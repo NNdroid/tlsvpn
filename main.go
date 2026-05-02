@@ -764,6 +764,9 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(15 * time.Second)
+		conn.SetNoDelay(true)
+		conn.SetReadBuffer(4 * 1024 * 1024)  // 4MB
+		conn.SetWriteBuffer(4 * 1024 * 1024) // 4MB
 
 		if srv.brutal {
 			if err := applyTCPBrutal(conn, srv.brutalRate); err != nil {
@@ -1067,6 +1070,9 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 	tcpConn := rawConn.(*net.TCPConn)
 	tcpConn.SetKeepAlive(true)
 	tcpConn.SetKeepAlivePeriod(15 * time.Second)
+	tcpConn.SetNoDelay(true)
+	tcpConn.SetReadBuffer(4 * 1024 * 1024)  // 4MB
+	tcpConn.SetWriteBuffer(4 * 1024 * 1024) // 4MB
 
 	if c.brutal {
 		if err := applyTCPBrutal(tcpConn, c.brutalRate); err != nil {
