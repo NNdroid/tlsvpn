@@ -81,16 +81,20 @@ func putFrame(b []byte) {
 func buildPaddedFrame(buf []byte, rn int) []byte {
 	targetLen := rn
 	if rn < 600 {
-		targetLen = mathrand.Intn(301) + 600
+		// 避免调用 mathrand，使用包长度衍生一个确定性的伪随机偏移量
+		// 这样既能实现长度混淆，又能省下极高的 CPU 计算开销
+		pseudoRand := (rn * 16777619) ^ int(buf[0])
+		targetLen = 600 + (pseudoRand % 301)
 	} else if rn <= 900 {
-		targetLen = rn + mathrand.Intn(193) + 64
+		pseudoRand := (rn * 16777619) ^ int(buf[rn-1])
+		targetLen = rn + 64 + (pseudoRand % 193)
 	}
+	
 	frame := getFrame()[:targetLen]
 	copy(frame, buf[:rn])
 	if targetLen > rn {
-		for i := rn; i < targetLen; i++ {
-			frame[i] = 0
-		}
+		// 优化：使用 clear() 内置函数 (Go 1.21+) 清零内存，底层有汇编加速
+		clear(frame[rn:targetLen]) 
 	}
 	return frame
 }
@@ -248,6 +252,18 @@ func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {
 	log.Infof("🧹 Policy routing cleaned (fwmark: %d)", mark)
 }
 
+// ======================= 流式帧组包缓存 =======================
+func appendStreamFrame(buf []byte, frame []byte) []byte {
+	length := len(frame)
+	// 扩展 2 个字节的空间存放长度
+	buf = append(buf, 0, 0)
+	binary.BigEndian.PutUint16(buf[len(buf)-2:], uint16(length))
+	if length > 0 {
+		buf = append(buf, frame...)
+	}
+	return buf
+}
+
 // ======================= 流式帧扫描器 =======================
 func writeStreamFrame(w io.Writer, frame []byte) error {
 	length := len(frame)
@@ -270,44 +286,55 @@ func writeStreamFrame(w io.Writer, frame []byte) error {
 }
 
 type FrameScanner struct {
-	r   io.Reader
-	buf []byte
+	r      io.Reader
+	buf    []byte
+	offset int // 新增：读游标
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
 	return &FrameScanner{
 		r:   r,
-		buf: make([]byte, 0, 65536),
+		// 初始化一个足够大的容量，避免 append 时底层扩容复制
+		buf: make([]byte, 0, 128*1024), 
 	}
 }
 
 func (fs *FrameScanner) ReadFrame() ([]byte, error) {
 	for {
-		if len(fs.buf) >= 2 {
-			length := int(binary.BigEndian.Uint16(fs.buf[:2]))
+		available := len(fs.buf) - fs.offset
+		if available >= 2 {
+			length := int(binary.BigEndian.Uint16(fs.buf[fs.offset : fs.offset+2]))
+			
 			if length == 0 {
-				remaining := len(fs.buf) - 2
-				copy(fs.buf, fs.buf[2:])
-				fs.buf = fs.buf[:remaining]
+				fs.offset += 2 // 仅移动游标
 				continue
 			}
 
 			if length > 0 && length < 1600 {
-				if len(fs.buf) >= 2+length {
+				if available >= 2+length {
 					frame := getFrame()[:length]
-					copy(frame, fs.buf[2:2+length])
-					remaining := len(fs.buf) - (2 + length)
-					copy(fs.buf, fs.buf[2+length:])
-					fs.buf = fs.buf[:remaining]
+					copy(frame, fs.buf[fs.offset+2 : fs.offset+2+length])
+					fs.offset += 2 + length
+
+					// 核心优化：懒惰内存搬运 (Lazy memory compaction)
+					// 当游标超过 32KB 时，才将剩余数据搬运到切片头部
+					if fs.offset > 32768 {
+						remaining := len(fs.buf) - fs.offset
+						copy(fs.buf, fs.buf[fs.offset:])
+						fs.buf = fs.buf[:remaining]
+						fs.offset = 0
+					}
 					return frame, nil
 				}
 			} else {
 				log.Warnf("[FrameScanner] CORRUPTION DETECTED: Invalid length %d.", length)
 				fs.buf = fs.buf[:0]
+				fs.offset = 0
 				return nil, fmt.Errorf("invalid frame length: %d", length)
 			}
 		}
 
+		// 数据不够，需要从网络读取
 		temp := getFrame()
 		n, err := fs.r.Read(temp)
 		if n > 0 {
@@ -533,21 +560,35 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	strDstMAC := string(dstMAC)
 	strSrcMAC := string(srcMAC)
 
-	vs.mu.Lock()
-	if _, exists := vs.macTable[strSrcMAC]; !exists {
-		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
-	}
-	vs.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
+	// 1. MAC 地址学习阶段：使用读锁极速检查
+	vs.mu.RLock()
+	entry, exists := vs.macTable[strSrcMAC]
+	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
+	vs.mu.RUnlock()
 
+	// 如果需要更新，才抢占写锁
+	if needUpdate {
+		vs.mu.Lock()
+		if _, checkExists := vs.macTable[strSrcMAC]; !checkExists {
+			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
+		}
+		vs.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
+		vs.mu.Unlock() // 写锁释放
+	}
+
+	// 2. 路由转发阶段：查询目标 MAC 地址
 	isBUM := (dstMAC[0] & 1) == 1
 	var targetPortID string
 	if !isBUM {
+		// 这里必须加上读锁，并配对 RUnlock
+		vs.mu.RLock()
 		if entry, exists := vs.macTable[strDstMAC]; exists {
 			targetPortID = entry.portID
 		}
+		vs.mu.RUnlock() 
 	}
-	vs.mu.Unlock()
 
+	// 3. 执行转发
 	if targetPortID != "" {
 		if targetPortID != srcPortID {
 			vs.sendToPort(targetPortID, frame)
@@ -584,12 +625,12 @@ func (vs *VSwitch) flood(excludePortID string, frame []byte) {
 type AsyncPort struct {
 	id     string
 	ch     chan []byte
-	writer func([]byte) error
+	writer func([][]byte) error
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func NewAsyncPort(ctx context.Context, id string, writer func([]byte) error) *AsyncPort {
+func NewAsyncPort(ctx context.Context, id string, writer func([][]byte) error) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
 	p := &AsyncPort{
 		id:     id,
@@ -627,17 +668,43 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 }
 
 func (p *AsyncPort) run() {
+	const MaxBatchBytes = 64 * 1024 // 单次组包最大字节限制（建议 64KB）
+	batch := make([][]byte, 0, 128)
+	var batchBytes int
+
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
 		case frame := <-p.ch:
-			if err := p.writer(frame); err != nil {
+			batch = append(batch, frame)
+			batchBytes += len(frame)
+
+			// 核心逻辑：尝试抽干 channel 中积压的帧
+		drainLoop:
+			for batchBytes < MaxBatchBytes {
+				select {
+				case f := <-p.ch:
+					batch = append(batch, f)
+					batchBytes += len(f)
+				default:
+					// 通道空了，或者被阻塞了，立刻跳出组包，保证低延迟
+					break drainLoop
+				}
+			}
+
+			if err := p.writer(batch); err != nil {
 				log.Debugf("[AsyncPort %s] Writer returned error: %v", p.id, err)
 			}
-			if frame != nil {
-				putFrame(frame)
+
+			// 统一释放内存回 sync.Pool
+			for _, f := range batch {
+				if f != nil {
+					putFrame(f)
+				}
 			}
+			batch = batch[:0]
+			batchBytes = 0
 		}
 	}
 }
@@ -707,10 +774,13 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 	}()
 
 	tapPortID := "TAP_LOCAL"
-	tapPort := NewAsyncPort(ctx, tapPortID, func(b []byte) error {
-		if len(b) > 0 {
-			_, err := srv.tap.Write(b)
-			return err
+	tapPort := NewAsyncPort(ctx, tapPortID, func(frames [][]byte) error {
+		for _, b := range frames {
+			if len(b) > 0 {
+				if _, err := srv.tap.Write(b); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -889,9 +959,19 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID
 	s.sendResp(conn, true, "OK", v4cidr, v6cidr)
 	log.Infof("[%s] Tunnel established. Assigned V4: %s | V6: %s", clientID, v4cidr, v6cidr)
 
-	clientPort := NewAsyncPort(connCtx, clientID, func(b []byte) error {
-		return writeStreamFrame(conn, b)
-	})
+	clientPort := NewAsyncPort(connCtx, clientID, func() func(frames [][]byte) error {
+		// 预分配大数组，生命周期绑定在该 port 内
+		sendBuffer := make([]byte, 0, 64*1024+2048) 
+		return func(frames [][]byte) error {
+			sendBuffer = sendBuffer[:0] // 重置指针，但不释放底层内存
+			for _, f := range frames {
+				sendBuffer = appendStreamFrame(sendBuffer, f)
+			}
+			// 组装好的多包大缓存，一次性系统调用 Write
+			_, err := conn.Write(sendBuffer)
+			return err
+		}
+	}())
 	s.vswitch.AddPort(clientPort)
 	defer clientPort.Close()
 
@@ -1124,21 +1204,51 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 
 	errChan := make(chan error, 2)
 
+	// 组包发送协程
 	go func() {
+		const MaxBatchBytes = 64 * 1024
+		batch := make([][]byte, 0, 128)
+		sendBuffer := make([]byte, 0, MaxBatchBytes+2048)
+
 		for {
 			jitterDelay := time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond
 			select {
 			case <-runCtx.Done():
 				return
 			case frame := <-c.tapTxChan:
-				err := writeStreamFrame(tlsConn, frame)
-				putFrame(frame)
-				if err != nil {
+				batch = append(batch, frame)
+				batchBytes := len(frame)
+
+			drainLoop:
+				for batchBytes < MaxBatchBytes {
+					select {
+					case f := <-c.tapTxChan:
+						batch = append(batch, f)
+						batchBytes += len(f)
+					default:
+						break drainLoop
+					}
+				}
+
+				sendBuffer = sendBuffer[:0]
+				for _, f := range batch {
+					sendBuffer = appendStreamFrame(sendBuffer, f)
+					if f != nil {
+						putFrame(f)
+					}
+				}
+				batch = batch[:0]
+
+				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
 				}
+
 			case <-time.After(jitterDelay):
-				if err := writeStreamFrame(tlsConn, nil); err != nil {
+				// Keep-Alive 逻辑（空帧也会被序列化为 0x00 0x00 发送）
+				sendBuffer = sendBuffer[:0]
+				sendBuffer = appendStreamFrame(sendBuffer, nil)
+				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
 				}
