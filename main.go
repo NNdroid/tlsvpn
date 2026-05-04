@@ -34,12 +34,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ======================= 全局随机数池 =======================
+// 提前生成一个 1MB 的随机数组，用于极速填充
+const RandomPoolSize = 1024 * 1024
+
+var (
+	randomPool []byte
+	log        *zap.SugaredLogger
+)
+
 func init() {
 	mathrand.Seed(time.Now().UnixNano())
+	randomPool = make([]byte, RandomPoolSize)
+	// 初始化填满真实随机数
+	_, err := rand.Read(randomPool)
+	if err != nil {
+		panic("Failed to initialize random pool: " + err.Error())
+	}
 }
-
-// ======================= 全局日志 =======================
-var log *zap.SugaredLogger
 
 func initLogger(level string) {
 	config := zap.NewDevelopmentConfig()
@@ -77,39 +89,179 @@ func putFrame(b []byte) {
 	}
 }
 
-// ======================= 动态流量特征混淆 =======================
-func buildPaddedFrame(buf []byte, rn int) []byte {
-	targetLen := rn
-	if rn < 600 {
-		// 避免调用 mathrand，使用包长度衍生一个确定性的伪随机偏移量
-		// 这样既能实现长度混淆，又能省下极高的 CPU 计算开销
-		pseudoRand := (rn * 16777619) ^ int(buf[0])
-		targetLen = 600 + (pseudoRand % 301)
-	} else if rn <= 900 {
-		pseudoRand := (rn * 16777619) ^ int(buf[rn-1])
-		targetLen = rn + 64 + (pseudoRand % 193)
+// ======================= 分散填充与成帧逻辑 =======================
+
+// getPaddingLength 计算需要填充的长度，以混淆真实包长
+func getPaddingLength(dataLen int) int {
+	// 如果是空包（如 KeepAlive），随机填充 100~300 字节
+	if dataLen == 0 {
+		return 100 + mathrand.Intn(201)
 	}
 	
-	frame := getFrame()[:targetLen]
-	copy(frame, buf[:rn])
-	if targetLen > rn {
-		// 优化：使用 clear() 内置函数 (Go 1.21+) 清零内存，底层有汇编加速
-		clear(frame[rn:targetLen]) 
+	// 根据真实包长决定填充策略
+	if dataLen < 200 {
+		return 300 + mathrand.Intn(200) // 小包垫大
+	} else if dataLen < 800 {
+		return 100 + mathrand.Intn(200) // 中包垫一点
+	} else {
+		return mathrand.Intn(100)       // 大包稍微垫一点
 	}
-	return frame
+}
+
+// appendPaddedFrame 将单个数据帧按照 [4B 数据长][2B 填充长][数据][填充] 的格式追加到 buffer 中
+func appendPaddedFrame(buf []byte, frame []byte) []byte {
+	dataLen := len(frame)
+	padLen := getPaddingLength(dataLen)
+	
+	// 扩展 6 字节的头部
+	buf = append(buf, 0, 0, 0, 0, 0, 0)
+	headerStart := len(buf) - 6
+	
+	binary.BigEndian.PutUint32(buf[headerStart:headerStart+4], uint32(dataLen))
+	binary.BigEndian.PutUint16(buf[headerStart+4:headerStart+6], uint16(padLen))
+	
+	if dataLen > 0 {
+		buf = append(buf, frame...)
+	}
+	
+	if padLen > 0 {
+		// 从预生成的随机池中极速切取 Padding 数据
+		offset := mathrand.Intn(RandomPoolSize - padLen)
+		buf = append(buf, randomPool[offset:offset+padLen]...)
+	}
+	
+	return buf
+}
+
+// writeStreamFrame 用于发送单个控制帧（例如握手响应），自带填充混淆
+func writeStreamFrame(w io.Writer, frame []byte) error {
+	// 预估大小：6字节头 + 数据长 + 最大可能填充(500)
+	streamBuf := getFrame()[:0] 
+	streamBuf = appendPaddedFrame(streamBuf, frame)
+	
+	_, err := w.Write(streamBuf)
+	putFrame(streamBuf[:cap(streamBuf)]) // 恢复 cap 用于回收
+	return err
 }
 
 func generatePadding(min, max int) string {
 	length := mathrand.Intn(max-min+1) + min
-	b := make([]byte, length)
-	rand.Read(b)
-	return hex.EncodeToString(b)[:length]
+	offset := mathrand.Intn(RandomPoolSize - length)
+	return hex.EncodeToString(randomPool[offset : offset+length])
+}
+
+// ======================= 流式帧扫描器 (解包逻辑) =======================
+type FrameScanner struct {
+	r      io.Reader
+	buf    []byte
+	offset int
+}
+
+func NewFrameScanner(r io.Reader) *FrameScanner {
+	return &FrameScanner{
+		r:   r,
+		buf: make([]byte, 0, 70*1024), 
+	}
+}
+
+func (fs *FrameScanner) ReadFrame() ([]byte, error) {
+	const HeaderSize = 6
+	const MaxDataLength = 65535 * 2 // 容忍极限 GRO 大包
+
+	for {
+		available := len(fs.buf) - fs.offset
+		
+		// 1. 尝试快速剥离完整帧
+		if available >= HeaderSize {
+			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
+			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+			totalLen := dataLen + padLen
+			
+			// 严格防越界校验
+			if dataLen > MaxDataLength {
+				log.Warnf("[FrameScanner] CORRUPTION DETECTED: Invalid data length %d.", dataLen)
+				fs.buf = fs.buf[:0]
+				fs.offset = 0
+				return nil, fmt.Errorf("invalid frame data length: %d", dataLen)
+			}
+			
+			// 如果当前 buffer 包含完整的帧（头+数据+填充）
+			if available >= HeaderSize+totalLen {
+				// 如果是空包（仅探测保活），跳过它，继续读取下一个
+				if dataLen == 0 {
+					fs.offset += HeaderSize + totalLen
+					continue
+				}
+				
+				var frame []byte
+				temp := getFrame()
+				
+				if dataLen > cap(temp) {
+					putFrame(temp)
+					frame = make([]byte, dataLen) 
+				} else {
+					frame = temp[:dataLen]
+				}
+				
+				// 只提取真实数据，自动丢弃尾部的 padLen
+				copy(frame, fs.buf[fs.offset+HeaderSize : fs.offset+HeaderSize+dataLen])
+				fs.offset += HeaderSize + totalLen
+				return frame, nil
+			}
+		}
+
+		// 2. 内存整理 (游标推进超过 16KB 时执行数据左移)
+		if fs.offset > 0 && (fs.offset == len(fs.buf) || fs.offset > 16384) {
+			remaining := len(fs.buf) - fs.offset
+			if remaining > 0 {
+				copy(fs.buf, fs.buf[fs.offset:])
+			}
+			fs.buf = fs.buf[:remaining]
+			fs.offset = 0
+		}
+
+		// 3. 智能扩容 (防御性扩容预测)
+		tailStart := len(fs.buf)
+		requiredCap := tailStart + 2048 
+
+		available = len(fs.buf) - fs.offset
+		if available >= HeaderSize {
+			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
+			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+			if fs.offset + HeaderSize + dataLen + padLen > requiredCap {
+				requiredCap = fs.offset + HeaderSize + dataLen + padLen
+			}
+		}
+
+		if cap(fs.buf) < requiredCap {
+			newCap := cap(fs.buf) * 2
+			if newCap < requiredCap {
+				newCap = requiredCap
+			}
+			newBuf := make([]byte, len(fs.buf), newCap)
+			copy(newBuf, fs.buf)
+			fs.buf = newBuf
+		}
+
+		fs.buf = fs.buf[:cap(fs.buf)]
+		n, err := fs.r.Read(fs.buf[tailStart:])
+		fs.buf = fs.buf[:tailStart+n]
+
+		if err != nil {
+			if n == 0 || (err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection")) {
+				return nil, err
+			}
+		}
+	}
 }
 
 // ======================= TCP Brutal 内核级拥塞控制 =======================
 const TCP_BRUTAL_PARAMS = 23301
 
 func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
+	if rateMbps == 0 {
+		return fmt.Errorf("TCP Brutal rate cannot be 0")
+	}
 	raw, err := conn.SyscallConn()
 	if err != nil {
 		return err
@@ -122,10 +274,10 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 			return
 		}
 
-		rateBps := rateMbps * 1024 * 1024 / 8
+		rateBps := rateMbps * 1000 * 1000 / 8
 		b := make([]byte, 12)
 		binary.LittleEndian.PutUint64(b[0:8], rateBps)
-		binary.LittleEndian.PutUint32(b[8:12], 20)
+		binary.LittleEndian.PutUint32(b[8:12], 20) 
 
 		_, _, errno := unix.Syscall6(
 			unix.SYS_SETSOCKOPT,
@@ -252,103 +404,6 @@ func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {
 	log.Infof("🧹 Policy routing cleaned (fwmark: %d)", mark)
 }
 
-// ======================= 流式帧组包缓存 =======================
-func appendStreamFrame(buf []byte, frame []byte) []byte {
-	length := len(frame)
-	// 扩展 2 个字节的空间存放长度
-	buf = append(buf, 0, 0)
-	binary.BigEndian.PutUint16(buf[len(buf)-2:], uint16(length))
-	if length > 0 {
-		buf = append(buf, frame...)
-	}
-	return buf
-}
-
-// ======================= 流式帧扫描器 =======================
-func writeStreamFrame(w io.Writer, frame []byte) error {
-	length := len(frame)
-	streamBuf := getFrame()
-	defer putFrame(streamBuf)
-
-	if 2+length > cap(streamBuf) {
-		streamBuf = make([]byte, 2+length)
-	} else {
-		streamBuf = streamBuf[:2+length]
-	}
-
-	binary.BigEndian.PutUint16(streamBuf[:2], uint16(length))
-	if length > 0 {
-		copy(streamBuf[2:], frame)
-	}
-
-	_, err := w.Write(streamBuf)
-	return err
-}
-
-type FrameScanner struct {
-	r      io.Reader
-	buf    []byte
-	offset int // 新增：读游标
-}
-
-func NewFrameScanner(r io.Reader) *FrameScanner {
-	return &FrameScanner{
-		r:   r,
-		// 初始化一个足够大的容量，避免 append 时底层扩容复制
-		buf: make([]byte, 0, 128*1024), 
-	}
-}
-
-func (fs *FrameScanner) ReadFrame() ([]byte, error) {
-	for {
-		available := len(fs.buf) - fs.offset
-		if available >= 2 {
-			length := int(binary.BigEndian.Uint16(fs.buf[fs.offset : fs.offset+2]))
-			
-			if length == 0 {
-				fs.offset += 2 // 仅移动游标
-				continue
-			}
-
-			if length > 0 && length < 1600 {
-				if available >= 2+length {
-					frame := getFrame()[:length]
-					copy(frame, fs.buf[fs.offset+2 : fs.offset+2+length])
-					fs.offset += 2 + length
-
-					// 核心优化：懒惰内存搬运 (Lazy memory compaction)
-					// 当游标超过 32KB 时，才将剩余数据搬运到切片头部
-					if fs.offset > 32768 {
-						remaining := len(fs.buf) - fs.offset
-						copy(fs.buf, fs.buf[fs.offset:])
-						fs.buf = fs.buf[:remaining]
-						fs.offset = 0
-					}
-					return frame, nil
-				}
-			} else {
-				log.Warnf("[FrameScanner] CORRUPTION DETECTED: Invalid length %d.", length)
-				fs.buf = fs.buf[:0]
-				fs.offset = 0
-				return nil, fmt.Errorf("invalid frame length: %d", length)
-			}
-		}
-
-		// 数据不够，需要从网络读取
-		temp := getFrame()
-		n, err := fs.r.Read(temp)
-		if n > 0 {
-			fs.buf = append(fs.buf, temp[:n]...)
-		}
-		putFrame(temp)
-
-		if err != nil {
-			return nil, err
-		}
-	}
-}
-
-// 焦油坑主动探测伪装防御 (保留处理协议格式错误但并非 HTTP 请求的情况)
 func camouflageProbe(conn net.Conn) {
 	defer conn.Close()
 	junkBuf := getFrame()
@@ -380,8 +435,6 @@ func camouflageProbe(conn net.Conn) {
 }
 
 // ======================= HTTP/1.1 & HTTP/2 长连接原生代理伪装 =======================
-
-// PrefixConn 用于包装嗅探过的连接，将嗅探出的首字节原封不动交还给上层解析器
 type PrefixConn struct {
 	net.Conn
 	prefix []byte
@@ -396,7 +449,6 @@ func (c *PrefixConn) Read(p []byte) (n int, err error) {
 	return c.Conn.Read(p)
 }
 
-// singleConnListener 允许我们将一个独立的 net.Conn 强行塞给原生的 http.Server
 type singleConnListener struct {
 	conn net.Conn
 	done chan struct{}
@@ -414,7 +466,6 @@ func (s *singleConnListener) Accept() (net.Conn, error) {
 func (s *singleConnListener) Close() error   { return nil }
 func (s *singleConnListener) Addr() net.Addr { return s.conn.LocalAddr() }
 
-// serveFallbackHTTP 接管连接并启动一个标准的 Nginx 403 页面服务
 func serveFallbackHTTP(conn net.Conn, alpn string) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "nginx")
@@ -431,7 +482,6 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 	})
 
 	if alpn == "h2" {
-		// 原生 HTTP/2 长连接接管 (完美支持多路复用与 Ping/Pong 保持存活)
 		srv := &http2.Server{
 			IdleTimeout: 60 * time.Second,
 		}
@@ -439,7 +489,6 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 			Handler: handler,
 		})
 	} else {
-		// 原生 HTTP/1.1 接管 (支持 Keep-Alive 长连接)
 		l := &singleConnListener{conn: conn, done: make(chan struct{})}
 		srv := &http.Server{
 			Handler:     handler,
@@ -451,20 +500,24 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 
 // ======================= 协议与配置 =======================
 type HandshakeReq struct {
-	PSK     string `json:"psk"`
-	IPv4    string `json:"ipv4,omitempty"`
-	IPv6    string `json:"ipv6,omitempty"`
-	Padding string `json:"padding,omitempty"`
+	PSK      string `json:"psk"`
+	IPv4     string `json:"ipv4,omitempty"`
+	IPv6     string `json:"ipv6,omitempty"`
+	Padding  string `json:"padding,omitempty"`
+	BrutalTx uint64 `json:"brutal_tx,omitempty"` 
+	BrutalRx uint64 `json:"brutal_rx,omitempty"` 
 }
 
 type HandshakeResp struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	IPv4    string `json:"ipv4"`
-	IPv6    string `json:"ipv6"`
-	GwV4    string `json:"gw_v4,omitempty"`
-	GwV6    string `json:"gw_v6,omitempty"`
-	Padding string `json:"padding,omitempty"`
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+	IPv4     string `json:"ipv4"`
+	IPv6     string `json:"ipv6"`
+	GwV4     string `json:"gw_v4,omitempty"`
+	GwV6     string `json:"gw_v6,omitempty"`
+	Padding  string `json:"padding,omitempty"`
+	BrutalTx uint64 `json:"brutal_tx,omitempty"` 
+	BrutalRx uint64 `json:"brutal_rx,omitempty"` 
 }
 
 func main() {
@@ -487,7 +540,8 @@ func main() {
 	fwmark := flag.Int("fwmark", 0, "Enable policy routing with specified fwmark (e.g. 1911) (Client only)")
 
 	brutal := flag.Bool("brutal", false, "Enable TCP Brutal congestion control")
-	brutalRate := flag.Uint64("brutal-rate", 200, "Brutal send/receive rate in Mbps (default 200)")
+	brutalUp := flag.Uint64("brutal-up", 100, "Brutal upload rate limit in Mbps")
+	brutalDown := flag.Uint64("brutal-down", 500, "Brutal download rate limit in Mbps")
 
 	flag.Parse()
 	initLogger(*logLevel)
@@ -497,9 +551,9 @@ func main() {
 	defer cancel()
 
 	if *mode == "server" {
-		startServer(ctx, *psk, *tapName, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalRate)
+		startServer(ctx, *psk, *tapName, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown)
 	} else if *mode == "client" {
-		startClient(ctx, *psk, *tapName, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalRate)
+		startClient(ctx, *psk, *tapName, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown)
 	} else {
 		fmt.Println("Usage: go run main.go -mode server|client [flags...]")
 		os.Exit(1)
@@ -560,27 +614,23 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	strDstMAC := string(dstMAC)
 	strSrcMAC := string(srcMAC)
 
-	// 1. MAC 地址学习阶段：使用读锁极速检查
 	vs.mu.RLock()
 	entry, exists := vs.macTable[strSrcMAC]
 	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
 	vs.mu.RUnlock()
 
-	// 如果需要更新，才抢占写锁
 	if needUpdate {
 		vs.mu.Lock()
 		if _, checkExists := vs.macTable[strSrcMAC]; !checkExists {
 			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
 		}
 		vs.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
-		vs.mu.Unlock() // 写锁释放
+		vs.mu.Unlock() 
 	}
 
-	// 2. 路由转发阶段：查询目标 MAC 地址
 	isBUM := (dstMAC[0] & 1) == 1
 	var targetPortID string
 	if !isBUM {
-		// 这里必须加上读锁，并配对 RUnlock
 		vs.mu.RLock()
 		if entry, exists := vs.macTable[strDstMAC]; exists {
 			targetPortID = entry.portID
@@ -588,7 +638,6 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 		vs.mu.RUnlock() 
 	}
 
-	// 3. 执行转发
 	if targetPortID != "" {
 		if targetPortID != srcPortID {
 			vs.sendToPort(targetPortID, frame)
@@ -668,7 +717,7 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 }
 
 func (p *AsyncPort) run() {
-	const MaxBatchBytes = 64 * 1024 // 单次组包最大字节限制（建议 64KB）
+	const MaxBatchBytes = 64 * 1024 
 	batch := make([][]byte, 0, 128)
 	var batchBytes int
 
@@ -680,24 +729,17 @@ func (p *AsyncPort) run() {
 			batch = append(batch, frame)
 			batchBytes += len(frame)
 
-			// 核心逻辑：尝试抽干 channel 中积压的帧
-		drainLoop:
-			for batchBytes < MaxBatchBytes {
-				select {
-				case f := <-p.ch:
-					batch = append(batch, f)
-					batchBytes += len(f)
-				default:
-					// 通道空了，或者被阻塞了，立刻跳出组包，保证低延迟
-					break drainLoop
-				}
+			queueLen := len(p.ch)
+			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
+				f := <-p.ch
+				batch = append(batch, f)
+				batchBytes += len(f)
 			}
 
 			if err := p.writer(batch); err != nil {
 				log.Debugf("[AsyncPort %s] Writer returned error: %v", p.id, err)
 			}
 
-			// 统一释放内存回 sync.Pool
 			for _, f := range batch {
 				if f != nil {
 					putFrame(f)
@@ -724,10 +766,11 @@ type Server struct {
 	tap        *water.Interface
 	vswitch    *VSwitch
 	brutal     bool
-	brutalRate uint64
+	brutalUp   uint64
+	brutalDown uint64
 }
 
-func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalRate uint64) {
+func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64) {
 	log.Infof("Starting TCP TLS server process...")
 	_, v4net, _ := net.ParseCIDR(v4cidr)
 	_, v6net, _ := net.ParseCIDR(v6cidr)
@@ -740,7 +783,8 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 		usedV6:     make(map[string]bool),
 		vswitch:    NewVSwitch(),
 		brutal:     brutal,
-		brutalRate: brutalRate,
+		brutalUp:   brutalUp,   
+		brutalDown: brutalDown, 
 	}
 
 	srvV4IP := getFirstIP(v4net)
@@ -800,7 +844,9 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 					}
 					return
 				}
-				frame := buildPaddedFrame(buf, rn)
+				// 从 TAP 读取的真实数据不加 Padding，原样进入 VSwitch
+				frame := getFrame()[:rn]
+				copy(frame, buf[:rn])
 				srv.vswitch.ProcessFrame(tapPortID, frame)
 				putFrame(frame)
 			}
@@ -835,19 +881,10 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(15 * time.Second)
 		conn.SetNoDelay(true)
-		conn.SetReadBuffer(4 * 1024 * 1024)  // 4MB
-		conn.SetWriteBuffer(4 * 1024 * 1024) // 4MB
-
-		if srv.brutal {
-			if err := applyTCPBrutal(conn, srv.brutalRate); err != nil {
-				log.Warnf("[%s] TCP Brutal 开启失败: %v", conn.RemoteAddr().String(), err)
-			}
-		}
+		conn.SetReadBuffer(4 * 1024 * 1024)
+		conn.SetWriteBuffer(4 * 1024 * 1024)
 
 		go func(c *net.TCPConn) {
-			// ===============================================
-			// Layer 1: 明文嗅探拦截 (探测直连 443 的非 TLS 流量)
-			// ===============================================
 			peekBuf := make([]byte, 1)
 			c.SetReadDeadline(time.Now().Add(3 * time.Second))
 			n, err := c.Read(peekBuf)
@@ -858,25 +895,18 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 				return
 			}
 
-			// 包装 PrefixConn 保留原始字节，不影响后续库的解析
 			prefixConn := &PrefixConn{
 				Conn:   c,
 				prefix: peekBuf[:n],
 			}
 
-			// 如果第一字节不是 0x16 (TLS ClientHello)，说明是明文 HTTP 扫描器
 			if peekBuf[0] != 0x16 {
-				log.Debugf("[%s] 拦截明文 HTTP 探测，伪装为 Nginx 403", c.RemoteAddr().String())
-				serveFallbackHTTP(prefixConn, "http/1.1") // 交给 HTTP/1.1 长连接处理器
+				serveFallbackHTTP(prefixConn, "http/1.1") 
 				return
 			}
 
-			// ===============================================
-			// Layer 2: 密文嗅探拦截 (完成 TLS 握手后探测内部载荷)
-			// ===============================================
 			tlsConn := tls.Server(prefixConn, tlsConfig)
 
-			// 强制触发握手，以便获取双方协商的协议 (ALPN)
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
@@ -887,7 +917,6 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 
 			alpn := tlsConn.ConnectionState().NegotiatedProtocol
 
-			// 读取解密后的第一个字节
 			peekBuf2 := make([]byte, 1)
 			tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			n2, err2 := tlsConn.Read(peekBuf2)
@@ -903,21 +932,17 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 				prefix: peekBuf2[:n2],
 			}
 
-			// VPN 客户端首帧是长度(uint16)。我们限制长度 < 8192，则首字节必定 < 0x20
-			// HTTP(S) 请求的首字节是纯字母 (例如 GET 的 G 是 0x47，PRI 的 P 是 0x50，全部 >= 0x40)
 			if peekBuf2[0] >= 0x20 {
-				log.Debugf("[%s] 拦截密文 HTTP 探测(ALPN: %s)，伪装为 Nginx 403", c.RemoteAddr().String(), alpn)
-				serveFallbackHTTP(prefixConn2, alpn) // 智能分发至 HTTP/1.1 或原生 HTTP/2 处理
+				serveFallbackHTTP(prefixConn2, alpn) 
 				return
 			}
 
-			// 验证通过，移交至真正的 VPN 业务逻辑
-			srv.handleClient(ctx, prefixConn2, c.RemoteAddr().String())
+			srv.handleClient(ctx, prefixConn2, c, c.RemoteAddr().String())
 		}(conn)
 	}
 }
 
-func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID string) {
+func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, clientID string) {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
@@ -929,7 +954,6 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID
 
 	var req HandshakeReq
 
-	// 此时若仍出错，可能遇到混淆探测或是非法格式，退回传统的焦油坑逻辑
 	if err != nil {
 		log.Debugf("[%s] 隧道内帧读取异常: %v", clientID, err)
 		camouflageProbe(conn)
@@ -944,6 +968,24 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID
 	}
 	putFrame(reqData)
 
+	serverTxRate := s.brutalUp 
+	if req.BrutalRx > 0 && (s.brutalUp == 0 || req.BrutalRx < s.brutalUp) {
+		serverTxRate = req.BrutalRx 
+	}
+
+	clientTxRate := s.brutalDown 
+	if req.BrutalTx > 0 && (s.brutalDown == 0 || req.BrutalTx < s.brutalDown) {
+		clientTxRate = req.BrutalTx 
+	}
+
+	if s.brutal && serverTxRate > 0 {
+		if err := applyTCPBrutal(tcpConn, serverTxRate); err != nil {
+			log.Warnf("[%s] TCP Brutal 下行限速应用失败: %v", clientID, err)
+		} else {
+			log.Infof("[%s] TCP Brutal 协商完成: 允许客户端发送 %d Mbps, 服务端发送 %d Mbps", clientID, clientTxRate, serverTxRate)
+		}
+	}
+
 	v4ip, v6ip := s.assignIPs(req.IPv4, req.IPv6)
 	defer func() {
 		s.mu.Lock()
@@ -956,18 +998,23 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
 
-	s.sendResp(conn, true, "OK", v4cidr, v6cidr)
+	s.sendResp(conn, true, "OK", v4cidr, v6cidr, serverTxRate, clientTxRate)
 	log.Infof("[%s] Tunnel established. Assigned V4: %s | V6: %s", clientID, v4cidr, v6cidr)
 
 	clientPort := NewAsyncPort(connCtx, clientID, func() func(frames [][]byte) error {
-		// 预分配大数组，生命周期绑定在该 port 内
-		sendBuffer := make([]byte, 0, 64*1024+2048) 
+		sendBuffer := make([]byte, 0, 64*1024+4096) 
 		return func(frames [][]byte) error {
-			sendBuffer = sendBuffer[:0] // 重置指针，但不释放底层内存
+			sendBuffer = sendBuffer[:0] 
+			// 每帧独立 Padding 混淆并合并
 			for _, f := range frames {
-				sendBuffer = appendStreamFrame(sendBuffer, f)
+				if f == nil {
+					// 写入一个代表 KeepAlive 的空包，并加上随机填充
+					sendBuffer = appendPaddedFrame(sendBuffer, nil)
+				} else {
+					sendBuffer = appendPaddedFrame(sendBuffer, f)
+				}
 			}
-			// 组装好的多包大缓存，一次性系统调用 Write
+
 			_, err := conn.Write(sendBuffer)
 			return err
 		}
@@ -982,7 +1029,7 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, clientID
 			case <-connCtx.Done():
 				return
 			case <-time.After(jitterDelay):
-				clientPort.WriteFrame(nil) // TCP 保活空帧
+				clientPort.WriteFrame(nil) 
 			}
 		}
 	}()
@@ -1027,10 +1074,12 @@ func (s *Server) assignIPs(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, v4cidr, v6cidr string) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, v4cidr, v6cidr string, srvTx, srvRx uint64) {
 	d, _ := json.Marshal(HandshakeResp{
 		Success: ok, Message: msg, IPv4: v4cidr, IPv6: v6cidr,
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
+		BrutalTx: srvTx, 
+		BrutalRx: srvRx, 
 	})
 	writeStreamFrame(w, d)
 }
@@ -1047,12 +1096,13 @@ type Client struct {
 	certHash   string
 	fwmark     int
 	brutal     bool
-	brutalRate uint64
+	brutalUp   uint64
+	brutalDown uint64
 	tap        *water.Interface
 	tapTxChan  chan []byte
 }
 
-func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalRate uint64) {
+func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64) {
 	log.Infof("Starting TCP TLS client process...")
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -1069,7 +1119,8 @@ func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni stri
 	c := &Client{
 		psk: psk, serverAddr: addr, tapName: tapName, reqV4: reqV4, reqV6: reqV6,
 		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark,
-		brutal: brutal, brutalRate: brutalRate, tap: iface, tapTxChan: make(chan []byte, 4096),
+		brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown, 
+		tap: iface, tapTxChan: make(chan []byte, 4096),
 	}
 
 	go func() {
@@ -1083,7 +1134,11 @@ func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni stri
 				time.Sleep(1 * time.Second)
 				continue
 			}
-			frame := buildPaddedFrame(buf, rn)
+			
+			// 直接将提取的原始包塞入发送管道
+			frame := getFrame()[:rn]
+			copy(frame, buf[:rn])
+
 			select {
 			case <-ctx.Done():
 				putFrame(frame)
@@ -1151,14 +1206,14 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 	tcpConn.SetKeepAlive(true)
 	tcpConn.SetKeepAlivePeriod(15 * time.Second)
 	tcpConn.SetNoDelay(true)
-	tcpConn.SetReadBuffer(4 * 1024 * 1024)  // 4MB
-	tcpConn.SetWriteBuffer(4 * 1024 * 1024) // 4MB
+	tcpConn.SetReadBuffer(4 * 1024 * 1024) 
+	tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 
 	if c.brutal {
-		if err := applyTCPBrutal(tcpConn, c.brutalRate); err != nil {
+		if err := applyTCPBrutal(tcpConn, c.brutalUp); err != nil {
 			log.Warnf("TCP Brutal 启用失败: %v", err)
 		} else {
-			log.Infof("TCP Brutal 发送端已接管，硬限速: %d Mbps", c.brutalRate)
+			log.Infof("TCP Brutal 上行发送端已接管，硬限速: %d Mbps", c.brutalUp)
 		}
 	}
 
@@ -1172,7 +1227,14 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 	log.Infof("Encrypted TLS transport established.")
 
 	scanner := NewFrameScanner(tlsConn)
-	req := HandshakeReq{PSK: c.psk, IPv4: c.reqV4, IPv6: c.reqV6, Padding: generatePadding(100, 500)}
+	req := HandshakeReq{
+		PSK:        c.psk, 
+		IPv4:       c.reqV4, 
+		IPv6:       c.reqV6, 
+		Padding:    generatePadding(100, 500),
+		BrutalTx:   c.brutalUp,   
+		BrutalRx:   c.brutalDown, 
+	}
 	reqData, _ := json.Marshal(req)
 	if err := writeStreamFrame(tlsConn, reqData); err != nil {
 		return fmt.Errorf("failed to send handshake: %v", err)
@@ -1194,6 +1256,11 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 
 	log.Infof("Tunnel negotiated! IPv4: %s | IPv6: %s", resp.IPv4, resp.IPv6)
 
+	if c.brutal && resp.BrutalRx > 0 && resp.BrutalRx != c.brutalUp {
+		log.Infof("服务端强制调整客户端上行速率至: %d Mbps", resp.BrutalRx)
+		applyTCPBrutal(tcpConn, resp.BrutalRx)
+	}
+
 	if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
 		return fmt.Errorf("TAP interface setup failed: %v", err)
 	}
@@ -1204,11 +1271,10 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 
 	errChan := make(chan error, 2)
 
-	// 组包发送协程
 	go func() {
 		const MaxBatchBytes = 64 * 1024
 		batch := make([][]byte, 0, 128)
-		sendBuffer := make([]byte, 0, MaxBatchBytes+2048)
+		sendBuffer := make([]byte, 0, MaxBatchBytes+4096)
 
 		for {
 			jitterDelay := time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond
@@ -1232,9 +1298,12 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 
 				sendBuffer = sendBuffer[:0]
 				for _, f := range batch {
-					sendBuffer = appendStreamFrame(sendBuffer, f)
+					// 每个包独立填充并合并
 					if f != nil {
+						sendBuffer = appendPaddedFrame(sendBuffer, f)
 						putFrame(f)
+					} else {
+						sendBuffer = appendPaddedFrame(sendBuffer, nil)
 					}
 				}
 				batch = batch[:0]
@@ -1245,9 +1314,8 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 				}
 
 			case <-time.After(jitterDelay):
-				// Keep-Alive 逻辑（空帧也会被序列化为 0x00 0x00 发送）
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendStreamFrame(sendBuffer, nil)
+				sendBuffer = appendPaddedFrame(sendBuffer, nil)
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
