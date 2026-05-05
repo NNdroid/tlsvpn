@@ -336,6 +336,26 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 }
 
 // ======================= 策略路由 =======================
+func setTapMac(tapName, macStr string) error {
+	if macStr == "" {
+		return nil
+	}
+	hwAddr, err := net.ParseMAC(macStr)
+	if err != nil {
+		return fmt.Errorf("invalid MAC address format: %v", err)
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil {
+		return fmt.Errorf("failed to find tap dev %s: %v", tapName, err)
+	}
+	// 修改 MAC 地址前最好确保网卡是 DOWN 状态，但这取决于内核，netlink 库通常能直接处理
+	if err := netlink.LinkSetHardwareAddr(link, hwAddr); err != nil {
+		return fmt.Errorf("failed to set MAC address: %v", err)
+	}
+	log.Infof("Interface %s MAC set to %s", tapName, macStr)
+	return nil
+}
+
 func setupPolicyRouting(tapName string, mark int, gwV4, gwV6 string) error {
 	if mark <= 0 {
 		return nil
@@ -501,11 +521,18 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 // ======================= 协议与配置 =======================
 type HandshakeReq struct {
 	PSK      string `json:"psk"`
+	MAC      string `json:"mac,omitempty"`
 	IPv4     string `json:"ipv4,omitempty"`
 	IPv6     string `json:"ipv6,omitempty"`
 	Padding  string `json:"padding,omitempty"`
 	BrutalTx uint64 `json:"brutal_tx,omitempty"` 
 	BrutalRx uint64 `json:"brutal_rx,omitempty"` 
+}
+
+// MacBinding 记录 MAC 与 IP 的绑定关系
+type MacBinding struct {
+	IPv4 string `json:"ipv4"`
+	IPv6 string `json:"ipv6"`
 }
 
 type HandshakeResp struct {
@@ -524,6 +551,7 @@ func main() {
 	mode := flag.String("mode", "", "server or client")
 	psk := flag.String("psk", "quic_secret", "Pre-shared key")
 	tapName := flag.String("tap", "tap0", "Name of the TAP device")
+	macAddr := flag.String("mac", "", "Specify MAC address for TAP device (Client/Server)")
 	addr := flag.String("addr", "0.0.0.0:4000", "Server address")
 	logLevel := flag.String("loglevel", "info", "Log level")
 
@@ -551,9 +579,9 @@ func main() {
 	defer cancel()
 
 	if *mode == "server" {
-		startServer(ctx, *psk, *tapName, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown)
+		startServer(ctx, *psk, *tapName, *macAddr, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown)
 	} else if *mode == "client" {
-		startClient(ctx, *psk, *tapName, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown)
+		startClient(ctx, *psk, *tapName, *macAddr, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown)
 	} else {
 		fmt.Println("Usage: go run main.go -mode server|client [flags...]")
 		os.Exit(1)
@@ -754,6 +782,12 @@ func (p *AsyncPort) run() {
 func (p *AsyncPort) Close() { p.cancel() }
 
 // ======================= 服务端实现 =======================
+type Session struct {
+    ID     string
+	Cancel context.CancelFunc
+	Done   chan struct{}
+}
+
 type Server struct {
 	psk        string
 	v4Net      *net.IPNet
@@ -768,9 +802,13 @@ type Server struct {
 	brutal     bool
 	brutalUp   uint64
 	brutalDown uint64
+
+	macAddr     string
+	activeMacs  map[string]*Session           // 记录 MAC 对应的 Session
+	macToIP     map[string]MacBinding         // 存储 MAC 到静态 IP 的绑定
 }
 
-func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64) {
+func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64) {
 	log.Infof("Starting TCP TLS server process...")
 	_, v4net, _ := net.ParseCIDR(v4cidr)
 	_, v6net, _ := net.ParseCIDR(v6cidr)
@@ -784,7 +822,10 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 		vswitch:    NewVSwitch(),
 		brutal:     brutal,
 		brutalUp:   brutalUp,   
-		brutalDown: brutalDown, 
+		brutalDown: brutalDown,
+		macAddr:    macAddr,
+		activeMacs: make(map[string]*Session),
+		macToIP:    make(map[string]MacBinding),
 	}
 
 	srvV4IP := getFirstIP(v4net)
@@ -802,6 +843,11 @@ func startServer(ctx context.Context, psk, tapName, addr, v4cidr, v6cidr, certFi
 		log.Fatalf("Server TAP error: %v", err)
 	}
 	srv.tap = tap
+	
+	// 尝试为服务端的 TAP 网卡设置指定的 MAC
+	if err := setTapMac(tapName, macAddr); err != nil {
+		log.Warnf("Server failed to set tap MAC: %v", err)
+	}
 
 	if link, err := netlink.LinkByName(tapName); err == nil {
 		v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
@@ -966,6 +1012,33 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, tcpConn 
 		camouflageProbe(conn)
 		return
 	}
+
+    newSession := &Session { ID: clientID, Cancel: cancel, Done: make(chan struct{}) }
+	mac := req.MAC
+
+	s.mu.Lock()
+	// 如果内存里已经有这个 MAC 的分配记录，强制覆盖客户端的请求 IP
+	if bind, exists := s.macToIP[mac]; exists && mac != "" {
+		req.IPv4 = bind.IPv4
+		req.IPv6 = bind.IPv6
+	}
+
+	// 检查并踢除占用相同 MAC 的旧连接
+	if mac != "" {
+		if oldSession, exists := s.activeMacs[mac]; exists {
+			log.Infof("[%s] 发现相同 MAC (%s) 的旧连接，强制断开...", clientID, mac)
+			oldSession.Cancel() // 触发旧连接的 defer 释放资源
+			
+			s.mu.Unlock()
+			<-oldSession.Done
+			s.mu.Lock()
+		}
+		// 注册新连接控制函数
+		s.activeMacs[mac] = newSession
+	}
+	s.mu.Unlock()
+
+	// 回复客户端
 	putFrame(reqData)
 
 	serverTxRate := s.brutalUp 
@@ -987,12 +1060,27 @@ func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, tcpConn 
 	}
 
 	v4ip, v6ip := s.assignIPs(req.IPv4, req.IPv6)
+
+	// 将新分配成功的 IP 记录回内存（下次重连就能恢复）
+	s.mu.Lock()
+	if mac != "" {
+		s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
+	}
+	s.mu.Unlock()
+
 	defer func() {
 		s.mu.Lock()
 		delete(s.usedV4, v4ip)
 		delete(s.usedV6, v6ip)
+
+		// 防止把刚顶替上来的新连接清掉
+		if mac != "" && s.activeMacs[mac] == newSession {
+			delete(s.activeMacs, mac)
+		}
 		s.mu.Unlock()
 		s.vswitch.RemovePort(clientID)
+		// 发送完成信号，唤醒可能正在等待当前连接退出的新连接
+		close(newSession.Done)
 	}()
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
@@ -1100,9 +1188,10 @@ type Client struct {
 	brutalDown uint64
 	tap        *water.Interface
 	tapTxChan  chan []byte
+	macAddr    string
 }
 
-func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64) {
+func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64) {
 	log.Infof("Starting TCP TLS client process...")
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -1116,11 +1205,25 @@ func startClient(ctx context.Context, psk, tapName, addr, reqV4, reqV6, sni stri
 		iface.Close()
 	}()
 
+	// 修改客户端 TAP 网卡 MAC
+	if err := setTapMac(tapName, macAddr); err != nil {
+		log.Warnf("Client failed to set tap MAC: %v", err)
+	}
+	
+	// 没有显式指定 -mac 参数，我们主动去读取网卡当前的实际 MAC 上报，这样服务端也能进行状态追踪
+	actualMac := macAddr
+	if actualMac == "" {
+		if link, err := netlink.LinkByName(tapName); err == nil {
+			actualMac = link.Attrs().HardwareAddr.String()
+		}
+	}
+
 	c := &Client{
 		psk: psk, serverAddr: addr, tapName: tapName, reqV4: reqV4, reqV6: reqV6,
 		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark,
 		brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown, 
 		tap: iface, tapTxChan: make(chan []byte, 4096),
+		macAddr: actualMac,
 	}
 
 	go func() {
@@ -1229,6 +1332,7 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 	scanner := NewFrameScanner(tlsConn)
 	req := HandshakeReq{
 		PSK:        c.psk, 
+		MAC:        c.macAddr,
 		IPv4:       c.reqV4, 
 		IPv6:       c.reqV6, 
 		Padding:    generatePadding(100, 500),
