@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	mathrand "math/rand"
 	"net"
@@ -22,10 +23,12 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/google/uuid"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
@@ -35,7 +38,6 @@ import (
 )
 
 // ======================= 全局随机数池 =======================
-// 提前生成一个 1MB 的随机数组，用于极速填充
 const RandomPoolSize = 1024 * 1024
 
 var (
@@ -46,7 +48,6 @@ var (
 func init() {
 	mathrand.Seed(time.Now().UnixNano())
 	randomPool = make([]byte, RandomPoolSize)
-	// 初始化填满真实随机数
 	_, err := rand.Read(randomPool)
 	if err != nil {
 		panic("Failed to initialize random pool: " + err.Error())
@@ -72,75 +73,114 @@ func fmtMAC(mac []byte) string {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
-// ======================= 内存池优化 (sync.Pool) =======================
+// hashPSK 将明文 PSK 转换为 SHA256 防止明文传输
+func hashPSK(psk string) string {
+	h := sha256.Sum256([]byte(psk))
+	return hex.EncodeToString(h[:])
+}
+
+// ======================= 高速环形去重器 (用于 FEC 过滤) =======================
+type DeDuplicator struct {
+	mu   sync.Mutex
+	set  map[uint32]struct{}
+	ring [4096]uint32
+	idx  int
+}
+
+func NewDeDuplicator() *DeDuplicator {
+	return &DeDuplicator{
+		set: make(map[uint32]struct{}, 4096),
+	}
+}
+
+func (d *DeDuplicator) IsDuplicate(seq uint32) bool {
+	if seq == 0 {
+		return false // 保活空包、控制帧不参与去重
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, exists := d.set[seq]; exists {
+		return true // 发现重复包！
+	}
+
+	// 淘汰最老的记录
+	oldest := d.ring[d.idx]
+	if oldest != 0 {
+		delete(d.set, oldest)
+	}
+
+	// 加入新记录
+	d.ring[d.idx] = seq
+	d.set[seq] = struct{}{}
+	d.idx = (d.idx + 1) % 4096
+
+	return false
+}
+
+// ======================= 内存池与带有序列号的成帧协议 =======================
+type VPNFrame struct {
+	Seq  uint32
+	Data []byte
+}
+
 var framePool = sync.Pool{
-	New: func() any {
-		return make([]byte, 2048)
-	},
+	New: func() any { return make([]byte, 70*1000) },
 }
 
-func getFrame() []byte {
-	return framePool.Get().([]byte)
-}
-
+func getFrame() []byte { return framePool.Get().([]byte) }
 func putFrame(b []byte) {
 	if cap(b) >= 1500 && cap(b) <= 65536 {
 		framePool.Put(b[:cap(b)])
 	}
 }
 
-// ======================= 分散填充与成帧逻辑 =======================
-
-// getPaddingLength 计算需要填充的长度，以混淆真实包长
 func getPaddingLength(dataLen int) int {
-	// 如果是空包（如 KeepAlive），随机填充 100~300 字节
 	if dataLen == 0 {
 		return 100 + mathrand.Intn(201)
 	}
-	
-	// 根据真实包长决定填充策略
 	if dataLen < 200 {
-		return 300 + mathrand.Intn(200) // 小包垫大
+		return 300 + mathrand.Intn(200)
 	} else if dataLen < 800 {
-		return 100 + mathrand.Intn(200) // 中包垫一点
+		return 100 + mathrand.Intn(200)
 	} else {
-		return mathrand.Intn(100)       // 大包稍微垫一点
+		return mathrand.Intn(100)
 	}
 }
 
-// appendPaddedFrame 将单个数据帧按照 [4B 数据长][2B 填充长][数据][填充] 的格式追加到 buffer 中
-func appendPaddedFrame(buf []byte, frame []byte) []byte {
-	dataLen := len(frame)
+// appendPaddedFrame 增加 10 字节头部 [4B len][2B padLen][4B seq]
+func appendPaddedFrame(buf []byte, vf VPNFrame) []byte {
+	dataLen := 0
+	if vf.Data != nil {
+		dataLen = len(vf.Data)
+	}
 	padLen := getPaddingLength(dataLen)
-	
-	// 扩展 6 字节的头部
-	buf = append(buf, 0, 0, 0, 0, 0, 0)
-	headerStart := len(buf) - 6
-	
+
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+	headerStart := len(buf) - 10
+
 	binary.BigEndian.PutUint32(buf[headerStart:headerStart+4], uint32(dataLen))
 	binary.BigEndian.PutUint16(buf[headerStart+4:headerStart+6], uint16(padLen))
-	
+	binary.BigEndian.PutUint32(buf[headerStart+6:headerStart+10], vf.Seq)
+
 	if dataLen > 0 {
-		buf = append(buf, frame...)
+		buf = append(buf, vf.Data...)
 	}
-	
+
 	if padLen > 0 {
-		// 从预生成的随机池中极速切取 Padding 数据
 		offset := mathrand.Intn(RandomPoolSize - padLen)
 		buf = append(buf, randomPool[offset:offset+padLen]...)
 	}
-	
+
 	return buf
 }
 
-// writeStreamFrame 用于发送单个控制帧（例如握手响应），自带填充混淆
+// writeStreamFrame 发送无需去重的控制帧
 func writeStreamFrame(w io.Writer, frame []byte) error {
-	// 预估大小：6字节头 + 数据长 + 最大可能填充(500)
-	streamBuf := getFrame()[:0] 
-	streamBuf = appendPaddedFrame(streamBuf, frame)
-	
+	streamBuf := getFrame()[:0]
+	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame})
 	_, err := w.Write(streamBuf)
-	putFrame(streamBuf[:cap(streamBuf)]) // 恢复 cap 用于回收
+	putFrame(streamBuf[:cap(streamBuf)])
 	return err
 }
 
@@ -150,7 +190,7 @@ func generatePadding(min, max int) string {
 	return hex.EncodeToString(randomPool[offset : offset+length])
 }
 
-// ======================= 流式帧扫描器 (解包逻辑) =======================
+// ======================= 流式帧扫描器 (读取 10 字节头) =======================
 type FrameScanner struct {
 	r      io.Reader
 	buf    []byte
@@ -158,59 +198,49 @@ type FrameScanner struct {
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
-	return &FrameScanner{
-		r:   r,
-		buf: make([]byte, 0, 70*1024), 
-	}
+	return &FrameScanner{r: r, buf: make([]byte, 0, 70*1024)}
 }
 
-func (fs *FrameScanner) ReadFrame() ([]byte, error) {
-	const HeaderSize = 6
-	const MaxDataLength = 65535 * 2 // 容忍极限 GRO 大包
+func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
+	const HeaderSize = 10
+	const MaxDataLength = 65535 * 2
 
 	for {
 		available := len(fs.buf) - fs.offset
-		
-		// 1. 尝试快速剥离完整帧
+
 		if available >= HeaderSize {
 			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+			seq := binary.BigEndian.Uint32(fs.buf[fs.offset+6 : fs.offset+10])
 			totalLen := dataLen + padLen
-			
-			// 严格防越界校验
+
 			if dataLen > MaxDataLength {
-				log.Warnf("[FrameScanner] CORRUPTION DETECTED: Invalid data length %d.", dataLen)
 				fs.buf = fs.buf[:0]
 				fs.offset = 0
-				return nil, fmt.Errorf("invalid frame data length: %d", dataLen)
+				return nil, 0, fmt.Errorf("invalid frame data length: %d", dataLen)
 			}
-			
-			// 如果当前 buffer 包含完整的帧（头+数据+填充）
+
 			if available >= HeaderSize+totalLen {
-				// 如果是空包（仅探测保活），跳过它，继续读取下一个
 				if dataLen == 0 {
 					fs.offset += HeaderSize + totalLen
-					continue
+					continue // 忽略空包
 				}
-				
+
 				var frame []byte
 				temp := getFrame()
-				
 				if dataLen > cap(temp) {
 					putFrame(temp)
-					frame = make([]byte, dataLen) 
+					frame = make([]byte, dataLen)
 				} else {
 					frame = temp[:dataLen]
 				}
-				
-				// 只提取真实数据，自动丢弃尾部的 padLen
-				copy(frame, fs.buf[fs.offset+HeaderSize : fs.offset+HeaderSize+dataLen])
+
+				copy(frame, fs.buf[fs.offset+HeaderSize:fs.offset+HeaderSize+dataLen])
 				fs.offset += HeaderSize + totalLen
-				return frame, nil
+				return frame, seq, nil
 			}
 		}
 
-		// 2. 内存整理 (游标推进超过 16KB 时执行数据左移)
 		if fs.offset > 0 && (fs.offset == len(fs.buf) || fs.offset > 16384) {
 			remaining := len(fs.buf) - fs.offset
 			if remaining > 0 {
@@ -220,15 +250,14 @@ func (fs *FrameScanner) ReadFrame() ([]byte, error) {
 			fs.offset = 0
 		}
 
-		// 3. 智能扩容 (防御性扩容预测)
 		tailStart := len(fs.buf)
-		requiredCap := tailStart + 2048 
+		requiredCap := tailStart + 2048
 
 		available = len(fs.buf) - fs.offset
 		if available >= HeaderSize {
 			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
-			if fs.offset + HeaderSize + dataLen + padLen > requiredCap {
+			if fs.offset+HeaderSize+dataLen+padLen > requiredCap {
 				requiredCap = fs.offset + HeaderSize + dataLen + padLen
 			}
 		}
@@ -249,13 +278,13 @@ func (fs *FrameScanner) ReadFrame() ([]byte, error) {
 
 		if err != nil {
 			if n == 0 || (err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection")) {
-				return nil, err
+				return nil, 0, err
 			}
 		}
 	}
 }
 
-// ======================= TCP Brutal 内核级拥塞控制 =======================
+// ======================= TCP Brutal & RTT 探测 =======================
 const TCP_BRUTAL_PARAMS = 23301
 
 func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
@@ -273,21 +302,11 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 			sysErr = fmt.Errorf("TCP_CONGESTION=brutal 未生效: %v", err)
 			return
 		}
-
 		rateBps := rateMbps * 1000 * 1000 / 8
 		b := make([]byte, 12)
 		binary.LittleEndian.PutUint64(b[0:8], rateBps)
-		binary.LittleEndian.PutUint32(b[8:12], 20) 
-
-		_, _, errno := unix.Syscall6(
-			unix.SYS_SETSOCKOPT,
-			fd,
-			unix.IPPROTO_TCP,
-			TCP_BRUTAL_PARAMS,
-			uintptr(unsafe.Pointer(&b[0])),
-			12,
-			0,
-		)
+		binary.LittleEndian.PutUint32(b[8:12], 20)
+		_, _, errno := unix.Syscall6(unix.SYS_SETSOCKOPT, fd, unix.IPPROTO_TCP, TCP_BRUTAL_PARAMS, uintptr(unsafe.Pointer(&b[0])), 12, 0)
 		if errno != 0 {
 			sysErr = fmt.Errorf("设置 TCP_BRUTAL_PARAMS 失败: %v", errno)
 		}
@@ -298,7 +317,43 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 	return sysErr
 }
 
-// ======================= TLS 证书管理 (伪装 h2) =======================
+func getTCPRTT(conn *net.TCPConn) (uint32, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var rtt uint32
+	var sysErr error
+	err = raw.Control(func(fd uintptr) {
+		info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
+		if err == nil {
+			rtt = info.Rtt
+		} else {
+			sysErr = err
+		}
+	})
+	if err != nil {
+		return 0, err
+	}
+	return rtt, sysErr
+}
+
+func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if rtt, err := getTCPRTT(conn); err == nil && rtt > 0 {
+				atomic.StoreUint32(rttCache, rtt)
+			}
+		}
+	}
+}
+
+// ======================= TLS 伪装 =======================
 func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 	var cert tls.Certificate
 	var err error
@@ -308,9 +363,7 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 		if err != nil {
 			log.Fatalf("Failed to load custom TLS pair: %v", err)
 		}
-		log.Infof("Loaded custom TLS certificate: %s", certFile)
 	} else {
-		log.Infof("No cert/key specified. Generating ephemeral memory certificate...")
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			panic(err)
@@ -322,139 +375,15 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 		}
 		keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
 		cert, err = tls.X509KeyPair(certPEM, keyPEM)
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"h2", "http/1.1"},
-	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
 }
 
-// ======================= 策略路由 =======================
-func setTapMac(tapName, macStr string) error {
-	if macStr == "" {
-		return nil
-	}
-	hwAddr, err := net.ParseMAC(macStr)
-	if err != nil {
-		return fmt.Errorf("invalid MAC address format: %v", err)
-	}
-	link, err := netlink.LinkByName(tapName)
-	if err != nil {
-		return fmt.Errorf("failed to find tap dev %s: %v", tapName, err)
-	}
-	// 修改 MAC 地址前最好确保网卡是 DOWN 状态，但这取决于内核，netlink 库通常能直接处理
-	if err := netlink.LinkSetHardwareAddr(link, hwAddr); err != nil {
-		return fmt.Errorf("failed to set MAC address: %v", err)
-	}
-	log.Infof("Interface %s MAC set to %s", tapName, macStr)
-	return nil
-}
-
-func setupPolicyRouting(tapName string, mark int, gwV4, gwV6 string) error {
-	if mark <= 0 {
-		return nil
-	}
-	link, err := netlink.LinkByName(tapName)
-	if err != nil {
-		return fmt.Errorf("failed to find tap dev %s: %v", tapName, err)
-	}
-	setup := func(gwStr string, family int) {
-		if gwStr == "" {
-			return
-		}
-		gw := net.ParseIP(gwStr)
-		rule := netlink.NewRule()
-		rule.Mark = uint32(mark)
-		rule.Table = mark
-		rule.Family = family
-		netlink.RuleDel(rule)
-		if err := netlink.RuleAdd(rule); err != nil {
-			log.Warnf("Failed to add rule for fwmark %d: %v", mark, err)
-		}
-		route := &netlink.Route{
-			LinkIndex: link.Attrs().Index,
-			Dst:       nil,
-			Gw:        gw,
-			Table:     mark,
-		}
-		if err := netlink.RouteReplace(route); err != nil {
-			log.Warnf("Failed to replace route in table %d: %v", mark, err)
-		}
-	}
-	setup(gwV4, netlink.FAMILY_V4)
-	setup(gwV6, netlink.FAMILY_V6)
-	log.Infof("🔀 Policy routing configured (fwmark: %d)", mark)
-	return nil
-}
-
-func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {
-	if mark <= 0 {
-		return
-	}
-	link, err := netlink.LinkByName(tapName)
-	if err != nil {
-		return
-	}
-	cleanup := func(gwStr string, family int) {
-		if gwStr == "" {
-			return
-		}
-		gw := net.ParseIP(gwStr)
-		rule := netlink.NewRule()
-		rule.Mark = uint32(mark)
-		rule.Table = mark
-		rule.Family = family
-		netlink.RuleDel(rule)
-		route := &netlink.Route{
-			LinkIndex: link.Attrs().Index,
-			Dst:       nil,
-			Gw:        gw,
-			Table:     mark,
-		}
-		netlink.RouteDel(route)
-	}
-	cleanup(gwV4, netlink.FAMILY_V4)
-	cleanup(gwV6, netlink.FAMILY_V6)
-	log.Infof("🧹 Policy routing cleaned (fwmark: %d)", mark)
-}
-
-func camouflageProbe(conn net.Conn) {
-	defer conn.Close()
-	junkBuf := getFrame()
-	defer putFrame(junkBuf)
-
-	deadline := time.Now().Add(10 * time.Second)
-	conn.SetReadDeadline(deadline)
-
-	for {
-		_, err := conn.Read(junkBuf)
-		if err != nil {
-			return
-		}
-		time.Sleep(time.Duration(mathrand.Intn(150)+50) * time.Millisecond)
-
-		fakePayloadLen := mathrand.Intn(300) + 100
-		fakeFrame := getFrame()[:fakePayloadLen+2]
-		fakeFrame[0] = 0x00
-		fakeFrame[1] = byte(fakePayloadLen)
-		rand.Read(fakeFrame[2:])
-
-		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_, err = conn.Write(fakeFrame)
-		putFrame(fakeFrame)
-		if err != nil {
-			return
-		}
-	}
-}
-
-// ======================= HTTP/1.1 & HTTP/2 长连接原生代理伪装 =======================
 type PrefixConn struct {
 	net.Conn
 	prefix []byte
@@ -491,45 +420,130 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 		w.Header().Set("Server", "nginx")
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(403)
-		w.Write([]byte(`<html>
-<head><title>403 Forbidden</title></head>
-<body>
-<center><h1>403 Forbidden</h1></center>
-<hr><center>nginx</center>
-</body>
-</html>
-`))
+		w.Write([]byte(`<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>`))
 	})
-
 	if alpn == "h2" {
-		srv := &http2.Server{
-			IdleTimeout: 60 * time.Second,
-		}
-		srv.ServeConn(conn, &http2.ServeConnOpts{
-			Handler: handler,
-		})
+		srv := &http2.Server{IdleTimeout: 60 * time.Second}
+		srv.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
 	} else {
 		l := &singleConnListener{conn: conn, done: make(chan struct{})}
-		srv := &http.Server{
-			Handler:     handler,
-			IdleTimeout: 60 * time.Second,
-		}
+		srv := &http.Server{Handler: handler, IdleTimeout: 60 * time.Second}
 		srv.Serve(l)
 	}
 }
 
-// ======================= 协议与配置 =======================
+func camouflageProbe(conn net.Conn) {
+	defer conn.Close()
+	junkBuf := getFrame()
+	defer putFrame(junkBuf)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		if _, err := conn.Read(junkBuf); err != nil {
+			return
+		}
+		time.Sleep(time.Duration(mathrand.Intn(150)+50) * time.Millisecond)
+		fakePayloadLen := mathrand.Intn(300) + 100
+		fakeFrame := getFrame()[:fakePayloadLen+2]
+		fakeFrame[0] = 0x00
+		fakeFrame[1] = byte(fakePayloadLen)
+		rand.Read(fakeFrame[2:])
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, err := conn.Write(fakeFrame)
+		putFrame(fakeFrame)
+		if err != nil {
+			return
+		}
+	}
+}
+
+// ======================= 网络接口配置 =======================
+func setTapMac(tapName, macStr string) error {
+	if macStr == "" {
+		return nil
+	}
+	hwAddr, err := net.ParseMAC(macStr)
+	if err != nil {
+		return fmt.Errorf("invalid MAC format: %v", err)
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil {
+		return fmt.Errorf("tap %s not found: %v", tapName, err)
+	}
+
+	if len(hwAddr) > 0 && (hwAddr[0]&1) == 1 {
+		return fmt.Errorf("cannot assign multicast/broadcast MAC address: %s", macStr)
+	}
+
+	netlink.LinkSetDown(link) // 拦截修改期间的网络占用
+	if err := netlink.LinkSetHardwareAddr(link, hwAddr); err != nil {
+		return fmt.Errorf("failed to set MAC address: %v", err)
+	}
+	log.Infof("Interface %s MAC set to %s", tapName, macStr)
+	return nil
+}
+
+func setupPolicyRouting(tapName string, mark int, gwV4, gwV6 string) error {
+	if mark <= 0 {
+		return nil
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil {
+		return err
+	}
+	setup := func(gwStr string, family int) {
+		if gwStr == "" {
+			return
+		}
+		gw := net.ParseIP(gwStr)
+		rule := netlink.NewRule()
+		rule.Mark, rule.Table, rule.Family = uint32(mark), mark, family
+		netlink.RuleDel(rule)
+		netlink.RuleAdd(rule)
+		route := &netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw, Table: mark}
+		netlink.RouteReplace(route)
+	}
+	setup(gwV4, netlink.FAMILY_V4)
+	setup(gwV6, netlink.FAMILY_V6)
+	log.Infof("🔀 Policy routing configured (fwmark: %d)", mark)
+	return nil
+}
+
+func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {
+	if mark <= 0 {
+		return
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil {
+		return
+	}
+	cleanup := func(gwStr string, family int) {
+		if gwStr == "" {
+			return
+		}
+		gw := net.ParseIP(gwStr)
+		rule := netlink.NewRule()
+		rule.Mark, rule.Table, rule.Family = uint32(mark), mark, family
+		netlink.RuleDel(rule)
+		route := &netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw, Table: mark}
+		netlink.RouteDel(route)
+	}
+	cleanup(gwV4, netlink.FAMILY_V4)
+	cleanup(gwV6, netlink.FAMILY_V6)
+}
+
+// ======================= 协议结构 =======================
 type HandshakeReq struct {
+	ClientID string `json:"client_id"`
 	PSK      string `json:"psk"`
 	MAC      string `json:"mac,omitempty"`
 	IPv4     string `json:"ipv4,omitempty"`
 	IPv6     string `json:"ipv6,omitempty"`
 	Padding  string `json:"padding,omitempty"`
-	BrutalTx uint64 `json:"brutal_tx,omitempty"` 
-	BrutalRx uint64 `json:"brutal_rx,omitempty"` 
+	BrutalTx uint64 `json:"brutal_tx,omitempty"`
+	BrutalRx uint64 `json:"brutal_rx,omitempty"`
+	FEC      bool   `json:"fec,omitempty"`
 }
 
-// MacBinding 记录 MAC 与 IP 的绑定关系
 type MacBinding struct {
 	IPv4 string `json:"ipv4"`
 	IPv6 string `json:"ipv6"`
@@ -538,64 +552,22 @@ type MacBinding struct {
 type HandshakeResp struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
+	ClientID      string   `json:"client_id"`
 	IPv4     string `json:"ipv4"`
 	IPv6     string `json:"ipv6"`
 	GwV4     string `json:"gw_v4,omitempty"`
 	GwV6     string `json:"gw_v6,omitempty"`
 	Padding  string `json:"padding,omitempty"`
-	BrutalTx uint64 `json:"brutal_tx,omitempty"` 
-	BrutalRx uint64 `json:"brutal_rx,omitempty"` 
+	BrutalTx uint64 `json:"brutal_tx,omitempty"`
+	BrutalRx uint64 `json:"brutal_rx,omitempty"`
+	FEC      bool   `json:"fec,omitempty"`
 }
 
-func main() {
-	mode := flag.String("mode", "", "server or client")
-	psk := flag.String("psk", "quic_secret", "Pre-shared key")
-	tapName := flag.String("tap", "tap0", "Name of the TAP device")
-	macAddr := flag.String("mac", "", "Specify MAC address for TAP device (Client/Server)")
-	addr := flag.String("addr", "0.0.0.0:4000", "Server address")
-	logLevel := flag.String("loglevel", "info", "Log level")
-
-	v4cidr := flag.String("v4cidr", "10.0.0.0/24", "IPv4 CIDR block (Server only)")
-	v6cidr := flag.String("v6cidr", "fd00::/64", "IPv6 CIDR block (Server only)")
-	certFile := flag.String("cert", "", "TLS Certificate file (Server only)")
-	keyFile := flag.String("key", "", "TLS Key file (Server only)")
-
-	reqV4 := flag.String("req-v4", "", "Requested IPv4 (Client only)")
-	reqV6 := flag.String("req-v6", "", "Requested IPv6 (Client only)")
-	sni := flag.String("sni", "www.cloudflare.com", "SNI for TLS (Client only)")
-	insecure := flag.Bool("insecure", false, "Skip TLS verify (Client only)")
-	certHash := flag.String("cert-sha256", "", "Verify server cert SHA256 (hex encoded) (Client only)")
-	fwmark := flag.Int("fwmark", 0, "Enable policy routing with specified fwmark (e.g. 1911) (Client only)")
-
-	brutal := flag.Bool("brutal", false, "Enable TCP Brutal congestion control")
-	brutalUp := flag.Uint64("brutal-up", 100, "Brutal upload rate limit in Mbps")
-	brutalDown := flag.Uint64("brutal-down", 500, "Brutal download rate limit in Mbps")
-
-	flag.Parse()
-	initLogger(*logLevel)
-	defer log.Sync()
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
-	if *mode == "server" {
-		startServer(ctx, *psk, *tapName, *macAddr, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown)
-	} else if *mode == "client" {
-		startClient(ctx, *psk, *tapName, *macAddr, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown)
-	} else {
-		fmt.Println("Usage: go run main.go -mode server|client [flags...]")
-		os.Exit(1)
-	}
-
-	log.Info("Program exited gracefully.")
-}
-
-// ======================= VSwitch 虚拟交换机 =======================
+// ======================= VSwitch =======================
 type Port interface {
 	ID() string
 	WriteFrame(frame []byte) error
 }
-
 type macEntry struct {
 	portID    string
 	updatedAt time.Time
@@ -608,19 +580,14 @@ type VSwitch struct {
 }
 
 func NewVSwitch() *VSwitch {
-	return &VSwitch{
-		ports:    make(map[string]Port),
-		macTable: make(map[string]*macEntry),
-	}
+	return &VSwitch{ports: make(map[string]Port), macTable: make(map[string]*macEntry)}
 }
-
 func (vs *VSwitch) AddPort(p Port) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 	vs.ports[p.ID()] = p
 	log.Debugf("[VSwitch] Port UP: %s", p.ID())
 }
-
 func (vs *VSwitch) RemovePort(portID string) {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -632,15 +599,12 @@ func (vs *VSwitch) RemovePort(portID string) {
 	}
 	log.Debugf("[VSwitch] Port DOWN: %s", portID)
 }
-
 func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	if len(frame) < 14 {
 		return
 	}
-	dstMAC := frame[0:6]
-	srcMAC := frame[6:12]
-	strDstMAC := string(dstMAC)
-	strSrcMAC := string(srcMAC)
+	dstMAC, srcMAC := frame[0:6], frame[6:12]
+	strDstMAC, strSrcMAC := string(dstMAC), string(srcMAC)
 
 	vs.mu.RLock()
 	entry, exists := vs.macTable[strSrcMAC]
@@ -653,28 +617,24 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
 		}
 		vs.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
-		vs.mu.Unlock() 
+		vs.mu.Unlock()
 	}
 
-	isBUM := (dstMAC[0] & 1) == 1
 	var targetPortID string
-	if !isBUM {
+	if (dstMAC[0] & 1) != 1 {
 		vs.mu.RLock()
 		if entry, exists := vs.macTable[strDstMAC]; exists {
 			targetPortID = entry.portID
 		}
-		vs.mu.RUnlock() 
+		vs.mu.RUnlock()
 	}
 
-	if targetPortID != "" {
-		if targetPortID != srcPortID {
-			vs.sendToPort(targetPortID, frame)
-		}
-	} else {
+	if targetPortID != "" && targetPortID != srcPortID {
+		vs.sendToPort(targetPortID, frame)
+	} else if targetPortID == "" {
 		vs.flood(srcPortID, frame)
 	}
 }
-
 func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
 	vs.mu.RLock()
 	port, exists := vs.ports[targetPortID]
@@ -683,7 +643,6 @@ func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
 		port.WriteFrame(frame)
 	}
 }
-
 func (vs *VSwitch) flood(excludePortID string, frame []byte) {
 	vs.mu.RLock()
 	var targets []Port
@@ -698,34 +657,50 @@ func (vs *VSwitch) flood(excludePortID string, frame []byte) {
 	}
 }
 
-// ======================= 异步端口 =======================
-type AsyncPort struct {
-	id     string
-	ch     chan []byte
-	writer func([][]byte) error
-	ctx    context.Context
-	cancel context.CancelFunc
+// ======================= 异步聚合端口 (支持 MinRTT) =======================
+type Backend struct {
+	ch       chan []VPNFrame
+	rttCache *uint32
 }
 
-func NewAsyncPort(ctx context.Context, id string, writer func([][]byte) error) *AsyncPort {
+type AsyncPort struct {
+	id         string
+	ch         chan []byte
+	ctx        context.Context
+	cancel     context.CancelFunc
+	backendsMu sync.RWMutex
+	backends   []*Backend
+	fecMode    bool
+	txSeq      uint32
+}
+
+func NewAsyncPort(ctx context.Context, id string, fecMode bool) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
-	p := &AsyncPort{
-		id:     id,
-		ch:     make(chan []byte, 4096),
-		writer: writer,
-		ctx:    pCtx,
-		cancel: pCancel,
-	}
+	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, fecMode: fecMode}
 	go p.run()
 	return p
 }
 
 func (p *AsyncPort) ID() string { return p.id }
-
+func (p *AsyncPort) RegisterBackend(ch chan []VPNFrame, rttCache *uint32) {
+	p.backendsMu.Lock()
+	defer p.backendsMu.Unlock()
+	p.backends = append(p.backends, &Backend{ch: ch, rttCache: rttCache})
+}
+func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
+	p.backendsMu.Lock()
+	defer p.backendsMu.Unlock()
+	for i, b := range p.backends {
+		if b.ch == ch {
+			p.backends = append(p.backends[:i], p.backends[i+1:]...)
+			break
+		}
+	}
+}
 func (p *AsyncPort) WriteFrame(frame []byte) error {
 	select {
 	case <-p.ctx.Done():
-		return fmt.Errorf("port %s closed", p.id)
+		return fmt.Errorf("port closed")
 	default:
 	}
 	var buf []byte
@@ -736,7 +711,7 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 	select {
 	case p.ch <- buf:
 	default:
-		log.Warnf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
+		log.Debugf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
 		if buf != nil {
 			putFrame(buf)
 		}
@@ -745,8 +720,8 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 }
 
 func (p *AsyncPort) run() {
-	const MaxBatchBytes = 64 * 1024 
-	batch := make([][]byte, 0, 128)
+	const MaxBatchBytes = 64 * 1024
+	batch := make([]VPNFrame, 0, 128)
 	var batchBytes int
 
 	for {
@@ -754,38 +729,84 @@ func (p *AsyncPort) run() {
 		case <-p.ctx.Done():
 			return
 		case frame := <-p.ch:
-			batch = append(batch, frame)
+			seq := atomic.AddUint32(&p.txSeq, 1)
+			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
 
 			queueLen := len(p.ch)
 			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
 				f := <-p.ch
-				batch = append(batch, f)
+				s := atomic.AddUint32(&p.txSeq, 1)
+				batch = append(batch, VPNFrame{Seq: s, Data: f})
 				batchBytes += len(f)
 			}
 
-			if err := p.writer(batch); err != nil {
-				log.Debugf("[AsyncPort %s] Writer returned error: %v", p.id, err)
-			}
+			p.backendsMu.RLock()
+			backends := p.backends
+			p.backendsMu.RUnlock()
 
-			for _, f := range batch {
-				if f != nil {
-					putFrame(f)
+			if len(backends) > 0 {
+				if p.fecMode {
+					// FEC: 将带有相同 Seq 的 VPNFrame 分发给所有连接
+					for _, b := range backends {
+						batchCopy := make([]VPNFrame, len(batch))
+						copy(batchCopy, batch)
+						select {
+						case b.ch <- batchCopy:
+						default:
+						}
+					}
+				} else {
+					// MinRTT: 选路
+					var bestBackend *Backend
+					var minScore uint32 = math.MaxUint32
+					for _, b := range backends {
+						qLen := len(b.ch)
+						if qLen >= cap(b.ch)-2 {
+							continue
+						}
+						rtt := atomic.LoadUint32(b.rttCache)
+						score := rtt + uint32(qLen*2000)
+						if score < minScore {
+							minScore = score
+							bestBackend = b
+						}
+					}
+					if bestBackend == nil {
+						bestBackend = backends[0]
+					}
+
+					batchCopy := make([]VPNFrame, len(batch))
+					copy(batchCopy, batch)
+					select {
+					case bestBackend.ch <- batchCopy:
+					default:
+					}
+				}
+			} else {
+				// 丢弃内存
+				for _, vf := range batch {
+					if vf.Data != nil && !p.fecMode {
+						putFrame(vf.Data)
+					}
 				}
 			}
+
 			batch = batch[:0]
 			batchBytes = 0
 		}
 	}
 }
-
 func (p *AsyncPort) Close() { p.cancel() }
 
-// ======================= 服务端实现 =======================
-type Session struct {
-    ID     string
-	Cancel context.CancelFunc
-	Done   chan struct{}
+// ======================= 服务端 =======================
+type ClientSession struct {
+	Port        *AsyncPort
+	IPv4        string
+	IPv6        string
+	MAC         string
+	Dedup       *DeDuplicator
+	ActiveConns int
 }
 
 type Server struct {
@@ -803,9 +824,9 @@ type Server struct {
 	brutalUp   uint64
 	brutalDown uint64
 
-	macAddr     string
-	activeMacs  map[string]*Session           // 记录 MAC 对应的 Session
-	macToIP     map[string]MacBinding         // 存储 MAC 到静态 IP 的绑定
+	macAddr       string
+	activeClients map[string]*ClientSession
+	macToIP       map[string]MacBinding
 }
 
 func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64) {
@@ -814,27 +835,12 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 	_, v6net, _ := net.ParseCIDR(v6cidr)
 
 	srv := &Server{
-		psk:        psk,
-		v4Net:      v4net,
-		v6Net:      v6net,
-		usedV4:     make(map[string]bool),
-		usedV6:     make(map[string]bool),
-		vswitch:    NewVSwitch(),
-		brutal:     brutal,
-		brutalUp:   brutalUp,   
-		brutalDown: brutalDown,
-		macAddr:    macAddr,
-		activeMacs: make(map[string]*Session),
-		macToIP:    make(map[string]MacBinding),
+		psk: psk, v4Net: v4net, v6Net: v6net, usedV4: make(map[string]bool), usedV6: make(map[string]bool),
+		vswitch: NewVSwitch(), brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
+		macAddr: macAddr, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
 	}
-
-	srvV4IP := getFirstIP(v4net)
-	srvV6IP := getFirstIP(v6net)
-	srv.v4Gw = srvV4IP.String()
-	srv.v6Gw = srvV6IP.String()
-
-	srv.usedV4[srv.v4Gw] = true
-	srv.usedV6[srv.v6Gw] = true
+	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
+	srv.usedV4[srv.v4Gw], srv.usedV6[srv.v6Gw] = true, true
 
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -843,59 +849,49 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 		log.Fatalf("Server TAP error: %v", err)
 	}
 	srv.tap = tap
-	
-	// 尝试为服务端的 TAP 网卡设置指定的 MAC
+
 	if err := setTapMac(tapName, macAddr); err != nil {
 		log.Warnf("Server failed to set tap MAC: %v", err)
 	}
 
 	if link, err := netlink.LinkByName(tapName); err == nil {
 		v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
-		netlink.AddrReplace(link, v4Addr)
 		v6Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)))
+		netlink.AddrReplace(link, v4Addr)
 		netlink.AddrReplace(link, v6Addr)
 		netlink.LinkSetUp(link)
-		log.Infof("Server TAP configured: IPv4=%s, IPv6=%s", v4Addr.String(), v6Addr.String())
 	}
 
-	go func() {
-		<-ctx.Done()
-		srv.tap.Close()
-	}()
+	go func() { <-ctx.Done(); srv.tap.Close() }()
 
 	tapPortID := "TAP_LOCAL"
-	tapPort := NewAsyncPort(ctx, tapPortID, func(frames [][]byte) error {
-		for _, b := range frames {
-			if len(b) > 0 {
-				if _, err := srv.tap.Write(b); err != nil {
-					return err
+	tapBackend := make(chan []VPNFrame, 32)
+	tapPort := NewAsyncPort(ctx, tapPortID, false)
+	tapPort.RegisterBackend(tapBackend, new(uint32))
+	srv.vswitch.AddPort(tapPort)
+
+	go func() {
+		for frames := range tapBackend {
+			for _, vf := range frames {
+				if len(vf.Data) > 0 {
+					srv.tap.Write(vf.Data)
+					putFrame(vf.Data)
 				}
 			}
 		}
-		return nil
-	})
-	srv.vswitch.AddPort(tapPort)
+	}()
 
 	go func() {
 		buf := make([]byte, 65536)
 		for {
-			select {
-			case <-ctx.Done():
+			rn, err := srv.tap.Read(buf)
+			if err != nil {
 				return
-			default:
-				rn, err := srv.tap.Read(buf)
-				if err != nil {
-					if ctx.Err() != nil {
-						return
-					}
-					return
-				}
-				// 从 TAP 读取的真实数据不加 Padding，原样进入 VSwitch
-				frame := getFrame()[:rn]
-				copy(frame, buf[:rn])
-				srv.vswitch.ProcessFrame(tapPortID, frame)
-				putFrame(frame)
 			}
+			frame := getFrame()[:rn]
+			copy(frame, buf[:rn])
+			srv.vswitch.ProcessFrame(tapPortID, frame)
+			putFrame(frame)
 		}
 	}()
 
@@ -910,10 +906,7 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 	}
 	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", addr)
 
-	go func() {
-		<-ctx.Done()
-		listener.Close()
-	}()
+	go func() { <-ctx.Done(); listener.Close() }()
 
 	for {
 		conn, err := listener.AcceptTCP()
@@ -935,24 +928,18 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 			c.SetReadDeadline(time.Now().Add(3 * time.Second))
 			n, err := c.Read(peekBuf)
 			c.SetReadDeadline(time.Time{})
-
 			if err != nil || n == 0 {
 				c.Close()
 				return
 			}
 
-			prefixConn := &PrefixConn{
-				Conn:   c,
-				prefix: peekBuf[:n],
-			}
-
+			prefixConn := &PrefixConn{Conn: c, prefix: peekBuf[:n]}
 			if peekBuf[0] != 0x16 {
-				serveFallbackHTTP(prefixConn, "http/1.1") 
+				serveFallbackHTTP(prefixConn, "http/1.1")
 				return
 			}
 
 			tlsConn := tls.Server(prefixConn, tlsConfig)
-
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
@@ -962,185 +949,175 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 			}
 
 			alpn := tlsConn.ConnectionState().NegotiatedProtocol
-
 			peekBuf2 := make([]byte, 1)
 			tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			n2, err2 := tlsConn.Read(peekBuf2)
 			tlsConn.SetReadDeadline(time.Time{})
-
 			if err2 != nil || n2 == 0 {
 				tlsConn.Close()
 				return
 			}
 
-			prefixConn2 := &PrefixConn{
-				Conn:   tlsConn,
-				prefix: peekBuf2[:n2],
-			}
-
+			prefixConn2 := &PrefixConn{Conn: tlsConn, prefix: peekBuf2[:n2]}
 			if peekBuf2[0] >= 0x20 {
-				serveFallbackHTTP(prefixConn2, alpn) 
+				serveFallbackHTTP(prefixConn2, alpn)
 				return
 			}
 
-			srv.handleClient(ctx, prefixConn2, c, c.RemoteAddr().String())
+			srv.handleConnection(ctx, prefixConn2, c)
 		}(conn)
 	}
 }
 
-func (s *Server) handleClient(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, clientID string) {
+func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn) {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
 
 	scanner := NewFrameScanner(conn)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	reqData, err := scanner.ReadFrame()
+	reqData, _, err := scanner.ReadFrame()
 	conn.SetReadDeadline(time.Time{})
 
-	var req HandshakeReq
-
 	if err != nil {
-		log.Debugf("[%s] 隧道内帧读取异常: %v", clientID, err)
 		camouflageProbe(conn)
 		return
 	}
 
-	if err := json.Unmarshal(reqData, &req); err != nil || req.PSK != s.psk {
-		log.Warnf("[%s] PSK 验证失败. 开启伪装焦油坑.", clientID)
+	var req HandshakeReq
+	if err := json.Unmarshal(reqData, &req); err != nil {
+		log.Warnf("握手数据解析失败. 开启伪装焦油坑.")
 		putFrame(reqData)
 		camouflageProbe(conn)
 		return
 	}
+	putFrame(reqData)
+	log.Debugf("<= 收到客户端握手请求 (HandshakeReq): %+v", req)
 
-    newSession := &Session { ID: clientID, Cancel: cancel, Done: make(chan struct{}) }
+	if req.PSK != hashPSK(s.psk) {
+		log.Warnf("PSK 验证失败 (Hash不匹配).")
+		camouflageProbe(conn)
+		return
+	}
+	clientID := req.ClientID
+	if clientID == "" {
+		log.Warnf("拒绝连接: 缺少 ClientID")
+		return
+	}
 	mac := req.MAC
 
 	s.mu.Lock()
-	// 如果内存里已经有这个 MAC 的分配记录，强制覆盖客户端的请求 IP
 	if bind, exists := s.macToIP[mac]; exists && mac != "" {
-		req.IPv4 = bind.IPv4
-		req.IPv6 = bind.IPv6
+		req.IPv4, req.IPv6 = bind.IPv4, bind.IPv6
 	}
 
-	// 检查并踢除占用相同 MAC 的旧连接
-	if mac != "" {
-		if oldSession, exists := s.activeMacs[mac]; exists {
-			log.Infof("[%s] 发现相同 MAC (%s) 的旧连接，强制断开...", clientID, mac)
-			oldSession.Cancel() // 触发旧连接的 defer 释放资源
-			
+	session, exists := s.activeClients[clientID]
+	if exists {
+		if req.MAC != session.MAC {
+			log.Warnf("[%s] 拒绝连接: MAC 不匹配", clientID)
 			s.mu.Unlock()
-			<-oldSession.Done
-			s.mu.Lock()
+			camouflageProbe(conn)
+			return
 		}
-		// 注册新连接控制函数
-		s.activeMacs[mac] = newSession
+	} else {
+		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
+		port := NewAsyncPort(parentCtx, clientID, req.FEC)
+		session = &ClientSession{Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, Dedup: NewDeDuplicator(), ActiveConns: 0}
+		s.activeClients[clientID] = session
+		if mac != "" {
+			s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
+		}
+		s.vswitch.AddPort(port)
+		log.Infof("[%s] 新逻辑 Client 上线 (FEC=%v), Assigned IPs: %s, %s", clientID, req.FEC, v4ip, v6ip)
 	}
+
+	session.ActiveConns++
+	v4ip, v6ip, port, dedup := session.IPv4, session.IPv6, session.Port, session.Dedup
 	s.mu.Unlock()
 
-	// 回复客户端
-	putFrame(reqData)
-
-	serverTxRate := s.brutalUp 
+	serverTxRate, clientTxRate := s.brutalUp, s.brutalDown
 	if req.BrutalRx > 0 && (s.brutalUp == 0 || req.BrutalRx < s.brutalUp) {
-		serverTxRate = req.BrutalRx 
+		serverTxRate = req.BrutalRx
 	}
-
-	clientTxRate := s.brutalDown 
 	if req.BrutalTx > 0 && (s.brutalDown == 0 || req.BrutalTx < s.brutalDown) {
-		clientTxRate = req.BrutalTx 
+		clientTxRate = req.BrutalTx
 	}
 
 	if s.brutal && serverTxRate > 0 {
-		if err := applyTCPBrutal(tcpConn, serverTxRate); err != nil {
-			log.Warnf("[%s] TCP Brutal 下行限速应用失败: %v", clientID, err)
-		} else {
-			log.Infof("[%s] TCP Brutal 协商完成: 允许客户端发送 %d Mbps, 服务端发送 %d Mbps", clientID, clientTxRate, serverTxRate)
-		}
+		applyTCPBrutal(tcpConn, serverTxRate)
 	}
-
-	v4ip, v6ip := s.assignIPs(req.IPv4, req.IPv6)
-
-	// 将新分配成功的 IP 记录回内存（下次重连就能恢复）
-	s.mu.Lock()
-	if mac != "" {
-		s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
-	}
-	s.mu.Unlock()
-
-	defer func() {
-		s.mu.Lock()
-		delete(s.usedV4, v4ip)
-		delete(s.usedV6, v6ip)
-
-		// 防止把刚顶替上来的新连接清掉
-		if mac != "" && s.activeMacs[mac] == newSession {
-			delete(s.activeMacs, mac)
-		}
-		s.mu.Unlock()
-		s.vswitch.RemovePort(clientID)
-		// 发送完成信号，唤醒可能正在等待当前连接退出的新连接
-		close(newSession.Done)
-	}()
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
+	s.sendResp(conn, true, "OK", clientID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC)
 
-	s.sendResp(conn, true, "OK", v4cidr, v6cidr, serverTxRate, clientTxRate)
-	log.Infof("[%s] Tunnel established. Assigned V4: %s | V6: %s", clientID, v4cidr, v6cidr)
+	rttCache := new(uint32)
+	atomic.StoreUint32(rttCache, 50000)
+	go startRTTPoller(connCtx, tcpConn, rttCache)
 
-	clientPort := NewAsyncPort(connCtx, clientID, func() func(frames [][]byte) error {
-		sendBuffer := make([]byte, 0, 64*1024+4096) 
-		return func(frames [][]byte) error {
-			sendBuffer = sendBuffer[:0] 
-			// 每帧独立 Padding 混淆并合并
-			for _, f := range frames {
-				if f == nil {
-					// 写入一个代表 KeepAlive 的空包，并加上随机填充
-					sendBuffer = appendPaddedFrame(sendBuffer, nil)
-				} else {
-					sendBuffer = appendPaddedFrame(sendBuffer, f)
-				}
-			}
+	connTxChan := make(chan []VPNFrame, 32)
+	port.RegisterBackend(connTxChan, rttCache)
 
-			_, err := conn.Write(sendBuffer)
-			return err
+	defer func() {
+		port.UnregisterBackend(connTxChan)
+		s.mu.Lock()
+		session.ActiveConns--
+		if session.ActiveConns <= 0 {
+			delete(s.usedV4, session.IPv4)
+			delete(s.usedV6, session.IPv6)
+			delete(s.activeClients, clientID)
+			s.vswitch.RemovePort(clientID)
+			port.Close()
+			log.Infof("[%s] 逻辑 Client 下线，所有连接均已断开，释放 IP", clientID)
 		}
-	}())
-	s.vswitch.AddPort(clientPort)
-	defer clientPort.Close()
+		s.mu.Unlock()
+	}()
 
 	go func() {
+		sendBuffer := make([]byte, 0, 64*1024+4096)
 		for {
-			jitterDelay := time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond
 			select {
 			case <-connCtx.Done():
 				return
-			case <-time.After(jitterDelay):
-				clientPort.WriteFrame(nil) 
+			case frames := <-connTxChan:
+				sendBuffer = sendBuffer[:0]
+				for _, vf := range frames {
+					sendBuffer = appendPaddedFrame(sendBuffer, vf)
+					if !req.FEC && vf.Data != nil {
+						putFrame(vf.Data)
+					} // 非FEC模式立即回收
+				}
+				conn.Write(sendBuffer)
+			case <-time.After(time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond):
+				sendBuffer = sendBuffer[:0]
+				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
+				conn.Write(sendBuffer)
 			}
 		}
 	}()
 
 	for {
-		select {
-		case <-connCtx.Done():
+		frame, seq, err := scanner.ReadFrame()
+		if err != nil {
+			log.Debugf("[%s] 链接断开: %v", clientID, err)
 			return
-		default:
-			frame, err := scanner.ReadFrame()
-			if err != nil {
-				log.Debugf("[%s] Tunnel TCP connection closed: %v", clientID, err)
-				return
-			}
-			s.vswitch.ProcessFrame(clientID, frame)
-			putFrame(frame)
 		}
+
+		// 使用 DeDuplicator 拦截网络放大报文
+		if dedup.IsDuplicate(seq) {
+			//log.Debugf("[%s] 拦截 FEC 冗余包 Seq: %d", clientID, seq)
+			if frame != nil {
+				putFrame(frame)
+			}
+			continue
+		}
+
+		s.vswitch.ProcessFrame(clientID, frame)
+		putFrame(frame)
 	}
 }
 
-func (s *Server) assignIPs(reqV4, reqV6 string) (string, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	alloc := func(req string, netw *net.IPNet, used map[string]bool) string {
 		req = strings.Split(req, "/")[0]
 		parsed := net.ParseIP(req)
@@ -1162,18 +1139,19 @@ func (s *Server) assignIPs(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, v4cidr, v6cidr string, srvTx, srvRx uint64) {
-	d, _ := json.Marshal(HandshakeResp{
-		Success: ok, Message: msg, IPv4: v4cidr, IPv6: v6cidr,
-		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
-		BrutalTx: srvTx, 
-		BrutalRx: srvRx, 
-	})
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool) {
+    resp := HandshakeResp{
+		Success: ok, Message: msg, ClientID: clientID, IPv4: v4cidr, IPv6: v6cidr,
+		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec,
+	}
+	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
+	d, _ := json.Marshal(resp)
 	writeStreamFrame(w, d)
 }
 
 // ======================= 客户端实现 =======================
 type Client struct {
+	clientID   string
 	psk        string
 	serverAddr string
 	tapName    string
@@ -1187,11 +1165,14 @@ type Client struct {
 	brutalUp   uint64
 	brutalDown uint64
 	tap        *water.Interface
-	tapTxChan  chan []byte
 	macAddr    string
+	connsCount int
+	fecMode    bool
+	txPort     *AsyncPort
+	dedup      *DeDuplicator // 客户端也需要统一去重！
 }
 
-func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64) {
+func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec bool) {
 	log.Infof("Starting TCP TLS client process...")
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -1199,18 +1180,12 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 	if err != nil {
 		log.Fatalf("Client TAP creation error: %v", err)
 	}
+	go func() { <-ctx.Done(); iface.Close() }()
 
-	go func() {
-		<-ctx.Done()
-		iface.Close()
-	}()
-
-	// 修改客户端 TAP 网卡 MAC
 	if err := setTapMac(tapName, macAddr); err != nil {
 		log.Warnf("Client failed to set tap MAC: %v", err)
 	}
-	
-	// 没有显式指定 -mac 参数，我们主动去读取网卡当前的实际 MAC 上报，这样服务端也能进行状态追踪
+
 	actualMac := macAddr
 	if actualMac == "" {
 		if link, err := netlink.LinkByName(tapName); err == nil {
@@ -1218,12 +1193,16 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 		}
 	}
 
+	ns := uuid.NewMD5(uuid.NameSpaceURL, []byte("my_vpn_tunnel"))
+	clientID := uuid.NewSHA1(ns, []byte(actualMac+psk)).String()
+	log.Infof("Assigned UUID v5 ClientID: %s", clientID)
+
 	c := &Client{
-		psk: psk, serverAddr: addr, tapName: tapName, reqV4: reqV4, reqV6: reqV6,
-		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark,
-		brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown, 
-		tap: iface, tapTxChan: make(chan []byte, 4096),
-		macAddr: actualMac,
+		clientID: clientID, psk: psk, serverAddr: addr, tapName: tapName, reqV4: reqV4, reqV6: reqV6,
+		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark, brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
+		tap: iface, macAddr: actualMac, connsCount: connsCount, fecMode: fec,
+		txPort: NewAsyncPort(ctx, "client_tx_port", fec),
+		dedup:  NewDeDuplicator(), // 初始化客户端去重器
 	}
 
 	go func() {
@@ -1237,189 +1216,164 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 				time.Sleep(1 * time.Second)
 				continue
 			}
-			
-			// 直接将提取的原始包塞入发送管道
 			frame := getFrame()[:rn]
 			copy(frame, buf[:rn])
-
-			select {
-			case <-ctx.Done():
-				putFrame(frame)
-				return
-			case c.tapTxChan <- frame:
-			default:
-				putFrame(frame)
-			}
+			c.txPort.WriteFrame(frame)
 		}
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			err := c.dialAndServe(ctx)
-			log.Warnf("Tunnel down: %v. Reconnecting in 3s...", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(3 * time.Second):
+	var wg sync.WaitGroup
+	for i := 0; i < c.connsCount; i++ {
+		wg.Add(1)
+		go func(connIndex int) {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					err := c.dialAndServe(ctx, connIndex)
+					log.Warnf("[Conn %d] Tunnel down: %v. Reconnecting in 3s...", connIndex, err)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(3 * time.Second):
+					}
+				}
 			}
-		}
+		}(i)
 	}
+	wg.Wait()
 }
 
-func (c *Client) dialAndServe(parentCtx context.Context) error {
+func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 	runCtx, runCancel := context.WithCancel(parentCtx)
 	defer runCancel()
 
-	tlsConf := &tls.Config{
-		ServerName:         c.sni,
-		InsecureSkipVerify: c.insecure,
-		NextProtos:         []string{"h2", "http/1.1"},
-	}
-
+	tlsConf := &tls.Config{ServerName: c.sni, InsecureSkipVerify: c.insecure, NextProtos: []string{"h2", "http/1.1"}}
 	if c.certHash != "" {
 		tlsConf.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
-				return fmt.Errorf("no certificates provided by server")
+				return fmt.Errorf("no certificates provided")
 			}
-			hash := sha256.Sum256(rawCerts[0])
-			hashStr := hex.EncodeToString(hash[:])
+			hashStr := hex.EncodeToString(sha256.New().Sum(rawCerts[0]))
 			if hashStr != c.certHash {
-				return fmt.Errorf("cert SHA-256 mismatch. Expected %s, got %s", c.certHash, hashStr)
+				return fmt.Errorf("cert SHA-256 mismatch")
 			}
 			return nil
 		}
 	}
 
-	log.Infof("Initiating TCP connection to Server: %s", c.serverAddr)
-	tcpAddr, err := net.ResolveTCPAddr("tcp", c.serverAddr)
+	log.Infof("[Conn %d] Initiating connection...", connIndex)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	rawConn, err := dialer.DialContext(runCtx, "tcp", c.serverAddr)
 	if err != nil {
 		return err
-	}
-
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	rawConn, err := dialer.DialContext(runCtx, "tcp", tcpAddr.String())
-	if err != nil {
-		return fmt.Errorf("TCP dial failed: %v", err)
 	}
 
 	tcpConn := rawConn.(*net.TCPConn)
 	tcpConn.SetKeepAlive(true)
 	tcpConn.SetKeepAlivePeriod(15 * time.Second)
 	tcpConn.SetNoDelay(true)
-	tcpConn.SetReadBuffer(4 * 1024 * 1024) 
+	tcpConn.SetReadBuffer(4 * 1024 * 1024)
 	tcpConn.SetWriteBuffer(4 * 1024 * 1024)
 
-	if c.brutal {
-		if err := applyTCPBrutal(tcpConn, c.brutalUp); err != nil {
-			log.Warnf("TCP Brutal 启用失败: %v", err)
-		} else {
-			log.Infof("TCP Brutal 上行发送端已接管，硬限速: %d Mbps", c.brutalUp)
-		}
+	// 1. 防御整除为 0 的陷阱
+	clientTxRate := c.brutalUp / uint64(c.connsCount)
+	if clientTxRate == 0 && c.brutalUp > 0 {
+		clientTxRate = 1
+	}
+
+	clientRxRate := c.brutalDown / uint64(c.connsCount)
+	if clientRxRate == 0 && c.brutalDown > 0 {
+		clientRxRate = 1
+	}
+
+	// 初始以客户端期望的速率申请接管
+	if c.brutal && clientTxRate > 0 {
+		applyTCPBrutal(tcpConn, clientTxRate)
 	}
 
 	tlsConn := tls.Client(tcpConn, tlsConf)
 	if err := tlsConn.HandshakeContext(runCtx); err != nil {
 		tcpConn.Close()
-		return fmt.Errorf("TLS handshake failed: %v", err)
+		return err
 	}
 	defer tlsConn.Close()
 
-	log.Infof("Encrypted TLS transport established.")
-
 	scanner := NewFrameScanner(tlsConn)
 	req := HandshakeReq{
-		PSK:        c.psk, 
-		MAC:        c.macAddr,
-		IPv4:       c.reqV4, 
-		IPv6:       c.reqV6, 
-		Padding:    generatePadding(100, 500),
-		BrutalTx:   c.brutalUp,   
-		BrutalRx:   c.brutalDown, 
+		ClientID: c.clientID,
+		PSK:      hashPSK(c.psk),
+		MAC:      c.macAddr,
+		IPv4:     c.reqV4,
+		IPv6:     c.reqV6,
+		Padding:  generatePadding(100, 500),
+		FEC:      c.fecMode,
+		BrutalTx: clientTxRate,
+		BrutalRx: clientRxRate,
 	}
+	log.Debugf("[Conn %d] => 发送握手请求 (HandshakeReq): %+v", connIndex, req)
 	reqData, _ := json.Marshal(req)
-	if err := writeStreamFrame(tlsConn, reqData); err != nil {
-		return fmt.Errorf("failed to send handshake: %v", err)
-	}
+	writeStreamFrame(tlsConn, reqData)
 
 	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	respData, err := scanner.ReadFrame()
-	if err != nil {
-		return fmt.Errorf("handshake read error: %v", err)
-	}
+	respData, _, err := scanner.ReadFrame()
 	tlsConn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return err
+	}
 
 	var resp HandshakeResp
 	if err := json.Unmarshal(respData, &resp); err != nil || !resp.Success {
-		putFrame(respData)
-		return fmt.Errorf("handshake failed/rejected: %v", err)
+		return fmt.Errorf("handshake rejected")
 	}
-	putFrame(respData)
+	log.Debugf("[Conn %d] <= 收到握手响应 (HandshakeResp): %+v", connIndex, resp)
 
-	log.Infof("Tunnel negotiated! IPv4: %s | IPv6: %s", resp.IPv4, resp.IPv6)
-
-	if c.brutal && resp.BrutalRx > 0 && resp.BrutalRx != c.brutalUp {
-		log.Infof("服务端强制调整客户端上行速率至: %d Mbps", resp.BrutalRx)
-		applyTCPBrutal(tcpConn, resp.BrutalRx)
+	// 服从服务端下达的强制最高限速
+	if c.brutal && resp.BrutalRx > 0 && resp.BrutalRx != clientTxRate {
+		log.Infof("[Conn %d] 服从服务端指令，重新调整上行限速为: %d Mbps", connIndex, resp.BrutalRx)
+		applyTCPBrutal(tcpConn, resp.BrutalRx) // 二次调用内核修改拥塞控制参数
 	}
 
-	if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
-		return fmt.Errorf("TAP interface setup failed: %v", err)
+	log.Infof("[Conn %d] Linked! IPv4: %s | IPv6: %s | FEC Match: %v", connIndex, resp.IPv4, resp.IPv6, resp.FEC)
+
+	if connIndex == 0 {
+		c.setupInterface(resp.IPv4, resp.IPv6)
+		setupPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
+		defer cleanPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
 	}
-	if err := setupPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6); err != nil {
-		log.Warnf("Policy routing setup failed: %v", err)
-	}
-	defer cleanPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
+
+	rttCache := new(uint32)
+	atomic.StoreUint32(rttCache, 50000)
+	go startRTTPoller(runCtx, tcpConn, rttCache)
 
 	errChan := make(chan error, 2)
+	connTxChan := make(chan []VPNFrame, 32)
+	c.txPort.RegisterBackend(connTxChan, rttCache)
+	defer c.txPort.UnregisterBackend(connTxChan)
 
 	go func() {
-		const MaxBatchBytes = 64 * 1024
-		batch := make([][]byte, 0, 128)
-		sendBuffer := make([]byte, 0, MaxBatchBytes+4096)
-
+		sendBuffer := make([]byte, 0, 64*1024+4096)
 		for {
-			jitterDelay := time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond
 			select {
 			case <-runCtx.Done():
 				return
-			case frame := <-c.tapTxChan:
-				batch = append(batch, frame)
-				batchBytes := len(frame)
-
-			drainLoop:
-				for batchBytes < MaxBatchBytes {
-					select {
-					case f := <-c.tapTxChan:
-						batch = append(batch, f)
-						batchBytes += len(f)
-					default:
-						break drainLoop
-					}
-				}
-
+			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
-				for _, f := range batch {
-					// 每个包独立填充并合并
-					if f != nil {
-						sendBuffer = appendPaddedFrame(sendBuffer, f)
-						putFrame(f)
-					} else {
-						sendBuffer = appendPaddedFrame(sendBuffer, nil)
-					}
+				for _, vf := range frames {
+					sendBuffer = appendPaddedFrame(sendBuffer, vf)
+					if !c.fecMode && vf.Data != nil {
+						putFrame(vf.Data)
+					} // 非FEC释放
 				}
-				batch = batch[:0]
-
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
 				}
-
-			case <-time.After(jitterDelay):
+			case <-time.After(time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond):
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendPaddedFrame(sendBuffer, nil)
+				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
@@ -1430,22 +1384,23 @@ func (c *Client) dialAndServe(parentCtx context.Context) error {
 
 	go func() {
 		for {
-			select {
-			case <-runCtx.Done():
+			frame, seq, err := scanner.ReadFrame()
+			if err != nil {
+				errChan <- err
 				return
-			default:
-				frame, err := scanner.ReadFrame()
-				if err != nil {
-					errChan <- err
-					return
-				}
-				if _, err := c.tap.Write(frame); err != nil {
-					putFrame(frame)
-					errChan <- err
-					return
-				}
-				putFrame(frame)
 			}
+
+			// 客户端去重器
+			if c.dedup.IsDuplicate(seq) {
+				//log.Debugf("[Conn %d] 拦截 FEC 冗余包 Seq: %d", connIndex, seq)
+				if frame != nil {
+					putFrame(frame)
+				}
+				continue
+			}
+
+			c.tap.Write(frame)
+			putFrame(frame)
 		}
 	}()
 
@@ -1483,17 +1438,55 @@ func incrementIP(ip net.IP) {
 		}
 	}
 }
-func duplicateIP(ip net.IP) net.IP {
-	dup := make(net.IP, len(ip))
-	copy(dup, ip)
-	return dup
-}
-func maskSize(m net.IPMask) int {
-	ones, _ := m.Size()
-	return ones
-}
-func getFirstIP(network *net.IPNet) net.IP {
-	ip := duplicateIP(network.IP)
-	incrementIP(ip)
-	return ip
+func duplicateIP(ip net.IP) net.IP         { dup := make(net.IP, len(ip)); copy(dup, ip); return dup }
+func maskSize(m net.IPMask) int            { ones, _ := m.Size(); return ones }
+func getFirstIP(network *net.IPNet) net.IP { ip := duplicateIP(network.IP); incrementIP(ip); return ip }
+
+func main() {
+	mode := flag.String("mode", "", "server or client")
+	psk := flag.String("psk", "quic_secret", "Pre-shared key")
+	tapName := flag.String("tap", "tap0", "Name of the TAP device")
+	macAddr := flag.String("mac", "", "Specify MAC address for TAP device (Client/Server)")
+	addr := flag.String("addr", "0.0.0.0:4000", "Server address")
+	logLevel := flag.String("loglevel", "info", "Log level (e.g. info, debug)")
+
+	v4cidr := flag.String("v4cidr", "10.0.0.0/24", "IPv4 CIDR block (Server only)")
+	v6cidr := flag.String("v6cidr", "fd00::/64", "IPv6 CIDR block (Server only)")
+	certFile := flag.String("cert", "", "TLS Certificate file (Server only)")
+	keyFile := flag.String("key", "", "TLS Key file (Server only)")
+
+	reqV4 := flag.String("req-v4", "", "Requested IPv4 (Client only)")
+	reqV6 := flag.String("req-v6", "", "Requested IPv6 (Client only)")
+	sni := flag.String("sni", "www.cloudflare.com", "SNI for TLS (Client only)")
+	insecure := flag.Bool("insecure", false, "Skip TLS verify (Client only)")
+	certHash := flag.String("cert-sha256", "", "Verify server cert SHA256 (hex encoded) (Client only)")
+	fwmark := flag.Int("fwmark", 0, "Enable policy routing with specified fwmark (Client only)")
+
+	brutal := flag.Bool("brutal", false, "Enable TCP Brutal congestion control")
+	brutalUp := flag.Uint64("brutal-up", 100, "Brutal upload rate limit in Mbps")
+	brutalDown := flag.Uint64("brutal-down", 500, "Brutal download rate limit in Mbps")
+
+	conns := flag.Int("conns", 1, "Number of concurrent TCP connections for Load Balancing")
+	fec := flag.Bool("fec", false, "Enable Packet Duplication FEC over Multipath")
+
+	flag.Parse()
+	initLogger(*logLevel)
+	defer log.Sync()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if *mode == "server" {
+		startServer(ctx, *psk, *tapName, *macAddr, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown)
+	} else if *mode == "client" {
+		if *fec && *conns < 2 {
+			log.Warnf("FEC (Packet Duplication) is enabled but conns < 2. Falling back to single connection.")
+		}
+		startClient(ctx, *psk, *tapName, *macAddr, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown, *conns, *fec)
+	} else {
+		fmt.Println("Usage: go run main.go -mode server|client [flags...]")
+		os.Exit(1)
+	}
+
+	log.Info("Program exited gracefully.")
 }
