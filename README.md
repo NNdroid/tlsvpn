@@ -68,9 +68,7 @@ sudo ./tlsvpn -mode client \
 | Flag | Default | Description |
 | --- | --- | --- |
 | `-mode` | (Required) | Running mode: `server` or `client` |
-| `-addr` | `0.0.0.0:4000` | **Server**: Listen address (e.g., `:4000`) <br>
-
-<br>**Client**: Target address list, comma-separated for multi-IP round-robin |
+| `-addr` | `0.0.0.0:4000` | **Server**: Listen address (e.g., `:4000`) **Client**: Target address list, comma-separated for multi-IP round-robin |
 | `-psk` | `quic_secret` | Pre-shared key for authentication |
 | `-tap` | `tap0` | Name of the virtual Layer 2 TAP device to create/use |
 | `-mac` | `(Empty)` | Manually specify the MAC address for the TAP interface |
