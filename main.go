@@ -16,7 +16,7 @@ import (
 	"io"
 	"math"
 	"math/big"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -47,7 +47,6 @@ var (
 )
 
 func init() {
-	mathrand.Seed(time.Now().UnixNano())
 	randomPool = make([]byte, RandomPoolSize)
 	_, err := rand.Read(randomPool)
 	if err != nil {
@@ -138,14 +137,14 @@ func putFrame(b []byte) {
 
 func getPaddingLength(dataLen int) int {
 	if dataLen == 0 {
-		return 100 + mathrand.Intn(201)
+		return 100 + mathrand.IntN(201)
 	}
 	if dataLen < 200 {
-		return 300 + mathrand.Intn(200)
+		return 300 + mathrand.IntN(200)
 	} else if dataLen < 800 {
-		return 100 + mathrand.Intn(200)
+		return 100 + mathrand.IntN(200)
 	} else {
-		return mathrand.Intn(100)
+		return mathrand.IntN(100)
 	}
 }
 
@@ -169,7 +168,7 @@ func appendPaddedFrame(buf []byte, vf VPNFrame) []byte {
 	}
 
 	if padLen > 0 {
-		offset := mathrand.Intn(RandomPoolSize - padLen)
+		offset := mathrand.IntN(RandomPoolSize - padLen)
 		buf = append(buf, randomPool[offset:offset+padLen]...)
 	}
 
@@ -186,8 +185,8 @@ func writeStreamFrame(w io.Writer, frame []byte) error {
 }
 
 func generatePadding(min, max int) string {
-	length := mathrand.Intn(max-min+1) + min
-	offset := mathrand.Intn(RandomPoolSize - length)
+	length := mathrand.IntN(max-min+1) + min
+	offset := mathrand.IntN(RandomPoolSize - length)
 	return hex.EncodeToString(randomPool[offset : offset+length])
 }
 
@@ -442,8 +441,8 @@ func camouflageProbe(conn net.Conn) {
 		if _, err := conn.Read(junkBuf); err != nil {
 			return
 		}
-		time.Sleep(time.Duration(mathrand.Intn(150)+50) * time.Millisecond)
-		fakePayloadLen := mathrand.Intn(300) + 100
+		time.Sleep(time.Duration(mathrand.IntN(150)+50) * time.Millisecond)
+		fakePayloadLen := mathrand.IntN(300) + 100
 		fakeFrame := getFrame()[:fakePayloadLen+2]
 		fakeFrame[0] = 0x00
 		fakeFrame[1] = byte(fakePayloadLen)
@@ -1121,7 +1120,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				conn.Write(sendBuffer)
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&session.TxPackets, uint64(len(frames)))
-			case <-time.After(time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond):
+			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
 				conn.Write(sendBuffer)
@@ -1130,6 +1129,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}()
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
 			log.Debugf("[%s] 链接断开: %v", clientID, err)
@@ -1481,7 +1481,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 				}
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&c.TxPackets, uint64(len(frames)))
-			case <-time.After(time.Duration(mathrand.Intn(3000)+4000) * time.Millisecond):
+			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
@@ -1494,6 +1494,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 
 	go func() {
 		for {
+			tlsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
 				errChan <- err
