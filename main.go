@@ -29,9 +29,9 @@ import (
 	"unsafe"
 
 	"github.com/google/uuid"
+	utls "github.com/refraction-networking/utls"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
-	utls "github.com/refraction-networking/utls"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
@@ -126,7 +126,7 @@ type VPNFrame struct {
 }
 
 var framePool = sync.Pool{
-	New: func() any { return make([]byte, 70*1000) },
+	New: func() any { return make([]byte, 32*1024) },
 }
 
 func getFrame() []byte { return framePool.Get().([]byte) }
@@ -581,7 +581,23 @@ type VSwitch struct {
 }
 
 func NewVSwitch() *VSwitch {
-	return &VSwitch{ports: make(map[string]Port), macTable: make(map[string]*macEntry)}
+	vs := &VSwitch{ports: make(map[string]Port), macTable: make(map[string]*macEntry)}
+	go vs.purgeExpiredMACs() // 启动清理协程
+	return vs
+}
+func (vs *VSwitch) purgeExpiredMACs() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		vs.mu.Lock()
+		for mac, entry := range vs.macTable {
+			// 如果一个 MAC 地址超过 30 分钟没有发包，就踢出转发表
+			if time.Since(entry.updatedAt) > 30*time.Minute {
+				delete(vs.macTable, mac)
+			}
+		}
+		vs.mu.Unlock()
+	}
 }
 func (vs *VSwitch) AddPort(p Port) {
 	vs.mu.Lock()
@@ -767,7 +783,13 @@ func (p *AsyncPort) run() {
 							continue
 						}
 						rtt := atomic.LoadUint32(b.rttCache)
-						score := rtt + uint32(qLen*2000)
+						// 降低单包的惩罚权重，或者引入缓冲阈值
+						// 假设 qLen 小于 10 时，不增加延迟惩罚
+						penalty := uint32(0)
+						if qLen > 10 {
+							penalty = uint32((qLen - 10) * 1000) // 积压超过10个包才开始惩罚
+						}
+						score := rtt + penalty
 						if score < minScore {
 							minScore = score
 							bestBackend = b

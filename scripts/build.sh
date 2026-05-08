@@ -44,7 +44,7 @@ do
     # -ldflags="-s -w": 壓縮體積，移除符號表和調試資訊
     echo "Building $PLATFORM..."
     env CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
-        -ldflags "-s -w" \
+        -ldflags "-s -w" -trimpath \
         -o "$OUTPUT_DIR/$OUTPUT_NAME" *.go
 
     if [ $? -ne 0 ]; then
