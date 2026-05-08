@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
+	utls "github.com/refraction-networking/utls"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/http2"
@@ -1286,6 +1287,51 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 	wg.Wait()
 }
 
+// negotiateUTLS 负责配置 uTLS、选择指纹并执行 TLS 握手
+func (c *Client) negotiateUTLS(ctx context.Context, tcpConn *net.TCPConn) (*utls.UConn, error) {
+	utlsConf := &utls.Config{
+		ServerName:         c.sni,
+		InsecureSkipVerify: c.insecure,
+		NextProtos:         []string{"h2", "http/1.1"},
+	}
+
+	// 自定义证书哈希校验
+	if c.certHash != "" {
+		utlsConf.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("no certificates provided")
+			}
+			hashStr := hex.EncodeToString(sha256.New().Sum(rawCerts[0]))
+			if hashStr != c.certHash {
+				return fmt.Errorf("cert SHA-256 mismatch: expected %s", c.certHash)
+			}
+			return nil
+		}
+	}
+
+	// 映射 ClientHello 指纹
+	var utlsID string = "chrome"
+	var clientHelloID utls.ClientHelloID
+	switch strings.ToLower(utlsID) {
+	case "firefox":
+		clientHelloID = utls.HelloFirefox_Auto
+	case "ios":
+		clientHelloID = utls.HelloIOS_Auto
+	case "random":
+		clientHelloID = utls.HelloRandomized
+	default:
+		clientHelloID = utls.HelloChrome_Auto // 默认 Chrome
+	}
+
+	// 构建 uTLS 连接并握手
+	utlsConn := utls.UClient(tcpConn, utlsConf, clientHelloID)
+	if err := utlsConn.HandshakeContext(ctx); err != nil {
+		return nil, fmt.Errorf("uTLS handshake failed: %v", err)
+	}
+
+	return utlsConn, nil
+}
+
 func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 	runCtx, runCancel := context.WithCancel(parentCtx)
 	defer runCancel()
@@ -1334,8 +1380,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		applyTCPBrutal(tcpConn, clientTxRate)
 	}
 
-	tlsConn := tls.Client(tcpConn, tlsConf)
-	if err := tlsConn.HandshakeContext(runCtx); err != nil {
+	tlsConn, err := c.negotiateUTLS(runCtx, tcpConn)
+	if err != nil {
 		tcpConn.Close()
 		return err
 	}
