@@ -552,7 +552,7 @@ type MacBinding struct {
 type HandshakeResp struct {
 	Success  bool   `json:"success"`
 	Message  string `json:"message"`
-	ClientID      string   `json:"client_id"`
+	ClientID string `json:"client_id"`
 	IPv4     string `json:"ipv4"`
 	IPv6     string `json:"ipv6"`
 	GwV4     string `json:"gw_v4,omitempty"`
@@ -807,10 +807,10 @@ type ClientSession struct {
 	MAC         string
 	Dedup       *DeDuplicator
 	ActiveConns int
-	TxBytes   uint64
-	RxBytes   uint64
-	TxPackets uint64
-	RxPackets uint64
+	TxBytes     uint64
+	RxBytes     uint64
+	TxPackets   uint64
+	RxPackets   uint64
 }
 
 type Server struct {
@@ -867,7 +867,7 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 	}
 
 	go func() { <-ctx.Done(); srv.tap.Close() }()
-	
+
 	if webAddr != "" {
 		go startWebServer(webAddr, srv, nil)
 	}
@@ -1112,7 +1112,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			log.Debugf("[%s] 链接断开: %v", clientID, err)
 			return
 		}
-		
+
 		if err == nil && frame != nil {
 			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
 			atomic.AddUint64(&session.RxPackets, 1)
@@ -1155,7 +1155,7 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 }
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool) {
-    resp := HandshakeResp{
+	resp := HandshakeResp{
 		Success: ok, Message: msg, ClientID: clientID, IPv4: v4cidr, IPv6: v6cidr,
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec,
 	}
@@ -1165,30 +1165,51 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr st
 }
 
 // ======================= 客户端实现 =======================
+
+// parseServerAddresses 解析逗号分隔的服务器地址字符串，并清理空格
+func parseServerAddresses(addrStr string) []string {
+	var addrs []string
+	rawList := strings.Split(addrStr, ",")
+
+	for _, raw := range rawList {
+		cleanAddr := strings.TrimSpace(raw)
+		if cleanAddr != "" {
+			addrs = append(addrs, cleanAddr)
+		}
+	}
+
+	// 如果由于某种原因解析后为空，提供一个安全的降级处理
+	if len(addrs) == 0 {
+		return []string{addrStr}
+	}
+
+	return addrs
+}
+
 type Client struct {
-	clientID   string
-	psk        string
-	serverAddr string
-	tapName    string
-	reqV4      string
-	reqV6      string
-	sni        string
-	insecure   bool
-	certHash   string
-	fwmark     int
-	brutal     bool
-	brutalUp   uint64
-	brutalDown uint64
-	tap        *water.Interface
-	macAddr    string
-	connsCount int
-	fecMode    bool
-	txPort     *AsyncPort
-	dedup      *DeDuplicator
-	TxBytes   uint64
-	RxBytes   uint64
-	TxPackets uint64
-	RxPackets uint64
+	clientID    string
+	psk         string
+	targetAddrs []string
+	tapName     string
+	reqV4       string
+	reqV6       string
+	sni         string
+	insecure    bool
+	certHash    string
+	fwmark      int
+	brutal      bool
+	brutalUp    uint64
+	brutalDown  uint64
+	tap         *water.Interface
+	macAddr     string
+	connsCount  int
+	fecMode     bool
+	txPort      *AsyncPort
+	dedup       *DeDuplicator
+	TxBytes     uint64
+	RxBytes     uint64
+	TxPackets   uint64
+	RxPackets   uint64
 }
 
 func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec bool) {
@@ -1217,7 +1238,7 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 	log.Infof("Assigned UUID v5 ClientID: %s", clientID)
 
 	c := &Client{
-		clientID: clientID, psk: psk, serverAddr: addr, tapName: tapName, reqV4: reqV4, reqV6: reqV6,
+		clientID: clientID, psk: psk, targetAddrs: parseServerAddresses(addr), tapName: tapName, reqV4: reqV4, reqV6: reqV6,
 		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark, brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
 		tap: iface, macAddr: actualMac, connsCount: connsCount, fecMode: fec,
 		txPort: NewAsyncPort(ctx, "client_tx_port", fec),
@@ -1285,7 +1306,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 
 	log.Infof("[Conn %d] Initiating connection...", connIndex)
 	dialer := net.Dialer{Timeout: 5 * time.Second}
-	rawConn, err := dialer.DialContext(runCtx, "tcp", c.serverAddr)
+	rawConn, err := dialer.DialContext(runCtx, "tcp", c.targetAddrs[connIndex%len(c.targetAddrs)])
 	if err != nil {
 		return err
 	}
@@ -1410,7 +1431,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 				errChan <- err
 				return
 			}
-			
+
 			if err == nil && frame != nil {
 				atomic.AddUint64(&c.RxBytes, uint64(len(frame)))
 				atomic.AddUint64(&c.RxPackets, 1)
@@ -1473,7 +1494,7 @@ func main() {
 	psk := flag.String("psk", "quic_secret", "Pre-shared key")
 	tapName := flag.String("tap", "tap0", "Name of the TAP device")
 	macAddr := flag.String("mac", "", "Specify MAC address for TAP device (Client/Server)")
-	addr := flag.String("addr", "0.0.0.0:4000", "Server address")
+	addr := flag.String("addr", "0.0.0.0:4000", "Server: listen address (e.g., :4000) | Client: target addresses (comma-separated, e.g., 1.1.1.1:4000,[::1]:4000)")
 	logLevel := flag.String("loglevel", "info", "Log level (e.g. info, debug)")
 
 	v4cidr := flag.String("v4cidr", "10.0.0.0/24", "IPv4 CIDR block (Server only)")
@@ -1752,7 +1773,7 @@ func startWebServer(addr string, srv *Server, cli *Client) {
 			}
 			srv.mu.Unlock()
 		}
-		
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status": "ok"}`))
 	})
