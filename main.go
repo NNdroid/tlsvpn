@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -79,6 +81,31 @@ func hashPSK(psk string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// getCipherContext 根据 PSK 派生出 AES 块和基础 IV
+func getCipherContext(psk string) (cipher.Block, []byte) {
+	keyHash := sha256.Sum256([]byte(psk + "_enc_key"))
+	ivHash := sha256.Sum256([]byte(psk + "_enc_iv"))
+	block, err := aes.NewCipher(keyHash[:]) // 衍生为 AES-256
+	if err != nil {
+		panic(err)
+	}
+	return block, ivHash[:16]
+}
+
+// xorCryptInPlace 高速流式异或，原址修改数据（加解密通用）
+func xorCryptInPlace(data []byte, seq uint32, block cipher.Block, baseIV []byte) {
+	if len(data) == 0 || block == nil {
+		return
+	}
+	iv := make([]byte, 16)
+	copy(iv, baseIV)
+	// 将包的序列号(Seq)混淆进 IV，确保每个数据包的异或密钥流完全不同
+	binary.BigEndian.PutUint32(iv[12:], seq)
+
+	stream := cipher.NewCTR(block, iv)
+	stream.XORKeyStream(data, data) // 高速异或位运算
+}
+
 // ======================= 高速环形去重器 (用于 FEC 过滤) =======================
 type DeDuplicator struct {
 	mu   sync.Mutex
@@ -148,8 +175,8 @@ func getPaddingLength(dataLen int) int {
 	}
 }
 
-// appendPaddedFrame 增加 10 字节头部 [4B len][2B padLen][4B seq]
-func appendPaddedFrame(buf []byte, vf VPNFrame) []byte {
+// appendPaddedFrame 10 字节头部 [4B len][2B padLen][4B seq]
+func appendPaddedFrame(buf []byte, vf VPNFrame, block cipher.Block, baseIV []byte) []byte {
 	dataLen := 0
 	if vf.Data != nil {
 		dataLen = len(vf.Data)
@@ -164,7 +191,13 @@ func appendPaddedFrame(buf []byte, vf VPNFrame) []byte {
 	binary.BigEndian.PutUint32(buf[headerStart+6:headerStart+10], vf.Seq)
 
 	if dataLen > 0 {
+		start := len(buf)
 		buf = append(buf, vf.Data...)
+		// == 如果有加密块且 Seq != 0，则执行异或加密 ==
+		// (Seq=0 约定为空控制帧/握手帧，直接明文传输即可，因为外层还有一层 TLS)
+		if block != nil && vf.Seq != 0 {
+			xorCryptInPlace(buf[start:start+dataLen], vf.Seq, block, baseIV)
+		}
 	}
 
 	if padLen > 0 {
@@ -178,7 +211,7 @@ func appendPaddedFrame(buf []byte, vf VPNFrame) []byte {
 // writeStreamFrame 发送无需去重的控制帧
 func writeStreamFrame(w io.Writer, frame []byte) error {
 	streamBuf := getFrame()[:0]
-	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame})
+	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil, nil)
 	_, err := w.Write(streamBuf)
 	putFrame(streamBuf[:cap(streamBuf)])
 	return err
@@ -542,6 +575,7 @@ type HandshakeReq struct {
 	BrutalTx uint64 `json:"brutal_tx,omitempty"`
 	BrutalRx uint64 `json:"brutal_rx,omitempty"`
 	FEC      bool   `json:"fec,omitempty"`
+	Encrypt  bool   `json:"encrypt,omitempty"`
 }
 
 type MacBinding struct {
@@ -561,6 +595,7 @@ type HandshakeResp struct {
 	BrutalTx uint64 `json:"brutal_tx,omitempty"`
 	BrutalRx uint64 `json:"brutal_rx,omitempty"`
 	FEC      bool   `json:"fec,omitempty"`
+	Encrypt  bool   `json:"encrypt,omitempty"`
 }
 
 // ======================= VSwitch =======================
@@ -853,9 +888,13 @@ type Server struct {
 	macAddr       string
 	activeClients map[string]*ClientSession
 	macToIP       map[string]MacBinding
+
+	encrypt     bool
+	cipherBlock cipher.Block
+	baseIV      []byte
 }
 
-func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64, webAddr string) {
+func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64, webAddr string, encrypt bool) {
 	log.Infof("Starting TCP TLS server process...")
 	_, v4net, _ := net.ParseCIDR(v4cidr)
 	_, v6net, _ := net.ParseCIDR(v6cidr)
@@ -864,9 +903,13 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 		psk: psk, v4Net: v4net, v6Net: v6net, usedV4: make(map[string]bool), usedV6: make(map[string]bool),
 		vswitch: NewVSwitch(), brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
 		macAddr: macAddr, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
+		encrypt: encrypt,
 	}
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
 	srv.usedV4[srv.v4Gw], srv.usedV6[srv.v6Gw] = true, true
+	if encrypt {
+		srv.cipherBlock, srv.baseIV = getCipherContext(psk)
+	}
 
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -1029,6 +1072,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		camouflageProbe(conn)
 		return
 	}
+	if req.Encrypt != s.encrypt {
+		log.Warnf("加密配置不匹配 (Client: %v, Server: %v)", req.Encrypt, s.encrypt)
+		camouflageProbe(conn)
+		return
+	}
 	clientID := req.ClientID
 	if clientID == "" {
 		log.Warnf("拒绝连接: 缺少 ClientID")
@@ -1079,7 +1127,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
-	s.sendResp(conn, true, "OK", clientID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC)
+	s.sendResp(conn, true, "OK", clientID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, req.Encrypt)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1112,7 +1160,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				for _, vf := range frames {
-					sendBuffer = appendPaddedFrame(sendBuffer, vf)
+					sendBuffer = appendPaddedFrame(sendBuffer, vf, s.cipherBlock, s.baseIV)
 					if !req.FEC && vf.Data != nil {
 						putFrame(vf.Data)
 					} // 非FEC模式立即回收
@@ -1122,7 +1170,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				atomic.AddUint64(&session.TxPackets, uint64(len(frames)))
 			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
+				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, nil)
 				conn.Write(sendBuffer)
 			}
 		}
@@ -1136,11 +1184,6 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			return
 		}
 
-		if err == nil && frame != nil {
-			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
-			atomic.AddUint64(&session.RxPackets, 1)
-		}
-
 		// 使用 DeDuplicator 拦截网络放大报文
 		if dedup.IsDuplicate(seq) {
 			//log.Debugf("[%s] 拦截 FEC 冗余包 Seq: %d", clientID, seq)
@@ -1148,6 +1191,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				putFrame(frame)
 			}
 			continue
+		}
+
+		if err == nil && frame != nil {
+			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
+			atomic.AddUint64(&session.RxPackets, 1)
+			if seq != 0 && s.cipherBlock != nil {
+				xorCryptInPlace(frame, seq, s.cipherBlock, s.baseIV)
+			}
 		}
 
 		s.vswitch.ProcessFrame(clientID, frame)
@@ -1177,10 +1228,10 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, encrypt bool) {
 	resp := HandshakeResp{
 		Success: ok, Message: msg, ClientID: clientID, IPv4: v4cidr, IPv6: v6cidr,
-		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec,
+		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec, Encrypt: encrypt,
 	}
 	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
 	d, _ := json.Marshal(resp)
@@ -1233,9 +1284,12 @@ type Client struct {
 	RxBytes     uint64
 	TxPackets   uint64
 	RxPackets   uint64
+	encrypt     bool
+	cipherBlock cipher.Block
+	baseIV      []byte
 }
 
-func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec bool) {
+func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec, encrypt bool) {
 	log.Infof("Starting TCP TLS client process...")
 	config := water.Config{DeviceType: water.TAP}
 	config.Name = tapName
@@ -1263,9 +1317,12 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 	c := &Client{
 		clientID: clientID, psk: psk, targetAddrs: parseServerAddresses(addr), tapName: tapName, reqV4: reqV4, reqV6: reqV6,
 		sni: sni, insecure: insecure, certHash: certHash, fwmark: fwmark, brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
-		tap: iface, macAddr: actualMac, connsCount: connsCount, fecMode: fec,
+		tap: iface, macAddr: actualMac, connsCount: connsCount, fecMode: fec, encrypt: encrypt,
 		txPort: NewAsyncPort(ctx, "client_tx_port", fec),
 		dedup:  NewDeDuplicator(), // 初始化客户端去重器
+	}
+	if encrypt {
+		c.cipherBlock, c.baseIV = getCipherContext(psk)
 	}
 
 	go func() {
@@ -1420,6 +1477,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		FEC:      c.fecMode,
 		BrutalTx: clientTxRate,
 		BrutalRx: clientRxRate,
+		Encrypt:  c.encrypt,
 	}
 	log.Debugf("[Conn %d] => 发送握手请求 (HandshakeReq): %+v", connIndex, req)
 	reqData, _ := json.Marshal(req)
@@ -1437,6 +1495,10 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		return fmt.Errorf("handshake rejected")
 	}
 	log.Debugf("[Conn %d] <= 收到握手响应 (HandshakeResp): %+v", connIndex, resp)
+
+	if resp.Encrypt != c.encrypt {
+		return fmt.Errorf("server encryption mismatch")
+	}
 
 	// 服从服务端下达的强制最高限速
 	if c.brutal && resp.BrutalRx > 0 && resp.BrutalRx != clientTxRate {
@@ -1470,7 +1532,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				for _, vf := range frames {
-					sendBuffer = appendPaddedFrame(sendBuffer, vf)
+					sendBuffer = appendPaddedFrame(sendBuffer, vf, c.cipherBlock, c.baseIV)
 					if !c.fecMode && vf.Data != nil {
 						putFrame(vf.Data)
 					} // 非FEC释放
@@ -1483,7 +1545,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 				atomic.AddUint64(&c.TxPackets, uint64(len(frames)))
 			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil})
+				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, nil)
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
@@ -1501,11 +1563,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 				return
 			}
 
-			if err == nil && frame != nil {
-				atomic.AddUint64(&c.RxBytes, uint64(len(frame)))
-				atomic.AddUint64(&c.RxPackets, 1)
-			}
-
 			// 客户端去重器
 			if c.dedup.IsDuplicate(seq) {
 				//log.Debugf("[Conn %d] 拦截 FEC 冗余包 Seq: %d", connIndex, seq)
@@ -1513,6 +1570,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 					putFrame(frame)
 				}
 				continue
+			}
+
+			if err == nil && frame != nil {
+				atomic.AddUint64(&c.RxBytes, uint64(len(frame)))
+				atomic.AddUint64(&c.RxPackets, 1)
+				if seq != 0 && c.cipherBlock != nil {
+					xorCryptInPlace(frame, seq, c.cipherBlock, c.baseIV)
+				}
 			}
 
 			c.tap.Write(frame)
@@ -1585,6 +1650,7 @@ func main() {
 	conns := flag.Int("conns", 1, "Number of concurrent TCP connections for Load Balancing")
 	fec := flag.Bool("fec", false, "Enable Packet Duplication FEC over Multipath")
 	webAddr := flag.String("web", "", "Start Web Dashboard on specified address (e.g. :8080)")
+	encrypt := flag.Bool("encrypt", false, "Enable inner payload AES-CTR XOR encryption")
 
 	flag.Parse()
 	initLogger(*logLevel)
@@ -1594,12 +1660,12 @@ func main() {
 	defer cancel()
 
 	if *mode == "server" {
-		startServer(ctx, *psk, *tapName, *macAddr, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown, *webAddr)
+		startServer(ctx, *psk, *tapName, *macAddr, *addr, *v4cidr, *v6cidr, *certFile, *keyFile, *brutal, *brutalUp, *brutalDown, *webAddr, *encrypt)
 	} else if *mode == "client" {
 		if *fec && *conns < 2 {
 			log.Warnf("FEC (Packet Duplication) is enabled but conns < 2. Falling back to single connection.")
 		}
-		startClient(ctx, *psk, *tapName, *macAddr, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown, *conns, *fec)
+		startClient(ctx, *psk, *tapName, *macAddr, *addr, *reqV4, *reqV6, *sni, *insecure, *certHash, *fwmark, *brutal, *brutalUp, *brutalDown, *conns, *fec, *encrypt)
 	} else {
 		fmt.Println("Usage: go run main.go -mode server|client [flags...]")
 		os.Exit(1)
