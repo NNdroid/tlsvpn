@@ -145,6 +145,125 @@ func (d *DeDuplicator) IsDuplicate(seq uint32) bool {
 	return false
 }
 
+// ======================= 乱序重排缓冲区 (Reorder Buffer) =======================
+type ReorderBuffer struct {
+	mu          sync.Mutex
+	expectedSeq uint32
+	buffer      map[uint32][]byte
+	outFunc     func([]byte) // 提取出回调函数，方便 Client 写 TAP，Server 写 VSwitch
+	lastAdvance time.Time
+}
+
+// NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
+func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+	rb := &ReorderBuffer{
+		buffer:      make(map[uint32][]byte),
+		outFunc:     outFunc,
+		lastAdvance: time.Now(),
+	}
+	go rb.timeoutWorker() // 启动后台防死锁协程
+	return rb
+}
+
+// timeoutWorker 定期检查是否因为彻底丢包而卡死
+func (rb *ReorderBuffer) timeoutWorker() {
+	ticker := time.NewTicker(10 * time.Millisecond) // 每 10ms 检查一次
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rb.mu.Lock()
+		// 如果缓冲区有数据，且超过 20ms 没有推进期望 Seq（说明缺口包彻底丢了）
+		if len(rb.buffer) > 0 && time.Since(rb.lastAdvance) > 20*time.Millisecond {
+			var minSeq uint32 = 0xFFFFFFFF
+			var found bool = false
+			// 寻找当前缓冲区中存在的最小 Seq
+			for seq := range rb.buffer {
+				// 利用 int32 强转来安全处理 uint32 回绕问题
+				if int32(seq-rb.expectedSeq) > 0 && (!found || int32(seq-minSeq) < 0) {
+					minSeq = seq
+					found = true
+				}
+			}
+
+			if found {
+				// 强制跳过丢失的包，将期待的 Seq 推进到缓冲区中现存的最小 Seq
+				rb.expectedSeq = minSeq
+				rb.flushLocked()
+			}
+		}
+		rb.mu.Unlock()
+	}
+}
+
+// Insert 将收到的包推入缓冲区
+func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
+	if seq == 0 {
+		// 控制帧不参与重排，直接放行或丢弃
+		if frame != nil {
+			putFrame(frame)
+		}
+		return
+	}
+
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	// 初始化：收到第一个有效数据包时，对齐 expectedSeq
+	if rb.expectedSeq == 0 {
+		rb.expectedSeq = seq
+	}
+
+	// 丢弃旧包：如果 Seq 小于当前期望的 Seq，说明是迟到的包，直接抛弃并回收内存
+	if int32(seq-rb.expectedSeq) < 0 {
+		if frame != nil {
+			putFrame(frame)
+		}
+		return
+	}
+
+	// 丢弃重复包 (FEC 冗余)：如果缓冲区内已经有这个 Seq，直接丢弃
+	if _, exists := rb.buffer[seq]; exists {
+		if frame != nil {
+			putFrame(frame)
+		}
+		return
+	}
+
+	//如果是空缓冲区被推入第一个包，重置计时器
+	if len(rb.buffer) == 0 {
+		rb.lastAdvance = time.Now()
+	}
+	// 存入缓冲区等候
+	rb.buffer[seq] = frame
+
+	// 如果到达的刚好是期望的包，触发批量按序输出
+	if seq == rb.expectedSeq {
+		rb.flushLocked()
+	}
+}
+
+// flushLocked 按序提取连续的包
+func (rb *ReorderBuffer) flushLocked() {
+	for {
+		frame, ok := rb.buffer[rb.expectedSeq]
+		if !ok {
+			break // 序列断档，退出循环等待下一个缺口被填补
+		}
+
+		// 调用外层传入的处理逻辑 (写 TAP 或写 VSwitch)
+		if len(frame) > 0 {
+			rb.outFunc(frame)
+		}
+		
+		// == 注意：此处必须回收内存，因为 outFunc 是同步调用的 ==
+		putFrame(frame)
+		delete(rb.buffer, rb.expectedSeq)
+
+		rb.expectedSeq++
+		rb.lastAdvance = time.Now() // 更新最后推进时间，重置超时判定
+	}
+}
+
 // ======================= 内存池与带有序列号的成帧协议 =======================
 type VPNFrame struct {
 	Seq  uint32
@@ -863,6 +982,7 @@ type ClientSession struct {
 	IPv6        string
 	MAC         string
 	Dedup       *DeDuplicator
+	RxReorder   *ReorderBuffer
 	ActiveConns int
 	TxBytes     uint64
 	RxBytes     uint64
@@ -1101,6 +1221,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
 		port := NewAsyncPort(parentCtx, clientID, req.FEC)
 		session = &ClientSession{Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, Dedup: NewDeDuplicator(), ActiveConns: 0}
+		// 初始化服务端重排缓冲区，理顺后交由交换机转发
+		session.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+			s.vswitch.ProcessFrame(clientID, orderedFrame)
+		})
 		s.activeClients[clientID] = session
 		if mac != "" {
 			s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
@@ -1110,7 +1234,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 
 	session.ActiveConns++
-	v4ip, v6ip, port, dedup := session.IPv4, session.IPv6, session.Port, session.Dedup
+	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
 	s.mu.Unlock()
 
 	serverTxRate, clientTxRate := s.brutalUp, s.brutalDown
@@ -1153,6 +1277,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		keepAliveTicker := time.NewTicker(4 * time.Second)
+		defer keepAliveTicker.Stop()
 		for {
 			select {
 			case <-connCtx.Done():
@@ -1165,10 +1291,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						putFrame(vf.Data)
 					} // 非FEC模式立即回收
 				}
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				conn.Write(sendBuffer)
+				conn.SetWriteDeadline(time.Time{})
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&session.TxPackets, uint64(len(frames)))
-			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
+			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, nil)
 				conn.Write(sendBuffer)
@@ -1184,25 +1312,15 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			return
 		}
 
-		// 使用 DeDuplicator 拦截网络放大报文
-		if dedup.IsDuplicate(seq) {
-			//log.Debugf("[%s] 拦截 FEC 冗余包 Seq: %d", clientID, seq)
-			if frame != nil {
-				putFrame(frame)
-			}
-			continue
-		}
-
 		if err == nil && frame != nil {
 			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
 			atomic.AddUint64(&session.RxPackets, 1)
 			if seq != 0 && s.cipherBlock != nil {
 				xorCryptInPlace(frame, seq, s.cipherBlock, s.baseIV)
 			}
+			// 交给重排缓冲区
+			session.RxReorder.Insert(seq, frame)
 		}
-
-		s.vswitch.ProcessFrame(clientID, frame)
-		putFrame(frame)
 	}
 }
 
@@ -1279,6 +1397,7 @@ type Client struct {
 	connsCount  int
 	fecMode     bool
 	txPort      *AsyncPort
+	rxReorder   *ReorderBuffer
 	dedup       *DeDuplicator
 	TxBytes     uint64
 	RxBytes     uint64
@@ -1321,6 +1440,10 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 		txPort: NewAsyncPort(ctx, "client_tx_port", fec),
 		dedup:  NewDeDuplicator(), // 初始化客户端去重器
 	}
+	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
+	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+		c.tap.Write(orderedFrame)
+	})
 	if encrypt {
 		c.cipherBlock, c.baseIV = getCipherContext(psk)
 	}
@@ -1459,7 +1582,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		applyTCPBrutal(tcpConn, clientTxRate)
 	}
 
+	tcpConn.SetDeadline(time.Now().Add(10 * time.Second))// tls握手超时
 	tlsConn, err := c.negotiateUTLS(runCtx, tcpConn)
+	tcpConn.SetDeadline(time.Time{})
 	if err != nil {
 		tcpConn.Close()
 		return err
@@ -1525,6 +1650,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		keepAliveTicker := time.NewTicker(4 * time.Second)
+		defer keepAliveTicker.Stop()
 		for {
 			select {
 			case <-runCtx.Done():
@@ -1537,13 +1664,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 						putFrame(vf.Data)
 					} // 非FEC释放
 				}
-				if _, err := tlsConn.Write(sendBuffer); err != nil {
+				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				_, err := tlsConn.Write(sendBuffer)
+				tlsConn.SetWriteDeadline(time.Time{})
+				if err != nil {
 					errChan <- err
 					return
 				}
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&c.TxPackets, uint64(len(frames)))
-			case <-time.After(time.Duration(mathrand.IntN(3000)+4000) * time.Millisecond):
+			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, nil)
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
@@ -1563,25 +1693,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 				return
 			}
 
-			// 客户端去重器
-			if c.dedup.IsDuplicate(seq) {
-				//log.Debugf("[Conn %d] 拦截 FEC 冗余包 Seq: %d", connIndex, seq)
-				if frame != nil {
-					putFrame(frame)
-				}
-				continue
-			}
-
 			if err == nil && frame != nil {
 				atomic.AddUint64(&c.RxBytes, uint64(len(frame)))
 				atomic.AddUint64(&c.RxPackets, 1)
 				if seq != 0 && c.cipherBlock != nil {
 					xorCryptInPlace(frame, seq, c.cipherBlock, c.baseIV)
 				}
+				// 丢入重排缓冲区，后续的 Write 和 putFrame 由缓冲区内部接管
+				c.rxReorder.Insert(seq, frame)
 			}
-
-			c.tap.Write(frame)
-			putFrame(frame)
 		}
 	}()
 
