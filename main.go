@@ -146,10 +146,11 @@ func (d *DeDuplicator) IsDuplicate(seq uint32) bool {
 }
 
 // ======================= 乱序重排缓冲区 (Reorder Buffer) =======================
+const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性能
 type ReorderBuffer struct {
 	mu          sync.Mutex
 	expectedSeq uint32
-	buffer      map[uint32][]byte
+	ring        []*[]byte
 	outFunc     func([]byte) // 提取出回调函数，方便 Client 写 TAP，Server 写 VSwitch
 	lastAdvance time.Time
 }
@@ -157,7 +158,7 @@ type ReorderBuffer struct {
 // NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
 func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 	rb := &ReorderBuffer{
-		buffer:      make(map[uint32][]byte),
+		ring:        make([]*[]byte, ReorderWindowSize),
 		outFunc:     outFunc,
 		lastAdvance: time.Now(),
 	}
@@ -167,28 +168,24 @@ func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 
 // timeoutWorker 定期检查是否因为彻底丢包而卡死
 func (rb *ReorderBuffer) timeoutWorker() {
-	ticker := time.NewTicker(10 * time.Millisecond) // 每 10ms 检查一次
+	ticker := time.NewTicker(5 * time.Millisecond) // 提高到 5ms 减小缺口积压
 	defer ticker.Stop()
 
 	for range ticker.C {
 		rb.mu.Lock()
-		// 如果缓冲区有数据，且超过 20ms 没有推进期望 Seq（说明缺口包彻底丢了）
-		if len(rb.buffer) > 0 && time.Since(rb.lastAdvance) > 20*time.Millisecond {
-			var minSeq uint32 = 0xFFFFFFFF
-			var found bool = false
-			// 寻找当前缓冲区中存在的最小 Seq
-			for seq := range rb.buffer {
-				// 利用 int32 强转来安全处理 uint32 回绕问题
-				if int32(seq-rb.expectedSeq) > 0 && (!found || int32(seq-minSeq) < 0) {
-					minSeq = seq
-					found = true
+		// 如果距离上一次推进已经超过 20ms，说明预期的包彻底丢了，强制跳过缺口
+		if rb.expectedSeq != 0 && time.Since(rb.lastAdvance) > 20*time.Millisecond {
+			idx := rb.expectedSeq % ReorderWindowSize
+			// 如果当前预期的坑里没包，说明确实丢了，往后找第一个有包的坑
+			if rb.ring[idx] == nil {
+				for i := uint32(1); i < ReorderWindowSize; i++ {
+					nextSeq := rb.expectedSeq + i
+					if rb.ring[nextSeq%ReorderWindowSize] != nil {
+						rb.expectedSeq = nextSeq
+						rb.flushLocked()
+						break
+					}
 				}
-			}
-
-			if found {
-				// 强制跳过丢失的包，将期待的 Seq 推进到缓冲区中现存的最小 Seq
-				rb.expectedSeq = minSeq
-				rb.flushLocked()
 			}
 		}
 		rb.mu.Unlock()
@@ -198,7 +195,6 @@ func (rb *ReorderBuffer) timeoutWorker() {
 // Insert 将收到的包推入缓冲区
 func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	if seq == 0 {
-		// 控制帧不参与重排，直接放行或丢弃
 		if frame != nil {
 			putFrame(frame)
 		}
@@ -208,35 +204,40 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 
-	// 初始化：收到第一个有效数据包时，对齐 expectedSeq
 	if rb.expectedSeq == 0 {
 		rb.expectedSeq = seq
 	}
 
-	// 丢弃旧包：如果 Seq 小于当前期望的 Seq，说明是迟到的包，直接抛弃并回收内存
-	if int32(seq-rb.expectedSeq) < 0 {
+	// 丢弃太老的包
+	diff := int32(seq - rb.expectedSeq)
+	if diff < 0 {
 		if frame != nil {
 			putFrame(frame)
 		}
 		return
 	}
 
-	// 丢弃重复包 (FEC 冗余)：如果缓冲区内已经有这个 Seq，直接丢弃
-	if _, exists := rb.buffer[seq]; exists {
+	// 乱序窗口超出限制，防极端情况内存溢出
+	if diff >= ReorderWindowSize {
 		if frame != nil {
 			putFrame(frame)
 		}
 		return
 	}
 
-	//如果是空缓冲区被推入第一个包，重置计时器
-	if len(rb.buffer) == 0 {
-		rb.lastAdvance = time.Now()
+	idx := seq % ReorderWindowSize
+	// 去重：如果坑里已经有包了，说明是 FEC 冗余包
+	if rb.ring[idx] != nil {
+		if frame != nil {
+			putFrame(frame)
+		}
+		return
 	}
-	// 存入缓冲区等候
-	rb.buffer[seq] = frame
 
-	// 如果到达的刚好是期望的包，触发批量按序输出
+	// 放入环形槽
+	rb.ring[idx] = &frame
+
+	// 刚好匹配，批量按序输出
 	if seq == rb.expectedSeq {
 		rb.flushLocked()
 	}
@@ -245,22 +246,22 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 // flushLocked 按序提取连续的包
 func (rb *ReorderBuffer) flushLocked() {
 	for {
-		frame, ok := rb.buffer[rb.expectedSeq]
-		if !ok {
-			break // 序列断档，退出循环等待下一个缺口被填补
+		idx := rb.expectedSeq % ReorderWindowSize
+		framePtr := rb.ring[idx]
+		if framePtr == nil {
+			break // 依然有缺口，等待
 		}
 
-		// 调用外层传入的处理逻辑 (写 TAP 或写 VSwitch)
+		frame := *framePtr
 		if len(frame) > 0 {
 			rb.outFunc(frame)
 		}
-		
-		// == 注意：此处必须回收内存，因为 outFunc 是同步调用的 ==
+
 		putFrame(frame)
-		delete(rb.buffer, rb.expectedSeq)
+		rb.ring[idx] = nil // 释放槽位
 
 		rb.expectedSeq++
-		rb.lastAdvance = time.Now() // 更新最后推进时间，重置超时判定
+		rb.lastAdvance = time.Now()
 	}
 }
 
@@ -302,26 +303,45 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, block cipher.Block, baseIV []byt
 	}
 	padLen := getPaddingLength(dataLen)
 
-	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-	headerStart := len(buf) - 10
+	// 1. 一次性算出需要的整包新增长度
+	needed := 10 + dataLen + padLen
+	startIdx := len(buf)
 
-	binary.BigEndian.PutUint32(buf[headerStart:headerStart+4], uint32(dataLen))
-	binary.BigEndian.PutUint16(buf[headerStart+4:headerStart+6], uint16(padLen))
-	binary.BigEndian.PutUint32(buf[headerStart+6:headerStart+10], vf.Seq)
+	// 2. 检查容量，不够则一次性扩容，防多次 append 扩容崩溃
+	if cap(buf)-startIdx < needed {
+		newCap := cap(buf) * 2
+		if newCap < startIdx+needed {
+			newCap = startIdx + needed
+		}
+		newBuf := make([]byte, startIdx, newCap)
+		copy(newBuf, buf)
+		buf = newBuf
+	}
 
+	// 改变 slice 的长度属性
+	buf = buf[:startIdx+needed]
+
+	// 3. 原址绝对下标写入头信息
+	binary.BigEndian.PutUint32(buf[startIdx:startIdx+4], uint32(dataLen))
+	binary.BigEndian.PutUint16(buf[startIdx+4:startIdx+6], uint16(padLen))
+	binary.BigEndian.PutUint32(buf[startIdx+6:startIdx+10], vf.Seq)
+
+	// 4. 拷贝数据负载
 	if dataLen > 0 {
-		start := len(buf)
-		buf = append(buf, vf.Data...)
-		// == 如果有加密块且 Seq != 0，则执行异或加密 ==
-		// (Seq=0 约定为空控制帧/握手帧，直接明文传输即可，因为外层还有一层 TLS)
+		payloadStart := startIdx + 10
+		copy(buf[payloadStart:payloadStart+dataLen], vf.Data)
+
+		// 加密
 		if block != nil && vf.Seq != 0 {
-			xorCryptInPlace(buf[start:start+dataLen], vf.Seq, block, baseIV)
+			xorCryptInPlace(buf[payloadStart:payloadStart+dataLen], vf.Seq, block, baseIV)
 		}
 	}
 
+	// 5. 填补混淆填充
 	if padLen > 0 {
+		padStart := startIdx + 10 + dataLen
 		offset := mathrand.IntN(RandomPoolSize - padLen)
-		buf = append(buf, randomPool[offset:offset+padLen]...)
+		copy(buf[padStart:padStart+padLen], randomPool[offset:offset+padLen])
 	}
 
 	return buf
@@ -727,45 +747,74 @@ type macEntry struct {
 	updatedAt time.Time
 }
 
-type VSwitch struct {
+const ShardCount = 16
+
+type VSwitchShard struct {
 	mu       sync.RWMutex
-	ports    map[string]Port
 	macTable map[string]*macEntry
+}
+type VSwitch struct {
+	portsMu sync.RWMutex
+	ports   map[string]Port
+	shards  [ShardCount]*VSwitchShard
 }
 
 func NewVSwitch() *VSwitch {
-	vs := &VSwitch{ports: make(map[string]Port), macTable: make(map[string]*macEntry)}
-	go vs.purgeExpiredMACs() // 启动清理协程
+	vs := &VSwitch{ports: make(map[string]Port)}
+	for i := 0; i < ShardCount; i++ {
+		vs.shards[i] = &VSwitchShard{macTable: make(map[string]*macEntry)}
+	}
+	go vs.purgeExpiredMACs()
 	return vs
+}
+
+// 快速字符串 Hash
+func getShardIdx(mac string) int {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(mac); i++ {
+		hash *= 16777619
+		hash ^= uint32(mac[i])
+	}
+	return int(hash % ShardCount)
 }
 func (vs *VSwitch) purgeExpiredMACs() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		vs.mu.Lock()
-		for mac, entry := range vs.macTable {
-			// 如果一个 MAC 地址超过 30 分钟没有发包，就踢出转发表
-			if time.Since(entry.updatedAt) > 30*time.Minute {
-				delete(vs.macTable, mac)
+		for i := 0; i < ShardCount; i++ {
+			shard := vs.shards[i]
+			shard.mu.Lock()
+			for mac, entry := range shard.macTable {
+				if time.Since(entry.updatedAt) > 30*time.Minute {
+					delete(shard.macTable, mac)
+				}
 			}
+			shard.mu.Unlock()
 		}
-		vs.mu.Unlock()
 	}
 }
 func (vs *VSwitch) AddPort(p Port) {
-	vs.mu.Lock()
-	defer vs.mu.Unlock()
+	vs.portsMu.Lock()
 	vs.ports[p.ID()] = p
+	vs.portsMu.Unlock()
 	log.Debugf("[VSwitch] Port UP: %s", p.ID())
 }
+
 func (vs *VSwitch) RemovePort(portID string) {
-	vs.mu.Lock()
-	defer vs.mu.Unlock()
+	vs.portsMu.Lock()
 	delete(vs.ports, portID)
-	for mac, entry := range vs.macTable {
-		if entry.portID == portID {
-			delete(vs.macTable, mac)
+	vs.portsMu.Unlock()
+
+	// 清理分片表里的 MAC
+	for i := 0; i < ShardCount; i++ {
+		shard := vs.shards[i]
+		shard.mu.Lock()
+		for mac, entry := range shard.macTable {
+			if entry.portID == portID {
+				delete(shard.macTable, mac)
+			}
 		}
+		shard.mu.Unlock()
 	}
 	log.Debugf("[VSwitch] Port DOWN: %s", portID)
 }
@@ -776,27 +825,29 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	dstMAC, srcMAC := frame[0:6], frame[6:12]
 	strDstMAC, strSrcMAC := string(dstMAC), string(srcMAC)
 
-	vs.mu.RLock()
-	entry, exists := vs.macTable[strSrcMAC]
+	// 计算属于哪一个锁分片
+	srcShard := vs.shards[getShardIdx(strSrcMAC)]
+
+	srcShard.mu.RLock()
+	entry, exists := srcShard.macTable[strSrcMAC]
 	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
-	vs.mu.RUnlock()
+	srcShard.mu.RUnlock()
 
 	if needUpdate {
-		vs.mu.Lock()
-		if _, checkExists := vs.macTable[strSrcMAC]; !checkExists {
-			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
-		}
-		vs.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
-		vs.mu.Unlock()
+		srcShard.mu.Lock()
+		srcShard.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
+		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
+		srcShard.mu.Unlock()
 	}
 
 	var targetPortID string
-	if (dstMAC[0] & 1) != 1 {
-		vs.mu.RLock()
-		if entry, exists := vs.macTable[strDstMAC]; exists {
-			targetPortID = entry.portID
+	if (dstMAC[0] & 1) != 1 { // 单播包
+		dstShard := vs.shards[getShardIdx(strDstMAC)]
+		dstShard.mu.RLock()
+		if dEntry, dExists := dstShard.macTable[strDstMAC]; dExists {
+			targetPortID = dEntry.portID
 		}
-		vs.mu.RUnlock()
+		dstShard.mu.RUnlock()
 	}
 
 	if targetPortID != "" && targetPortID != srcPortID {
@@ -806,22 +857,22 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	}
 }
 func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
-	vs.mu.RLock()
+	vs.portsMu.RLock()
 	port, exists := vs.ports[targetPortID]
-	vs.mu.RUnlock()
+	vs.portsMu.RUnlock()
 	if exists {
 		port.WriteFrame(frame)
 	}
 }
 func (vs *VSwitch) flood(excludePortID string, frame []byte) {
-	vs.mu.RLock()
+	vs.portsMu.RLock()
 	var targets []Port
 	for id, port := range vs.ports {
 		if id != excludePortID {
 			targets = append(targets, port)
 		}
 	}
-	vs.mu.RUnlock()
+	vs.portsMu.RUnlock()
 	for _, port := range targets {
 		port.WriteFrame(frame)
 	}
@@ -998,7 +1049,7 @@ type Server struct {
 	v6Gw       string
 	usedV4     map[string]bool
 	usedV6     map[string]bool
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	tap        *water.Interface
 	vswitch    *VSwitch
 	brutal     bool
@@ -1582,7 +1633,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		applyTCPBrutal(tcpConn, clientTxRate)
 	}
 
-	tcpConn.SetDeadline(time.Now().Add(10 * time.Second))// tls握手超时
+	tcpConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
 	tlsConn, err := c.negotiateUTLS(runCtx, tcpConn)
 	tcpConn.SetDeadline(time.Time{})
 	if err != nil {
@@ -1971,8 +2022,27 @@ func startWebServer(addr string, srv *Server, cli *Client) {
 
 		if srv != nil {
 			stats.Mode = "server"
-			srv.mu.Lock()
+			srv.mu.RLock()
 			stats.ActiveClients = len(srv.activeClients)
+			// 建立一个临时快照，迅速释放全局锁
+			type tmpSession struct {
+				v4, v6, mac        string
+				conns              int
+				txB, rxB, txP, rxP uint64
+			}
+			snapClients := make(map[string]tmpSession, len(srv.activeClients))
+			for id, session := range srv.activeClients {
+				snapClients[id] = tmpSession{
+					v4: session.IPv4, v6: session.IPv6, mac: session.MAC, conns: session.ActiveConns,
+					txB: atomic.LoadUint64(&session.TxBytes),
+					rxB: atomic.LoadUint64(&session.RxBytes),
+					txP: atomic.LoadUint64(&session.TxPackets),
+					rxP: atomic.LoadUint64(&session.RxPackets),
+				}
+			}
+			srv.mu.RUnlock()
+
+			// 在锁外进行 JSON 序列化和耗时的 Map 赋值，彻底不阻塞 handleConnection
 			for id, session := range srv.activeClients {
 				stats.Clients[id] = map[string]interface{}{
 					"ipv4":         session.IPv4,
@@ -1985,7 +2055,6 @@ func startWebServer(addr string, srv *Server, cli *Client) {
 					"rx_packets":   atomic.LoadUint64(&session.RxPackets),
 				}
 			}
-			srv.mu.Unlock()
 		} else if cli != nil {
 			stats.Mode = "client"
 			stats.ActiveClients = 1
