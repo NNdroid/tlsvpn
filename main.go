@@ -145,6 +145,26 @@ func (d *DeDuplicator) IsDuplicate(seq uint32) bool {
 	return false
 }
 
+func (d *DeDuplicator) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.set = make(map[uint32]struct{}, 4096)
+	d.ring = [4096]uint32{}
+	d.idx = 0
+}
+
+func (rb *ReorderBuffer) Reset() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.expectedSeq = 0
+	for i := range rb.ring {
+		if rb.ring[i] != nil {
+			putFrame(*rb.ring[i])
+			rb.ring[i] = nil
+		}
+	}
+}
+
 // ======================= 乱序重排缓冲区 (Reorder Buffer) =======================
 const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性能
 type ReorderBuffer struct {
@@ -723,18 +743,19 @@ type MacBinding struct {
 }
 
 type HandshakeResp struct {
-	Success  bool   `json:"success"`
-	Message  string `json:"message"`
-	ClientID string `json:"client_id"`
-	IPv4     string `json:"ipv4"`
-	IPv6     string `json:"ipv6"`
-	GwV4     string `json:"gw_v4,omitempty"`
-	GwV6     string `json:"gw_v6,omitempty"`
-	Padding  string `json:"padding,omitempty"`
-	BrutalTx uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx uint64 `json:"brutal_rx,omitempty"`
-	FEC      bool   `json:"fec,omitempty"`
-	Encrypt  bool   `json:"encrypt,omitempty"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	SessionID string `json:"session_id,omitempty"`
+	ClientID  string `json:"client_id"`
+	IPv4      string `json:"ipv4"`
+	IPv6      string `json:"ipv6"`
+	GwV4      string `json:"gw_v4,omitempty"`
+	GwV6      string `json:"gw_v6,omitempty"`
+	Padding   string `json:"padding,omitempty"`
+	BrutalTx  uint64 `json:"brutal_tx,omitempty"`
+	BrutalRx  uint64 `json:"brutal_rx,omitempty"`
+	FEC       bool   `json:"fec,omitempty"`
+	Encrypt   bool   `json:"encrypt,omitempty"`
 }
 
 // ======================= VSwitch =======================
@@ -1028,6 +1049,7 @@ func (p *AsyncPort) Close() { p.cancel() }
 
 // ======================= 服务端 =======================
 type ClientSession struct {
+	SessionID   string
 	Port        *AsyncPort
 	IPv4        string
 	IPv6        string
@@ -1039,6 +1061,9 @@ type ClientSession struct {
 	RxBytes     uint64
 	TxPackets   uint64
 	RxPackets   uint64
+	// 会话保活与生命周期控制
+	sessionMu    sync.Mutex
+	destroyTimer *time.Timer
 }
 
 type Server struct {
@@ -1268,10 +1293,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			camouflageProbe(conn)
 			return
 		}
+		// 检测到老会话，立刻取消销毁倒计时，无缝复活！
+		session.sessionMu.Lock()
+		if session.destroyTimer != nil {
+			session.destroyTimer.Stop()
+			session.destroyTimer = nil
+			log.Infof("[%s] ⚡ 会话在销毁倒计时内成功复活！(无缝接续)", clientID)
+		}
+		session.ActiveConns++
+		session.sessionMu.Unlock()
+
+		log.Infof("[%s] 🔗 已有会话增加新物理连接 (当前连接数: %d)", clientID, session.ActiveConns)
 	} else {
 		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
 		port := NewAsyncPort(parentCtx, clientID, req.FEC)
-		session = &ClientSession{Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, Dedup: NewDeDuplicator(), ActiveConns: 0}
+		session = &ClientSession{SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, Dedup: NewDeDuplicator(), ActiveConns: 1}
 		// 初始化服务端重排缓冲区，理顺后交由交换机转发
 		session.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
 			s.vswitch.ProcessFrame(clientID, orderedFrame)
@@ -1284,8 +1320,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Infof("[%s] 新逻辑 Client 上线 (FEC=%v), Assigned IPs: %s, %s", clientID, req.FEC, v4ip, v6ip)
 	}
 
-	session.ActiveConns++
 	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
+	sessionID := session.SessionID // 提取出来准备发给客户端
 	s.mu.Unlock()
 
 	serverTxRate, clientTxRate := s.brutalUp, s.brutalDown
@@ -1302,7 +1338,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
-	s.sendResp(conn, true, "OK", clientID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, req.Encrypt)
+	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, req.Encrypt)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1314,15 +1350,31 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	defer func() {
 		port.UnregisterBackend(connTxChan)
 		s.mu.Lock()
+		session.sessionMu.Lock()
 		session.ActiveConns--
 		if session.ActiveConns <= 0 {
-			delete(s.usedV4, session.IPv4)
-			delete(s.usedV6, session.IPv6)
-			delete(s.activeClients, clientID)
-			s.vswitch.RemovePort(clientID)
-			port.Close()
-			log.Infof("[%s] 逻辑 Client 下线，所有连接均已断开，释放 IP", clientID)
+			// 不要立刻删除！给它 120 秒的“僵尸续命期”
+			log.Infof("[%s] ⚠️ 客户端所有物理连接已断开，会话进入 120 秒保留期...", clientID)
+
+			session.destroyTimer = time.AfterFunc(120*time.Second, func() {
+				s.mu.Lock()
+				session.sessionMu.Lock()
+
+				// 120 秒后再次检查，如果还是没连上，才彻底销毁
+				if session.ActiveConns <= 0 {
+					delete(s.usedV4, session.IPv4)
+					delete(s.usedV6, session.IPv6)
+					delete(s.activeClients, clientID)
+					s.vswitch.RemovePort(clientID)
+					session.Port.Close()
+					log.Infof("[%s] 💀 会话超时彻底销毁，释放 IP 及内存资源", clientID)
+				}
+
+				session.sessionMu.Unlock()
+				s.mu.Unlock()
+			})
 		}
+		session.sessionMu.Unlock()
 		s.mu.Unlock()
 	}()
 
@@ -1397,9 +1449,9 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, encrypt bool) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, encrypt bool) {
 	resp := HandshakeResp{
-		Success: ok, Message: msg, ClientID: clientID, IPv4: v4cidr, IPv6: v6cidr,
+		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec, Encrypt: encrypt,
 	}
 	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
@@ -1430,33 +1482,37 @@ func parseServerAddresses(addrStr string) []string {
 }
 
 type Client struct {
-	clientID    string
-	psk         string
-	targetAddrs []string
-	tapName     string
-	reqV4       string
-	reqV6       string
-	sni         string
-	insecure    bool
-	certHash    string
-	fwmark      int
-	brutal      bool
-	brutalUp    uint64
-	brutalDown  uint64
-	tap         *water.Interface
-	macAddr     string
-	connsCount  int
-	fecMode     bool
-	txPort      *AsyncPort
-	rxReorder   *ReorderBuffer
-	dedup       *DeDuplicator
-	TxBytes     uint64
-	RxBytes     uint64
-	TxPackets   uint64
-	RxPackets   uint64
-	encrypt     bool
-	cipherBlock cipher.Block
-	baseIV      []byte
+	clientID        string
+	serverSessionID string     // 记录服务端的会话ID
+	gwV4            string     // 记录网关以便退出时清理
+	gwV6            string     // 记录网关以便退出时清理
+	sessionMu       sync.Mutex // 保护状态防止并发写
+	psk             string
+	targetAddrs     []string
+	tapName         string
+	reqV4           string
+	reqV6           string
+	sni             string
+	insecure        bool
+	certHash        string
+	fwmark          int
+	brutal          bool
+	brutalUp        uint64
+	brutalDown      uint64
+	tap             *water.Interface
+	macAddr         string
+	connsCount      int
+	fecMode         bool
+	txPort          *AsyncPort
+	rxReorder       *ReorderBuffer
+	dedup           *DeDuplicator
+	TxBytes         uint64
+	RxBytes         uint64
+	TxPackets       uint64
+	RxPackets       uint64
+	encrypt         bool
+	cipherBlock     cipher.Block
+	baseIV          []byte
 }
 
 func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec, encrypt bool) {
@@ -1491,6 +1547,14 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 		txPort: NewAsyncPort(ctx, "client_tx_port", fec),
 		dedup:  NewDeDuplicator(), // 初始化客户端去重器
 	}
+
+	// 程序彻底退出时才清理系统路由表
+	defer func() {
+		c.sessionMu.Lock()
+		cleanPolicyRouting(c.tapName, c.fwmark, c.gwV4, c.gwV6)
+		c.sessionMu.Unlock()
+	}()
+
 	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
 	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
 		c.tap.Write(orderedFrame)
@@ -1684,11 +1748,24 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 
 	log.Infof("[Conn %d] Linked! IPv4: %s | IPv6: %s | FEC Match: %v", connIndex, resp.IPv4, resp.IPv6, resp.FEC)
 
-	if connIndex == 0 {
-		c.setupInterface(resp.IPv4, resp.IPv6)
-		setupPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
-		defer cleanPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
+	c.sessionMu.Lock()
+	isNewSession := false
+	if c.serverSessionID != resp.SessionID {
+		isNewSession = true
+		c.serverSessionID = resp.SessionID
 	}
+	c.gwV4 = resp.GwV4
+	c.gwV6 = resp.GwV6
+	c.sessionMu.Unlock()
+
+	if isNewSession {
+		log.Infof("[Conn %d] 🔄 检测到服务端重置了会话，正在清理本地旧的接收缓冲池...", connIndex)
+		c.rxReorder.Reset()
+		c.dedup.Reset()
+	}
+
+	c.setupInterface(resp.IPv4, resp.IPv6)
+	setupPolicyRouting(c.tapName, c.fwmark, resp.GwV4, resp.GwV6)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -2032,8 +2109,12 @@ func startWebServer(addr string, srv *Server, cli *Client) {
 			}
 			snapClients := make(map[string]tmpSession, len(srv.activeClients))
 			for id, session := range srv.activeClients {
+				session.sessionMu.Lock()
+				conns := session.ActiveConns
+				session.sessionMu.Unlock()
+
 				snapClients[id] = tmpSession{
-					v4: session.IPv4, v6: session.IPv6, mac: session.MAC, conns: session.ActiveConns,
+					v4: session.IPv4, v6: session.IPv6, mac: session.MAC, conns: conns,
 					txB: atomic.LoadUint64(&session.TxBytes),
 					rxB: atomic.LoadUint64(&session.RxBytes),
 					txP: atomic.LoadUint64(&session.TxPackets),
@@ -2042,17 +2123,16 @@ func startWebServer(addr string, srv *Server, cli *Client) {
 			}
 			srv.mu.RUnlock()
 
-			// 在锁外进行 JSON 序列化和耗时的 Map 赋值，彻底不阻塞 handleConnection
-			for id, session := range srv.activeClients {
+			for id, snap := range snapClients {
 				stats.Clients[id] = map[string]interface{}{
-					"ipv4":         session.IPv4,
-					"ipv6":         session.IPv6,
-					"mac":          session.MAC,
-					"active_conns": session.ActiveConns,
-					"tx_bytes":     atomic.LoadUint64(&session.TxBytes),
-					"rx_bytes":     atomic.LoadUint64(&session.RxBytes),
-					"tx_packets":   atomic.LoadUint64(&session.TxPackets),
-					"rx_packets":   atomic.LoadUint64(&session.RxPackets),
+					"ipv4":         snap.v4,
+					"ipv6":         snap.v6,
+					"mac":          snap.mac,
+					"active_conns": snap.conns,
+					"tx_bytes":     snap.txB,
+					"rx_bytes":     snap.rxB,
+					"tx_packets":   snap.txP,
+					"rx_packets":   snap.rxP,
 				}
 			}
 		} else if cli != nil {
