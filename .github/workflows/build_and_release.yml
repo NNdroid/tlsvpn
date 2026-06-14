@@ -1,0 +1,35 @@
+name: Build and Release (Script Based)
+
+on:
+  push:
+    tags:
+      - 'v*' # 僅在推送 v* tag 時觸發
+
+jobs:
+  build:
+    name: Build with scripts/build.sh
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允許建立 Release
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run Build Script
+        run: |
+          chmod +x scripts/build.sh
+          ./scripts/build.sh
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/* # 直接上傳 bin 目錄下編譯好的所有檔案
+          draft: false
+          prerelease: false
+          body: "Automatic build for tag ${{ github.ref_name }}"
