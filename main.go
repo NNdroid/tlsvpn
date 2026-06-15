@@ -972,6 +972,10 @@ func (p *AsyncPort) run() {
 			return
 		case frame := <-p.ch:
 			seq := atomic.AddUint32(&p.txSeq, 1)
+			if seq == 0 {
+				// 防止 uint32 溢出为 0。因为 0 被保留作为控制/心跳帧
+				seq = atomic.AddUint32(&p.txSeq, 1)
+			}
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
 
