@@ -9,7 +9,7 @@ import (
 )
 
 // ==========================================
-// 1. 工具函數測試 (Utility Functions)
+// 工具函數測試 (Utility Functions)
 // ==========================================
 
 func TestFmtMAC(t *testing.T) {
@@ -29,7 +29,7 @@ func TestParseServerAddresses(t *testing.T) {
 	raw := " 192.168.1.1:4000 ,  [::1]:4000, 10.0.0.1:4000  "
 	expected := []string{"192.168.1.1:4000", "[::1]:4000", "10.0.0.1:4000"}
 	res := parseServerAddresses(raw)
-	
+
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("parseServerAddresses 解析錯誤. 預期: %v, 實際: %v", expected, res)
 	}
@@ -54,7 +54,7 @@ func TestIncrementIP(t *testing.T) {
 }
 
 // ==========================================
-// 2. 加解密邏輯測試 (Cryptography)
+// 加解密邏輯測試 (Cryptography)
 // ==========================================
 
 func TestXorCryptInPlace(t *testing.T) {
@@ -81,7 +81,7 @@ func TestXorCryptInPlace(t *testing.T) {
 }
 
 // ==========================================
-// 3. 去重器測試 (DeDuplicator)
+// 去重器測試 (DeDuplicator)
 // ==========================================
 
 func TestDeDuplicator(t *testing.T) {
@@ -114,7 +114,7 @@ func TestDeDuplicator(t *testing.T) {
 }
 
 // ==========================================
-// 4. 亂序重排緩衝區測試 (ReorderBuffer)
+// 亂序重排緩衝區測試 (ReorderBuffer)
 // ==========================================
 
 func TestReorderBuffer(t *testing.T) {
@@ -160,7 +160,7 @@ func TestReorderBuffer(t *testing.T) {
 }
 
 // ==========================================
-// 5. 成幀與流式解析測試 (Frame & Scanner)
+// 成幀與流式解析測試 (Frame & Scanner)
 // ==========================================
 
 func TestFrameScanner(t *testing.T) {
@@ -173,7 +173,7 @@ func TestFrameScanner(t *testing.T) {
 	// 產生並寫入兩筆 Frame (不加密)
 	buf1 := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 101, Data: payload1}, nil, nil)
 	tcpBuffer.Write(buf1)
-	
+
 	buf2 := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 102, Data: payload2}, nil, nil)
 	tcpBuffer.Write(buf2)
 
@@ -216,5 +216,52 @@ func TestFrameScanner(t *testing.T) {
 		// EOF 是正常的
 	case <-time.After(100 * time.Millisecond):
 		// 阻塞代表沒資料了，這是預期的 Scanner 行為
+	}
+}
+
+// ==========================================
+// 協議吞吐量基準測試 (Benchmark)
+// ==========================================
+
+type infiniteReader struct {
+	data []byte
+	pos  int
+}
+
+func (r *infiniteReader) Read(p []byte) (n int, err error) {
+	n = copy(p, r.data[r.pos:])
+	r.pos += n
+	if r.pos >= len(r.data) {
+		r.pos = 0
+	}
+	return n, nil
+}
+
+func BenchmarkProtocolThroughput(b *testing.B) {
+	psk := "benchmark_secret_key"
+	block, baseIV := getCipherContext(psk)
+
+	payload := make([]byte, 1400)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	frameBuf := getFrame()[:0]
+	frameBuf = appendPaddedFrame(frameBuf, VPNFrame{Seq: 1, Data: payload}, block, baseIV)
+
+	reader := &infiniteReader{data: frameBuf}
+	scanner := NewFrameScanner(reader)
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		data, seq, err := scanner.ReadFrame()
+		if err != nil {
+			b.Fatal(err)
+		}
+		// 模擬解密
+		xorCryptInPlace(data, seq, block, baseIV)
+		putFrame(data)
 	}
 }
