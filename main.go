@@ -69,10 +69,26 @@ func main() {
 	fec := flag.Bool("fec", false, "Enable Packet Duplication FEC over Multipath")
 	webAddr := flag.String("web", "", "Start Web Dashboard on specified address (e.g. :8080)")
 	encrypt := flag.Bool("encrypt", false, "Enable inner payload AES-CTR XOR encryption")
+	socks5 := flag.String("socks5", "", "Route ALL outbound sockets through a SOCKS5 proxy, e.g. 127.0.0.1:1080 or user:pass@127.0.0.1:1080 (Client only)")
 
 	flag.Parse()
 	initLogger(*logLevel)
 	defer log.Sync()
+
+	// 初始化全局出口：要么全部经由 SOCKS5，要么全部直连。
+	// fwmark 必须在此传入，使承载隧道的物理 socket（直连时为服务端连接，
+	// 代理时为到 SOCKS5 服务器的连接）都能打上 SO_MARK，避免被卷入自身隧道。
+	if err := initGlobalProxy(*socks5, *fwmark); err != nil {
+		log.Fatalf("Invalid -socks5 option: %v", err)
+	}
+	if isSocks5Enabled() {
+		log.Infof("🧦 SOCKS5 proxy enabled: all outbound sockets go through %s", globalSocks5Addr)
+		if *fwmark <= 0 {
+			log.Warnf("⚠️  -socks5 is used without -fwmark. If the tunnel becomes the default route, " +
+				"the connection to the SOCKS5 proxy may be routed into the tunnel itself and deadlock. " +
+				"Consider setting -fwmark, or excluding the proxy address from the tunnel route.")
+		}
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

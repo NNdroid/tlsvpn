@@ -319,7 +319,7 @@ func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6,
 }
 
 // negotiateUTLS 负责配置 uTLS、选择指纹并执行 TLS 握手
-func (c *Client) negotiateUTLS(ctx context.Context, tcpConn *net.TCPConn) (*utls.UConn, error) {
+func (c *Client) negotiateUTLS(ctx context.Context, rawConn net.Conn) (*utls.UConn, error) {
 	utlsConf := &utls.Config{
 		ServerName:         c.sni,
 		InsecureSkipVerify: c.insecure,
@@ -355,7 +355,7 @@ func (c *Client) negotiateUTLS(ctx context.Context, tcpConn *net.TCPConn) (*utls
 	}
 
 	// 构建 uTLS 连接并握手
-	utlsConn := utls.UClient(tcpConn, utlsConf, clientHelloID)
+	utlsConn := utls.UClient(rawConn, utlsConf, clientHelloID)
 	if err := utlsConn.HandshakeContext(ctx); err != nil {
 		return nil, fmt.Errorf("uTLS handshake failed: %v", err)
 	}
@@ -381,19 +381,28 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		}
 	}
 
-	log.Infof("[Conn %d] Initiating connection...", connIndex)
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	rawConn, err := dialer.DialContext(runCtx, "tcp", c.targetAddrs[connIndex%len(c.targetAddrs)])
+	target := c.targetAddrs[connIndex%len(c.targetAddrs)]
+	if isSocks5Enabled() {
+		log.Infof("[Conn %d] Initiating connection to %s via SOCKS5 %s ...", connIndex, target, globalSocks5Addr)
+	} else {
+		log.Infof("[Conn %d] Initiating connection...", connIndex)
+	}
+	// 统一走全局拨号器：启用 -socks5 时所有 socket 均经由代理，否则全部直连
+	rawConn, err := dialContext(runCtx, "tcp", target)
 	if err != nil {
 		return err
 	}
 
-	tcpConn := rawConn.(*net.TCPConn)
-	tcpConn.SetKeepAlive(true)
-	tcpConn.SetKeepAlivePeriod(15 * time.Second)
-	tcpConn.SetNoDelay(true)
-	tcpConn.SetReadBuffer(4 * 1024 * 1024)
-	tcpConn.SetWriteBuffer(4 * 1024 * 1024)
+	// 通用 socket 调优：作用于本地 socket，与是否经过代理无关，两种模式下都应生效。
+	// （KeepAlive 已由 newBaseDialer 统一设置，此处补充 NoDelay 与收发缓冲区）
+	if sock := underlyingTCPConn(rawConn); sock != nil {
+		sock.SetNoDelay(true)
+		sock.SetReadBuffer(4 * 1024 * 1024)
+		sock.SetWriteBuffer(4 * 1024 * 1024)
+	}
+
+	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
+	tcpConn := asTCPConn(rawConn)
 
 	// 1. 防御整除为 0 的陷阱
 	clientTxRate := c.brutalUp / uint64(c.connsCount)
@@ -411,11 +420,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) error {
 		applyTCPBrutal(tcpConn, clientTxRate)
 	}
 
-	tcpConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
-	tlsConn, err := c.negotiateUTLS(runCtx, tcpConn)
-	tcpConn.SetDeadline(time.Time{})
+	rawConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
+	tlsConn, err := c.negotiateUTLS(runCtx, rawConn)
+	rawConn.SetDeadline(time.Time{})
 	if err != nil {
-		tcpConn.Close()
+		rawConn.Close()
 		return err
 	}
 	defer tlsConn.Close()

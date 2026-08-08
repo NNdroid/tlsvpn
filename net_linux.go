@@ -20,6 +20,10 @@ import (
 const TCP_BRUTAL_PARAMS = 23301
 
 func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
+	// 经由 SOCKS5 代理时拿不到端到端的 TCP 句柄，此处直接跳过内核调优
+	if conn == nil {
+		return fmt.Errorf("no raw TCP connection available (proxied?)")
+	}
 	if rateMbps == 0 {
 		return fmt.Errorf("TCP Brutal rate cannot be 0")
 	}
@@ -50,6 +54,9 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 }
 
 func getTCPRTT(conn *net.TCPConn) (uint32, error) {
+	if conn == nil {
+		return 0, fmt.Errorf("no raw TCP connection available (proxied?)")
+	}
 	raw, err := conn.SyscallConn()
 	if err != nil {
 		return 0, err
@@ -71,6 +78,10 @@ func getTCPRTT(conn *net.TCPConn) (uint32, error) {
 }
 
 func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {
+	// 代理模式下无法读取内核 TCP_INFO，保持 rttCache 的默认估值即可
+	if conn == nil {
+		return
+	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {

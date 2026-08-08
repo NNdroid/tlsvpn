@@ -1,0 +1,51 @@
+name: Cross-Implementation E2E
+
+# End-to-end interop tests between the released Go (tlsvpn) and Rust (tlsvpn-rs)
+# builds. Downloads the latest GitHub release of BOTH projects and exercises the
+# control groups: self-self (Go↔Go, Rust↔Rust) and cross-language
+# (Go-server↔Rust-client, Rust-server↔Go-client) plus a SOCKS5 client group.
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      go_tag:
+        description: "tlsvpn release tag (default: latest)"
+        required: false
+        default: "latest"
+      rs_tag:
+        description: "tlsvpn-rs release tag (default: latest)"
+        required: false
+        default: "latest"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (Go repo)
+        uses: actions/checkout@v4
+
+      - name: Install test deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y microsocks netcat-openbsd 2>/dev/null || true
+
+      - name: Run e2e control groups (download release binaries)
+        env:
+          E2E_USE_RELEASE: "1"
+          E2E_GO_TAG: "${{ github.event.inputs.go_tag || 'latest' }}"
+          E2E_RS_TAG: "${{ github.event.inputs.rs_tag || 'latest' }}"
+        run: |
+          chmod +x scripts/*.sh
+          bash scripts/e2e_test.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: /tmp/tlsvpn-test.*/**
+          if-no-files-found: ignore

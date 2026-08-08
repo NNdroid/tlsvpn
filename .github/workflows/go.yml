@@ -20,8 +20,15 @@ jobs:
     - name: Build
       run: go build -v ./...
 
-    - name: Test Core Logic
+    - name: Test Core Logic (go test -v)
       run: go test -v ./...
+
+    - name: Verify protocol golden vectors (cross-language contract)
+      run: go test -v -run 'TestProtocol|TestGenerateGoldenVectors' ./...
 
     - name: Benchmark Protocol
       run: go test -bench=BenchmarkProtocolThroughput -run=^$ -benchmem -v
+
+  e2e:
+    needs: test-and-bench
+    uses: ./.github/workflows/e2e.yml
