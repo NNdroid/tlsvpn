@@ -20,6 +20,14 @@ jobs:
     - name: Build
       run: go build -v ./...
 
+    - name: Vet
+      run: go vet -v ./...
+
+    # NOTE: project is linux-only; vet/build on the host OS may fail for
+    # linux-specific syscalls. Run vet under GOOS=linux to catch real issues.
+    - name: Vet (linux target)
+      run: GOOS=linux go vet ./...
+
     - name: Test Core Logic (go test -v)
       run: go test -v ./...
 
