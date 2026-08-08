@@ -63,21 +63,42 @@ fail() { err "$*"; exit 1; }
 # ---------------------------------------------------------------------------
 fetch_latest_tag() {
   # $1 = owner/repo
-  curl -fsSL "https://api.github.com/repos/$1/releases/latest" \
-    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+  # NOTE: do NOT pipe curl into grep — grep -m1 closes the pipe early, causing
+  # curl to hit SIGPIPE and exit 23 under `set -o pipefail`. Save to a file first.
+  local repo="$1" tmp api
+  tmp="$(mktemp)"
+  api="https://api.github.com/repos/$repo/releases/latest"
+  local -a auth=()
+  [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  if ! curl -fsSL "${auth[@]}" -o "$tmp" "$api" 2>/dev/null; then
+    err "failed to fetch latest release metadata for $repo (rate-limited or no release?)"
+    rm -f "$tmp"
+    return 1
+  fi
+  local tag
+  tag="$(grep -m1 '"tag_name"' "$tmp" | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+  rm -f "$tmp"
+  [[ -n "$tag" ]] && echo "$tag" || return 1
 }
 
 download_release_asset() {
   # $1 = owner/repo  $2 = tag  $3 = asset name  $4 = output path
-  local repo="$1" tag="$2" asset="$3" out="$4"
-  local url
+  local repo="$1" tag="$2" asset="$3" out="$4" url
   if [[ "$tag" == "latest" ]]; then
     url="https://github.com/$repo/releases/latest/download/$asset"
   else
     url="https://github.com/$repo/releases/download/$tag/$asset"
   fi
   log "downloading $repo @ $tag asset=$asset"
-  curl -fsSL -o "$out" "$url"
+  if ! curl -fsSL -o "$out" "$url"; then
+    err "download failed: $url"
+    return 1
+  fi
+  # Guard against HTML error pages (e.g. 404) being saved as the "binary".
+  if [[ ! -s "$out" ]] || head -c 15 "$out" | grep -qi '<!doctype\|<html'; then
+    err "downloaded asset is empty or an HTML error page: $asset"
+    return 1
+  fi
   chmod +x "$out"
 }
 
@@ -87,12 +108,18 @@ fetch_release_binaries() {
   mkdir -p "$dir"
 
   local go_tag="$E2E_GO_TAG" rs_tag="$E2E_RS_TAG"
-  [[ "$go_tag" == "latest" ]] && go_tag="$(fetch_latest_tag "$E2E_GO_REPO")"
-  [[ "$rs_tag" == "latest" ]] && rs_tag="$(fetch_latest_tag "$E2E_RS_REPO")"
+  if [[ "$go_tag" == "latest" ]]; then
+    go_tag="$(fetch_latest_tag "$E2E_GO_REPO")" || fail "could not resolve latest Go tag"
+  fi
+  if [[ "$rs_tag" == "latest" ]]; then
+    rs_tag="$(fetch_latest_tag "$E2E_RS_REPO")" || fail "could not resolve latest Rust tag"
+  fi
   log "using Go release tag=$go_tag  Rust release tag=$rs_tag"
 
-  download_release_asset "$E2E_GO_REPO" "$go_tag" "tlsvpn_linux_${E2E_ARCH_GO}" "$dir/tlsvpn_go"
-  download_release_asset "$E2E_RS_REPO" "$rs_tag" "tlsvpn-${E2E_ARCH_RS}-unknown-linux-musl" "$dir/tlsvpn_rs"
+  download_release_asset "$E2E_GO_REPO" "$go_tag" "tlsvpn_linux_${E2E_ARCH_GO}" "$dir/tlsvpn_go" \
+    || fail "Go release asset missing: tlsvpn_linux_${E2E_ARCH_GO} @ $go_tag"
+  download_release_asset "$E2E_RS_REPO" "$rs_tag" "tlsvpn-${E2E_ARCH_RS}-unknown-linux-musl" "$dir/tlsvpn_rs" \
+    || fail "Rust release asset missing: tlsvpn-${E2E_ARCH_RS}-unknown-linux-musl @ $rs_tag"
 
   BIN_GO="$dir/tlsvpn_go"
   BIN_RS="$dir/tlsvpn_rs"

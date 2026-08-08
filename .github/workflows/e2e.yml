@@ -31,11 +31,14 @@ jobs:
       - name: Install test deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y microsocks netcat-openbsd 2>/dev/null || true
+          # microsocks provides the SOCKS5 proxy for groups E/F. If the package
+          # is unavailable on this runner image, those groups skip gracefully.
+          sudo apt-get install -y microsocks 2>/dev/null || echo "microsocks not available — SOCKS5 groups will skip"
 
       - name: Run e2e control groups (download release binaries)
         env:
           E2E_USE_RELEASE: "1"
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           E2E_GO_TAG: "${{ github.event.inputs.go_tag || 'latest' }}"
           E2E_RS_TAG: "${{ github.event.inputs.rs_tag || 'latest' }}"
         run: |
