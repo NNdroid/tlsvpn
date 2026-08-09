@@ -40,3 +40,6 @@ jobs:
   e2e:
     needs: test-and-bench
     uses: ./.github/workflows/e2e.yml
+    with:
+      go_tag: "latest"
+      rs_tag: "latest"

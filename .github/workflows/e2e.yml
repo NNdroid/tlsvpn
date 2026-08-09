@@ -5,12 +5,14 @@ name: Cross-Implementation E2E
 # control groups: self-self (Go↔Go, Rust↔Rust) and cross-language
 # (Go-server↔Rust-client, Rust-server↔Go-client) plus a SOCKS5 client group.
 
+# This workflow is intended to be invoked only via `workflow_call` (see the
+# `e2e` job in go.yml). A previous setup also had `on: push` here, which caused
+# every push to main to trigger it TWICE: once from go.yml's `uses:` and once
+# from this file's own push trigger. Keeping it `workflow_call`-only means there
+# is a single, unambiguous entry point.
+
 on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
-  workflow_dispatch:
+  workflow_call:
     inputs:
       go_tag:
         description: "tlsvpn release tag (default: latest)"

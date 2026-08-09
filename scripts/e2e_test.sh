@@ -19,14 +19,31 @@ source "$SCRIPT_DIR/lib_e2e.sh"
 PASS=0
 FAIL=0
 
+# Emit the flag style for a given binary. Go uses single-dash flags
+# (-mode/-addr/-socks5); Rust uses long-only flags (--mode/--addr/--socks5).
+# We map a logical "verb" to the concrete flag string for the binary.
+#   $1 = binary path
+#   $2 = verb: mode|addr|socks5
+# Prints the flag prefix WITHOUT the value (caller appends " value").
+flag_for() {
+  local bin="$1" verb="$2"
+  case "$(basename "$bin")" in
+    tlsvpn_rs) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; esac ;;
+    *)         case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";;  esac ;;
+  esac
+}
+
 # Start a server in background.
 #   $1 = binary path
 #   $2 = listen port
 #   $3 = extra args (optional)
 start_server() {
   local bin="$1" port="$2"; shift 2
+  local mode_flag addr_flag
+  mode_flag="$(flag_for "$bin" mode)"
+  addr_flag="$(flag_for "$bin" addr)"
   local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
-  "$bin" "$@" -mode server -listen ":$port" >"$log" 2>&1 &
+  "$bin" "$@" "$mode_flag" server "$addr_flag" ":$port" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/srv_$port.pid"
   if wait_for_port 127.0.0.1 "$port" 20; then
@@ -45,12 +62,15 @@ stop_server() {
 
 # Run a client to completion (short-lived), asserting exit 0.
 #   $1 = binary  $2 = server addr  rest = extra args (forwarded verbatim)
-# SOCKS5 flag differs between binaries: Go uses -socks5, Rust uses --socks5.
-# Callers pass the correct flag form explicitly.
+# The client target address is passed via the binary's addr flag; the SOCKS5
+# flag is passed by the caller using the correct form (see flag_for).
 run_client() {
   local bin="$1" addr="$2"; shift 2
+  local mode_flag addr_flag
+  mode_flag="$(flag_for "$bin" mode)"
+  addr_flag="$(flag_for "$bin" addr)"
   local log="$TEST_DIR/cli_$(basename "$bin")_$$.log"
-  if "$bin" "$@" -mode client -server "$addr" >"$log" 2>&1; then
+  if "$bin" "$@" "$mode_flag" client "$addr_flag" "$addr" >"$log" 2>&1; then
     ok "client ok: $bin -> $addr"
     return 0
   else
@@ -94,9 +114,15 @@ run_group_E() {
   return $r
 }
 
-# Group F: Rust client through SOCKS5 proxy -> Go server (client-only feature,
-# now both implementations support --socks5).
+# Group F: Rust client through SOCKS5 proxy -> Go server (client-only feature).
+# NOTE: Rust --socks5 was added after release v1.0.20260615. In release mode
+# (E2E_USE_RELEASE=1) the published binary lacks the flag, so we skip the group
+# and remind that a fresh Rust release is required. In local-build mode it runs.
 run_group_F() {
+  if [[ "${E2E_USE_RELEASE:-1}" == "1" ]]; then
+    log "group F (rs-socks5): requires a Rust release that ships --socks5; published v1.0.20260615 lacks it — skipping in release mode"
+    return 0
+  fi
   local port; port="$(ensure_socks5_proxy)" || { log "group F (rs-socks5): microsocks not installed — skipping"; return 0; }
   start_server "$BIN_GO" 18085
   local r=0
