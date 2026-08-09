@@ -38,7 +38,8 @@ jobs:
       run: go test -bench=BenchmarkProtocolThroughput -run=^$ -benchmem -v
 
   e2e:
-    needs: test-and-bench
+    # Run e2e independently of the unit-test job so a pre-existing
+    # linux-only/network test failure does not block the integration run.
     uses: ./.github/workflows/e2e.yml
     with:
       go_tag: "latest"
