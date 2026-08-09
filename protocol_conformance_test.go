@@ -9,6 +9,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -216,7 +217,14 @@ func TestGenerateGoldenVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取黄金向量失败（首次请运行 go test -run TestGenerateGoldenVectors -update-golden）: %v", err)
 	}
-	if !bytes.Equal(bytes.TrimSpace(old), bytes.TrimSpace(data)) {
+	// 用结构化深度比较而非字节比较：JSON 对象内的键排列顺序对协议语义
+	// 没有影响（Rust 端 serde 按字段名匹配），但若出现真实的协议变更
+	// （密钥派生、字段名、向量值、数量），DeepEqual 仍会捕获并失败。
+	var oldGV GoldenVectors
+	if err := json.Unmarshal(bytes.TrimSpace(old), &oldGV); err != nil {
+		t.Fatalf("解析已有黄金向量失败: %v", err)
+	}
+	if !reflect.DeepEqual(oldGV, *gv) {
 		t.Errorf("当前实现与黄金向量不一致！\n"+
 			"这意味着协议发生了变更，Rust 端必须同步修改，否则两端无法互通。\n"+
 			"确认变更无误后运行: go test -run TestGenerateGoldenVectors -update-golden\n"+
