@@ -12,6 +12,21 @@ name: Cross-Implementation E2E
 # is a single, unambiguous entry point.
 
 on:
+  # Allow manual / API dispatch so the e2e result can be inspected on its own,
+  # independent of the unit-test job in go.yml (which currently fails on CI
+  # for linux-only/network reasons). This does NOT auto-trigger on push.
+  workflow_dispatch:
+    inputs:
+      go_tag:
+        description: "tlsvpn release tag (default: latest)"
+        type: string
+        required: false
+        default: "latest"
+      rs_tag:
+        description: "tlsvpn-rs release tag (default: latest)"
+        type: string
+        required: false
+        default: "latest"
   workflow_call:
     inputs:
       go_tag:
