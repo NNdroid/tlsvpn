@@ -33,3 +33,7 @@ go.work.sum
 # .vscode/
 
 bin/tlsvpn
+
+# built binaries
+bin/
+tlsvpn
