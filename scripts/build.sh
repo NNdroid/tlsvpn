@@ -45,7 +45,7 @@ do
     echo "Building $PLATFORM..."
     env CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
         -ldflags "-s -w" -trimpath \
-        -o "$OUTPUT_DIR/$OUTPUT_NAME" *.go
+        -o "$OUTPUT_DIR/$OUTPUT_NAME" .
 
     if [ $? -ne 0 ]; then
         echo "Error building $PLATFORM"
