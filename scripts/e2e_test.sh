@@ -33,8 +33,8 @@ FAIL=0
 flag_for() {
   local bin="$1" verb="$2"
   case "$(basename "$bin")" in
-    tlsvpn_rs) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; tap) echo "--tap";; esac ;;
-    *)         case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";; tap) echo "-tap";;  esac ;;
+    tlsvpn_rs) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; tap) echo "--tap";; cert) echo "--cert";; key) echo "--key";; esac ;;
+    *)         case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";; tap) echo "-tap";;  cert) echo "-cert";;  key) echo "-key";;  esac ;;
   esac
 }
 
@@ -45,12 +45,23 @@ flag_for() {
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 start_server() {
   local bin="$1" port="$2"; shift 2
-  local mode_flag addr_flag tap_flag
+  local mode_flag addr_flag tap_flag cert_flag key_flag
   mode_flag="$(flag_for "$bin" mode)"
   addr_flag="$(flag_for "$bin" addr)"
   tap_flag="$(flag_for "$bin" tap)"
+  cert_flag="$(flag_for "$bin" cert)"
+  key_flag="$(flag_for "$bin" key)"
+  # Provide a self-signed cert so the Rust server (which requires --cert/--key,
+  # unlike Go which self-signs when omitted) can start. Generated once per env.
+  if [ ! -f "$TEST_DIR/e2e_cert.pem" ]; then
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "$TEST_DIR/e2e_key.pem" -out "$TEST_DIR/e2e_cert.pem" \
+      -days 2 -subj "/CN=tlsvpn-e2e" >/dev/null 2>&1 \
+      || { err "could not generate e2e TLS cert (openssl missing?)"; return 1; }
+  fi
   local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
-  "$bin" "$@" "$mode_flag" server "$addr_flag" ":$port" "$tap_flag" mem >"$log" 2>&1 &
+  "$bin" "$@" "$mode_flag" server "$addr_flag" ":$port" "$tap_flag" mem \
+    "$cert_flag" "$TEST_DIR/e2e_cert.pem" "$key_flag" "$TEST_DIR/e2e_key.pem" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/srv_$port.pid"
   if wait_for_port 127.0.0.1 "$port" 20; then
