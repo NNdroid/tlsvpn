@@ -115,14 +115,9 @@ run_group_E() {
 }
 
 # Group F: Rust client through SOCKS5 proxy -> Go server (client-only feature).
-# NOTE: Rust --socks5 was added after release v1.0.20260615. In release mode
-# (E2E_USE_RELEASE=1) the published binary lacks the flag, so we skip the group
-# and remind that a fresh Rust release is required. In local-build mode it runs.
+# Rust --socks5 shipped in release v1.0.20260809 and later; this group runs in
+# both release and local-build modes (requires microsocks for the proxy).
 run_group_F() {
-  if [[ "${E2E_USE_RELEASE:-1}" == "1" ]]; then
-    log "group F (rs-socks5): requires a Rust release that ships --socks5; published v1.0.20260615 lacks it — skipping in release mode"
-    return 0
-  fi
   local port; port="$(ensure_socks5_proxy)" || { log "group F (rs-socks5): microsocks not installed — skipping"; return 0; }
   start_server "$BIN_GO" 18085
   local r=0
