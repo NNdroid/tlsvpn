@@ -38,10 +38,8 @@ jobs:
           # microsocks provides the SOCKS5 proxy for groups E/F. If the package
           # is unavailable on this runner image, those groups skip gracefully.
           sudo apt-get install -y microsocks 2>/dev/null || echo "microsocks not available — SOCKS5 groups will skip"
-          # tlsvpn creates a TAP device, which requires the `tap` kernel module
-          # and root privileges on the runner.
-          sudo modprobe tap || echo "modprobe tap failed — TAP groups may not start"
-          sudo -n true && echo "have sudo" || echo "no sudo"
+          # NOTE: e2e uses the in-memory TAP backend (-tap mem / --tap mem), so no
+          # root / CAP_NET_ADMIN / tap kernel module is required to run it.
 
       - name: Run e2e control groups (download release binaries)
         env:
@@ -51,9 +49,7 @@ jobs:
           E2E_RS_TAG: "${{ github.event.inputs.rs_tag || 'latest' }}"
         run: |
           chmod +x scripts/*.sh
-          # Run as root so the server can create the TAP device; -E preserves the
-          # injected env (GITHUB_TOKEN / E2E_*).
-          sudo -E bash -c 'E2E_USE_RELEASE="$E2E_USE_RELEASE" GITHUB_TOKEN="$GITHUB_TOKEN" E2E_GO_TAG="$E2E_GO_TAG" E2E_RS_TAG="$E2E_RS_TAG" bash scripts/e2e_test.sh'
+          bash scripts/e2e_test.sh
 
       - name: Upload logs on failure
         if: failure()

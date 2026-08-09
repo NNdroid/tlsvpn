@@ -187,7 +187,7 @@ type Server struct {
 	usedV4     map[string]bool
 	usedV6     map[string]bool
 	mu         sync.RWMutex
-	tap        *water.Interface
+	tap        io.ReadWriteCloser
 	vswitch    *VSwitch
 	brutal     bool
 	brutalUp   uint64
@@ -219,25 +219,33 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 		srv.cipherBlock, srv.baseIV = getCipherContext(psk)
 	}
 
-	config := water.Config{DeviceType: water.TAP}
-	config.Name = tapName
-	tap, err := water.New(config)
-	if err != nil {
-		log.Fatalf("Server TAP error: %v", err)
+	var tap io.ReadWriteCloser
+	if tapName == "mem" {
+		// In-memory TAP backend for CI/e2e where no real TAP device can be
+		// created (GitHub hosted runners lack CAP_NET_ADMIN). The tunnel
+		// (TCP TLS, handshake, FEC, encryption) is exercised exactly the same.
+		tap = newMemTap(ctx)
+		log.Infof("Using in-memory TAP backend (no real device)")
+	} else {
+		config := water.Config{DeviceType: water.TAP}
+		config.Name = tapName
+		t, err := water.New(config)
+		if err != nil {
+			log.Fatalf("Server TAP error: %v", err)
+		}
+		tap = t
+		if err := setTapMac(tapName, macAddr); err != nil {
+			log.Warnf("Server failed to set tap MAC: %v", err)
+		}
+		if link, err := netlink.LinkByName(tapName); err == nil {
+			v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
+			v6Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)))
+			netlink.AddrReplace(link, v4Addr)
+			netlink.AddrReplace(link, v6Addr)
+			netlink.LinkSetUp(link)
+		}
 	}
 	srv.tap = tap
-
-	if err := setTapMac(tapName, macAddr); err != nil {
-		log.Warnf("Server failed to set tap MAC: %v", err)
-	}
-
-	if link, err := netlink.LinkByName(tapName); err == nil {
-		v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
-		v6Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)))
-		netlink.AddrReplace(link, v4Addr)
-		netlink.AddrReplace(link, v6Addr)
-		netlink.LinkSetUp(link)
-	}
 
 	go func() { <-ctx.Done(); srv.tap.Close() }()
 
@@ -570,3 +578,26 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 	d, _ := json.Marshal(resp)
 	writeStreamFrame(w, d)
 }
+
+// ======================= in-memory TAP =======================
+// memTap is a no-op TAP backend used when -tap mem is requested (CI/e2e on
+// runners that cannot create a real TAP device). Writes are dropped (there is
+// no real subnet behind it); reads block until the context is cancelled so the
+// stack goroutines terminate cleanly. The actual tunnel (TCP TLS, handshake,
+// FEC, encryption) runs identically to the real-TAP path.
+type memTap struct {
+	ctx context.Context
+}
+
+func newMemTap(ctx context.Context) *memTap { return &memTap{ctx: ctx} }
+
+func (m *memTap) Read(p []byte) (int, error) {
+	<-m.ctx.Done()
+	return 0, io.EOF
+}
+
+func (m *memTap) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (m *memTap) Close() error { return nil }

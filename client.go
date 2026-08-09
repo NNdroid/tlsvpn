@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"strings"
@@ -213,7 +214,7 @@ type Client struct {
 	brutal          bool
 	brutalUp        uint64
 	brutalDown      uint64
-	tap             *water.Interface
+	tap             io.ReadWriteCloser
 	macAddr         string
 	connsCount      int
 	fecMode         bool
@@ -231,20 +232,26 @@ type Client struct {
 
 func startClient(ctx context.Context, psk, tapName, macAddr, addr, reqV4, reqV6, sni string, insecure bool, certHash string, fwmark int, brutal bool, brutalUp, brutalDown uint64, connsCount int, fec, encrypt bool) {
 	log.Infof("Starting TCP TLS client process...")
-	config := water.Config{DeviceType: water.TAP}
-	config.Name = tapName
-	iface, err := water.New(config)
-	if err != nil {
-		log.Fatalf("Client TAP creation error: %v", err)
+	var iface io.ReadWriteCloser
+	if tapName == "mem" {
+		iface = newMemTap(ctx)
+		log.Infof("Using in-memory TAP backend (no real device)")
+	} else {
+		config := water.Config{DeviceType: water.TAP}
+		config.Name = tapName
+		t, err := water.New(config)
+		if err != nil {
+			log.Fatalf("Client TAP creation error: %v", err)
+		}
+		iface = t
+		if err := setTapMac(tapName, macAddr); err != nil {
+			log.Warnf("Client failed to set tap MAC: %v", err)
+		}
 	}
 	go func() { <-ctx.Done(); iface.Close() }()
 
-	if err := setTapMac(tapName, macAddr); err != nil {
-		log.Warnf("Client failed to set tap MAC: %v", err)
-	}
-
 	actualMac := macAddr
-	if actualMac == "" {
+	if actualMac == "" && tapName != "mem" {
 		if link, err := netlink.LinkByName(tapName); err == nil {
 			actualMac = link.Attrs().HardwareAddr.String()
 		}
