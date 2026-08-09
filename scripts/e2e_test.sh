@@ -190,3 +190,6 @@ main() {
 
 trap cleanup_test_env EXIT
 main "$@"
+# Capture main()'s status explicitly and exit with it, so the EXIT trap cannot
+# influence the final exit code.
+exit $?

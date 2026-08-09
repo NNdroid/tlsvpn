@@ -172,8 +172,14 @@ setup_test_env() {
   ok "test env: $TEST_DIR"
 }
 
+# Remove the temp test dir. Must always return 0: this runs from an EXIT trap,
+# and a non-zero return there would override the script's real exit status
+# (turning a fully passing run into a failed job).
 cleanup_test_env() {
-  [[ -n "${TEST_DIR:-}" && -d "$TEST_DIR" ]] && rm -rf "$TEST_DIR"
+  if [[ -n "${TEST_DIR:-}" && -d "$TEST_DIR" ]]; then
+    rm -rf "$TEST_DIR"
+  fi
+  return 0
 }
 
 # Wait until a TCP port is accepting connections (poll up to $2 seconds).
