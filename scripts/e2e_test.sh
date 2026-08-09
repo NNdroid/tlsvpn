@@ -67,7 +67,12 @@ start_server() {
   if wait_for_port 127.0.0.1 "$port" 20; then
     ok "server up: $bin :$port (pid $pid)"
   else
-    err "server failed to start: $bin :$port"; cat "$log" >&2; kill "$pid" 2>/dev/null || true; return 1
+    err "server failed to start: $bin :$port"
+    echo "----- $bin server log (port $port) -----"
+    cat "$log"
+    echo "----- cert present: $([ -f "$TEST_DIR/e2e_cert.pem" ] && echo yes || echo no) -----"
+    kill "$pid" 2>/dev/null || true
+    return 1
   fi
 }
 
