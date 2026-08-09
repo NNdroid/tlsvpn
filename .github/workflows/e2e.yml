@@ -16,10 +16,12 @@ on:
     inputs:
       go_tag:
         description: "tlsvpn release tag (default: latest)"
+        type: string
         required: false
         default: "latest"
       rs_tag:
         description: "tlsvpn-rs release tag (default: latest)"
+        type: string
         required: false
         default: "latest"
 
