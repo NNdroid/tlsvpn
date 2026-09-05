@@ -127,7 +127,7 @@ func loadConfigFile(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// applyDefaults 填充未指定的默认值
+// applyDefaults 填充未指定的默认值（与命令行标志默认值保持一致）
 func (c *Config) applyDefaults() {
 	if c.PSK == "" {
 		c.PSK = "quic_secret"
@@ -137,6 +137,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
+	}
+	if c.BrutalUp == 0 {
+		c.BrutalUp = 100
+	}
+	if c.BrutalDown == 0 {
+		c.BrutalDown = 500
 	}
 	if c.Mode == "server" {
 		if c.Addr == "" {
