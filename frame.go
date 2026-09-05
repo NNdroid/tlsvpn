@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/cipher"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -28,6 +27,33 @@ func putFrame(b []byte) {
 	}
 }
 
+// cloneFrame 深拷贝一帧负载（优先取池缓冲），供逐后端独立所有权使用
+func cloneFrame(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+	buf := getFrame()
+	if len(data) > cap(buf) {
+		putFrame(buf)
+		dst := make([]byte, len(data))
+		copy(dst, data)
+		return dst
+	}
+	dst := buf[:len(data)]
+	copy(dst, data)
+	return dst
+}
+
+// freeFrames 释放一批帧的缓冲（所有权归调用方时使用）
+func freeFrames(batch []VPNFrame) {
+	for i := range batch {
+		if batch[i].Data != nil {
+			putFrame(batch[i].Data)
+			batch[i].Data = nil
+		}
+	}
+}
+
 func getPaddingLength(dataLen int) int {
 	if dataLen == 0 {
 		return 100 + mathrand.IntN(201)
@@ -42,15 +68,23 @@ func getPaddingLength(dataLen int) int {
 }
 
 // appendPaddedFrame 10 字节头部 [4B len][2B padLen][4B seq]
-func appendPaddedFrame(buf []byte, vf VPNFrame, block cipher.Block, baseIV []byte) []byte {
+//
+// ic 为内层加密器：nil 表示明文；seq=0 的控制/握手帧恒不加密（协议约定，
+// 接收端以此区分校验帧与握手帧）。GCM 模式密文后附 16B 标签，线路
+// dataLen = 明文长 + tagLen；ic.tagLen() 用于一次性预留缓冲，避免中途扩容。
+func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) []byte {
 	dataLen := 0
 	if vf.Data != nil {
 		dataLen = len(vf.Data)
 	}
+	encTag := 0
+	if ic != nil && vf.Seq != 0 && dataLen > 0 {
+		encTag = ic.tagLen()
+	}
 	padLen := getPaddingLength(dataLen)
 
 	// 1. 一次性算出需要的整包新增长度
-	needed := 10 + dataLen + padLen
+	needed := 10 + dataLen + encTag + padLen
 	startIdx := len(buf)
 
 	// 2. 检查容量，不够则一次性扩容，防多次 append 扩容崩溃
@@ -67,25 +101,24 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, block cipher.Block, baseIV []byt
 	// 改变 slice 的长度属性
 	buf = buf[:startIdx+needed]
 
-	// 3. 原址绝对下标写入头信息
-	binary.BigEndian.PutUint32(buf[startIdx:startIdx+4], uint32(dataLen))
+	// 3. 原址绝对下标写入头信息（dataLen 为线路负载长度，含 GCM 标签）
+	binary.BigEndian.PutUint32(buf[startIdx:startIdx+4], uint32(dataLen+encTag))
 	binary.BigEndian.PutUint16(buf[startIdx+4:startIdx+6], uint16(padLen))
 	binary.BigEndian.PutUint32(buf[startIdx+6:startIdx+10], vf.Seq)
 
-	// 4. 拷贝数据负载
+	// 4. 拷贝数据负载并加密
 	if dataLen > 0 {
 		payloadStart := startIdx + 10
 		copy(buf[payloadStart:payloadStart+dataLen], vf.Data)
 
-		// 加密
-		if block != nil && vf.Seq != 0 {
-			xorCryptInPlace(buf[payloadStart:payloadStart+dataLen], vf.Seq, block, baseIV)
+		if ic != nil && vf.Seq != 0 {
+			ic.sealInPlace(buf[payloadStart:payloadStart+dataLen+encTag], dataLen, vf.Seq, uint32(dataLen+encTag))
 		}
 	}
 
 	// 5. 填补混淆填充
 	if padLen > 0 {
-		padStart := startIdx + 10 + dataLen
+		padStart := startIdx + 10 + dataLen + encTag
 		offset := mathrand.IntN(RandomPoolSize - padLen)
 		copy(buf[padStart:padStart+padLen], randomPool[offset:offset+padLen])
 	}
@@ -96,7 +129,7 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, block cipher.Block, baseIV []byt
 // writeStreamFrame 发送无需去重的控制帧
 func writeStreamFrame(w io.Writer, frame []byte) error {
 	streamBuf := getFrame()[:0]
-	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil, nil)
+	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil)
 	_, err := w.Write(streamBuf)
 	putFrame(streamBuf[:cap(streamBuf)])
 	return err
@@ -213,7 +246,11 @@ type HandshakeReq struct {
 	BrutalTx uint64 `json:"brutal_tx,omitempty"`
 	BrutalRx uint64 `json:"brutal_rx,omitempty"`
 	FEC      bool   `json:"fec,omitempty"`
+	FecGroup int    `json:"fec_group,omitempty"`
 	Encrypt  bool   `json:"encrypt,omitempty"`
+	// EncAlgo：本端支持的最高内层加密算法（位集，bit1=GCM）。
+	// 旧版 Go/Rust 不发送本字段 → 0（legacy CTR）。
+	EncAlgo int `json:"enc_algo,omitempty"`
 }
 
 type MacBinding struct {
@@ -234,5 +271,12 @@ type HandshakeResp struct {
 	BrutalTx  uint64 `json:"brutal_tx,omitempty"`
 	BrutalRx  uint64 `json:"brutal_rx,omitempty"`
 	FEC       bool   `json:"fec,omitempty"`
+	FecGroup  int    `json:"fec_group,omitempty"`
 	Encrypt   bool   `json:"encrypt,omitempty"`
+	// EncAlgo：协商选定的算法（0=legacy CTR，2=GCM）。仅当双方都支持
+	// GCM 时为 2；此时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
+	// EncSalt2 为 s2c 方向盐（服务端加密/客户端解密）。
+	EncAlgo  int    `json:"enc_algo,omitempty"`
+	EncSalt  string `json:"enc_salt,omitempty"`  // hex(8B)：客户端→服务端方向
+	EncSalt2 string `json:"enc_salt2,omitempty"` // hex(8B)：服务端→客户端方向
 }

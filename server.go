@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/cipher"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,6 +168,15 @@ type ClientSession struct {
 	MAC         string
 	Dedup       *DeDuplicator
 	RxReorder   *ReorderBuffer
+	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
+	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
+	FecMode     string            // 面板展示：xor:K / dup / off
+	EncAlgo     int               // 内层加密算法（0=legacy，2=GCM）
+	SaltA       [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
+	SaltB       [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
+	icTx        *innerCipher      // s2c 加密器
+	icRx        *innerCipher      // c2s 解密器
+	CreatedAt   time.Time
 	ActiveConns int
 	TxBytes     uint64
 	RxBytes     uint64
@@ -176,6 +185,23 @@ type ClientSession struct {
 	// 会话保活与生命周期控制
 	sessionMu    sync.Mutex
 	destroyTimer *time.Timer
+	// 该会话的物理连接注册表：Web 面板踢出时逐个关闭，并输出连接明细
+	connsMu sync.Mutex
+	conns   map[*connInfo]struct{}
+}
+
+// connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
+type connInfo struct {
+	remote    string
+	tcpConn   *net.TCPConn
+	rttCache  *uint32 // 微秒（200ms 刷新）
+	txBytes   uint64
+	rxBytes   uint64
+	txPackets uint64
+	rxPackets uint64
+	linkedAt  int64 // 建立时间（unix 秒）
+	brutalTx  uint64
+	brutalRx  uint64
 }
 
 type Server struct {
@@ -197,47 +223,174 @@ type Server struct {
 	activeClients map[string]*ClientSession
 	macToIP       map[string]MacBinding
 
-	encrypt     bool
-	cipherBlock cipher.Block
-	baseIV      []byte
+	encrypt   bool
+	icLegacy  *innerCipher
+	startedAt time.Time
+
+	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
+	bannedMu sync.Mutex
 }
 
-func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cidr, certFile, keyFile string, brutal bool, brutalUp, brutalDown uint64, webAddr string, encrypt bool) {
+// Ban 封禁客户端。ttl<=0 表示永久；会话若在线则立即断开。
+func (s *Server) Ban(clientID string, ttl time.Duration) bool {
+	if clientID == "" {
+		return false
+	}
+	s.bannedMu.Lock()
+	if ttl <= 0 {
+		s.banned[clientID] = 0
+	} else {
+		s.banned[clientID] = time.Now().Add(ttl).UnixMilli()
+	}
+	s.bannedMu.Unlock()
+	// 已在线则立刻踢下线
+	s.mu.RLock()
+	session, ok := s.activeClients[clientID]
+	s.mu.RUnlock()
+	if ok {
+		s.kickSession(session)
+	}
+	log.Infof("[Server] Client %s banned (ttl=%s)", clientID, ttl)
+	return true
+}
+
+// Unban 解除封禁
+func (s *Server) Unban(clientID string) {
+	s.bannedMu.Lock()
+	delete(s.banned, clientID)
+	s.bannedMu.Unlock()
+}
+
+// IsBanned 查询 clientID 当前是否被封禁（自动清理过期项）
+func (s *Server) IsBanned(clientID string) bool {
+	if clientID == "" {
+		return false
+	}
+	s.bannedMu.Lock()
+	defer s.bannedMu.Unlock()
+	exp, ok := s.banned[clientID]
+	if !ok {
+		return false
+	}
+	if exp > 0 && time.Now().UnixMilli() >= exp {
+		delete(s.banned, clientID)
+		return false
+	}
+	return true
+}
+
+// BanList 返回当前封禁列表快照（clientID → 剩余秒，0=永久）
+func (s *Server) BanList() map[string]int64 {
+	s.bannedMu.Lock()
+	defer s.bannedMu.Unlock()
+	out := make(map[string]int64, len(s.banned))
+	nowMs := time.Now().UnixMilli()
+	for id, exp := range s.banned {
+		if exp == 0 {
+			out[id] = 0
+		} else if exp > nowMs {
+			out[id] = (exp - nowMs) / 1000
+		} else {
+			delete(s.banned, id)
+		}
+	}
+	return out
+}
+
+// kickSession 断开一个会话的所有物理连接并停止下行（Web 面板 kick 用）
+func (s *Server) kickSession(session *ClientSession) {
+	session.Port.Close()
+	session.sessionMu.Lock()
+	conns := make([]*connInfo, 0, len(session.conns))
+	for ci := range session.conns {
+		conns = append(conns, ci)
+	}
+	session.sessionMu.Unlock()
+	for _, ci := range conns {
+		ci.tcpConn.Close()
+	}
+}
+
+// IPPoolStatus 地址池使用情况（面板展示）。v6 空间巨大不计算容量。
+func (s *Server) IPPoolStatus() (v4Used, v4Total, v6Used int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v4Used, v4Total = len(s.usedV4), ipNetHostCount(s.v4Net)
+	v6Used = len(s.usedV6)
+	return
+}
+
+// ipNetHostCount 估算 IPv4 网段可用主机数（扣网络号/广播，超大网段封顶）
+func ipNetHostCount(n *net.IPNet) int {
+	ones, bits := n.Mask.Size()
+	hostBits := bits - ones
+	if hostBits >= 16 {
+		return 1 << 16
+	}
+	cnt := 1 << uint(hostBits)
+	if cnt > 2 {
+		cnt -= 2
+	}
+	return cnt
+}
+
+// MACEntry 面板展示的 MAC 表条目
+type MACEntry struct {
+	MAC    string `json:"mac"`
+	Port   string `json:"port"`
+	AgeSec uint64 `json:"age_sec"`
+}
+
+// MACSnapshot 交换机学习到的 MAC→端口 快照（面板展示）
+func (s *Server) MACSnapshot() []MACEntry {
+	out := []MACEntry{}
+	for i := 0; i < ShardCount; i++ {
+		shard := s.vswitch.shards[i]
+		shard.mu.RLock()
+		for mac, entry := range shard.macTable {
+			out = append(out, MACEntry{MAC: mac, Port: entry.portID, AgeSec: uint64(time.Since(entry.updatedAt) / time.Second)})
+		}
+		shard.mu.RUnlock()
+	}
+	return out
+}
+
+// startServer 以 JSON 配置启动服务端（cfg 已经过 applyDefaults + Validate）
+func startServer(ctx context.Context, cfg *Config) {
 	log.Infof("Starting TCP TLS server process...")
-	_, v4net, _ := net.ParseCIDR(v4cidr)
-	_, v6net, _ := net.ParseCIDR(v6cidr)
+	_, v4net, _ := net.ParseCIDR(cfg.Server.V4CIDR)
+	_, v6net, _ := net.ParseCIDR(cfg.Server.V6CIDR)
 
 	srv := &Server{
-		psk: psk, v4Net: v4net, v6Net: v6net, usedV4: make(map[string]bool), usedV6: make(map[string]bool),
-		vswitch: NewVSwitch(), brutal: brutal, brutalUp: brutalUp, brutalDown: brutalDown,
-		macAddr: macAddr, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
-		encrypt: encrypt,
+		psk: cfg.PSK, v4Net: v4net, v6Net: v6net, usedV4: make(map[string]bool), usedV6: make(map[string]bool),
+		vswitch: NewVSwitch(), brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
+		macAddr: cfg.Mac, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
+		encrypt: cfg.Encrypt, startedAt: time.Now(),
+		banned: make(map[string]int64),
 	}
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
 	srv.usedV4[srv.v4Gw], srv.usedV6[srv.v6Gw] = true, true
-	if encrypt {
-		srv.cipherBlock, srv.baseIV = getCipherContext(psk)
+	if cfg.Encrypt {
+		srv.icLegacy = newLegacyInnerCipher(cfg.PSK)
 	}
 
 	var tap io.ReadWriteCloser
-	if tapName == "mem" {
+	if cfg.Tap == "mem" {
 		// In-memory TAP backend for CI/e2e where no real TAP device can be
 		// created (GitHub hosted runners lack CAP_NET_ADMIN). The tunnel
 		// (TCP TLS, handshake, FEC, encryption) is exercised exactly the same.
 		tap = newMemTap(ctx)
 		log.Infof("Using in-memory TAP backend (no real device)")
 	} else {
-		config := water.Config{DeviceType: water.TAP}
-		config.Name = tapName
-		t, err := water.New(config)
+		t, err := water.New(newTapConfig(cfg.Tap))
 		if err != nil {
 			log.Fatalf("Server TAP error: %v", err)
 		}
 		tap = t
-		if err := setTapMac(tapName, macAddr); err != nil {
+		if err := setTapMac(cfg.Tap, cfg.Mac); err != nil {
 			log.Warnf("Server failed to set tap MAC: %v", err)
 		}
-		if link, err := netlink.LinkByName(tapName); err == nil {
+		if link, err := netlink.LinkByName(cfg.Tap); err == nil {
 			v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
 			v6Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)))
 			netlink.AddrReplace(link, v4Addr)
@@ -249,8 +402,8 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 
 	go func() { <-ctx.Done(); srv.tap.Close() }()
 
-	if webAddr != "" {
-		go startWebServer(webAddr, srv, nil)
+	if cfg.Web.Addr != "" {
+		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key)
 	}
 
 	tapPortID := "TAP_LOCAL"
@@ -277,15 +430,13 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 			if err != nil {
 				return
 			}
-			frame := getFrame()[:rn]
-			copy(frame, buf[:rn])
-			srv.vswitch.ProcessFrame(tapPortID, frame)
-			putFrame(frame)
+			// ProcessFrame 内部会拷贝进独立的池缓冲，直接复用本地缓冲
+			srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
 		}
 	}()
 
-	tlsConfig := getServerTLSConfig(certFile, keyFile)
-	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	tlsConfig := getServerTLSConfig(cfg.Server.Cert, cfg.Server.Key)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", cfg.Addr)
 	if err != nil {
 		log.Fatalf("ResolveTCPAddr error: %v", err)
 	}
@@ -293,7 +444,7 @@ func startServer(ctx context.Context, psk, tapName, macAddr, addr, v4cidr, v6cid
 	if err != nil {
 		log.Fatalf("TCP Listen error: %v", err)
 	}
-	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", addr)
+	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", cfg.Addr)
 
 	go func() { <-ctx.Done(); listener.Close() }()
 
@@ -398,6 +549,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Warnf("拒绝连接: 缺少 ClientID")
 		return
 	}
+	// 封禁检查：命中直接进焦油坑（与 PSK 错误同等对待，不泄露 ban 状态）
+	if s.IsBanned(clientID) {
+		log.Warnf("[%s] 已封禁，拒绝接入", clientID)
+		camouflageProbe(conn)
+		return
+	}
 	mac := req.MAC
 
 	s.mu.Lock()
@@ -426,22 +583,77 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Infof("[%s] 🔗 已有会话增加新物理连接 (当前连接数: %d)", clientID, session.ActiveConns)
 	} else {
 		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
-		port := NewAsyncPort(parentCtx, clientID, req.FEC)
-		session = &ClientSession{SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, Dedup: NewDeDuplicator(), ActiveConns: 1}
+		// FEC 模式协商：req.FecGroup>=2 表示客户端请求 XOR 奇偶校验模式
+		// （服务端对下行也用同参数编码）；否则维持传统逐帧复制模式。
+		fecEncK := 0
+		if req.FEC && int(req.FecGroup) >= fecMinGroup {
+			fecEncK = clampFecGroup(int(req.FecGroup))
+		}
+		// 内层加密协商：双方均声明 GCM 支持时启用。会话盐每次建会话随机
+		// 生成（c2s/s2c 各一个），服务端重启或会话重建即换盐，密钥流不再
+		// 跨会话重用；旧客户端 enc_algo=0 → 维持 legacy CTR。
+		saltA, saltB := newRandomSalt(), newRandomSalt()
+		encAlgo := encAlgoLegacyCTR
+		if s.encrypt && int(req.EncAlgo) >= encAlgoGCM {
+			encAlgo = encAlgoGCM
+		}
+		// 各方向加密器：legacy 模式各方向共用回退实例；加密关闭时为 nil
+		var icTx, icRx *innerCipher
+		if s.encrypt {
+			if encAlgo == encAlgoGCM {
+				icTx, _ = newGCMInnerCipher(s.psk, saltB[:]) // s2c
+				icRx, _ = newGCMInnerCipher(s.psk, saltA[:]) // c2s
+			} else {
+				icTx, icRx = s.icLegacy, s.icLegacy
+			}
+		}
+		fecMode := "off"
+		if fecEncK > 0 {
+			fecMode = fmt.Sprintf("xor K=%d", fecEncK)
+		} else if req.FEC {
+			fecMode = "dup"
+		}
+
+		port := NewAsyncPort(parentCtx, clientID, req.FEC && fecEncK == 0)
+		if fecEncK > 0 {
+			port.AttachFEC(fecEncK, icTx)
+		}
+		session = &ClientSession{
+			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,
+			Dedup: NewDeDuplicator(), ActiveConns: 1, FecEncK: fecEncK, FecMode: fecMode,
+			EncAlgo: encAlgo, SaltA: saltA, SaltB: saltB, CreatedAt: time.Now(),
+			conns: make(map[*connInfo]struct{}),
+		}
+		session.icTx = icTx
+		session.icRx = icRx
 		// 初始化服务端重排缓冲区，理顺后交由交换机转发
 		session.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
 			s.vswitch.ProcessFrame(clientID, orderedFrame)
 		})
+		if fecEncK > 0 {
+			session.FecDec = NewFECDecoder(fecEncK, icRx, session.RxReorder.Insert)
+		}
 		s.activeClients[clientID] = session
 		if mac != "" {
 			s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
 		}
 		s.vswitch.AddPort(port)
-		log.Infof("[%s] 新逻辑 Client 上线 (FEC=%v), Assigned IPs: %s, %s", clientID, req.FEC, v4ip, v6ip)
+		log.Infof("[%s] 新逻辑 Client 上线 (FEC=%s EncAlgo=%d), Assigned IPs: %s, %s", clientID, fecMode, encAlgo, v4ip, v6ip)
 	}
 
 	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
 	sessionID := session.SessionID // 提取出来准备发给客户端
+	encAlgo := session.EncAlgo
+	icTx, icRx := session.icTx, session.icRx
+	ci := &connInfo{
+		remote:   tcpConn.RemoteAddr().String(),
+		tcpConn:  tcpConn,
+		linkedAt: time.Now().Unix(),
+	}
+	// 注册本物理连接到会话，供 Web 面板踢出/展示明细
+	session.sessionMu.Lock()
+	session.conns[ci] = struct{}{}
+	session.sessionMu.Unlock()
 	s.mu.Unlock()
 
 	serverTxRate, clientTxRate := s.brutalUp, s.brutalDown
@@ -451,6 +663,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	if req.BrutalTx > 0 && (s.brutalDown == 0 || req.BrutalTx < s.brutalDown) {
 		clientTxRate = req.BrutalTx
 	}
+	ci.brutalTx, ci.brutalRx = serverTxRate, clientTxRate
 
 	if s.brutal && serverTxRate > 0 {
 		applyTCPBrutal(tcpConn, serverTxRate)
@@ -458,10 +671,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
-	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, req.Encrypt)
+	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
+	// 旧客户端忽略未知字段，互操作不受影响。
+	encSalt, encSalt2 := "", ""
+	if encAlgo == encAlgoGCM {
+		encSalt = hex.EncodeToString(session.SaltA[:])  // c2s
+		encSalt2 = hex.EncodeToString(session.SaltB[:]) // s2c
+	}
+	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, uint32(session.FecEncK), encAlgo, encSalt, encSalt2, req.Encrypt)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
+	ci.rttCache = rttCache
 	go startRTTPoller(connCtx, tcpConn, rttCache)
 
 	connTxChan := make(chan []VPNFrame, 32)
@@ -469,6 +690,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	defer func() {
 		port.UnregisterBackend(connTxChan)
+		// 从会话连接注册表移除本连接
+		session.sessionMu.Lock()
+		delete(session.conns, ci)
+		session.sessionMu.Unlock()
 		s.mu.Lock()
 		session.sessionMu.Lock()
 		session.ActiveConns--
@@ -485,6 +710,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					delete(s.usedV4, session.IPv4)
 					delete(s.usedV6, session.IPv6)
 					delete(s.activeClients, clientID)
+					s.macToIPCleanLocked(session.MAC, session.IPv4)
 					s.vswitch.RemovePort(clientID)
 					session.Port.Close()
 					log.Infof("[%s] 💀 会话超时彻底销毁，释放 IP 及内存资源", clientID)
@@ -509,20 +735,29 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				for _, vf := range frames {
-					sendBuffer = appendPaddedFrame(sendBuffer, vf, s.cipherBlock, s.baseIV)
-					if !req.FEC && vf.Data != nil {
-						putFrame(vf.Data)
-					} // 非FEC模式立即回收
+					sendBuffer = appendPaddedFrame(sendBuffer, vf, icTx)
 				}
+				// 副本所有权归本协程：发送后无条件归还（深拷贝分发保证独立）
+				freeFrames(frames)
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				conn.Write(sendBuffer)
+				_, werr := conn.Write(sendBuffer)
 				conn.SetWriteDeadline(time.Time{})
+				if werr != nil {
+					log.Debugf("[%s] 下行写入失败，关闭连接: %v", clientID, werr)
+					conn.Close()
+					return
+				}
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&session.TxPackets, uint64(len(frames)))
+				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
+				atomic.AddUint64(&ci.txPackets, uint64(len(frames)))
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, nil)
-				conn.Write(sendBuffer)
+				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				if _, err := conn.Write(sendBuffer); err != nil {
+					conn.Close()
+					return
+				}
 			}
 		}
 	}()
@@ -538,12 +773,42 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if err == nil && frame != nil {
 			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
 			atomic.AddUint64(&session.RxPackets, 1)
-			if seq != 0 && s.cipherBlock != nil {
-				xorCryptInPlace(frame, seq, s.cipherBlock, s.baseIV)
+			atomic.AddUint64(&ci.rxBytes, uint64(len(frame)))
+			atomic.AddUint64(&ci.rxPackets, 1)
+			if seq != 0 && icRx != nil {
+				plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
+				if derr != nil {
+					// GCM 校验失败：篡改或异源注入的帧，直接丢弃
+					log.Debugf("[%s] dropped tampered/foreign frame (seq=%d): %v", clientID, seq, derr)
+					putFrame(frame)
+					continue
+				}
+				frame = plain
+			}
+			if seq == 0 && session.FecDec != nil && len(frame) >= 7 && frame[0] == fecMagic {
+				// XOR 校验帧：交给会话级 FEC 解码器
+				session.FecDec.OnParity(frame)
+				putFrame(frame)
+				continue
+			}
+			if session.FecDec != nil {
+				session.FecDec.OnData(seq, frame)
 			}
 			// 交给重排缓冲区
 			session.RxReorder.Insert(seq, frame)
 		}
+	}
+}
+
+// macToIPCleanLocked 会话销毁时回收其 MAC 绑定，防止表无限增长。
+// 调用方须持有 s.mu。
+func (s *Server) macToIPCleanLocked(mac, ip string) {
+	if mac == "" {
+		return
+	}
+	if bind, ok := s.macToIP[mac]; ok && bind.IPv4 == ip {
+		// 仅当绑定仍指向本会话地址时清除（期间 MAC 可能已重新绑定）
+		delete(s.macToIP, mac)
 	}
 }
 
@@ -569,10 +834,11 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, encrypt bool) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2 string, encrypt bool) {
 	resp := HandshakeResp{
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
-		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx, FEC: fec, Encrypt: encrypt,
+		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx,
+		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
 	}
 	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
 	d, _ := json.Marshal(resp)

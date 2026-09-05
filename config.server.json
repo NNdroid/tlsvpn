@@ -1,0 +1,24 @@
+{
+  "mode": "server",
+  "psk": "change-me-please",
+  "addr": ":4000",
+  "log_level": "info",
+  "encrypt": true,
+  "brutal": true,
+  "brutal_up": 100,
+  "brutal_down": 500,
+  "tap": "tap0",
+  "mac": "",
+  "web": {
+    "addr": ":8080",
+    "auth": "admin:change-me",
+    "cert": "",
+    "key": ""
+  },
+  "server": {
+    "v4_cidr": "10.0.0.0/24",
+    "v6_cidr": "fd00::/64",
+    "cert": "",
+    "key": ""
+  }
+}
