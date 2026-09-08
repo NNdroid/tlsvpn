@@ -37,3 +37,6 @@ bin/tlsvpn
 # built binaries
 bin/
 tlsvpn
+
+# local documentation output (not for the repo)
+docs/

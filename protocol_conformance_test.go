@@ -150,12 +150,13 @@ func buildGoldenVectors() *GoldenVectors {
 
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
-		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, Encrypt: true,
+		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
-		BrutalTx: 1, BrutalRx: 1, FEC: true, Encrypt: true,
+		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x",
 	})
 
 	return gv
@@ -292,11 +293,11 @@ func TestHandshakeJSONContract(t *testing.T) {
 	req := HandshakeReq{
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
-		BrutalTx: 100, BrutalRx: 200, FEC: true, Encrypt: true,
+		BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 	}
 	wantReq := []string{
-		"brutal_rx", "brutal_tx", "client_id", "encrypt", "fec",
-		"ipv4", "ipv6", "mac", "padding", "psk",
+		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "encrypt", "fec",
+		"fec_group", "ipv4", "ipv6", "mac", "padding", "psk",
 	}
 	if got := jsonFieldNames(req); !equalStrings(got, wantReq) {
 		t.Errorf("HandshakeReq 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantReq, got)
@@ -305,12 +306,13 @@ func TestHandshakeJSONContract(t *testing.T) {
 	resp := HandshakeResp{
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
-		Padding: "ab", BrutalTx: 100, BrutalRx: 200, FEC: true, Encrypt: true,
+		Padding: "ab", BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true,
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x",
 	}
 	wantResp := []string{
-		"brutal_rx", "brutal_tx", "client_id", "encrypt", "fec",
-		"gw_v4", "gw_v6", "ipv4", "ipv6", "message", "padding",
-		"session_id", "success",
+		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
+		"encrypt", "fec", "fec_group", "gw_v4", "gw_v6", "ipv4", "ipv6", "message",
+		"padding", "session_id", "success",
 	}
 	if got := jsonFieldNames(resp); !equalStrings(got, wantResp) {
 		t.Errorf("HandshakeResp 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantResp, got)
@@ -328,7 +330,7 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	json.Unmarshal(b, &m)
 
 	// 这些字段带 omitempty，零值时不出现
-	for _, k := range []string{"mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "encrypt"} {
+	for _, k := range []string{"mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("字段 %q 应因 omitempty 而省略，实际出现了", k)
 		}
@@ -351,10 +353,11 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	}
 }
 
-// TestFrameRoundTripWithEncryption 帧编解码闭环（含加密）
+// TestFrameRoundTripWithEncryption 帧编解码闭环（含加密，legacy CTR）
 func TestFrameRoundTripWithEncryption(t *testing.T) {
 	psk := "roundtrip_key"
 	block, iv := getCipherContext(psk)
+	ic := encIC(block, iv)
 
 	payloads := [][]byte{
 		[]byte("a"),
@@ -367,7 +370,7 @@ func TestFrameRoundTripWithEncryption(t *testing.T) {
 	buf := new(bytes.Buffer)
 	seqs := []uint32{1, 2, 3, 4, 5}
 	for i, p := range payloads {
-		f := appendPaddedFrame(nil, VPNFrame{Seq: seqs[i], Data: p}, block, iv)
+		f := appendPaddedFrame(nil, VPNFrame{Seq: seqs[i], Data: p}, ic)
 		buf.Write(f)
 	}
 
@@ -387,12 +390,48 @@ func TestFrameRoundTripWithEncryption(t *testing.T) {
 	}
 }
 
+// TestFrameGCMRoundTrip 帧编解码闭环（GCM：线路负载含 16B 标签）
+func TestFrameGCMRoundTrip(t *testing.T) {
+	psk := "gcm_roundtrip_key"
+	salt := randomSalt()
+	tx, _ := newGCMInnerCipher(psk, salt)
+	rx, _ := newGCMInnerCipher(psk, salt)
+
+	payloads := [][]byte{
+		[]byte("gcm-a"),
+		bytes.Repeat([]byte("g"), 1400),
+		bytes.Repeat([]byte("h"), 77),
+	}
+	buf := new(bytes.Buffer)
+	for i, p := range payloads {
+		f := appendPaddedFrame(nil, VPNFrame{Seq: uint32(i + 1), Data: p}, tx)
+		buf.Write(f)
+	}
+	scanner := NewFrameScanner(buf)
+	for i, want := range payloads {
+		got, seq, err := scanner.ReadFrame()
+		if err != nil {
+			t.Fatalf("第 %d 帧读取失败: %v", i, err)
+		}
+		if len(got) != len(want)+gcmTagSize {
+			t.Fatalf("第 %d 帧线路负载应含标签: got %d want %d", i, len(got), len(want)+gcmTagSize)
+		}
+		plain, err := rx.openInPlace(got, seq, uint32(len(got)))
+		if err != nil {
+			t.Fatalf("第 %d 帧 GCM 解密失败: %v", i, err)
+		}
+		if !bytes.Equal(plain, want) {
+			t.Fatalf("第 %d 帧 GCM 明文不一致", i)
+		}
+	}
+}
+
 // TestFrameSeqZeroNotEncrypted 控制帧 (seq=0) 不加密，两端必须一致
 func TestFrameSeqZeroNotEncrypted(t *testing.T) {
 	block, iv := getCipherContext("k")
 	payload := []byte("control frame must stay plaintext")
 
-	f := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, block, iv)
+	f := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, encIC(block, iv))
 	// 头部 10 字节之后即为负载，seq=0 时不应被加密
 	got := f[10 : 10+len(payload)]
 	if !bytes.Equal(got, payload) {
@@ -402,7 +441,7 @@ func TestFrameSeqZeroNotEncrypted(t *testing.T) {
 
 // TestFrameHeaderByteOrder 显式锁定大端字节序
 func TestFrameHeaderByteOrder(t *testing.T) {
-	f := appendPaddedFrame(nil, VPNFrame{Seq: 0x01020304, Data: []byte("ab")}, nil, nil)
+	f := appendPaddedFrame(nil, VPNFrame{Seq: 0x01020304, Data: []byte("ab")}, nil)
 
 	if dl := binary.BigEndian.Uint32(f[0:4]); dl != 2 {
 		t.Errorf("dataLen 应为 2，实际 %d", dl)
