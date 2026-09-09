@@ -36,7 +36,7 @@ jobs:
       continue-on-error: true
       run: go test -v ./...
 
-    - name: Race detector (concurrency surfaces: FEC decoder, web, ban, stats)
+    - name: "Race detector (FEC decoder, web, ban, stats)"
       # -race requires a real toolchain on linux runners; runs the
       # concurrency-heavy suites. Soft-fail for now: treat findings as
       # signal, not blockers, until the suite is fully race-clean.
