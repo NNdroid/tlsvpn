@@ -15,7 +15,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.21'
+        go-version: 'stable'   # go.mod 声明 go 1.26；stable 避免隐式 toolchain 下载
 
     - name: Build
       run: go build -v ./...
@@ -36,12 +36,28 @@ jobs:
       continue-on-error: true
       run: go test -v ./...
 
+    - name: Race detector (concurrency surfaces: FEC decoder, web, ban, stats)
+      # -race requires a real toolchain on linux runners; runs the
+      # concurrency-heavy suites. Soft-fail for now: treat findings as
+      # signal, not blockers, until the suite is fully race-clean.
+      continue-on-error: true
+      run: go test -race ./... -run 'TestFEC|TestGCM|TestWeb|TestStats|TestBan|TestControl|TestMetrics'
+
     - name: Verify protocol golden vectors (cross-language contract)
       run: go test -v -run 'TestProtocol|TestGenerateGoldenVectors' ./...
 
-    - name: Benchmark Protocol
+    - name: Benchmark (full suite, deterministic run count)
+      # -bench=. runs every benchmark incl. GCM/FEC; -count=5 gives
+      # benchstat-compatible samples instead of a single noisy number.
       continue-on-error: true
-      run: go test -bench=BenchmarkProtocolThroughput -run=^$ -benchmem -v
+      run: go test -bench . -run '^$' -benchmem -count=5 -timeout 20m | tee bench.txt
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: bench-results
+        path: bench.txt
+        retention-days: 30
 
   e2e:
     # Run e2e independently of the unit-test job so a pre-existing
