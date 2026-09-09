@@ -426,7 +426,7 @@ type clientConnInfo struct {
 	state     atomic.Value // string：connecting / up / retrying
 	lastError atomic.Value // string：最近一次失败原因
 	rttCache  *uint32      // 微秒（200ms 刷新）
-	conn      atomic.Value // net.Conn：强制重连时关闭
+	conn      atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
 	txBytes   uint64
 	rxBytes   uint64
 	retries   uint64
@@ -435,6 +435,13 @@ type clientConnInfo struct {
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
 func startClient(ctx context.Context, cfg *Config) {
+	c := NewClient(ctx, cfg)
+	c.Run(ctx)
+}
+
+// NewClient 构造客户端运行体（TAP、密钥、面板、连接注册表），供进程启动
+// 与测试进程内使用。
+func NewClient(ctx context.Context, cfg *Config) *Client {
 	cl := cfg.Client
 	log.Infof("Starting TCP TLS client process...")
 	var iface io.ReadWriteCloser
@@ -480,12 +487,6 @@ func startClient(ctx context.Context, cfg *Config) {
 	}
 	c.fecStatus = "off"
 
-	// 程序彻底退出时才清理系统路由表
-	defer func() {
-		lvNow := c.live.Load()
-		cleanPolicyRouting(c.tapName, lvNow.fwmark, c.gwV4, c.gwV6)
-	}()
-
 	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
 	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
 		c.tap.Write(orderedFrame)
@@ -505,12 +506,24 @@ func startClient(ctx context.Context, cfg *Config) {
 		c.conns[i] = &clientConnInfo{target: lv.targetAddrs[i%len(lv.targetAddrs)], rttCache: new(uint32)}
 		c.conns[i].state.Store("connecting")
 	}
+	return c
+}
+
+// Run 阻塞运行客户端直到 ctx 取消：TAP 读循环 + 每条物理连接的重连监督器。
+func (c *Client) Run(ctx context.Context) {
+	cleanupDone := make(chan struct{})
+	// 程序彻底退出时才清理系统路由表
+	defer func() {
+		lvNow := c.live.Load()
+		cleanPolicyRouting(c.tapName, lvNow.fwmark, c.gwV4, c.gwV6)
+		close(cleanupDone)
+	}()
 
 	go func() {
 		buf := make([]byte, 65536)
 		consecutiveErr := 0
 		for {
-			rn, err := iface.Read(buf)
+			rn, err := c.tap.Read(buf)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -743,7 +756,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, err
 	}
 	ci.remote.Store(rawConn.RemoteAddr().String())
-	ci.conn.Store(rawConn)
+	ci.conn.Store(connHolder{rawConn})
 
 	// 通用 socket 调优：作用于本地 socket，与是否经过代理无关，两种模式下都应生效。
 	// （KeepAlive 已由 newBaseDialer 统一设置，此处补充 NoDelay 与收发缓冲区）
@@ -915,7 +928,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	// 连接明细：握手成功，进入 up 态
 	ci.rttCache = rttCache
-	ci.conn.Store(tlsConn)
+	ci.conn.Store(connHolder{tlsConn})
 	ci.linkedAt = time.Now().Unix()
 	ci.state.Store("up")
 	ci.lastError.Store("")
@@ -1071,4 +1084,14 @@ func (c *Client) NeedsRestart(cfg *Config) []string {
 		}
 	}
 	return out
+}
+
+// connHolder 统一 atomic.Value 存储的连接类型（raw/tls 两种具体类型）
+type connHolder struct{ c net.Conn }
+
+// CloseIfOpen 强制重连时关闭底层连接（幂等）
+func (h connHolder) CloseIfOpen() {
+	if h.c != nil {
+		h.c.Close()
+	}
 }

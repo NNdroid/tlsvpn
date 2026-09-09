@@ -177,10 +177,28 @@ run_group_F() {
   stop_client 18085; stop_server 18085; teardown_socks5_proxy
 }
 
+# Group G: in-process performance suite (LibreSpeed/ping/traceroute equivalents
+# over the real tunnel pipeline with mem tap). Runs Go-side tests from the
+# checked-out source; requires a Go toolchain. In release mode the repo is not
+# checked out by resolve_binaries unless E2E_KEEP_SRC=1, so we skip gracefully
+# outside CI-source runs.
+run_group_G() {
+  if ! command -v go >/dev/null 2>&1; then
+    log "group G (perf): go toolchain not found — skipping"
+    return 0
+  fi
+  go test -count=1 -timeout 10m -run 'TestPerf' -v ./... | tee "$TEST_DIR/perf.txt"
+  if grep -qE '^--- FAIL' "$TEST_DIR/perf.txt"; then
+    err "group G: perf tests failed (see $TEST_DIR/perf.txt)"
+    return 1
+  fi
+  ok "group G: perf suite passed"
+}
+
 main() {
   setup_test_env
   resolve_binaries
-  for g in A B C D E F; do
+  for g in A B C D E F G; do
     if run_group "$g"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
   done
   cleanup_test_env

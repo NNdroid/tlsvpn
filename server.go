@@ -518,6 +518,11 @@ func startServer(ctx context.Context, cfg *Config) {
 	}
 	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", cfg.Addr)
 
+	serveListener(ctx, srv, listener, tlsConfig)
+}
+
+// serveListener 阻塞接受连接直到 ctx 取消。独立成函数以便测试进程内启动。
+func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, tlsConfig *tls.Config) {
 	go func() { <-ctx.Done(); listener.Close() }()
 
 	for {
@@ -923,11 +928,25 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 // no real subnet behind it); reads block until the context is cancelled so the
 // stack goroutines terminate cleanly. The actual tunnel (TCP TLS, handshake,
 // FEC, encryption) runs identically to the real-TAP path.
+//
+// e2e 性能测试通过 TxBytes/RxBytes 计数与 onWrite 钩子观测注入帧的回环，
+// 等效于真实 TAP 上的 iperf/ping。
 type memTap struct {
-	ctx context.Context
+	ctx      context.Context
+	TxBytes  atomic.Uint64 // 写入（即隧道向该 TAP 交付）的字节数
+	TxPkts   atomic.Uint64
+	onWrite  func([]byte) // 测试钩子：每帧交付回调（可为 nil）
+	onWriteM sync.Mutex
 }
 
 func newMemTap(ctx context.Context) *memTap { return &memTap{ctx: ctx} }
+
+// SetOnWrite 注册写入回调（测试观测用）
+func (m *memTap) SetOnWrite(f func([]byte)) {
+	m.onWriteM.Lock()
+	m.onWrite = f
+	m.onWriteM.Unlock()
+}
 
 func (m *memTap) Read(p []byte) (int, error) {
 	<-m.ctx.Done()
@@ -935,6 +954,14 @@ func (m *memTap) Read(p []byte) (int, error) {
 }
 
 func (m *memTap) Write(p []byte) (int, error) {
+	m.TxBytes.Add(uint64(len(p)))
+	m.TxPkts.Add(1)
+	m.onWriteM.Lock()
+	hook := m.onWrite
+	m.onWriteM.Unlock()
+	if hook != nil {
+		hook(p)
+	}
 	return len(p), nil
 }
 
