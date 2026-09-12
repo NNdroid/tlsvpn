@@ -28,7 +28,9 @@ func ensureBasicAuthFormat(v string) error {
 	return nil
 }
 
-const appVersion = "1.1.0"
+// appVersion 为可注入版本：`go build -ldflags "-X main.appVersion=<ver>"`
+// 由 scripts/build.sh 从 git tag 写入；默认值保证 go test / 直接构建可用。
+var appVersion = "1.1.0"
 
 // ======================= Web UI 与 监控 API =======================
 

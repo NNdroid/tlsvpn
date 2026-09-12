@@ -15,11 +15,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 拉取完整历史与 tags，供 build.sh 的 git describe 取版本号
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: 'stable'   # go.mod 声明 go 1.26；stable 避免隐式 toolchain 下载
 
       - name: Run Build Script
         run: |
