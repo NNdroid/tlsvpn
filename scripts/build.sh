@@ -1,61 +1,99 @@
 #!/bin/bash
-# build.sh — 交叉编译 tlsvpn 到常见路由器/服务器架构（静态、无 CGO）。
+# build.sh — 编译 tlsvpn（Go）。
 #
-# 版本号：默认取 git describe（tag），无 git 元数据时退回时间戳；
-# 可用环境变量覆盖：VERSION=1.2.3 ./scripts/build.sh
-# 注入到 main.appVersion（见 api.go），面板 /api/stats 与日志会显示该值。
+# 用法：
+#   ./scripts/build.sh                 # 交叉编译 Linux 矩阵（发布用，默认）
+#   ./scripts/build.sh host            # 仅编译当前宿主平台（本机开发 / 本地 e2e）
+#   ./scripts/build.sh linux/arm64     # 指定单个 GOOS/GOARCH
+#   ./scripts/build.sh host linux/amd64 linux/arm64   # 混合指定
 #
-# 注意：本项目依赖 Linux 的 TAP 与 netlink，非 Linux 平台编译仅用于代码检查。
+# 环境变量：
+#   VERSION=1.2.3   覆盖注入到 main.appVersion 的版本号
+#                   （默认：git describe --tags → 时间戳）
+#   JOBS=N          并行编译度（默认取 CPU 核数）
+#
+# 说明：本项目依赖 Linux 的 TAP 与 netlink，非 Linux 平台的编译仅用于代码
+# 检查 / 本地 e2e（-tap mem），无法实际建隧道。
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# 項目名稱
 APP_NAME="tlsvpn"
-# 輸出目錄
 OUTPUT_DIR="bin"
-# 版本號：env 覆盖 > git describe > 时间戳
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || date +%Y%m%d_%H%M%S)}"
+JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
-# 建立輸出目錄並清理舊的編譯檔案
-mkdir -p "$OUTPUT_DIR"
-echo "Cleaning old binaries..."
-rm -f "$OUTPUT_DIR"/*.exe "$OUTPUT_DIR/${APP_NAME}_"* 2>/dev/null || true
-
-# 定義要編譯的目標平台 (OS/Arch)
-PLATFORMS=(
+# 默认目标：Linux 发布矩阵
+LINUX_MATRIX=(
     "linux/amd64"   # 傳統 64 位伺服器
     "linux/386"     # 傳統 32 位伺服器
-    "linux/arm64"   # 新型伺服器 (如 AWS Graviton), 樹莓派 4/5
+    "linux/arm64"   # 新型伺服器 (AWS Graviton), 樹莓派 4/5
     "linux/arm"     # 嵌入式設備, 舊款樹莓派
     "linux/mipsle"  # 路由器常見架構 (Little Endian)
     "linux/mips"    # 路由器常見架構 (Big Endian)
 )
 
-echo "Starting build process for $APP_NAME (version $VERSION)..."
+# 解析命令行目标：无参数=Linux 矩阵；host=当前平台；其余按 GOOS/GOARCH 处理
+TARGETS=()
+if [ "$#" -eq 0 ]; then
+    TARGETS=("${LINUX_MATRIX[@]}")
+else
+    for arg in "$@"; do
+        case "$arg" in
+            host)   TARGETS+=("$(go env GOOS)/$(go env GOARCH)") ;;
+            linux)  TARGETS+=("${LINUX_MATRIX[@]}") ;;
+            */*)    TARGETS+=("$arg") ;;
+            *) echo "unknown target: $arg (use 'host', 'linux', or GOOS/GOARCH)" >&2; exit 2 ;;
+        esac
+    done
+fi
 
+mkdir -p "$OUTPUT_DIR"
+# 清理旧产物（仅本脚本命名的文件，避免误删）
+rm -f "$OUTPUT_DIR/${APP_NAME}_"* "$OUTPUT_DIR/${APP_NAME}" "$OUTPUT_DIR/${APP_NAME}.exe" 2>/dev/null || true
+
+echo "Building $APP_NAME (version $VERSION, jobs $JOBS) for: ${TARGETS[*]}"
+
+# 单个平台构建：输出到 bin/，失败退出码非零。
+# CGO_ENABLED=0 静态无依赖；-trimpath 可复现；-X 注入版本；-s -w 压缩。
+# go build 对显式 -o 使用精确文件名（不会自动补 .exe），故 windows 目标
+# 由我们显式加 .exe。宿主平台额外复制一份固定名 bin/tlsvpn[.exe] 供本地 e2e。
 build_one() {
     local platform="$1"
-    local goos goarch output_name
-    IFS="/" read -r goos goarch <<< "$platform"
-
-    output_name="${APP_NAME}_${goos}_${goarch}"
-
-    # CGO_ENABLED=0: 靜態編譯，不依賴系統 libc，提高移植性
-    # -ldflags="-s -w -X main.appVersion=...": 壓縮體積並注入版本號
-    # -trimpath: 去除本機構建路徑，產物可復現
-    echo "Building $platform -> $output_name"
-    env CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+    local goos="${platform%%/*}"
+    local goarch="${platform##*/}"
+    local goext=""
+    [ "$goos" = "windows" ] && goext=".exe"
+    local built="$OUTPUT_DIR/${APP_NAME}_${goos}_${goarch}${goext}"
+    # 用变量前缀而非 `env ...`：MSYS/Git Bash 下 `env GOOS=… go build -o` 会
+    # 把产物静默写到别处（exit 0 但当前目录无文件），前缀形式跨平台一致。
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
         -ldflags "-s -w -X main.appVersion=$VERSION" -trimpath \
-        -o "$OUTPUT_DIR/$output_name" .
+        -o "$built" .
+    if [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
+        cp "$built" "$OUTPUT_DIR/${APP_NAME}${goext}"
+    fi
+    echo "  ok: $(basename "$built")"
 }
 
-for PLATFORM in "${PLATFORMS[@]}"
-do
-    build_one "$PLATFORM"
+# 并行构建：按 JOBS 限流，收集后台 PID 与对应平台，任一失败则整体失败。
+pids=(); plats=()
+fail=0
+for platform in "${TARGETS[@]}"; do
+    # 控制在飞任务数
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.2; done
+    ( build_one "$platform" ) &
+    pids+=("$!"); plats+=("$platform")
 done
+for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+        echo "  FAIL: ${plats[$i]}" >&2
+        fail=1
+    fi
+done
+[ "$fail" -eq 0 ] || { echo "one or more targets failed" >&2; exit 1; }
 
 echo "---------------------------------------"
-echo "Build complete! Check the '$OUTPUT_DIR' directory."
+echo "Build complete ($VERSION). Output in '$OUTPUT_DIR/':"
 ls -lh "$OUTPUT_DIR"

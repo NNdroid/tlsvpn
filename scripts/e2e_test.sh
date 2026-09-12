@@ -32,9 +32,11 @@ FAIL=0
 # Prints the flag prefix WITHOUT the value (caller appends " value").
 flag_for() {
   local bin="$1" verb="$2"
+  # Match the tlsvpn_rs binary regardless of a platform suffix such as .exe
+  # (Windows local builds are named tlsvpn_rs.exe); anything else → Go flags.
   case "$(basename "$bin")" in
-    tlsvpn_rs) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; tap) echo "--tap";; cert) echo "--cert";; key) echo "--key";; esac ;;
-    *)         case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";; tap) echo "-tap";;  cert) echo "-cert";;  key) echo "-key";;  esac ;;
+    tlsvpn_rs*) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; tap) echo "--tap";; cert) echo "--cert";; key) echo "--key";; esac ;;
+    *)          case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";; tap) echo "-tap";;  cert) echo "-cert";;  key) echo "-key";;  esac ;;
   esac
 }
 
@@ -54,10 +56,8 @@ start_server() {
   # Provide a self-signed cert so the Rust server (which requires --cert/--key,
   # unlike Go which self-signs when omitted) can start. Generated once per env.
   if [ ! -f "$TEST_DIR/e2e_cert.pem" ]; then
-    openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout "$TEST_DIR/e2e_key.pem" -out "$TEST_DIR/e2e_cert.pem" \
-      -days 2 -subj "/CN=tlsvpn-e2e" >/dev/null 2>&1 \
-      || { err "could not generate e2e TLS cert (openssl missing?)"; return 1; }
+    gen_e2e_cert "$TEST_DIR/e2e_key.pem" "$TEST_DIR/e2e_cert.pem" \
+      || { err "could not generate e2e TLS cert (openssl missing or failed)"; return 1; }
   fi
   local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
   "$bin" "$@" "$mode_flag" server "$addr_flag" ":$port" "$tap_flag" mem \

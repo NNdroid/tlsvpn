@@ -135,14 +135,19 @@ build_local_binaries() {
   local dir="${E2E_BIN_DIR:-$(mktemp -d /tmp/tlsvpn-e2e.XXXXXX)}"
   mkdir -p "$dir"
 
+  # On Windows the compiler emits *.exe; resolve the right suffix so the
+  # later "$BIN_GO"/"$BIN_RS" invocations actually find the binary.
+  local exe=""
+  [[ "$(go env GOOS)" == "windows" ]] && exe=".exe"
+
   log "building Go binary from $go_src"
-  ( cd "$go_src" && go build -o "$dir/tlsvpn_go" . )
+  ( cd "$go_src" && go build -o "$dir/tlsvpn_go$exe" . )
 
   log "building Rust binary from $rs_src"
-  ( cd "$rs_src" && cargo build --release && cp target/release/tlsvpn "$dir/tlsvpn_rs" )
+  ( cd "$rs_src" && cargo build --release && cp "target/release/tlsvpn$exe" "$dir/tlsvpn_rs$exe" )
 
-  BIN_GO="$dir/tlsvpn_go"
-  BIN_RS="$dir/tlsvpn_rs"
+  BIN_GO="$dir/tlsvpn_go$exe"
+  BIN_RS="$dir/tlsvpn_rs$exe"
   ok "local binaries ready: $BIN_GO , $BIN_RS"
 }
 
@@ -180,6 +185,22 @@ cleanup_test_env() {
     rm -rf "$TEST_DIR"
   fi
   return 0
+}
+
+# Generate a self-signed cert into $1 (key) / $2 (cert), valid 2 days.
+# On MSYS/Git Bash we must disable path conversion and pass Windows paths,
+# otherwise `-subj /CN=...` is rewritten to a bogus filesystem path and openssl
+# fails with a misleading "could not generate cert" error.
+gen_e2e_cert() {
+  local key="$1" crt="$2"
+  if command -v cygpath >/dev/null 2>&1; then
+    MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "$(cygpath -w "$key")" -out "$(cygpath -w "$crt")" \
+      -days 2 -subj "/CN=tlsvpn-e2e" >/dev/null 2>&1
+  else
+    openssl req -x509 -newkey rsa:2048 -nodes \
+      -keyout "$key" -out "$crt" -days 2 -subj "/CN=tlsvpn-e2e" >/dev/null 2>&1
+  fi
 }
 
 # Wait until a TCP port is accepting connections (poll up to $2 seconds).
