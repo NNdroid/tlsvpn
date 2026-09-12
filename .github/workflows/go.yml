@@ -59,6 +59,38 @@ jobs:
         path: bench.txt
         retention-days: 30
 
+    - name: Profile (CPU + heap via go test -cpuprofile/-memprofile)
+      # Reuses the in-process perf harness (real tunnel pipeline). Produces
+      # pprof profiles; flame graphs can be viewed locally with
+      # `go tool pprof -http=:8080 cpu.prof` after downloading the artifact.
+      run: |
+        go test -run TestPerfThroughput -count=1 -timeout 10m \
+          -cpuprofile cpu.prof -memprofile mem.prof ./...
+        go tool pprof -top -nodecount=25 cpu.prof | tee cpu-top.txt
+        go tool pprof -top -nodecount=25 mem.prof | tee mem-top.txt
+
+    - name: Render SVG graphs (flame/call graph, needs graphviz)
+      if: always()
+      continue-on-error: true
+      run: |
+        command -v dot >/dev/null 2>&1 || sudo apt-get install -y graphviz
+        go tool pprof -svg cpu.prof > cpu-callgraph.svg 2>/dev/null || true
+        go tool pprof -alloc_objects -svg mem.prof > mem-allocs.svg 2>/dev/null || true
+
+    - name: Upload profile artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: profiles
+        path: |
+          cpu.prof
+          mem.prof
+          cpu-callgraph.svg
+          mem-allocs.svg
+          cpu-top.txt
+          mem-top.txt
+        retention-days: 14
+
   e2e:
     # Run e2e independently of the unit-test job so a pre-existing
     # linux-only/network test failure does not block the integration run.
