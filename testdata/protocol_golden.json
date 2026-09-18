@@ -125,7 +125,8 @@
     "ipv6",
     "mac",
     "padding",
-    "psk"
+    "psk",
+    "session_token"
   ],
   "handshake_resp_keys": [
     "brutal_rx",
@@ -144,6 +145,7 @@
     "message",
     "padding",
     "session_id",
+    "session_token",
     "success"
   ]
 }

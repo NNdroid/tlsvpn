@@ -148,15 +148,19 @@ func buildGoldenVectors() *GoldenVectors {
 		})
 	}
 
+	// 两个样本都必须把 omitempty 字段填成非零值，否则 jsonFieldNames 收不到它们，
+	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
+	// 降级成单向子集）。
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		SessionToken: "x",
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
-		EncAlgo: 2, EncSalt: "x", EncSalt2: "x",
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
 	})
 
 	return gv
@@ -284,6 +288,26 @@ func TestGoldenSelfConsistency(t *testing.T) {
 				h.DataLen, h.PadLen, h.Seq, h.HeaderHex, got)
 		}
 	}
+
+	// 握手键列表：Rust 端读它来对齐 serde 字段名，漏一个字段两端就静默错配。
+	// 按全填充样本复算再比对——样本必须填满 omitempty 字段，否则会自己漏掉
+	// 自己该锁的字段（历史上 session_token 就是这样漏出去的）。
+	checkKeys := func(name string, goldenKeys, want []string) {
+		if !equalStrings(goldenKeys, want) {
+			t.Errorf("%s 不一致\n黄金: %v\n复算: %v", name, goldenKeys, want)
+		}
+	}
+	checkKeys("handshake_req_keys", gv.HandshakeReqKeys, jsonFieldNames(HandshakeReq{
+		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
+		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		SessionToken: "x",
+	}))
+	checkKeys("handshake_resp_keys", gv.HandshakeRespKeys, jsonFieldNames(HandshakeResp{
+		Success: true, Message: "x", SessionID: "x", ClientID: "x",
+		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
+		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
+	}))
 }
 
 // TestHandshakeJSONContract 锁定握手 JSON 的字段名。
