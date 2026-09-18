@@ -45,6 +45,7 @@ type WebStats struct {
 	// 扩展观测
 	LogLevel    string               `json:"log_level"`
 	Dropped     uint64               `json:"dropped_frames"`
+	TapErrors   uint64               `json:"tap_write_errors"`
 	Fec         fecStatsJSON         `json:"fec"`
 	Mem         memStatsJSON         `json:"mem"`
 	IPPool      *ipPoolJSON          `json:"ip_pool,omitempty"`
@@ -734,15 +735,19 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 					rec += r2
 					lost += l2
 				}
+				parity += s2.Port.ParitySent()
 			}
 			srv.mu.RUnlock()
 			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(rec))
 			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(lost))
 			emit("tlsvpn_fec_parity_frames_total", "Parity frames generated", "counter", fmt.Sprint(parity))
+			emit("tlsvpn_tap_write_errors_total", "Frames dropped on TAP write failure", "counter", fmt.Sprint(srv.tapWriteErrs.Load()))
 			srv.mu.RLock()
 			banned := len(srv.banned)
+			pskBuckets := len(srv.pskFail)
 			srv.mu.RUnlock()
 			emit("tlsvpn_banned_clients", "Currently banned clients", "gauge", fmt.Sprint(banned))
+			emit("tlsvpn_psk_fail_buckets", "Remote addresses with recent PSK failures", "gauge", fmt.Sprint(pskBuckets))
 		}
 		if cli != nil {
 			emit("tlsvpn_tx_bytes_total", "Total bytes sent", "counter", fmt.Sprint(atomic.LoadUint64(&cli.TxBytes)))
@@ -752,6 +757,7 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_port_dropped_frames_total", "Frames dropped due to backpressure", "counter", fmt.Sprint(cli.txPort.Dropped()))
 			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(cli.FECRecovered()))
 			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(cli.FECLost()))
+			emit("tlsvpn_tap_write_errors_total", "Frames dropped on TAP write failure", "counter", fmt.Sprint(cli.tapWriteErrs.Load()))
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.Write([]byte(b.String()))
@@ -813,6 +819,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		// 否则同 goroutine 递归 RLock 在写者排队时会死锁。
 		stats.ServerConns = srv.snapshotServerConns()
 		stats.Fec = fecStatsJSON{Enabled: true, ParityTx: parity, Recovered: rec, Lost: lost}
+		stats.TapErrors = srv.tapWriteErrs.Load()
 
 		for id, snap := range snapClients {
 			stats.Clients[id] = map[string]interface{}{
@@ -850,6 +857,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			fecEnabled := lv != nil && lv.fecMode
 			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityTx: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
 		}
+		stats.TapErrors = cli.tapWriteErrs.Load()
 		stats.FecMode = fec
 		stats.EncAlgo = enc
 	}

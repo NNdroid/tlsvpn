@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -13,15 +14,10 @@ import (
 // ==========================================
 
 func TestFmtMAC(t *testing.T) {
-	validMAC := []byte{0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E}
+	validMAC := macKey{0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E}
 	expected := "00:1a:2b:3c:4d:5e"
 	if res := fmtMAC(validMAC); res != expected {
 		t.Errorf("fmtMAC 失敗，預期 %s，實際拿到 %s", expected, res)
-	}
-
-	invalidMAC := []byte{0x00, 0x1A}
-	if res := fmtMAC(invalidMAC); res != "invalid_mac" {
-		t.Errorf("fmtMAC 應該要回傳 invalid_mac，實際拿到 %s", res)
 	}
 }
 
@@ -81,35 +77,72 @@ func TestXorCryptInPlace(t *testing.T) {
 }
 
 // ==========================================
-// 去重器測試 (DeDuplicator)
+// 会话令牌与 PSK 失败限流测试
 // ==========================================
 
-func TestDeDuplicator(t *testing.T) {
-	d := NewDeDuplicator()
+func TestSessionToken(t *testing.T) {
+	psk := "rotate_me_please"
+	sessionID := "550e8400-e29b-41d4-a716-446655440000"
 
-	// 測試 seq 0 (控制幀不參與去重)
-	if d.IsDuplicate(0) {
-		t.Error("Seq 0 不應該被標記為重複")
+	tok := computeSessionToken(psk, sessionID)
+	if tok == "" || len(tok) != 64 {
+		t.Fatalf("令牌应为 64 位 hex，实际 %q", tok)
 	}
 
-	// 測試正常放入
-	if d.IsDuplicate(100) {
-		t.Error("Seq 100 第一次放入不應為重複")
+	// 正确组合通过
+	if !verifySessionToken(psk, sessionID, tok) {
+		t.Error("合法令牌校验应通过")
+	}
+	// 会话 ID 被换（冒充别人的会话）必须失败
+	if verifySessionToken(psk, "00000000-0000-0000-0000-000000000000", tok) {
+		t.Error("不同会话 ID 的令牌校验应失败")
+	}
+	// PSK 被换（轮换后旧令牌）必须失败
+	if verifySessionToken("another_psk", sessionID, tok) {
+		t.Error("不同 PSK 的令牌校验应失败")
+	}
+	// 空令牌（旧版客户端）必须失败
+	if verifySessionToken(psk, sessionID, "") {
+		t.Error("空令牌校验应失败")
+	}
+	// 常量时间接口不应因空比较而 panic
+	if verifySessionToken(psk, sessionID, "garbage") {
+		t.Error("伪造令牌校验应失败")
+	}
+}
+
+func TestPSKFailLimit(t *testing.T) {
+	s := &Server{pskFail: make(map[string]*pskFailBucket)}
+
+	remote := "203.0.113.7:44444"
+	for i := 0; i <= pskFailLimit; i++ {
+		exceeded := s.pskFailExceeded(remote)
+		if i < pskFailLimit {
+			if exceeded {
+				t.Fatalf("第 %d 次失败不应超限", i+1)
+			}
+		} else {
+			if !exceeded {
+				t.Fatalf("第 %d 次失败应超限", i+1)
+			}
+		}
 	}
 
-	// 測試重複檢查
-	if !d.IsDuplicate(100) {
-		t.Error("Seq 100 第二次放入應該被標記為重複")
+	// 其他地址不受影响
+	if s.pskFailExceeded("198.51.100.1:1") {
+		t.Error("不同地址的失败计数应相互独立")
 	}
 
-	if d.IsDuplicate(101) {
-		t.Error("Seq 101 不應為重複")
+	// 窗口过期后计数重置
+	b := s.pskFail[remote]
+	b.first = time.Now().Add(-2 * time.Minute)
+	if s.pskFailExceeded(remote) {
+		t.Error("窗口过期后应重新计数")
 	}
 
-	// 測試 Reset
-	d.Reset()
-	if d.IsDuplicate(100) {
-		t.Error("Reset 後，Seq 100 應該被視為新的包")
+	// 不同地址互不干扰：超限地址之外的新地址仍允许首次
+	if len(s.pskFail) < 2 {
+		t.Errorf("失败表应保留各地址条目，实际 %d", len(s.pskFail))
 	}
 }
 
@@ -118,44 +151,76 @@ func TestDeDuplicator(t *testing.T) {
 // ==========================================
 
 func TestReorderBuffer(t *testing.T) {
-	var output []uint32
-
-	// 建立一個假的 callback，紀錄被按序輸出的 Seq
+	// 交付走独立协程（锁与系统调用解耦），所以回调在 Insert 返回之后才执行。
+	// rec 用互斥锁保护：快照返回值供主协程读取，避免与交付协程的数据竞争。
+	rec := &struct {
+		mu     sync.Mutex
+		output []uint32
+	}{}
 	rb := NewReorderBuffer(func(data []byte) {
-		// 測試中我們把 Seq 放在 data 裡面的第一個 byte 方便驗證
-		if len(data) > 0 {
-			output = append(output, uint32(data[0]))
+		if len(data) == 0 {
+			return
 		}
+		rec.mu.Lock()
+		rec.output = append(rec.output, uint32(data[0]))
+		rec.mu.Unlock()
 	})
+	snapshot := func() []uint32 {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		return append([]uint32(nil), rec.output...)
+	}
+	clearRecord := func() {
+		rec.mu.Lock()
+		rec.output = nil
+		rec.mu.Unlock()
+	}
+	// waitFor 等到输出恰好是 want（顺序与个数都一致）
+	waitFor := func(t *testing.T, want []uint32, label string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if got := snapshot(); len(got) == len(want) {
+				for i := range want {
+					if got[i] != want[i] {
+						t.Fatalf("%s 时第 %d 个输出应为 %d，实际 %d", label, i+1, want[i], got[i])
+					}
+				}
+				return
+			}
+			time.Sleep(20 * time.Microsecond)
+		}
+		if got := snapshot(); len(got) != len(want) {
+			t.Fatalf("%s 超时：預期 %d 个输出，實際 %v", label, len(want), got)
+		}
+	}
 
 	// 模擬亂序封包到達
 	// 順序應該是: 1, 2, 3, 4
 	// 實際到達順序: 1, 4, 3, 2
 
 	rb.Insert(1, []byte{1})
-	// 到達 1 -> 應該立即輸出 [1]
-	if len(output) != 1 || output[0] != 1 {
-		t.Fatalf("預期輸出 [1], 實際: %v", output)
-	}
+	// 到達 1 -> 應該輸出 [1]
+	waitFor(t, []uint32{1}, "第一個包到達")
 
 	rb.Insert(4, []byte{4})
 	rb.Insert(3, []byte{3})
 	// 到達 4, 3 -> 缺少 2，應該卡在緩衝區，輸出依然只有 [1]
-	if len(output) != 1 {
-		t.Fatalf("缺少 2，不應有新輸出, 實際: %v", output)
+	time.Sleep(10 * time.Millisecond)
+	if got := snapshot(); len(got) != 1 {
+		t.Fatalf("缺少 2，不應有新輸出, 實際: %v", got)
 	}
 
 	rb.Insert(2, []byte{2})
 	// 到達 2 -> 缺口補齊，應該一口氣輸出 2, 3, 4
-	if len(output) != 4 || output[1] != 2 || output[2] != 3 || output[3] != 4 {
-		t.Fatalf("預期輸出 [1 2 3 4], 實際: %v", output)
-	}
+	waitFor(t, []uint32{1, 2, 3, 4}, "缺口補齊")
 
 	// 測試丟棄過期包 (例如重傳了 2)
-	output = []uint32{} // 清空紀錄
+	clearRecord()
 	rb.Insert(2, []byte{2})
-	if len(output) != 0 {
-		t.Fatalf("過期的包應該被丟棄，預期無輸出, 實際: %v", output)
+	time.Sleep(10 * time.Millisecond)
+	if got := snapshot(); len(got) != 0 {
+		t.Fatalf("過期的包應該被丟棄，預期無輸出, 實際: %v", got)
 	}
 }
 

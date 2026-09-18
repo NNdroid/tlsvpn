@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -17,9 +18,30 @@ import (
 	"strings"
 )
 
-func hashPSK(psk string) string {
+// pskKey 由 PSK 派生的 32 字节密钥材料（hashPSK 的二进制形式）
+func pskKey(psk string) []byte {
 	h := sha256.Sum256([]byte(psk))
-	return hex.EncodeToString(h[:])
+	return h[:]
+}
+
+func hashPSK(psk string) string { return hex.EncodeToString(pskKey(psk)) }
+
+// computeSessionToken 会话令牌 = HMAC-SHA256(pskKey, "session-token-v1" ‖ sessionID)。
+//
+// 身份伪造的根因是"共享 PSK + 自报 MAC"：clientID 完全由 (mac, psk) 推导，
+// 任何持密者只要知道目标 MAC 就能算出对方 clientID，触发会话复活分支接管
+// 其隧道流量。令牌只在受害者的 TLS 会话内下发一次，重连时必须回带——
+// 第三方从未见过它，因此无法冒充既有会话。首次接入仍走 PSK 校验。
+func computeSessionToken(psk, sessionID string) string {
+	m := hmac.New(sha256.New, pskKey(psk))
+	m.Write([]byte("session-token-v1"))
+	m.Write([]byte(sessionID))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// verifySessionToken 常量时间比较令牌
+func verifySessionToken(psk, sessionID, want string) bool {
+	return hmac.Equal([]byte(want), []byte(computeSessionToken(psk, sessionID)))
 }
 
 // ======================= 内层加密 =======================
@@ -105,6 +127,48 @@ func gcmAAD(wireLen, seq uint32) []byte {
 const clientEncAlgoSupport = encAlgoGCM
 
 func (ic *innerCipher) isGCM() bool { return ic != nil && ic.algo == encAlgoGCM }
+
+// ======================= 加密强度下限 =======================
+//
+// 旧实现里"是否加密"是一个布尔开关：一旦一端把 encrypt 关掉，整条链路
+// （含 FEC 校验帧）就只剩 TLS 一层。min_enc 把开关换成强度下限，允许运维
+// 强制"低于 GCM 一律拒连"。
+//
+// 取值："" 或 "any"（无下限，保持旧行为）、"ctr"、"gcm"
+
+// encAlgoRank 算法强度排序（数值越大越强），未知算法视为最弱。
+// 注意与算法 ID 区分：encAlgoLegacyCTR 的值恰为 0，若直接当强度用，
+// "最低要求 CTR" 会被解析成"不设下限"。
+const (
+	encRankNone = 0 // 不设下限
+	encRankCTR  = 1 // 最低要求 legacy CTR
+	encRankGCM  = 2 // 最低要求 GCM
+)
+
+func encAlgoRank(algo int) int {
+	if algo == encAlgoGCM {
+		return encRankGCM
+	}
+	return encRankCTR
+}
+
+// minEncRank 解析最低强度配置；0 表示不设下限
+func minEncRank(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "gcm":
+		return encRankGCM
+	case "ctr", "legacy":
+		return encRankCTR
+	default:
+		return encRankNone
+	}
+}
+
+// encAlgoSupported 对端声明的算法位集是否恰好包含某算法。
+// 用精确比较而非 >= ：未来若定义算法 3，旧实现对端不应被误判为"支持 GCM"。
+func encAlgoSupported(declared, want int) bool {
+	return declared == want
+}
 
 // tagLen 该加密器在线路上额外占用的字节数
 func (ic *innerCipher) tagLen() int {

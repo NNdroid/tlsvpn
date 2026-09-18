@@ -11,10 +11,9 @@ import (
 	"golang.org/x/net/http2"
 )
 
-func fmtMAC(mac []byte) string {
-	if len(mac) != 6 {
-		return "invalid_mac"
-	}
+// fmtMAC 格式化 6 字节 MAC。入参为定长数组（VSwitch MAC 表的 key 形式），
+// 避免每帧在 []byte 与 string 之间做转换拷贝。
+func fmtMAC(mac macKey) string {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
 }
 
@@ -78,7 +77,7 @@ func camouflageProbe(conn net.Conn) {
 		}
 		time.Sleep(time.Duration(mathrand.IntN(150)+50) * time.Millisecond)
 		fakePayloadLen := mathrand.IntN(300) + 100
-		fakeFrame := getFrame()[:fakePayloadLen+2]
+		fakeFrame := getFrameAtLeast(fakePayloadLen + 2)[:fakePayloadLen+2]
 		fakeFrame[0] = 0x00
 		fakeFrame[1] = byte(fakePayloadLen)
 		rand.Read(fakeFrame[2:])

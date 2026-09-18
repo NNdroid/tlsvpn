@@ -18,11 +18,25 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+// 隧道连接的 socket 缓冲。旧值读写各 4MB（合计 8MB/连接）是为对抗内核默认
+// 16KB 而取的粗值，实际单帧上限 65535*2≈128KB、发送批上界 64KB，留 8 倍余量
+// 已足够；同时把缓冲调小必须在确认是对端 TLS 握手**之后**做，否则扫描器
+// 和回退 HTTP 连接也会各自占用巨量内核内存。
+const (
+	connReadBuf  = 1 * 1024 * 1024
+	connWriteBuf = 512 * 1024
+)
+
 // ======================= VSwitch =======================
 type Port interface {
 	ID() string
 	WriteFrame(frame []byte) error
 }
+
+// macKey 是 6 字节 MAC 的定长数组形式。作为 map key 时零堆分配，
+// 旧实现每帧两次 string([]byte) 转换，每次都会分配并保留一份副本。
+type macKey [6]byte
+
 type macEntry struct {
 	portID    string
 	updatedAt time.Time
@@ -32,7 +46,7 @@ const ShardCount = 16
 
 type VSwitchShard struct {
 	mu       sync.RWMutex
-	macTable map[string]*macEntry
+	macTable map[macKey]*macEntry
 }
 type VSwitch struct {
 	portsMu sync.RWMutex
@@ -43,14 +57,14 @@ type VSwitch struct {
 func NewVSwitch() *VSwitch {
 	vs := &VSwitch{ports: make(map[string]Port)}
 	for i := 0; i < ShardCount; i++ {
-		vs.shards[i] = &VSwitchShard{macTable: make(map[string]*macEntry)}
+		vs.shards[i] = &VSwitchShard{macTable: make(map[macKey]*macEntry)}
 	}
 	go vs.purgeExpiredMACs()
 	return vs
 }
 
 // 快速字符串 Hash
-func getShardIdx(mac string) int {
+func getShardIdx(mac macKey) int {
 	var hash uint32 = 2166136261
 	for i := 0; i < len(mac); i++ {
 		hash *= 16777619
@@ -103,29 +117,30 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	if len(frame) < 14 {
 		return
 	}
-	dstMAC, srcMAC := frame[0:6], frame[6:12]
-	strDstMAC, strSrcMAC := string(dstMAC), string(srcMAC)
+	var dstMAC, srcMAC macKey
+	copy(dstMAC[:], frame[0:6])
+	copy(srcMAC[:], frame[6:12])
 
 	// 计算属于哪一个锁分片
-	srcShard := vs.shards[getShardIdx(strSrcMAC)]
+	srcShard := vs.shards[getShardIdx(srcMAC)]
 
 	srcShard.mu.RLock()
-	entry, exists := srcShard.macTable[strSrcMAC]
+	entry, exists := srcShard.macTable[srcMAC]
 	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
 	srcShard.mu.RUnlock()
 
 	if needUpdate {
 		srcShard.mu.Lock()
-		srcShard.macTable[strSrcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
+		srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
 		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
 		srcShard.mu.Unlock()
 	}
 
 	var targetPortID string
 	if (dstMAC[0] & 1) != 1 { // 单播包
-		dstShard := vs.shards[getShardIdx(strDstMAC)]
+		dstShard := vs.shards[getShardIdx(dstMAC)]
 		dstShard.mu.RLock()
-		if dEntry, dExists := dstShard.macTable[strDstMAC]; dExists {
+		if dEntry, dExists := dstShard.macTable[dstMAC]; dExists {
 			targetPortID = dEntry.portID
 		}
 		dstShard.mu.RUnlock()
@@ -166,7 +181,6 @@ type ClientSession struct {
 	IPv4        string
 	IPv6        string
 	MAC         string
-	Dedup       *DeDuplicator
 	RxReorder   *ReorderBuffer
 	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
@@ -176,6 +190,7 @@ type ClientSession struct {
 	SaltB       [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
 	icTx        *innerCipher      // s2c 加密器
 	icRx        *innerCipher      // c2s 解密器
+	pskHash     string            // 创建本会话时的 hashPSK（见 handleConnection 复活分支）
 	CreatedAt   time.Time
 	ActiveConns int
 	TxBytes     uint64
@@ -228,8 +243,61 @@ type Server struct {
 	icLegacy  *innerCipher
 	startedAt time.Time
 
+	// sessionToken 开启后，重连既有会话必须回带握手响应下发的会话令牌。
+	// 令牌只在原会话自己的 TLS 会话内下发一次，因此持密者知道 PSK+MAC
+	// 仍无法冒充一个在线会话（否则其隧道流量会被转发给自己）。
+	sessionToken bool
+	// minEnc 内层加密强度下限（encAlgoRank 值，0=不限）
+	minEnc int
+
 	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
 	bannedMu sync.Mutex
+
+	// pskFail 按远端地址统计握手 PSK 失败次数，把暴力猜测的代价从
+	// "无限连接" 降到 "每地址窗口内若干次"，同时给运维留一条可观测记录。
+	pskFailMu sync.Mutex
+	pskFail   map[string]*pskFailBucket
+
+	tapWriteErrs atomic.Uint64 // TAP 交付失败帧数（旧实现被静默吞掉）
+}
+
+// pskFailBucket 单个远端地址的 PSK 失败计数窗口
+type pskFailBucket struct {
+	count int
+	first time.Time
+}
+
+const (
+	pskFailLimit     = 5           // 窗口内允许失败次数（第 6 次起直接断链）
+	pskFailWindow    = time.Minute // 计数窗口
+	pskFailEntryMax  = 1024        // 超此规模触发全表清理，防表无限增长
+	pskFailBucketTTL = 10 * time.Minute
+)
+
+// pskFailExceeded 记录一次 PSK 校验失败，返回该远端是否已超出预算。
+// 超出后调用方应直接关闭连接：焦油坑会挂起 goroutine 到读超时，
+// 无限触发等于给攻击者一个零成本的内存放大器。
+func (s *Server) pskFailExceeded(remote string) bool {
+	s.pskFailMu.Lock()
+	if len(s.pskFail) > pskFailEntryMax {
+		now := time.Now()
+		for k, b := range s.pskFail {
+			if now.Sub(b.first) > pskFailBucketTTL {
+				delete(s.pskFail, k)
+			}
+		}
+	}
+	now := time.Now()
+	b, ok := s.pskFail[remote]
+	if !ok || now.Sub(b.first) > pskFailWindow {
+		s.pskFail[remote] = &pskFailBucket{count: 1, first: now}
+		s.pskFailMu.Unlock()
+		return false
+	}
+	b.count++
+	exceeded := b.count > pskFailLimit
+	s.pskFailMu.Unlock()
+	return exceeded
 }
 
 // Ban 封禁客户端。ttl<=0 表示永久；会话若在线则立即断开。
@@ -349,7 +417,7 @@ func (s *Server) MACSnapshot() []MACEntry {
 		shard := s.vswitch.shards[i]
 		shard.mu.RLock()
 		for mac, entry := range shard.macTable {
-			out = append(out, MACEntry{MAC: mac, Port: entry.portID, AgeSec: uint64(time.Since(entry.updatedAt) / time.Second)})
+			out = append(out, MACEntry{MAC: fmtMAC(mac), Port: entry.portID, AgeSec: uint64(time.Since(entry.updatedAt) / time.Second)})
 		}
 		shard.mu.RUnlock()
 	}
@@ -386,8 +454,10 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 	return out
 }
 
-// ApplyConfig 服务端热更：psk/encrypt 即时生效于新握手；其余差异返回
-// needs_restart。web 段由 WebManager 自行处理。
+// ApplyConfig 服务端热更。psk/encrypt 即时生效于**新**会话，但会出现在
+// needs_restart 里：现有会话的内层密钥在客户端进程内已固定，只有重启双方
+// 才算一次完整轮换（见 handleConnection 复活分支的 pskHash 校验）。
+// web 段由 WebManager 自行处理。
 func (s *Server) ApplyConfig(cfg *Config) []string {
 	s.mu.Lock()
 	s.psk = cfg.PSK
@@ -398,7 +468,14 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		s.icLegacy = nil
 	}
 	s.brutal, s.brutalUp, s.brutalDown = cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown
+	s.sessionToken = cfg.Server.SessionToken
+	s.minEnc = minEncRank(cfg.MinEnc)
 	s.mu.Unlock()
+
+	// 填充策略是全局原子量，作用于本进程的全部发送路径
+	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
+		log.Warnf("Invalid pad_mode %q, using %s", cfg.PadMode, actual)
+	}
 	s.cfg.Store(cfg)
 	return s.NeedsRestart(cfg)
 }
@@ -423,6 +500,14 @@ func (s *Server) NeedsRestart(cfg *Config) []string {
 	if o.Server.Cert != cfg.Server.Cert || o.Server.Key != cfg.Server.Key {
 		out = append(out, "server.cert/key")
 	}
+	// psk/encrypt 对**新**会话已生效，但既有会话的内层密钥在客户端进程里
+	// 已固定（客户端无法热改），必须双侧同时重启才算完成一次轮换。
+	if o.PSK != cfg.PSK {
+		out = append(out, "psk")
+	}
+	if o.Encrypt != cfg.Encrypt {
+		out = append(out, "encrypt")
+	}
 	return out
 }
 
@@ -437,7 +522,9 @@ func startServer(ctx context.Context, cfg *Config) {
 		vswitch: NewVSwitch(), brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		macAddr: cfg.Mac, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
 		encrypt: cfg.Encrypt, startedAt: time.Now(),
-		banned: make(map[string]int64),
+		banned:       make(map[string]int64),
+		pskFail:      make(map[string]*pskFailBucket),
+		sessionToken: cfg.Server.SessionToken, minEnc: minEncRank(cfg.MinEnc),
 	}
 	srv.cfg.Store(cfg)
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
@@ -488,7 +575,14 @@ func startServer(ctx context.Context, cfg *Config) {
 		for frames := range tapBackend {
 			for _, vf := range frames {
 				if len(vf.Data) > 0 {
-					srv.tap.Write(vf.Data)
+					if _, werr := srv.tap.Write(vf.Data); werr != nil {
+						// 旧实现把这里的错误直接丢掉，TAP 故障表现为"隧道在线但
+						// 客户端不通"。计数 + 限频日志让故障可观测。
+						n := srv.tapWriteErrs.Add(1)
+						if n == 1 || n%1000 == 0 {
+							log.Warnf("TAP 写入失败 #%d: %v", n, werr)
+						}
+					}
 					putFrame(vf.Data)
 				}
 			}
@@ -537,8 +631,6 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(15 * time.Second)
 		conn.SetNoDelay(true)
-		conn.SetReadBuffer(4 * 1024 * 1024)
-		conn.SetWriteBuffer(4 * 1024 * 1024)
 
 		go func(c *net.TCPConn) {
 			peekBuf := make([]byte, 1)
@@ -552,9 +644,15 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 
 			prefixConn := &PrefixConn{Conn: c, prefix: peekBuf[:n]}
 			if peekBuf[0] != 0x16 {
+				// 非 TLS 流量（回退 HTTP / 扫描器）走默认小缓冲
 				serveFallbackHTTP(prefixConn, "http/1.1")
 				return
 			}
+
+			// 确认是 TLS 握手后才放大 socket 缓冲：扫描与回退连接不占内存。
+			// 必须在 tls.Server 开始读取之前设置（内核要求首次 I/O 前）。
+			c.SetReadBuffer(connReadBuf)
+			c.SetWriteBuffer(connWriteBuf)
 
 			tlsConn := tls.Server(prefixConn, tlsConfig)
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
@@ -611,14 +709,36 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	putFrame(reqData)
 	log.Debugf("<= 收到客户端握手请求 (HandshakeReq): %+v", req)
 
-	if req.PSK != hashPSK(s.psk) {
-		log.Warnf("PSK 验证失败 (Hash不匹配).")
+	// 一次性快照鉴权参数（ApplyConfig 会在 s.mu 下改写，无锁读是数据竞争）
+	s.mu.RLock()
+	psk := s.psk
+	pskHash := hashPSK(psk)
+	encrypt := s.encrypt
+	minEnc := s.minEnc
+	sessionToken := s.sessionToken
+	s.mu.RUnlock()
+
+	if req.PSK != pskHash {
+		// 限流：超限后直接断链而不是进焦油坑——焦油坑会让 goroutine
+		// 挂到读超时，无限触发等于给攻击者一个零成本内存放大器。
+		if s.pskFailExceeded(tcpConn.RemoteAddr().String()) {
+			log.Warnf("PSK 校验失败，远端 %s 已超预算，直接断链", tcpConn.RemoteAddr().String())
+			return
+		}
+		log.Warnf("PSK 验证失败 (Hash不匹配)，远端 %s", tcpConn.RemoteAddr().String())
 		camouflageProbe(conn)
 		return
 	}
-	if req.Encrypt != s.encrypt {
-		log.Warnf("加密配置不匹配 (Client: %v, Server: %v)", req.Encrypt, s.encrypt)
+	if req.Encrypt != encrypt {
+		log.Warnf("加密配置不匹配 (Client: %v, Server: %v)", req.Encrypt, encrypt)
 		camouflageProbe(conn)
+		return
+	}
+	// 强度下限：运维强制 GCM 时拒绝能力不足的客户端。这里刻意**不**走焦油坑——
+	// 这是运维侧的期望结果（客户端版本过旧），需要一条明确可查的失败记录。
+	if encrypt && minEnc > 0 && encAlgoRank(req.EncAlgo) < minEnc {
+		log.Warnf("拒绝连接: 客户端加密能力 (algo=%d) 低于 min_enc 下限，远端 %s",
+			req.EncAlgo, tcpConn.RemoteAddr().String())
 		return
 	}
 	clientID := req.ClientID
@@ -647,6 +767,26 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			camouflageProbe(conn)
 			return
 		}
+		// 会话令牌：clientID 完全由 (MAC, PSK) 推导，持密者只要知道目标 MAC
+		// 就能算出对方 clientID 走"会话复活"分支接管其隧道流量。令牌只在原
+		// 会话自己的 TLS 会话内下发一次，第三方从未见过，无法冒充。
+		if sessionToken && !verifySessionToken(psk, session.SessionID, req.SessionToken) {
+			log.Warnf("[%s] 拒绝重连: 会话令牌无效（疑似冒充在线会话）", clientID)
+			s.mu.Unlock()
+			camouflageProbe(conn)
+			return
+		}
+		// PSK 轮换检测：会话内层密钥由创建时的 PSK 派生，且已被各连接的收发
+		// 协程捕获为局部变量。客户端进程重启（例如轮换 PSK 后）会用新 PSK
+		// 重新派生，两者不匹配时 GCM 标签校验全部失败→静默丢帧（legacy CTR
+		// 则是静默乱码）。此时必须整体丢弃会话让客户端重建，而不是"复活"。
+		if session.pskHash != pskHash {
+			log.Warnf("[%s] 会话密钥与当前 PSK 不匹配，丢弃旧会话强制重建", clientID)
+			s.destroySessionLocked(session, clientID)
+			exists = false
+		}
+	}
+	if exists {
 		// 检测到老会话，立刻取消销毁倒计时，无缝复活！
 		session.sessionMu.Lock()
 		if session.destroyTimer != nil {
@@ -671,15 +811,15 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 跨会话重用；旧客户端 enc_algo=0 → 维持 legacy CTR。
 		saltA, saltB := newRandomSalt(), newRandomSalt()
 		encAlgo := encAlgoLegacyCTR
-		if s.encrypt && int(req.EncAlgo) >= encAlgoGCM {
+		if encrypt && encAlgoSupported(req.EncAlgo, encAlgoGCM) {
 			encAlgo = encAlgoGCM
 		}
 		// 各方向加密器：legacy 模式各方向共用回退实例；加密关闭时为 nil
 		var icTx, icRx *innerCipher
-		if s.encrypt {
+		if encrypt {
 			if encAlgo == encAlgoGCM {
-				icTx, _ = newGCMInnerCipher(s.psk, saltB[:]) // s2c
-				icRx, _ = newGCMInnerCipher(s.psk, saltA[:]) // c2s
+				icTx, _ = newGCMInnerCipher(psk, saltB[:]) // s2c
+				icRx, _ = newGCMInnerCipher(psk, saltA[:]) // c2s
 			} else {
 				icTx, icRx = s.icLegacy, s.icLegacy
 			}
@@ -697,8 +837,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 		session = &ClientSession{
 			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,
-			Dedup: NewDeDuplicator(), ActiveConns: 1, FecEncK: fecEncK, FecMode: fecMode,
-			EncAlgo: encAlgo, SaltA: saltA, SaltB: saltB, CreatedAt: time.Now(),
+			ActiveConns: 1, FecEncK: fecEncK, FecMode: fecMode,
+			EncAlgo: encAlgo, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
 			conns: make(map[*connInfo]struct{}),
 		}
 		session.icTx = icTx
@@ -731,18 +871,20 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	session.sessionMu.Lock()
 	session.conns[ci] = struct{}{}
 	session.sessionMu.Unlock()
+	// 速率整形参数在锁内快照，避免与 ApplyConfig 的写构成数据竞争
+	brutal, brutalUp, brutalDown := s.brutal, s.brutalUp, s.brutalDown
 	s.mu.Unlock()
 
-	serverTxRate, clientTxRate := s.brutalUp, s.brutalDown
-	if req.BrutalRx > 0 && (s.brutalUp == 0 || req.BrutalRx < s.brutalUp) {
+	serverTxRate, clientTxRate := brutalUp, brutalDown
+	if req.BrutalRx > 0 && (brutalUp == 0 || req.BrutalRx < brutalUp) {
 		serverTxRate = req.BrutalRx
 	}
-	if req.BrutalTx > 0 && (s.brutalDown == 0 || req.BrutalTx < s.brutalDown) {
+	if req.BrutalTx > 0 && (brutalDown == 0 || req.BrutalTx < brutalDown) {
 		clientTxRate = req.BrutalTx
 	}
 	ci.brutalTx, ci.brutalRx = serverTxRate, clientTxRate
 
-	if s.brutal && serverTxRate > 0 {
+	if brutal && serverTxRate > 0 {
 		applyTCPBrutal(tcpConn, serverTxRate)
 	}
 
@@ -755,7 +897,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		encSalt = hex.EncodeToString(session.SaltA[:])  // c2s
 		encSalt2 = hex.EncodeToString(session.SaltB[:]) // s2c
 	}
-	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, uint32(session.FecEncK), encAlgo, encSalt, encSalt2, req.Encrypt)
+	// 会话令牌：仅原会话持有者可重连接管（见 handleConnection 的校验分支）
+	var sessToken string
+	if sessionToken {
+		sessToken = computeSessionToken(psk, sessionID)
+	}
+	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, uint32(session.FecEncK), encAlgo, encSalt, encSalt2, sessToken, req.Encrypt)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -784,12 +931,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 				// 120 秒后再次检查，如果还是没连上，才彻底销毁
 				if session.ActiveConns <= 0 {
-					delete(s.usedV4, session.IPv4)
-					delete(s.usedV6, session.IPv6)
-					delete(s.activeClients, clientID)
-					s.macToIPCleanLocked(session.MAC, session.IPv4)
-					s.vswitch.RemovePort(clientID)
-					session.Port.Close()
+					s.destroySessionLocked(session, clientID)
 					log.Infof("[%s] 💀 会话超时彻底销毁，释放 IP 及内存资源", clientID)
 				}
 
@@ -877,6 +1019,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 }
 
+// destroySessionLocked 彻底销毁一个会话：回收地址与 MAC 绑定、摘除交换机口、
+// 关闭重排缓冲区与端口。调用方须持有 s.mu。
+// 重排缓冲区持有未交付帧的池缓冲，必须 Close 归还，否则泄漏到进程退出。
+func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
+	delete(s.usedV4, session.IPv4)
+	delete(s.usedV6, session.IPv6)
+	delete(s.activeClients, clientID)
+	s.macToIPCleanLocked(session.MAC, session.IPv4)
+	s.vswitch.RemovePort(clientID)
+	if session.RxReorder != nil {
+		session.RxReorder.Close()
+	}
+	session.Port.Close()
+}
+
 // macToIPCleanLocked 会话销毁时回收其 MAC 绑定，防止表无限增长。
 // 调用方须持有 s.mu。
 func (s *Server) macToIPCleanLocked(mac, ip string) {
@@ -911,11 +1068,12 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	return alloc(reqV4, s.v4Net, s.usedV4), alloc(reqV6, s.v6Net, s.usedV6)
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2 string, encrypt bool) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool) {
 	resp := HandshakeResp{
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
+		SessionToken: sessionToken,
 	}
 	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
 	d, _ := json.Marshal(resp)

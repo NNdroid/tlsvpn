@@ -93,6 +93,102 @@ func TestFECEncoderPartialGroupNoParity(t *testing.T) {
 	}
 }
 
+// partialGroupParity 手工构造一个只有 m<K 个成员的校验帧负载，载荷为
+// members 的逐字节异或——载荷本身是自洽的，所以解码端拒绝它只能是因为
+// 成员数与本地 K 不符，而不是内容有问题。
+func partialGroupParity(start uint32, members [][]byte) []byte {
+	maxLen := 0
+	for _, p := range members {
+		if len(p) > maxLen {
+			maxLen = len(p)
+		}
+	}
+	buf := make([]byte, 1+6+4*len(members)+maxLen)
+	buf[0] = fecMagic
+	binary.BigEndian.PutUint32(buf[1:5], start)
+	buf[5] = byte(len(members))
+	off := 6
+	for _, p := range members {
+		binary.BigEndian.PutUint32(buf[off:off+4], uint32(len(p)))
+		off += 4
+	}
+	for _, p := range members {
+		for j, b := range p {
+			buf[off+j] ^= b
+		}
+	}
+	return buf
+}
+
+// TestFECDecoderRejectsPartialGroup 锁定"永不接受不满 K 的分组"这条不变量：
+// 解码端按 seq 算术对齐把数据帧归组，一旦接受 m<K 的分组，该 start 被标记
+// 已终结，紧随其后的帧会全部被算进这个已终结组而整组丢弃（静默批量丢包）。
+func TestFECDecoderRejectsPartialGroup(t *testing.T) {
+	part := [][]byte{
+		bytes.Repeat([]byte{0x01}, 16), bytes.Repeat([]byte{0x02}, 16),
+		bytes.Repeat([]byte{0x03}, 16),
+	}
+
+	// (1) K=4 解码器收到 3 成员校验帧：整帧忽略，不输出
+	none, outNone := newFecCollector()
+	d4 := NewFECDecoder(4, nil, outNone)
+	for i, p := range part {
+		d4.OnData(uint32(i+1), p)
+	}
+	d4.OnParity(partialGroupParity(1, part))
+	time.Sleep(5 * time.Millisecond)
+	none.mu.Lock()
+	n := len(none.seqs)
+	none.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("不满 K 的校验帧不应产生任何恢复输出, got %d", n)
+	}
+
+	// (2) 同一情形下分组未被终结：组状态仍在，正确校验帧到达即可恢复
+	c2, out2 := newFecCollector()
+	d4b := NewFECDecoder(4, nil, out2)
+	p4 := append(append([][]byte(nil), part...), bytes.Repeat([]byte{0x04}, 16))
+	for i, p := range p4[:3] {
+		d4b.OnData(uint32(i+1), p)
+	}
+	d4b.OnParity(partialGroupParity(1, part)) // 应被忽略，不得终结分组
+	c2.expect(1)
+	d4b.OnParity(encodeGroup(4, nil, nil, 1, p4))
+	c2.waitDone(t)
+	if len(c2.seqs) != 1 || c2.seqs[0] != 4 {
+		t.Fatalf("忽略错误校验帧后分组应仍可恢复 seq=4, got %v", c2.seqs)
+	}
+
+	// (3) 同一载荷 + K=3 解码器：对齐一致，应当被接受。
+	// 说明拒绝是"与本地 K 不符"导致的，而不是载荷本身有问题。
+	c3, out3 := newFecCollector()
+	d3 := NewFECDecoder(3, nil, out3)
+	d3.OnData(1, part[0])
+	d3.OnData(2, part[1])
+	c3.expect(1)
+	d3.OnParity(partialGroupParity(1, part))
+	c3.waitDone(t)
+	if len(c3.seqs) != 1 || c3.seqs[0] != 3 {
+		t.Fatalf("K 对齐时应恢复 seq=3, got %v", c3.seqs)
+	}
+	if !bytes.Equal(c3.frames[0], part[2]) {
+		t.Fatalf("恢复内容错误: % X", c3.frames[0])
+	}
+
+	// (4) 起点不是合法组起点（(start-1)%K != 0）的校验帧同样忽略
+	bad, outBad := newFecCollector()
+	dMis := NewFECDecoder(4, nil, outBad)
+	dMis.OnData(1, bytes.Repeat([]byte{0x09}, 16))
+	dMis.OnParity(partialGroupParity(2, part))
+	time.Sleep(5 * time.Millisecond)
+	bad.mu.Lock()
+	nBad := len(bad.seqs)
+	bad.mu.Unlock()
+	if nBad != 0 {
+		t.Fatalf("非法组起点的校验帧不应产生输出, got %d", nBad)
+	}
+}
+
 func TestFECEncoderAccumulatorGrowth(t *testing.T) {
 	// 组内后面的帧更长时，累加器扩容必须保留已有异或状态
 	e := newFECEncoder(2, nil)

@@ -294,10 +294,11 @@ func TestHandshakeJSONContract(t *testing.T) {
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
 		BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		SessionToken: "tok",
 	}
 	wantReq := []string{
 		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "encrypt", "fec",
-		"fec_group", "ipv4", "ipv6", "mac", "padding", "psk",
+		"fec_group", "ipv4", "ipv6", "mac", "padding", "psk", "session_token",
 	}
 	if got := jsonFieldNames(req); !equalStrings(got, wantReq) {
 		t.Errorf("HandshakeReq 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantReq, got)
@@ -307,12 +308,12 @@ func TestHandshakeJSONContract(t *testing.T) {
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
 		Padding: "ab", BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true,
-		EncAlgo: 2, EncSalt: "x", EncSalt2: "x",
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "tok",
 	}
 	wantResp := []string{
 		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
 		"encrypt", "fec", "fec_group", "gw_v4", "gw_v6", "ipv4", "ipv6", "message",
-		"padding", "session_id", "success",
+		"padding", "session_id", "session_token", "success",
 	}
 	if got := jsonFieldNames(resp); !equalStrings(got, wantResp) {
 		t.Errorf("HandshakeResp 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantResp, got)
@@ -330,7 +331,7 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	json.Unmarshal(b, &m)
 
 	// 这些字段带 omitempty，零值时不出现
-	for _, k := range []string{"mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2"} {
+	for _, k := range []string{"mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("字段 %q 应因 omitempty 而省略，实际出现了", k)
 		}
@@ -455,10 +456,14 @@ func TestFrameHeaderByteOrder(t *testing.T) {
 	}
 }
 
-// TestGetPaddingLengthRanges 填充长度分支必须与 Rust 端一致
-func TestGetPaddingLengthRanges(t *testing.T) {
+// TestPadModeLegacyRanges legacy 填充长度分支必须与 Rust 端一致。
+// 入参是线路负载长度（明文 + 加密标签），不是明文长度。
+func TestPadModeLegacyRanges(t *testing.T) {
+	prev := setPadMode(padModeLegacy)
+	defer setPadMode(prev)
+
 	checks := []struct {
-		dataLen  int
+		wireLen  int
 		min, max int
 	}{
 		{0, 100, 300},
@@ -471,11 +476,67 @@ func TestGetPaddingLengthRanges(t *testing.T) {
 	}
 	for _, c := range checks {
 		for i := 0; i < 200; i++ {
-			got := getPaddingLength(c.dataLen)
+			got := currentPadLength(c.wireLen)
 			if got < c.min || got > c.max {
-				t.Fatalf("dataLen=%d 的填充长度 %d 超出预期范围 [%d,%d]", c.dataLen, got, c.min, c.max)
+				t.Fatalf("wireLen=%d 的填充长度 %d 超出预期范围 [%d,%d]", c.wireLen, got, c.min, c.max)
 			}
 		}
+	}
+}
+
+// TestPadModeOff off 模式恒不填充
+func TestPadModeOff(t *testing.T) {
+	prev := setPadMode(padModeOff)
+	defer setPadMode(prev)
+	for _, n := range []int{0, 1, 100, 200, 1500, 70000} {
+		if got := currentPadLength(n); got != 0 {
+			t.Fatalf("off 模式下 wireLen=%d 的填充应为 0，实际 %d", n, got)
+		}
+	}
+	if padModeName() != padModeOff {
+		t.Fatalf("padModeName 应为 %q，实际 %q", padModeOff, padModeName())
+	}
+}
+
+// TestPadModeBucket bucket 模式必须把小帧恰好填到桶边界
+func TestPadModeBucket(t *testing.T) {
+	prev := setPadMode(padModeBucket)
+	defer setPadMode(prev)
+
+	for _, c := range []struct {
+		wireLen, want int
+	}{
+		{0, 0},     // 零长控制帧不填充
+		{1, 127},   // 填到 128 桶
+		{128, 0},   // 正好在桶边界
+		{129, 127}, // 填到 256 桶
+		{1500, 14}, // 填到 1514 桶
+		{1514, 0},
+	} {
+		if got := currentPadLength(c.wireLen); got != c.want {
+			t.Fatalf("bucket 模式 wireLen=%d 应填 %d，实际 %d", c.wireLen, c.want, got)
+		}
+	}
+	// 超出最大桶的 jumbo 帧只加小额随机填充
+	for i := 0; i < 100; i++ {
+		if got := currentPadLength(1515); got < 0 || got > 99 {
+			t.Fatalf("jumbo 帧填充应为 [0,99]，实际 %d", got)
+		}
+	}
+	if padModeName() != padModeBucket {
+		t.Fatalf("padModeName 应为 %q，实际 %q", padModeBucket, padModeName())
+	}
+}
+
+// TestPadModeFallback 非法值必须回落 legacy 而不是静默生效
+func TestPadModeFallback(t *testing.T) {
+	prev := setPadMode(padModeLegacy)
+	defer setPadMode(prev)
+	if got := setPadMode("bogus"); got != padModeLegacy {
+		t.Fatalf("非法 pad_mode 应回落 %q，实际 %q", padModeLegacy, got)
+	}
+	if padModeName() != padModeLegacy {
+		t.Fatalf("非法 pad_mode 后生效值应为 %q，实际 %q", padModeLegacy, padModeName())
 	}
 }
 

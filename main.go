@@ -152,6 +152,8 @@ func main() {
 	webCert := flag.String("web-cert", "", "Optional: TLS certificate for the Web Dashboard (HTTPS)")
 	webKey := flag.String("web-key", "", "Optional: TLS key for the Web Dashboard (HTTPS)")
 	encrypt := flag.Bool("encrypt", false, "Enable inner payload encryption (AES-256-GCM with per-session salts when the peer supports it)")
+	minEnc := flag.String("min-enc", "", "Minimum inner encryption strength: ctr | gcm (reject weaker negotiation)")
+	padMode := flag.String("pad-mode", "", "Confusion padding: legacy | bucket | off (default bucket)")
 	socks5 := flag.String("socks5", "", "Route ALL outbound sockets through a SOCKS5 proxy (Client only)")
 
 	configPath := flag.String("c", "", "Path to JSON config file (overrides all other flags)")
@@ -177,7 +179,8 @@ func main() {
 	} else {
 		cfg = &Config{
 			Mode: *mode, PSK: *psk, Tap: *tapName, Mac: *macAddr, Addr: *addr,
-			LogLevel: *logLevel, Encrypt: *encrypt, Socks5: *socks5,
+			LogLevel: *logLevel, Encrypt: *encrypt, MinEnc: *minEnc,
+			PadMode: *padMode, Socks5: *socks5,
 			Brutal: *brutal, BrutalUp: *brutalUp, BrutalDown: *brutalDown,
 			Web:    WebConfig{Addr: *webAddr, Auth: *webAuth, Cert: *webCert, Key: *webKey},
 			Server: ServerConfig{V4CIDR: *v4cidr, V6CIDR: *v6cidr, Cert: *certFile, Key: *keyFile},
@@ -196,6 +199,12 @@ func main() {
 	}
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
+	}
+	// 填充策略全局生效（发送路径读取），支持面板热更
+	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
+		log.Warnf("Invalid pad_mode %q, using %s", cfg.PadMode, actual)
+	} else {
+		log.Infof("Confusion padding: %s", actual)
 	}
 
 	// 初始化全局出口：要么全部经由 SOCKS5，要么全部直连。

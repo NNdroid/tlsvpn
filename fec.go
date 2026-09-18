@@ -25,11 +25,17 @@ import (
 //
 // 校验帧线路格式（沿用 10 字节头，seq=0、padLen 随机，加密与否不影响帧头）：
 //
-//	[1B 0xFE][4B groupStart(大端)][1B K][K×4B 成员长度(大端)][异或载荷]
+//	[1B 0xFE][4B groupStart(大端)][1B 成员数][成员数×4B 长度(大端)][异或载荷]
 //
-// 异或载荷为 K 个成员【明文】负载的异或，-encrypt 开启时以 groupStart 为
+// 异或载荷为组内成员【明文】负载的异或，-encrypt 开启时以 groupStart 为
 // seq 用既有 AES-CTR 加密。seq=0 + 负载首字节 0xFE 即为识别标志；握手帧
 // 同为 seq=0 但以 '{' 开头，且仅出现在数据循环建立之前，不会混淆。
+//
+// 分组大小恒等于 K：解码端用 seq 的算术对齐（start ≡ 1 mod K）把数据帧归组，
+// 因此分组边界必须由两端独立算出、无法随帧协商。若允许"不满 K 的分组"，
+// 下一组的数据帧会被算进上一组而被整组丢弃，所以编码器从不冲刷未凑满的
+// 分组。代价是流量彻底停止后未凑满的尾组没有校验保护（XOR 奇偶校验的固有
+// 局限），此时丢包由 TCP 层重传兜底。
 //
 // 解码（会话级，跨所有物理连接汇聚）：数据帧到达即按对齐规则计入所属组
 // 的异或累加器，校验帧到达且组内恰好缺 1 帧时恢复并按原 seq 注入重排缓冲；
@@ -42,7 +48,10 @@ const (
 	fecMinGroup              = 2
 	fecMaxGroup              = 64
 	fecMaxPendingGroups      = 512 // 解码器在途分组上限（≈ 重排窗口量级）
-	fecDoneCache             = 64  // 已终结分组的 start 记录数（去重广播副本）
+	// fecDoneRing 已终结分组 start 的环形记录数（去重多连接广播的重复校验帧）。
+	// 必须为 2 的幂；取 256 使"相隔 256 组的 start 撞槽"在实践中不可达。
+	fecDoneRing = 256
+	fecDoneMask = fecDoneRing - 1
 )
 
 // clampFecGroup 把用户配置的组大小约束到协议允许范围
@@ -94,6 +103,11 @@ func (e *fecEncoder) add(vf VPNFrame) []byte {
 	if len(e.seqs) < e.k {
 		return nil
 	}
+	return e.flushLocked()
+}
+
+// flushLocked 生成当前在途分组的校验帧并重置分组（调用方保证已凑满 K 帧）
+func (e *fecEncoder) flushLocked() []byte {
 	parity := e.buildParity()
 	atomic.AddUint64(&e.paritySent, 1)
 	e.reset()
@@ -113,7 +127,7 @@ func (e *fecEncoder) buildParity() []byte {
 		tagLen = gcmTagSize
 	}
 	total := 6 + 4*len(e.lens) + maxLen + tagLen
-	buf := getFrame()[:total]
+	buf := getFrameAtLeast(total)[:total]
 	buf[0] = fecMagic
 	binary.BigEndian.PutUint32(buf[1:5], e.seqs[0])
 	buf[5] = byte(len(e.lens))
@@ -148,11 +162,11 @@ type fecDecoder struct {
 	ic        *innerCipher
 	out       func(seq uint32, frame []byte)
 	groups    map[uint32]*fecGroupState // 组起点 → 组状态
-	done      []uint32                  // 已终结分组的 start，用于吸收多连接广播的重复帧
+	doneRing  [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
 	spare     *fecGroupState
 	spareAc   []byte
 	recovered uint64 // 异或恢复帧计数
-	lost      uint64 // 确认丢失帧计数（终结组内的缺失成员）
+	lost      uint64 // 确认丢失帧计数
 }
 
 // NewFECDecoder 创建解码器。k 必须与对端编码分组大小一致（来自握手协商）；
@@ -179,7 +193,9 @@ func (d *fecDecoder) Reset() {
 		d.releaseLocked(g)
 	}
 	d.groups = make(map[uint32]*fecGroupState)
-	d.done = nil
+	for i := range d.doneRing { // 数组不能用 clear()，显式归零
+		d.doneRing[i] = 0
+	}
 }
 
 // OnData 记录一个已解密的数据帧。frame 只读借用，不转移所有权。
@@ -219,11 +235,12 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	start := binary.BigEndian.Uint32(payload[1:5])
 	k := int(payload[5])
-	if start == 0 || k < fecMinGroup || k > fecMaxGroup || k != d.k {
+	// 成员数必须恰好等于 K。解码端按 seq 的算术对齐把数据帧归组，一旦接受
+	// 成员数不足 K 的分组，该 start 被标记 done 后，紧随其后的帧会全部被算进
+	// 这个已终结的组而直接丢弃。这里宁可整帧忽略（退化为容忍丢失），
+	// 也不能容忍归组错位。
+	if start == 0 || k != d.k || (start-1)%uint32(d.k) != 0 {
 		return
-	}
-	if (start-1)%uint32(k) != 0 {
-		return // 起点与对齐规则不符
 	}
 	descLen := 6 + 4*k
 	tagLen := 0
@@ -237,7 +254,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	maxLen := 0
 	for i := 0; i < k; i++ {
 		l := int(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
-		if l < 0 || l+tagLen > len(payload)-descLen {
+		if l+tagLen > len(payload)-descLen {
 			return // 描述符与负载长度自洽性校验失败
 		}
 		lens[i] = l
@@ -260,7 +277,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	g.k = k
 	g.lens = lens
-	pb := getFrame()[:maxLen]
+	pb := getFrameAtLeast(maxLen)
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
 	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]
 	aad := gcmAAD(uint32(maxLen+tagLen), start)
@@ -304,20 +321,14 @@ func (d *fecDecoder) newGroupLocked(start uint32) *fecGroupState {
 	return g
 }
 
+// isDoneLocked O(1) 判定：环形表槽位存的恰好等于 start 才算命中。
+// 旧实现对最多 64 项切片做线性扫描，每帧一次，在持锁状态下执行。
 func (d *fecDecoder) isDoneLocked(start uint32) bool {
-	for _, s := range d.done {
-		if s == start {
-			return true
-		}
-	}
-	return false
+	return d.doneRing[start&fecDoneMask] == start
 }
 
 func (d *fecDecoder) markDoneLocked(start uint32) {
-	d.done = append(d.done, start)
-	if len(d.done) > fecDoneCache {
-		d.done = d.done[len(d.done)-fecDoneCache:]
-	}
+	d.doneRing[start&fecDoneMask] = start
 }
 
 // tryRecoverLocked 组内恰好缺 1 帧且校验帧已到 → 异或恢复并输出
@@ -347,7 +358,7 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 	if n > len(g.acc) {
 		g.acc = d.growAccLocked(g.acc, n)
 	}
-	rec := getFrame()[:n]
+	rec := getFrameAtLeast(n)[:n]
 	for i := 0; i < n; i++ {
 		rec[i] = g.parity[i] ^ g.acc[i]
 	}

@@ -36,6 +36,8 @@ type Config struct {
 	Addr       string       `json:"addr"`                // server: 监听地址；client: 目标地址列表
 	LogLevel   string       `json:"log_level,omitempty"` // 默认 info
 	Encrypt    bool         `json:"encrypt,omitempty"`   // 内层加密（GCM 协商）
+	MinEnc     string       `json:"min_enc,omitempty"`   // 最低内层加密强度：ctr | gcm（空=无下限）
+	PadMode    string       `json:"pad_mode,omitempty"`  // 混淆填充：legacy | bucket | off（默认 bucket）
 	Socks5     string       `json:"socks5,omitempty"`    // 全局 SOCKS5 出口（client）
 	Brutal     bool         `json:"brutal,omitempty"`
 	BrutalUp   uint64       `json:"brutal_up,omitempty"`   // Mbps
@@ -70,6 +72,13 @@ type ServerConfig struct {
 	V6CIDR string `json:"v6_cidr,omitempty"` // 默认 fd00::/64
 	Cert   string `json:"cert,omitempty"`    // 留空则自动生成并持久化自签证书
 	Key    string `json:"key,omitempty"`
+	// SessionToken 要求重连接入既有会话时回带会话令牌。
+	// 关闭（默认）时保持旧行为：clientID + PSK + MAC 即可重连，
+	// 因此任何持密者只要知道目标 MAC 就能冒充既有会话（clientID 由 mac+psk 推导）。
+	// 开启后：令牌只在会话自己的 TLS 连接内下发一次，第三方无法取得，
+	// 冒充既有会话被拒。代价是旧版客户端无法重连既有会话（首次接入不受影响），
+	// 升级需两端同版本同时打开。
+	SessionToken bool `json:"session_token,omitempty"`
 }
 
 // ClientConfig 客户端专属
@@ -92,6 +101,8 @@ const exampleConfigJSON = `{
   "addr": "203.0.113.10:4000,[2001:db8::10]:4000",
   "log_level": "info",
   "encrypt": true,
+  "min_enc": "gcm",
+  "pad_mode": "bucket",
   "brutal": true,
   "brutal_up": 100,
   "brutal_down": 500,
@@ -119,7 +130,8 @@ const exampleConfigJSON = `{
     "v4_cidr": "10.0.0.0/24",
     "v6_cidr": "fd00::/64",
     "cert": "",
-    "key": ""
+    "key": "",
+    "session_token": false
   }
 }`
 
@@ -148,6 +160,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
+	}
+	if c.PadMode == "" {
+		c.PadMode = padModeBucket // 小帧填充到固定长度桶，开销远低于 legacy
 	}
 	if c.BrutalUp == 0 {
 		c.BrutalUp = 100
@@ -210,6 +225,20 @@ func (c *Config) Validate() error {
 	}
 	if c.PSK == "quic_secret" {
 		log.Warnf("⚠️  PSK is the default value — change it via -psk or the config file!")
+	}
+	switch c.MinEnc {
+	case "", "any", "ctr", "legacy", "gcm":
+	default:
+		return fmt.Errorf("invalid min_enc %q (want ctr, gcm or empty)", c.MinEnc)
+	}
+	switch c.PadMode {
+	case padModeOff, padModeLegacy, padModeBucket:
+	default:
+		return fmt.Errorf("invalid pad_mode %q (want %s, %s or %s)",
+			c.PadMode, padModeOff, padModeLegacy, padModeBucket)
+	}
+	if c.MinEnc != "" && !c.Encrypt {
+		return fmt.Errorf("min_enc %q requires encrypt=true", c.MinEnc)
 	}
 
 	if c.Mode == "server" {

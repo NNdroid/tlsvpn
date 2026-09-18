@@ -95,7 +95,7 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 	}
 	var buf []byte
 	if frame != nil {
-		buf = getFrame()[:len(frame)]
+		buf = getFrameAtLeast(len(frame))[:len(frame)]
 		copy(buf, frame)
 	}
 	select {
@@ -318,10 +318,12 @@ func parseServerAddresses(addrStr string) []string {
 
 type Client struct {
 	clientID        string
-	serverSessionID string     // 记录服务端的会话ID
-	gwV4            string     // 记录网关以便退出时清理
-	gwV6            string     // 记录网关以便退出时清理
-	sessionMu       sync.Mutex // 保护状态防止并发写
+	serverSessionID string // 记录服务端的会话ID
+	sessionToken    string // 服务端下发的会话令牌；重连握手时回带，用于
+	// 防止持密者冒充一个已在线的会话
+	gwV4      string     // 记录网关以便退出时清理
+	gwV6      string     // 记录网关以便退出时清理
+	sessionMu sync.Mutex // 保护状态防止并发写
 	// live 指向当前生效配置；面板热更时整体替换该指针，
 	// dialAndServe 每轮重拨前取最新值
 	live          atomic.Pointer[liveConfig]
@@ -336,7 +338,6 @@ type Client struct {
 	txPort        *AsyncPort
 	rxReorder     *ReorderBuffer
 	fecDec        *fecDecoder
-	dedup         *DeDuplicator
 	TxBytes       uint64
 	RxBytes       uint64
 	TxPackets     uint64
@@ -348,6 +349,7 @@ type Client struct {
 	assignedV4    string                 // 服务端分配的 IPv4（面板展示）
 	assignedV6    string                 // 服务端分配的 IPv6（面板展示）
 	liveConns     int32                  // 当前已建立的物理连接数（面板展示）
+	tapWriteErrs  atomic.Uint64          // TAP 交付失败帧数（旧实现被静默吞掉）
 	reconnects    uint64                 // 累计重连尝试次数（面板展示）
 	forceGen      uint64                 // 强制重连世代：递增即要求重连循环跳过退避
 	wake          chan struct{}          // 重连唤醒：强制重连/热更配置时广播（缓冲 1，非阻塞）
@@ -374,6 +376,7 @@ type liveConfig struct {
 	fecMode     bool
 	fecGroup    int
 	encrypt     bool
+	minEnc      int // 内层加密强度下限（encAlgoRank 值，0=不限）
 }
 
 // liveFromCfg 从完整配置提取热更子集
@@ -384,7 +387,7 @@ func liveFromCfg(cfg *Config) *liveConfig {
 		sni: cfg.Client.SNI, insecure: cfg.Client.Insecure, certHash: cfg.Client.CertSHA256,
 		fwmark: cfg.Client.Fwmark, brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		connsCount: cfg.Client.Conns, fecMode: cfg.Client.FEC, fecGroup: cfg.Client.FecGroup,
-		encrypt: cfg.Encrypt,
+		encrypt: cfg.Encrypt, minEnc: minEncRank(cfg.MinEnc),
 	}
 }
 
@@ -395,6 +398,23 @@ func (c *Client) ApplyConfig(cfg *Config) {
 	c.bootCfg.Store(cfg)
 	c.wake = make(chan struct{}, 1)
 	c.live.Store(lv)
+
+	// 回退加密器由 PSK 派生，旧实现只在启动时构造一次：热更 PSK 后新握手
+	// 仍会用旧 PSK 的密钥流，与对端算出的密钥不匹配（GCM 下表现为整链路
+	// 标签校验失败静默丢帧）。这里无条件重建，两个 SHA-256 + AES 造钥的
+	// 开销可忽略。已在使用的旧实例仍被本连接持有，不受影响。
+	c.sessionMu.Lock()
+	if cfg.Encrypt {
+		c.icLegacy = newLegacyInnerCipher(cfg.PSK)
+	} else {
+		c.icLegacy = nil
+	}
+	c.sessionMu.Unlock()
+
+	// 填充策略全局生效于发送路径
+	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
+		log.Warnf("[Client] Invalid pad_mode %q, using %s", cfg.PadMode, actual)
+	}
 	if int32(lv.connsCount) != c.connsCount {
 		log.Warnf("[Client] conns %d -> %d takes effect on reconnect (registry rebuilt)", c.connsCount, lv.connsCount)
 		c.connsMu.Lock()
@@ -475,7 +495,6 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		clientID: clientID, tapName: cfg.Tap,
 		tap: iface, macAddr: actualMac, connsCount: int32(cl.Conns),
 		txPort:    NewAsyncPort(ctx, "client_tx_port", cl.FEC),
-		dedup:     NewDeDuplicator(), // 初始化客户端去重器
 		startedAt: time.Now(),
 	}
 	lv := liveFromCfg(cfg)
@@ -489,7 +508,13 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 
 	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
 	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
-		c.tap.Write(orderedFrame)
+		if _, werr := c.tap.Write(orderedFrame); werr != nil {
+			// 旧实现静默丢弃错误：TAP 故障时表现为"隧道在线但本机不通"
+			n := c.tapWriteErrs.Add(1)
+			if n == 1 || n%1000 == 0 {
+				log.Warnf("[Client] TAP 写入失败 #%d: %v", n, werr)
+			}
+		}
 	})
 	if cfg.Encrypt {
 		c.icLegacy = newLegacyInnerCipher(cfg.PSK)
@@ -511,15 +536,16 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 
 // Run 阻塞运行客户端直到 ctx 取消：TAP 读循环 + 每条物理连接的重连监督器。
 func (c *Client) Run(ctx context.Context) {
-	cleanupDone := make(chan struct{})
-	// 程序彻底退出时才清理系统路由表
+	// 程序彻底退出时才清理系统路由表并停掉重排缓冲区的后台协程
 	defer func() {
 		lvNow := c.live.Load()
 		cleanPolicyRouting(c.tapName, lvNow.fwmark, c.gwV4, c.gwV6)
-		close(cleanupDone)
+		c.rxReorder.Close()
+		c.txPort.Close()
 	}()
 
 	go func() {
+		// 读缓冲只分配一次；旧实现在循环体里每帧 make([]byte, 65536)
 		buf := make([]byte, 65536)
 		consecutiveErr := 0
 		for {
@@ -762,8 +788,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// （KeepAlive 已由 newBaseDialer 统一设置，此处补充 NoDelay 与收发缓冲区）
 	if sock := underlyingTCPConn(rawConn); sock != nil {
 		sock.SetNoDelay(true)
-		sock.SetReadBuffer(4 * 1024 * 1024)
-		sock.SetWriteBuffer(4 * 1024 * 1024)
+		sock.SetReadBuffer(connReadBuf)
+		sock.SetWriteBuffer(connWriteBuf)
 	}
 
 	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
@@ -799,19 +825,26 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if lv.fecMode {
 		fecGroupReq = clampFecGroup(lv.fecGroup)
 	}
+	// 回带上一次握手收到的会话令牌（首次接入时为空）。与 PSK 快照一起读，
+	// 避免与握手响应处理协程的写入构成数据竞争。
+	c.sessionMu.Lock()
+	sessionToken := c.sessionToken
+	c.sessionMu.Unlock()
+
 	req := HandshakeReq{
-		ClientID: c.clientID,
-		PSK:      hashPSK(lv.psk),
-		MAC:      c.macAddr,
-		IPv4:     lv.reqV4,
-		IPv6:     lv.reqV6,
-		Padding:  generatePadding(100, 500),
-		FEC:      lv.fecMode,
-		FecGroup: fecGroupReq,
-		BrutalTx: clientTxRate,
-		BrutalRx: clientRxRate,
-		Encrypt:  lv.encrypt,
-		EncAlgo:  clientEncAlgoSupport,
+		ClientID:     c.clientID,
+		PSK:          hashPSK(lv.psk),
+		MAC:          c.macAddr,
+		IPv4:         lv.reqV4,
+		IPv6:         lv.reqV6,
+		Padding:      generatePadding(100, 500),
+		FEC:          lv.fecMode,
+		FecGroup:     fecGroupReq,
+		BrutalTx:     clientTxRate,
+		BrutalRx:     clientRxRate,
+		Encrypt:      lv.encrypt,
+		EncAlgo:      clientEncAlgoSupport,
+		SessionToken: sessionToken,
 	}
 	log.Debugf("[Conn %d] => 发送握手请求 (HandshakeReq): %+v", connIndex, req)
 	reqData, _ := json.Marshal(req)
@@ -839,7 +872,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	encAlgo := encAlgoLegacyCTR
 	var icTx, icRx *innerCipher
 	if lv.encrypt {
-		if resp.EncAlgo >= encAlgoGCM {
+		if encAlgoSupported(resp.EncAlgo, encAlgoGCM) {
 			saltTx, err1 := hex.DecodeString(resp.EncSalt)  // c2s
 			saltRx, err2 := hex.DecodeString(resp.EncSalt2) // s2c
 			if err1 == nil && err2 == nil && len(saltTx) == encSaltSize && len(saltRx) == encSaltSize {
@@ -858,8 +891,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			log.Infof("[Conn %d] Server lacks GCM support, using legacy CTR inner encryption", connIndex)
 		}
 		if icTx == nil {
+			c.sessionMu.Lock()
 			icTx, icRx = c.icLegacy, c.icLegacy
+			c.sessionMu.Unlock()
 		}
+	}
+
+	// 强度下限：协商结果低于本地要求时拒绝这条连接（服务端可能跑的是旧版，
+	// 或中间被降级）。这是运维显式声明的硬要求，不能静默降级。
+	if lv.minEnc > 0 && encAlgoRank(encAlgo) < lv.minEnc {
+		return 0, fmt.Errorf("server negotiated inner cipher %d is below min_enc=%d", encAlgo, lv.minEnc)
 	}
 
 	// 会话级协商：首个连接的握手决定本端解码与端口编码模式，后续连接沿用。
@@ -906,6 +947,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		isNewSession = true
 		c.serverSessionID = resp.SessionID
 	}
+	// 记下服务端下发的会话令牌，供后续重连回带。服务端未开启 session_token
+	// 时该字段为空，行为与旧版一致。
+	c.sessionToken = resp.SessionToken
 	c.gwV4 = resp.GwV4
 	c.gwV6 = resp.GwV6
 	// 面板展示：分配的隧道地址
@@ -916,7 +960,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if isNewSession {
 		log.Infof("[Conn %d] 🔄 检测到服务端重置了会话，正在清理本地旧的接收缓冲池...", connIndex)
 		c.rxReorder.Reset()
-		c.dedup.Reset()
 	}
 
 	c.setupInterface(resp.IPv4, resp.IPv6)
