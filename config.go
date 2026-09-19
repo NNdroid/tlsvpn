@@ -79,6 +79,11 @@ type ServerConfig struct {
 	// 冒充既有会话被拒。代价是旧版客户端无法重连既有会话（首次接入不受影响），
 	// 升级需两端同版本同时打开。
 	SessionToken bool `json:"session_token,omitempty"`
+	// MaxSessions 并发会话数上限（0 = 默认 1024）。v6 池在 /64 下实际不会
+	// 枯竭，没有上限的话任何持 PSK 者轮换 MAC 即可无限创建会话（每会话
+	// 3-4 个 goroutine + 4096 深发送队列 + 重排环形缓冲），直到 OOM。
+	// 达到上限后新握手按认证失败处理（焦油坑）。可热更，作用于新会话。
+	MaxSessions int `json:"max_sessions,omitempty"`
 }
 
 // ClientConfig 客户端专属
@@ -131,7 +136,8 @@ const exampleConfigJSON = `{
     "v6_cidr": "fd00::/64",
     "cert": "",
     "key": "",
-    "session_token": false
+    "session_token": false,
+    "max_sessions": 1024
   }
 }`
 
@@ -186,6 +192,9 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Server.V6CIDR == "" {
 			c.Server.V6CIDR = "fd00::/64"
+		}
+		if c.Server.MaxSessions == 0 {
+			c.Server.MaxSessions = 1024
 		}
 	}
 	if c.Mode == "client" {
@@ -242,6 +251,9 @@ func (c *Config) Validate() error {
 	}
 
 	if c.Mode == "server" {
+		if c.Server.MaxSessions < 0 || c.Server.MaxSessions > 1<<20 {
+			return fmt.Errorf("server.max_sessions %d out of range [0, 1048576]", c.Server.MaxSessions)
+		}
 		for name, cidr := range map[string]string{"v4_cidr": c.Server.V4CIDR, "v6_cidr": c.Server.V6CIDR} {
 			if _, _, err := net.ParseCIDR(cidr); err != nil {
 				return fmt.Errorf("invalid server.%s %q: %v", name, cidr, err)

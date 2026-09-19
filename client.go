@@ -821,6 +821,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	defer tlsConn.Close()
 
 	scanner := NewFrameScanner(tlsConn)
+	// 首帧是握手响应（<2KB）：用小上限防畸形帧头撑大缓冲，认证完成后恢复
+	scanner.SetMaxDataLen(maxHandshakeDataLen)
 	fecGroupReq := 0
 	if lv.fecMode {
 		fecGroupReq = clampFecGroup(lv.fecGroup)
@@ -861,6 +863,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if err := json.Unmarshal(respData, &resp); err != nil || !resp.Success {
 		return 0, fmt.Errorf("handshake rejected")
 	}
+	// 握手完成：后续数据帧恢复线路全量上限
+	scanner.SetMaxDataLen(maxWireDataLen)
 	log.Debugf("[Conn %d] <= 收到握手响应 (HandshakeResp): %+v", connIndex, resp)
 
 	if resp.Encrypt != lv.encrypt {
@@ -869,18 +873,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	// 内层加密协商：双方均声明 GCM 支持时启用（会话盐由服务端生成、
 	// 通过响应下发，服务端重启即换盐）；否则回退 legacy CTR。
+	// resp.enc_algo=3 为 GCM-v2（独立密钥标签），=2 为旧派生，二者语义一致。
 	encAlgo := encAlgoLegacyCTR
 	var icTx, icRx *innerCipher
 	if lv.encrypt {
-		if encAlgoSupported(resp.EncAlgo, encAlgoGCM) {
+		if encAlgoSupported(resp.EncAlgo, encAlgoGCM) || encAlgoSupported(resp.EncAlgo, encAlgoGCMv2) {
 			saltTx, err1 := hex.DecodeString(resp.EncSalt)  // c2s
 			saltRx, err2 := hex.DecodeString(resp.EncSalt2) // s2c
 			if err1 == nil && err2 == nil && len(saltTx) == encSaltSize && len(saltRx) == encSaltSize {
 				var errTx, errRx error
-				icTx, errTx = newGCMInnerCipher(lv.psk, saltTx)
-				icRx, errRx = newGCMInnerCipher(lv.psk, saltRx)
+				icTx, errTx = newGCMInnerCipherAlgo(lv.psk, saltTx, resp.EncAlgo)
+				icRx, errRx = newGCMInnerCipherAlgo(lv.psk, saltRx, resp.EncAlgo)
 				if errTx == nil && errRx == nil {
-					encAlgo = encAlgoGCM
+					encAlgo = resp.EncAlgo
 				} else {
 					log.Warnf("[Conn %d] GCM cipher init failed, falling back to legacy CTR: %v/%v", connIndex, errTx, errRx)
 				}

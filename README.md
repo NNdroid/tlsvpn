@@ -97,6 +97,8 @@ Values and defaults are identical whether you use the config file or the legacy 
 | `mac` | (Empty) | Manually specify the TAP interface MAC address |
 | `log_level` | `info` | `debug` / `info` / `warn` / `error` (switchable live from the dashboard) |
 | `encrypt` | `false` | Inner AES-256-GCM payload encryption with per-session salts (legacy CTR fallback for old peers) |
+| `min_enc` | (Empty) | Minimum inner-cipher strength: `ctr` or `gcm`. Server rejects clients below the floor; client treats a weaker negotiation as handshake failure. Empty = no floor. Requires `encrypt: true` |
+| `pad_mode` | `bucket` | Obfuscation padding: `bucket` (pad small frames to fixed length buckets — ~2% overhead at MTU), `legacy` (old random padding, 6–9× on small frames), `off` (no padding) |
 | `brutal` | `false` | Enable TCP Brutal congestion control (requires the kernel `tcp_brutal` module) |
 | `brutal_up` | `100` | Upload rate limit in Mbps |
 | `brutal_down` | `500` | Download rate limit in Mbps |
@@ -118,6 +120,8 @@ Values and defaults are identical whether you use the config file or the legacy 
 | `v4_cidr` | `10.0.0.0/24` | IPv4 address pool for clients |
 | `v6_cidr` | `fd00::/64` | IPv6 address pool for clients |
 | `cert` / `key` | (Empty) | Custom TLS certificate pair. Empty = generate & persist a self-signed cert |
+| `session_token` | `false` | Require a per-session token (delivered only inside the session's own TLS handshake) to re-attach to an existing session. Blocks session hijacking by other PSK holders. Opt-in: old clients cannot re-attach while it is on |
+| `max_sessions` | `1024` | Cap on concurrent client sessions. New handshakes are dropped (camouflaged as auth failures) once the cap is reached |
 
 ### 🟡 client (Client mode only)
 

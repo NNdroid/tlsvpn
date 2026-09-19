@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net"
 	"reflect"
 	"sync"
@@ -18,6 +19,183 @@ func TestFmtMAC(t *testing.T) {
 	expected := "00:1a:2b:3c:4d:5e"
 	if res := fmtMAC(validMAC); res != expected {
 		t.Errorf("fmtMAC 失敗，預期 %s，實際拿到 %s", expected, res)
+	}
+}
+
+// ==========================================
+// 握手输入校验（防日志伪造）
+// ==========================================
+
+func TestClientIDValidation(t *testing.T) {
+	valid := []string{
+		"123e4567-e89b-12d3-a456-426614174000",
+		"123E4567-E89B-12D3-A456-426614174000", // 大写 hex 同样合法
+	}
+	for _, id := range valid {
+		if !isValidClientID(id) {
+			t.Errorf("合法 clientID %q 被误拒", id)
+		}
+	}
+	invalid := []string{
+		"", "", // 空串
+		"g23e4567-e89b-12d3-a456-42661417400",           // 非 hex
+		"123e4567_e89b-12d3-a456-426614174000",          // 连字符位置错
+		"123e4567e89b12d3a4564266141740000",             // 缺连字符
+		"123e4567-e89b-12d3-a456-42661417400",           // 长度差 1
+		"123e4567-e89b-12d3-a456-4266141740000",         // 长度多 1
+		"bad\nid-with-log-forging-attempt-xxxxxxxxxxxx", // 换行注入
+	}
+	for _, id := range invalid {
+		if isValidClientID(id) {
+			t.Errorf("非法 clientID %q 被误放行", id)
+		}
+	}
+}
+
+func TestMACStringValidation(t *testing.T) {
+	if !isValidMACString("") {
+		t.Error("空 MAC（客户端未上报）应放行")
+	}
+	if !isValidMACString("00:1a:2b:3c:4d:5e") || !isValidMACString("00:1A:2B:3C:4D:5E") {
+		t.Error("合法 MAC 被误拒")
+	}
+	for _, s := range []string{"00:1a:2b:3c:4d", "00-1a-2b-3c-4d-5e", "zz:1a:2b:3c:4d:5e", "0:1a:2b:3c:4d:5e", "bad\nmac-xx"} {
+		if isValidMACString(s) {
+			t.Errorf("非法 MAC %q 被误放行", s)
+		}
+	}
+	m, ok := parseMACKey("00:1a:2b:3c:4d:5e")
+	if !ok || m != (macKey{0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e}) {
+		t.Errorf("parseMACKey 解析错误: %v ok=%v", m, ok)
+	}
+}
+
+// ==========================================
+// VSwitch：源 MAC 归属校验 + 广播预算
+// ==========================================
+
+type stubPort struct {
+	name   string
+	frames chan []byte
+}
+
+func newStubPort(name string) *stubPort {
+	return &stubPort{name: name, frames: make(chan []byte, 64)}
+}
+
+func (p *stubPort) ID() string { return p.name }
+func (p *stubPort) WriteFrame(frame []byte) error {
+	p.frames <- append([]byte(nil), frame...)
+	return nil
+}
+
+func macFrame(dst, src macKey) []byte {
+	f := make([]byte, 14)
+	copy(f[0:6], dst[:])
+	copy(f[6:12], src[:])
+	return f
+}
+
+func TestVSwitchRejectsSpoofedSrcMAC(t *testing.T) {
+	vs := NewVSwitch()
+	macA := macKey{0xAA, 0, 0, 0, 0, 1}
+	macB := macKey{0xBB, 0, 0, 0, 0, 2}
+	registered := map[string]macKey{"A": macA, "B": macB}
+	vs.validateMAC = func(srcPortID string, mac macKey) bool {
+		reg, ok := registered[srcPortID]
+		return !ok || reg == mac // 未登记端口放行（与服务端 MAC 为空放行语义一致）
+	}
+	pa, pb := newStubPort("A"), newStubPort("B")
+	vs.AddPort(pa)
+	vs.AddPort(pb)
+
+	// 冒充：端口 A 声明 B 的 MAC —— 整帧丢弃，既不学习也不转发
+	vs.ProcessFrame("A", macFrame(macB, macB))
+	select {
+	case f := <-pb.frames:
+		t.Fatalf("冒充帧不应被转发, 收到 % X", f[:6])
+	case <-time.After(50 * time.Millisecond):
+	}
+	if n := vs.spoofDrops.Load(); n != 1 {
+		t.Fatalf("冒充计数应为 1, 实际 %d", n)
+	}
+	// 冒充不得污染学习表：B 的单播仍送达 B
+	vs.ProcessFrame("A", macFrame(macA, macA)) // 正常帧，A→B
+	vs.ProcessFrame("A", macFrame(macB, macA)) // A 发给 B
+	select {
+	case f := <-pb.frames:
+		if !bytes.Equal(f[:6], macB[:]) {
+			t.Fatalf("转发内容错误: % X", f[:6])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("合法单播未送达 B")
+	}
+}
+
+func TestVSwitchFloodBudget(t *testing.T) {
+	vs := NewVSwitch()
+	vs.floodBurst = 2
+	vs.floodRatePerSec = 0.001 // 测试期内不回充
+	broadcast := macKey{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
+	unicastB := macKey{0xBA, 0, 0, 0, 0, 2} // 偶数首字节 = 单播 MAC（0xBB 的多播位会走洪泛）
+
+	pa, pb := newStubPort("A"), newStubPort("B")
+	vs.AddPort(pa)
+	vs.AddPort(pb)
+
+	// 前两帧在预算内送达 B，第三帧超预算丢弃
+	vs.ProcessFrame("A", macFrame(broadcast, macKey{0xAA, 0, 0, 0, 0, 1}))
+	vs.ProcessFrame("A", macFrame(broadcast, macKey{0xAA, 0, 0, 0, 0, 1}))
+	vs.ProcessFrame("A", macFrame(broadcast, macKey{0xAA, 0, 0, 0, 0, 1}))
+	got := 0
+deadline:
+	for {
+		select {
+		case <-pb.frames:
+			got++
+		default:
+			break deadline
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-pb.frames:
+		got++
+	default:
+	}
+	if got != 2 {
+		t.Fatalf("广播预算应为 2 帧, 实际送达 %d", got)
+	}
+	if n := vs.floodDrops.Load(); n != 1 {
+		t.Fatalf("广播丢弃计数应为 1, 实际 %d", n)
+	}
+
+	// 单播不受广播预算影响：先让 B 发帧建立 macB→B 的学习表项，
+	// 再从 A 发单播给 macB（此时预算已耗尽，走单播查找而非洪泛）
+	vs.ProcessFrame("B", macFrame(macKey{0xAA, 0, 0, 0, 0, 1}, unicastB))
+	select {
+	case <-pa.frames:
+	case <-time.After(time.Second):
+		t.Fatal("B 的合法帧应送达 A")
+	}
+	vs.ProcessFrame("A", macFrame(unicastB, macKey{0xAA, 0, 0, 0, 0, 1}))
+	select {
+	case <-pb.frames:
+	case <-time.After(time.Second):
+		t.Fatal("单播不应受广播预算影响")
+	}
+
+	// 可信端口豁免预算
+	vs.trustedPort = "TAP"
+	tap := newStubPort("TAP")
+	vs.AddPort(tap)
+	for i := 0; i < 5; i++ {
+		vs.ProcessFrame("TAP", macFrame(broadcast, macKey{0x00, 0, 0, 0, 0, 9}))
+	}
+	select {
+	case <-pb.frames:
+	case <-time.After(time.Second):
+		t.Fatal("可信端口的广播不应被限速")
 	}
 }
 
@@ -281,6 +459,50 @@ func TestFrameScanner(t *testing.T) {
 		// EOF 是正常的
 	case <-time.After(100 * time.Millisecond):
 		// 阻塞代表沒資料了，這是預期的 Scanner 行為
+	}
+}
+
+// TestFrameScannerMaxDataLen 锁定认证前首帧上限的语义：
+// 超限的帧头直接报错（拒绝连接），不按声明长度扩容缓冲——否则 10 字节
+// 帧头就能把每条预认证连接钉住 ~131KB 内存。
+func TestFrameScannerMaxDataLen(t *testing.T) {
+	mkStream := func(dataLen int) []byte {
+		hdr := make([]byte, 10)
+		binary.BigEndian.PutUint32(hdr[0:4], uint32(dataLen))
+		binary.BigEndian.PutUint16(hdr[4:6], 0)
+		binary.BigEndian.PutUint32(hdr[6:10], 1)
+		return hdr
+	}
+
+	// 超过 maxHandshakeDataLen：立即报错且不分配大缓冲
+	fs := NewFrameScanner(bytes.NewReader(mkStream(maxHandshakeDataLen + 1)))
+	fs.SetMaxDataLen(maxHandshakeDataLen)
+	if _, _, err := fs.ReadFrame(); err == nil {
+		t.Fatal("超过认证前上限的帧应被拒绝")
+	}
+	if cap(fs.buf) > maxHandshakeDataLen*2 {
+		t.Fatalf("拒绝帧不应把缓冲扩到 %.1fKB, 实际 cap=%d", float64(cap(fs.buf))/1024, cap(fs.buf))
+	}
+
+	// 认证后恢复全量上限：小于 maxWireDataLen 的大帧正常读取
+	big := 20 * 1024
+	stream := append(mkStream(big), make([]byte, big)...)
+	fs2 := NewFrameScanner(bytes.NewReader(stream))
+	fs2.SetMaxDataLen(maxHandshakeDataLen)
+	fs2.SetMaxDataLen(maxWireDataLen) // 认证通过后放开
+	frame, _, err := fs2.ReadFrame()
+	if err != nil {
+		t.Fatalf("放开上限后大帧应正常读取: %v", err)
+	}
+	if len(frame) != big {
+		t.Fatalf("大帧长度不符: %d", len(frame))
+	}
+
+	// 默认上限为线路全量（不破坏既有行为）
+	full := append(mkStream(maxWireDataLen), make([]byte, maxWireDataLen)...)
+	fs3 := NewFrameScanner(bytes.NewReader(full))
+	if _, _, err := fs3.ReadFrame(); err != nil {
+		t.Fatalf("默认上限下全量帧应可读取: %v", err)
 	}
 }
 

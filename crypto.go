@@ -54,7 +54,16 @@ const (
 	// 且 c2s/s2c 各一个，seq 会话内连续 —— 密钥流空间按 (salt, seq) 严格
 	// 不相交，根治密钥流重放；GCM 标签同时提供完整性，任何篡改/异源注入
 	// 的帧在解密时被丢弃（重放帧被重排窗口吸收或标签校验拦截）。
-	encAlgoGCM   = 2
+	// 密钥派生 sha256(psk+"_enc_key")，与 legacy CTR 共用同一 AES 密钥
+	// （历史原因，协商值 2 保留旧派生以保证与既有实现互通）。
+	encAlgoGCM = 2
+	// encAlgoGCMv2 协商式 GCM 密钥分离：算法语义与 2 完全一致，仅密钥改为
+	// 独立标签 sha256(psk+"_enc_key_gcm_v2") 派生，消除"同一 AES 密钥同时
+	// 充当 GCM 的 GHASH 子密钥与 legacy CTR 密钥流"的分层混用。必须走协商：
+	// 直接改 2 的派生会让"新服务端+旧客户端"在双方都声明支持 GCM 的情况下
+	// 静默黑洞（协商成功、标签全败）；改为新算法值后旧对端自动回退 CTR。
+	// 新客户端声明 3，新服务端按 3 用 v2 密钥、按 2 用旧密钥。
+	encAlgoGCMv2 = 3
 	gcmTagSize   = 16
 	gcmNonceSize = 12
 	encSaltSize  = 8
@@ -77,13 +86,30 @@ func newLegacyInnerCipher(psk string) *innerCipher {
 	return &innerCipher{algo: encAlgoLegacyCTR, block: block, baseIV: baseIV}
 }
 
-// newGCMInnerCipher 用会话盐构造 GCM 加密器。两个方向各用一个实例
-// （c2s 用 resp.enc_salt，s2c 用 resp.enc_salt2）。
+// gcmKeyLabel 各 GCM 算法值的密钥派生标签。算法 2 保留旧标签以兼容既有
+// 实现；算法 3 用独立标签实现 GCM/CTR 密钥分离。
+func gcmKeyLabel(algo int) string {
+	if algo == encAlgoGCMv2 {
+		return "_enc_key_gcm_v2"
+	}
+	return "_enc_key"
+}
+
+// newGCMInnerCipher 用会话盐构造 GCM 加密器（算法 2，旧密钥派生）。
+// 两个方向各用一个实例（c2s 用 resp.enc_salt，s2c 用 resp.enc_salt2）。
 func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
+	return newGCMInnerCipherAlgo(psk, salt, encAlgoGCM)
+}
+
+// newGCMInnerCipherAlgo 按协商出的算法值构造 GCM 加密器（2 或 3）
+func newGCMInnerCipherAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
+	if algo != encAlgoGCM && algo != encAlgoGCMv2 {
+		return nil, fmt.Errorf("unknown GCM algo %d", algo)
+	}
 	if len(salt) != encSaltSize {
 		return nil, fmt.Errorf("encryption salt must be %d bytes, got %d", encSaltSize, len(salt))
 	}
-	keyHash := sha256.Sum256([]byte(psk + "_enc_key"))
+	keyHash := sha256.Sum256([]byte(psk + gcmKeyLabel(algo)))
 	block, err := aes.NewCipher(keyHash[:])
 	if err != nil {
 		return nil, err
@@ -92,7 +118,7 @@ func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
 	if err != nil {
 		return nil, err
 	}
-	ic := &innerCipher{algo: encAlgoGCM, block: block, aead: aead}
+	ic := &innerCipher{algo: algo, block: block, aead: aead}
 	copy(ic.salt[:], salt)
 	return ic, nil
 }
@@ -123,10 +149,26 @@ func gcmAAD(wireLen, seq uint32) []byte {
 	return aad[:]
 }
 
-// clientEncAlgoSupport 客户端握手请求里声明的本端最高算法支持
-const clientEncAlgoSupport = encAlgoGCM
+// gcmNonceAAD 在调用方提供的 20 字节 scratch 上一次构造 nonce 与 AAD。
+// 热路径（每帧 Seal/Open）单独调用 gcmNonce/gcmAAD 会因接口调用逃逸产生
+// 两次小堆分配；合并成单块 scratch 后每帧至多一次 20B 分配。
+// 布局：buf[0:12] = nonce = seq(4BE) || salt(8B)；buf[12:20] = AAD = wireLen(4BE) || seq(4BE)。
+func (ic *innerCipher) gcmNonceAAD(seq uint32, wireLen uint32, buf *[gcmNonceSize + 8]byte) (nonce, aad []byte) {
+	binary.BigEndian.PutUint32(buf[0:4], seq)
+	copy(buf[4:12], ic.salt[:])
+	binary.BigEndian.PutUint32(buf[12:16], wireLen)
+	binary.BigEndian.PutUint32(buf[16:20], seq)
+	return buf[:gcmNonceSize], buf[gcmNonceSize:]
+}
 
-func (ic *innerCipher) isGCM() bool { return ic != nil && ic.algo == encAlgoGCM }
+// clientEncAlgoSupport 客户端握手请求里声明的本端最高算法支持。
+// 声明 v2(3)：新服务端按 3 协商 v2 密钥；旧服务端精确匹配 2 失败会回退
+// legacy CTR（安全降级，绝不静默黑洞）——两端都升级后 GCM 恢复。
+const clientEncAlgoSupport = encAlgoGCMv2
+
+func (ic *innerCipher) isGCM() bool {
+	return ic != nil && (ic.algo == encAlgoGCM || ic.algo == encAlgoGCMv2)
+}
 
 // ======================= 加密强度下限 =======================
 //
@@ -146,7 +188,7 @@ const (
 )
 
 func encAlgoRank(algo int) int {
-	if algo == encAlgoGCM {
+	if algo == encAlgoGCM || algo == encAlgoGCMv2 {
 		return encRankGCM
 	}
 	return encRankCTR
@@ -185,9 +227,11 @@ func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen
 		return ptLen
 	}
 	switch ic.algo {
-	case encAlgoGCM:
+	case encAlgoGCM, encAlgoGCMv2:
 		// 复用明文存储：dst = region[:0]，密文+标签原地覆盖
-		out := ic.aead.Seal(region[:0], ic.gcmNonce(seq), region[:ptLen], gcmAAD(wireLen, seq))
+		var scratch [gcmNonceSize + 8]byte
+		nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
+		out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
 		return len(out)
 	default:
 		xorCryptInPlace(region[:ptLen], seq, ic.block, ic.baseIV)
@@ -202,8 +246,10 @@ func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]b
 		return data, nil
 	}
 	switch ic.algo {
-	case encAlgoGCM:
-		return ic.aead.Open(data[:0], ic.gcmNonce(seq), data, gcmAAD(wireLen, seq))
+	case encAlgoGCM, encAlgoGCMv2:
+		var scratch [gcmNonceSize + 8]byte
+		nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
+		return ic.aead.Open(data[:0], nonce, data, aad)
 	default:
 		xorCryptInPlace(data, seq, ic.block, ic.baseIV)
 		return data, nil

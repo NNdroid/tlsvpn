@@ -742,6 +742,10 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(lost))
 			emit("tlsvpn_fec_parity_frames_total", "Parity frames generated", "counter", fmt.Sprint(parity))
 			emit("tlsvpn_tap_write_errors_total", "Frames dropped on TAP write failure", "counter", fmt.Sprint(srv.tapWriteErrs.Load()))
+			if srv.vswitch != nil {
+				emit("tlsvpn_spoofed_src_dropped_frames_total", "Frames dropped claiming another session's source MAC", "counter", fmt.Sprint(srv.vswitch.spoofDrops.Load()))
+				emit("tlsvpn_broadcast_dropped_frames_total", "Broadcast frames dropped over the per-port flood budget", "counter", fmt.Sprint(srv.vswitch.floodDrops.Load()))
+			}
 			srv.mu.RLock()
 			banned := len(srv.banned)
 			pskBuckets := len(srv.pskFail)

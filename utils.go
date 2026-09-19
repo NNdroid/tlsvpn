@@ -6,6 +6,8 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -15,6 +17,62 @@ import (
 // 避免每帧在 []byte 与 string 之间做转换拷贝。
 func fmtMAC(mac macKey) string {
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5])
+}
+
+// parseMACKey 解析 "aa:bb:cc:dd:ee:ff"（大小写不敏感）为定长 MAC。
+// 解析失败返回 false，调用方按无 MAC 处理。
+func parseMACKey(s string) (macKey, bool) {
+	var m macKey
+	parts := strings.Split(s, ":")
+	if len(parts) != 6 {
+		return m, false
+	}
+	for i, p := range parts {
+		if len(p) != 2 {
+			return m, false
+		}
+		b, err := strconv.ParseUint(p, 16, 8)
+		if err != nil {
+			return m, false
+		}
+		m[i] = byte(b)
+	}
+	return m, true
+}
+
+// isValidClientID 校验 clientID 为标准 UUID 形态（8-4-4-4-12，hex + 连字符）。
+// clientID 由请求方自报并大量进入日志：不校验格式的话，换行注入可以伪造
+// 日志行（日志聚合/告警按行解析时被注入伪事件）。
+func isValidClientID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i, c := range id {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !isHexDigit(byte(c)) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isValidMACString 校验自报 MAC 的形态（允许为空 = 客户端未上报）。
+func isValidMACString(s string) bool {
+	if s == "" {
+		return true
+	}
+	_, ok := parseMACKey(s)
+	return ok
+}
+
+func isHexDigit(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 // hashPSK 将明文 PSK 转换为 SHA256 防止明文传输

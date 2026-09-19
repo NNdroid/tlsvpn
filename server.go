@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -44,6 +45,10 @@ type macEntry struct {
 
 const ShardCount = 16
 
+// tapPortID 本机 TAP 在交换机上的端口名（网关侧，可信：豁免源 MAC 校验
+// 与广播限速）
+const tapPortID = "TAP_LOCAL"
+
 type VSwitchShard struct {
 	mu       sync.RWMutex
 	macTable map[macKey]*macEntry
@@ -52,10 +57,39 @@ type VSwitch struct {
 	portsMu sync.RWMutex
 	ports   map[string]Port
 	shards  [ShardCount]*VSwitchShard
+
+	// validateMAC 源 MAC 归属校验（可 nil = 不过滤）。共享 PSK 的多客户端
+	// 场景下，恶意客户端可以声明他人的 srcMAC 把受害者的 MAC 表项学习到
+	// 自己的端口，劫持其下行单播流量。校验函数由服务端注入：会话端口只允许
+	// 声明本会话注册的 MAC，可信端口（本机 TAP）豁免。
+	validateMAC func(srcPortID string, mac macKey) bool
+	trustedPort string // 豁免源 MAC 校验与广播限速的端口（本机 TAP）
+	spoofDrops  atomic.Uint64
+
+	// 广播/未知单播洪泛的每端口令牌桶：恶意客户端可以线速广播，洪泛会被
+	// 复制到所有端口放大 N 倍。合法 ARP/mDNS 远低于该预算；超预算的广播帧
+	// 直接丢弃（单播不受影响）。
+	floodMu         sync.Mutex
+	floodBudgets    map[string]*floodBudget
+	floodBurst      float64 // 桶容量（突发预算）
+	floodRatePerSec float64 // 每秒补充令牌数
+	floodDrops      atomic.Uint64
+}
+
+type floodBudget struct {
+	tokens float64
+	last   time.Time
 }
 
 func NewVSwitch() *VSwitch {
-	vs := &VSwitch{ports: make(map[string]Port)}
+	vs := &VSwitch{
+		ports:        make(map[string]Port),
+		floodBudgets: make(map[string]*floodBudget),
+		// 默认预算覆盖 ~180 Mbps 的纯洪泛流量（1400B 帧）且从不误伤学习后
+		// 的单播；线速广播攻击（10万+ fps）仍被削掉 90% 以上。
+		floodBurst:      8192,
+		floodRatePerSec: 16384,
+	}
 	for i := 0; i < ShardCount; i++ {
 		vs.shards[i] = &VSwitchShard{macTable: make(map[macKey]*macEntry)}
 	}
@@ -100,6 +134,11 @@ func (vs *VSwitch) RemovePort(portID string) {
 	delete(vs.ports, portID)
 	vs.portsMu.Unlock()
 
+	// 回收广播预算槽位，防长期运行下 map 无限增长
+	vs.floodMu.Lock()
+	delete(vs.floodBudgets, portID)
+	vs.floodMu.Unlock()
+
 	// 清理分片表里的 MAC
 	for i := 0; i < ShardCount; i++ {
 		shard := vs.shards[i]
@@ -130,6 +169,12 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	srcShard.mu.RUnlock()
 
 	if needUpdate {
+		// 源 MAC 归属校验：端口只能声明自己会话注册的 MAC。冒充帧整帧丢弃
+		// （既不学习也不转发——转发等于允许攻击者以受害者身份注入流量）。
+		if vs.validateMAC != nil && !vs.validateMAC(srcPortID, srcMAC) {
+			vs.spoofDrops.Add(1)
+			return
+		}
 		srcShard.mu.Lock()
 		srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
 		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
@@ -161,6 +206,12 @@ func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
 	}
 }
 func (vs *VSwitch) flood(excludePortID string, frame []byte) {
+	// 每源端口广播预算：超预算直接整帧丢弃。可信端口（本机 TAP）豁免——
+	// 网关自己发起的广播不受限。
+	if excludePortID != vs.trustedPort && !vs.allowFlood(excludePortID) {
+		vs.floodDrops.Add(1)
+		return
+	}
 	vs.portsMu.RLock()
 	var targets []Port
 	for id, port := range vs.ports {
@@ -174,6 +225,28 @@ func (vs *VSwitch) flood(excludePortID string, frame []byte) {
 	}
 }
 
+// allowFlood 消耗一个广播令牌；令牌按时间线性回充，容量 floodBurst。
+// 首次为端口建桶时即消耗一枚（桶满意味着"从此刻起还有 burst 枚预算"）。
+func (vs *VSwitch) allowFlood(srcPortID string) bool {
+	vs.floodMu.Lock()
+	defer vs.floodMu.Unlock()
+	now := time.Now()
+	b := vs.floodBudgets[srcPortID]
+	if b == nil {
+		vs.floodBudgets[srcPortID] = &floodBudget{tokens: vs.floodBurst - 1, last: now}
+		return true
+	}
+	if elapsed := now.Sub(b.last).Seconds(); elapsed > 0 {
+		b.tokens = min(vs.floodBurst, b.tokens+elapsed*vs.floodRatePerSec)
+		b.last = now
+	}
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 // ======================= 服务端 =======================
 type ClientSession struct {
 	SessionID   string
@@ -181,6 +254,7 @@ type ClientSession struct {
 	IPv4        string
 	IPv6        string
 	MAC         string
+	macBin      macKey // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
 	RxReorder   *ReorderBuffer
 	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
@@ -243,12 +317,15 @@ type Server struct {
 	icLegacy  *innerCipher
 	startedAt time.Time
 
+	// minEnc 内层加密强度下限（encAlgoRank 值，0=不限）
+	minEnc int
+	// maxSessions 并发会话数上限（0=不限）。v6 地址池在 /64 下实际不会枯竭，
+	// 无上限的会话创建等于把 OOM 做成持密者可远程触发的功能。
+	maxSessions int
 	// sessionToken 开启后，重连既有会话必须回带握手响应下发的会话令牌。
 	// 令牌只在原会话自己的 TLS 会话内下发一次，因此持密者知道 PSK+MAC
 	// 仍无法冒充一个在线会话（否则其隧道流量会被转发给自己）。
 	sessionToken bool
-	// minEnc 内层加密强度下限（encAlgoRank 值，0=不限）
-	minEnc int
 
 	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
 	bannedMu sync.Mutex
@@ -470,6 +547,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	s.brutal, s.brutalUp, s.brutalDown = cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown
 	s.sessionToken = cfg.Server.SessionToken
 	s.minEnc = minEncRank(cfg.MinEnc)
+	s.maxSessions = cfg.Server.MaxSessions
 	s.mu.Unlock()
 
 	// 填充策略是全局原子量，作用于本进程的全部发送路径
@@ -525,8 +603,13 @@ func startServer(ctx context.Context, cfg *Config) {
 		banned:       make(map[string]int64),
 		pskFail:      make(map[string]*pskFailBucket),
 		sessionToken: cfg.Server.SessionToken, minEnc: minEncRank(cfg.MinEnc),
+		maxSessions: cfg.Server.MaxSessions,
 	}
 	srv.cfg.Store(cfg)
+	// 交换机安全策略：会话端口只能声明本会话注册的 MAC（防跨客户端 MAC
+	// 冒充劫持下行流量）；本机 TAP 端口可信，豁免校验与广播限速。
+	srv.vswitch.validateMAC = srv.validateSrcMAC
+	srv.vswitch.trustedPort = tapPortID
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
 	srv.usedV4[srv.v4Gw], srv.usedV6[srv.v6Gw] = true, true
 	if cfg.Encrypt {
@@ -565,7 +648,6 @@ func startServer(ctx context.Context, cfg *Config) {
 		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
 	}
 
-	tapPortID := "TAP_LOCAL"
 	tapBackend := make(chan []VPNFrame, 32)
 	tapPort := NewAsyncPort(ctx, tapPortID, false)
 	tapPort.RegisterBackend(tapBackend, new(uint32))
@@ -690,6 +772,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	defer conn.Close()
 
 	scanner := NewFrameScanner(conn)
+	// 首帧是握手 JSON（<2KB）：认证前用小上限，防 10 字节帧头声明 131070
+	// 长度把扫描缓冲扩到 131KB/连接的内存放大
+	scanner.SetMaxDataLen(maxHandshakeDataLen)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reqData, _, err := scanner.ReadFrame()
 	conn.SetReadDeadline(time.Time{})
@@ -718,7 +803,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	sessionToken := s.sessionToken
 	s.mu.RUnlock()
 
-	if req.PSK != pskHash {
+	// 常量时间比较：Go 字符串 == 逐字节短路，响应时延会泄露匹配前缀长度。
+	// pskHash 本身就是握手凭据（线上传 hash 不传 PSK），非恒定时间比较等于
+	// 给攻击者一个逐字节重建 pskHash 的远程时序预言机，限流与焦油坑挡不住
+	// 换源 IP 的分布式采样。
+	if !hmac.Equal([]byte(req.PSK), []byte(pskHash)) {
 		// 限流：超限后直接断链而不是进焦油坑——焦油坑会让 goroutine
 		// 挂到读超时，无限触发等于给攻击者一个零成本内存放大器。
 		if s.pskFailExceeded(tcpConn.RemoteAddr().String()) {
@@ -746,6 +835,17 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Warnf("拒绝连接: 缺少 ClientID")
 		return
 	}
+	// 格式校验：clientID/MAC 会大量进入日志与面板，畸形值既可能是坏客户端，
+	// 也可能被用于换行注入伪造日志行。直接断链，刻意不走焦油坑——这不是探测，
+	// 无需伪装成服务故障。
+	if !isValidClientID(clientID) {
+		log.Warnf("拒绝连接: ClientID 格式非法（须为 UUID），长度 %d", len(clientID))
+		return
+	}
+	if !isValidMACString(req.MAC) {
+		log.Warnf("[%s] 拒绝连接: MAC 格式非法", clientID)
+		return
+	}
 	// 封禁检查：命中直接进焦油坑（与 PSK 错误同等对待，不泄露 ban 状态）
 	if s.IsBanned(clientID) {
 		log.Warnf("[%s] 已封禁，拒绝接入", clientID)
@@ -761,7 +861,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	session, exists := s.activeClients[clientID]
 	if exists {
-		if req.MAC != session.MAC {
+		if !hmac.Equal([]byte(req.MAC), []byte(session.MAC)) {
 			log.Warnf("[%s] 拒绝连接: MAC 不匹配", clientID)
 			s.mu.Unlock()
 			camouflageProbe(conn)
@@ -799,7 +899,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 		log.Infof("[%s] 🔗 已有会话增加新物理连接 (当前连接数: %d)", clientID, session.ActiveConns)
 	} else {
+		// 会话数与地址池双上限：达到任一即按认证失败处理（焦油坑），
+		// 不向攻击者泄露服务端内部状态。
+		if s.maxSessions > 0 && len(s.activeClients) >= s.maxSessions {
+			s.mu.Unlock()
+			log.Warnf("拒绝连接: 会话数已达上限 %d", s.maxSessions)
+			camouflageProbe(conn)
+			return
+		}
 		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
+		if v4ip == "" {
+			s.mu.Unlock()
+			log.Warnf("拒绝连接: IPv4 地址池已耗尽 (%s)", s.v4Net.String())
+			camouflageProbe(conn)
+			return
+		}
 		// FEC 模式协商：req.FecGroup>=2 表示客户端请求 XOR 奇偶校验模式
 		// （服务端对下行也用同参数编码）；否则维持传统逐帧复制模式。
 		fecEncK := 0
@@ -809,17 +923,23 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 内层加密协商：双方均声明 GCM 支持时启用。会话盐每次建会话随机
 		// 生成（c2s/s2c 各一个），服务端重启或会话重建即换盐，密钥流不再
 		// 跨会话重用；旧客户端 enc_algo=0 → 维持 legacy CTR。
+		// 算法 3（GCM-v2）优先于 2（GCM-v1）：v2 用独立密钥标签实现 GCM/CTR
+		// 密钥分离；仅声明 2 的旧客户端继续用旧派生，互通不受影响。
 		saltA, saltB := newRandomSalt(), newRandomSalt()
 		encAlgo := encAlgoLegacyCTR
-		if encrypt && encAlgoSupported(req.EncAlgo, encAlgoGCM) {
-			encAlgo = encAlgoGCM
+		if encrypt {
+			if encAlgoSupported(req.EncAlgo, encAlgoGCMv2) {
+				encAlgo = encAlgoGCMv2
+			} else if encAlgoSupported(req.EncAlgo, encAlgoGCM) {
+				encAlgo = encAlgoGCM
+			}
 		}
 		// 各方向加密器：legacy 模式各方向共用回退实例；加密关闭时为 nil
 		var icTx, icRx *innerCipher
 		if encrypt {
-			if encAlgo == encAlgoGCM {
-				icTx, _ = newGCMInnerCipher(psk, saltB[:]) // s2c
-				icRx, _ = newGCMInnerCipher(psk, saltA[:]) // c2s
+			if encAlgo == encAlgoGCM || encAlgo == encAlgoGCMv2 {
+				icTx, _ = newGCMInnerCipherAlgo(psk, saltB[:], encAlgo) // s2c
+				icRx, _ = newGCMInnerCipherAlgo(psk, saltA[:], encAlgo) // c2s
 			} else {
 				icTx, icRx = s.icLegacy, s.icLegacy
 			}
@@ -841,6 +961,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			EncAlgo: encAlgo, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
 			conns: make(map[*connInfo]struct{}),
 		}
+		// 解析失败则保持零值；归属校验对 MAC 为空的会话放行（见 validateSrcMAC）
+		session.macBin, _ = parseMACKey(req.MAC)
 		session.icTx = icTx
 		session.icRx = icRx
 		// 初始化服务端重排缓冲区，理顺后交由交换机转发
@@ -893,7 +1015,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
 	// 旧客户端忽略未知字段，互操作不受影响。
 	encSalt, encSalt2 := "", ""
-	if encAlgo == encAlgoGCM {
+	if encAlgo == encAlgoGCM || encAlgo == encAlgoGCMv2 {
 		encSalt = hex.EncodeToString(session.SaltA[:])  // c2s
 		encSalt2 = hex.EncodeToString(session.SaltB[:]) // s2c
 	}
@@ -981,6 +1103,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 	}()
 
+	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
+	scanner.SetMaxDataLen(maxWireDataLen)
 	for {
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		frame, seq, err := scanner.ReadFrame()
@@ -1044,6 +1168,25 @@ func (s *Server) macToIPCleanLocked(mac, ip string) {
 		// 仅当绑定仍指向本会话地址时清除（期间 MAC 可能已重新绑定）
 		delete(s.macToIP, mac)
 	}
+}
+
+// validateSrcMAC VSwitch 源 MAC 归属校验回调：会话端口只允许声明本会话
+// 注册的 MAC，防止持密者声明他人 MAC 劫持其下行单播流量（学习表翻转攻击）。
+// 本机 TAP 端口在 ProcessFrame 处已豁免，不会走到这里。
+// MAC 为空的会话（旧客户端未上报）无法核对，放行保持兼容。
+func (s *Server) validateSrcMAC(srcPortID string, mac macKey) bool {
+	s.mu.RLock()
+	session, ok := s.activeClients[srcPortID]
+	var registered macKey
+	hasMAC := false
+	if ok {
+		registered, hasMAC = session.macBin, session.macBin != (macKey{})
+	}
+	s.mu.RUnlock()
+	if !ok || !hasMAC {
+		return true
+	}
+	return registered == mac
 }
 
 func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {

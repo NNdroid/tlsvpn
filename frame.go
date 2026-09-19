@@ -286,19 +286,36 @@ func generatePadding(min, max int) string {
 }
 
 // ======================= 流式帧扫描器 (读取 10 字节头) =======================
+
+const (
+	// maxWireDataLen 数据帧线路负载上限（帧头 4B 长度字段的合法性边界）
+	maxWireDataLen = 65535 * 2
+	// maxHandshakeDataLen 认证前首帧上限。合法握手 JSON < 2KB；不设限的话
+	// 攻击者用 10 字节帧头声明 131070 长度即可把扫描缓冲扩到 131KB/连接，
+	// 预认证并发连接无上限，构成内存放大。
+	maxHandshakeDataLen = 16 * 1024
+)
+
 type FrameScanner struct {
 	r      io.Reader
 	buf    []byte
 	offset int
+	// maxDataLen 当前允许的帧负载上限：认证前的握手帧用小上限，认证通过后
+	// 恢复线路全量上限（见 SetMaxDataLen）。
+	maxDataLen int
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
-	return &FrameScanner{r: r, buf: make([]byte, 0, 70*1024)}
+	// 初始缓冲 16KB 覆盖典型 MTU 帧的聚合；大帧按需翻倍增长。旧值 70KB 对
+	// 1.5KB 帧是 45 倍冗余，多连接下白占内存并放大 GC 扫描。
+	return &FrameScanner{r: r, buf: make([]byte, 0, maxHandshakeDataLen), maxDataLen: maxWireDataLen}
 }
+
+// SetMaxDataLen 调整帧负载上限（认证前收紧、认证后放开的配对使用）
+func (fs *FrameScanner) SetMaxDataLen(n int) { fs.maxDataLen = n }
 
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 	const HeaderSize = 10
-	const MaxDataLength = 65535 * 2
 
 	for {
 		available := len(fs.buf) - fs.offset
@@ -309,7 +326,7 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 			seq := binary.BigEndian.Uint32(fs.buf[fs.offset+6 : fs.offset+10])
 			totalLen := dataLen + padLen
 
-			if dataLen > MaxDataLength {
+			if dataLen > fs.maxDataLen {
 				fs.buf = fs.buf[:0]
 				fs.offset = 0
 				return nil, 0, fmt.Errorf("invalid frame data length: %d", dataLen)

@@ -79,6 +79,62 @@ func TestGCMSealOpenRoundtrip(t *testing.T) {
 	}
 }
 
+// TestGCMV2RoundTripAndKeySeparation 锁定 GCM-v2（算法 3）的语义：
+// 与 v1 线路格式一致，但密钥派生独立——v1 密文不得被 v2 密钥打开。
+func TestGCMV2RoundTripAndKeySeparation(t *testing.T) {
+	salt := randomSalt()
+	tx, err := newGCMInnerCipherAlgo("v2_psk", salt, encAlgoGCMv2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tx.isGCM() {
+		t.Fatal("v2 加密器必须被 isGCM 识别（FEC 标签/AAD 依赖此判定）")
+	}
+	rx, _ := newGCMInnerCipherAlgo("v2_psk", salt, encAlgoGCMv2)
+	pt := bytes.Repeat([]byte{0xCD}, 300)
+	region := make([]byte, len(pt)+gcmTagSize)
+	copy(region, pt)
+	if written := tx.sealInPlace(region, len(pt), 42, uint32(len(pt)+gcmTagSize)); written != len(pt)+gcmTagSize {
+		t.Fatalf("v2 seal 写入 %d 字节, 预期 %d", written, len(pt)+gcmTagSize)
+	}
+	plain, err := rx.openInPlace(region, 42, uint32(len(pt)+gcmTagSize))
+	if err != nil || !bytes.Equal(plain, pt) {
+		t.Fatalf("v2 往返失败: %v", err)
+	}
+
+	// 密钥分离：v1 密文不得被 v2 密钥打开（反之亦然）。
+	// 这是把密钥分离做成分离协商值的全部意义。
+	tx1, _ := newGCMInnerCipher("sep_psk", salt)
+	rx2, _ := newGCMInnerCipherAlgo("sep_psk", salt, encAlgoGCMv2)
+	region1 := make([]byte, len(pt)+gcmTagSize)
+	copy(region1, pt)
+	tx1.sealInPlace(region1, len(pt), 7, uint32(len(pt)+gcmTagSize))
+	if _, err := rx2.openInPlace(region1, 7, uint32(len(pt)+gcmTagSize)); err == nil {
+		t.Fatal("v1 密文不得被 v2 密钥打开（密钥分离失效）")
+	}
+	tx2, _ := newGCMInnerCipherAlgo("sep_psk2", salt, encAlgoGCMv2)
+	rx1, _ := newGCMInnerCipher("sep_psk2", salt)
+	region2 := make([]byte, len(pt)+gcmTagSize)
+	copy(region2, pt)
+	tx2.sealInPlace(region2, len(pt), 8, uint32(len(pt)+gcmTagSize))
+	if _, err := rx1.openInPlace(region2, 8, uint32(len(pt)+gcmTagSize)); err == nil {
+		t.Fatal("v2 密文不得被 v1 密钥打开（密钥分离失效）")
+	}
+
+	// 未知算法值拒绝构造
+	if _, err := newGCMInnerCipherAlgo("x", salt, 99); err == nil {
+		t.Fatal("未知 GCM 算法值应拒绝构造")
+	}
+	// v2 与 v1 同强度档：min_enc=gcm 必须同时接受 2 与 3
+	if encAlgoRank(encAlgoGCMv2) != encRankGCM {
+		t.Fatal("GCM-v2 必须落在 GCM 强度档")
+	}
+	// 派生标签必须真正不同
+	if gcmKeyLabel(encAlgoGCM) == gcmKeyLabel(encAlgoGCMv2) {
+		t.Fatal("v1/v2 的密钥派生标签必须不同")
+	}
+}
+
 func TestGCMRejectsTampering(t *testing.T) {
 	salt := randomSalt()
 	tx, _ := newGCMInnerCipher("tamper_psk", salt)
