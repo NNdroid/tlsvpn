@@ -24,6 +24,11 @@ jobs:
           go-version: 'stable'   # go.mod 声明 go 1.26；stable 避免隐式 toolchain 下载
 
       - name: Run Build Script
+        env:
+          # 發布產物只保留帶平台名的 tlsvpn_<os>_<arch>：關閉宿主平台的固定名
+          # 副本 bin/tlsvpn。runner 是 linux/amd64，而矩陣裡正好有這個目標，
+          # 多出的無平台名副本上傳後會變成 release 裡的重複檔案。
+          HOST_ALIAS: "0"
         run: |
           chmod +x scripts/build.sh
           ./scripts/build.sh

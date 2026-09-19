@@ -3,7 +3,7 @@
 #
 # 用法：
 #   ./scripts/build.sh                 # 交叉编译 Linux 矩阵（发布用，默认）
-#   ./scripts/build.sh host            # 仅编译当前宿主平台（本机开发 / 本地 e2e）
+#   ./scripts/build.sh host            # 仅编译当前宿主平台（本机开发）
 #   ./scripts/build.sh linux/arm64     # 指定单个 GOOS/GOARCH
 #   ./scripts/build.sh host linux/amd64 linux/arm64   # 混合指定
 #
@@ -11,6 +11,9 @@
 #   VERSION=1.2.3   覆盖注入到 main.appVersion 的版本号
 #                   （默认：git describe --tags → 时间戳）
 #   JOBS=N          并行编译度（默认取 CPU 核数）
+#   HOST_ALIAS=0    不生成宿主平台的固定名副本 bin/tlsvpn[.exe]。发布 workflow
+#                   需要设为 0：runner 是 linux/amd64，而矩阵里正好有这个目标，
+#                   多出的无平台名副本上传后会成为 release 里的重复件。
 #
 # 说明：本项目依赖 Linux 的 TAP 与 netlink，非 Linux 平台的编译仅用于代码
 # 检查 / 本地 e2e（-tap mem），无法实际建隧道。
@@ -23,6 +26,7 @@ APP_NAME="tlsvpn"
 OUTPUT_DIR="bin"
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || date +%Y%m%d_%H%M%S)}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
+HOST_ALIAS="${HOST_ALIAS:-1}"
 
 # 默认目标：Linux 发布矩阵
 LINUX_MATRIX=(
@@ -58,7 +62,8 @@ echo "Building $APP_NAME (version $VERSION, jobs $JOBS) for: ${TARGETS[*]}"
 # 单个平台构建：输出到 bin/，失败退出码非零。
 # CGO_ENABLED=0 静态无依赖；-trimpath 可复现；-X 注入版本；-s -w 压缩。
 # go build 对显式 -o 使用精确文件名（不会自动补 .exe），故 windows 目标
-# 由我们显式加 .exe。宿主平台额外复制一份固定名 bin/tlsvpn[.exe] 供本地 e2e。
+# 由我们显式加 .exe。宿主平台额外复制一份固定名 bin/tlsvpn[.exe] 方便本机
+# 直接运行（HOST_ALIAS=0 关闭，发布 workflow 就是靠这个避免多出无平台名副本）。
 build_one() {
     local platform="$1"
     local goos="${platform%%/*}"
@@ -71,7 +76,8 @@ build_one() {
     CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
         -ldflags "-s -w -X main.appVersion=$VERSION" -trimpath \
         -o "$built" .
-    if [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
+    if [ "$HOST_ALIAS" = "1" ] \
+        && [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
         cp "$built" "$OUTPUT_DIR/${APP_NAME}${goext}"
     fi
     echo "  ok: $(basename "$built")"
