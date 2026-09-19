@@ -118,47 +118,11 @@ func currentLogLevelName() string {
 }
 
 func main() {
-	// 配置来源二选一：
-	//   1) -c config.json —— JSON 配置文件为唯一来源（推荐，便于 review）
-	//   2) 命令行标志     —— 兼容旧用法
-	mode := flag.String("mode", "", "server or client")
-	psk := flag.String("psk", "quic_secret", "Pre-shared key")
-	tapName := flag.String("tap", "tap0", "Name of the TAP device")
-	macAddr := flag.String("mac", "", "Specify MAC address for TAP device (Client/Server)")
-	addr := flag.String("addr", "0.0.0.0:4000", "Server: listen address | Client: target addresses (comma-separated)")
-	logLevel := flag.String("loglevel", "info", "Log level (e.g. info, debug)")
-
-	v4cidr := flag.String("v4cidr", "10.0.0.0/24", "IPv4 CIDR block (Server only)")
-	v6cidr := flag.String("v6cidr", "fd00::/64", "IPv6 CIDR block (Server only)")
-	certFile := flag.String("cert", "", "TLS Certificate file (Server only)")
-	keyFile := flag.String("key", "", "TLS Key file (Server only)")
-
-	reqV4 := flag.String("req-v4", "", "Requested IPv4 (Client only)")
-	reqV6 := flag.String("req-v6", "", "Requested IPv6 (Client only)")
-	sni := flag.String("sni", "www.cloudflare.com", "SNI for TLS (Client only)")
-	insecure := flag.Bool("insecure", false, "Skip TLS verify (Client only)")
-	certHash := flag.String("cert-sha256", "", "Verify server cert SHA256 (hex encoded) (Client only)")
-	fwmark := flag.Int("fwmark", 0, "Enable policy routing with specified fwmark (Client only)")
-
-	brutal := flag.Bool("brutal", false, "Enable TCP Brutal congestion control")
-	brutalUp := flag.Uint64("brutal-up", 100, "Brutal upload rate limit in Mbps")
-	brutalDown := flag.Uint64("brutal-down", 500, "Brutal download rate limit in Mbps")
-
-	conns := flag.Int("conns", 1, "Number of concurrent TCP connections for Load Balancing")
-	fec := flag.Bool("fec", false, "Enable FEC over Multipath (XOR parity when the server supports it, else packet duplication)")
-	fecGroup := flag.Int("fec-group", 4, "XOR FEC group size K (2-64); parity overhead is 1/K")
-	webAddr := flag.String("web", "", "Optional: start the Web Dashboard on this address (e.g. :8080). Omit to disable")
-	webAuth := flag.String("web-auth", "", "Basic Auth for the Web Dashboard as user:pass (strongly recommended when -web binds a public address)")
-	webCert := flag.String("web-cert", "", "Optional: TLS certificate for the Web Dashboard (HTTPS)")
-	webKey := flag.String("web-key", "", "Optional: TLS key for the Web Dashboard (HTTPS)")
-	encrypt := flag.Bool("encrypt", false, "Enable inner payload encryption (AES-256-GCM with per-session salts when the peer supports it)")
-	minEnc := flag.String("min-enc", "", "Minimum inner encryption strength: ctr | gcm (reject weaker negotiation)")
-	padMode := flag.String("pad-mode", "", "Confusion padding: legacy | bucket | off (default bucket)")
-	socks5 := flag.String("socks5", "", "Route ALL outbound sockets through a SOCKS5 proxy (Client only)")
-
-	configPath := flag.String("c", "", "Path to JSON config file (overrides all other flags)")
+	// 配置唯一来源是 JSON 文件：-c 指定路径，-print-config 输出可编辑模板。
+	// 旧的命令行参数面已整体移除——两套入口必然漂移，且面板 save_apply 写回
+	// 的也是同一份 JSON（字段参考见 README）。
+	configPath := flag.String("c", "", "Path to JSON config file (required)")
 	printConfig := flag.Bool("print-config", false, "Print an example JSON config and exit")
-
 	flag.Parse()
 
 	if *printConfig {
@@ -166,37 +130,22 @@ func main() {
 		return
 	}
 
-	// 组装配置：-c 优先，否则取命令行标志
-	var cfg *Config
-	if *configPath != "" {
-		loaded, err := loadConfigFile(*configPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		loaded.SourcePath = *configPath
-		cfg = loaded
-	} else {
-		cfg = &Config{
-			Mode: *mode, PSK: *psk, Tap: *tapName, Mac: *macAddr, Addr: *addr,
-			LogLevel: *logLevel, Encrypt: *encrypt, MinEnc: *minEnc,
-			PadMode: *padMode, Socks5: *socks5,
-			Brutal: *brutal, BrutalUp: *brutalUp, BrutalDown: *brutalDown,
-			Web:    WebConfig{Addr: *webAddr, Auth: *webAuth, Cert: *webCert, Key: *webKey},
-			Server: ServerConfig{V4CIDR: *v4cidr, V6CIDR: *v6cidr, Cert: *certFile, Key: *keyFile},
-			Client: ClientConfig{
-				ReqV4: *reqV4, ReqV6: *reqV6, SNI: *sni, Insecure: *insecure,
-				CertSHA256: *certHash, Fwmark: *fwmark, Conns: *conns,
-				FEC: *fec, FecGroup: *fecGroup,
-			},
-		}
+	if *configPath == "" {
+		fmt.Fprintln(os.Stderr, "tlsvpn: a JSON config file is required: tlsvpn -c config.json")
+		fmt.Fprintln(os.Stderr, "generate a template with: tlsvpn -print-config")
+		os.Exit(2)
 	}
 
+	loaded, err := loadConfigFile(*configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	loaded.SourcePath = *configPath
+	cfg := loaded
 	cfg.applyDefaults()
 	initLogger(cfg.LogLevel)
-	if *configPath != "" {
-		log.Infof("Loaded configuration from %s", *configPath)
-	}
+	log.Infof("Loaded configuration from %s", *configPath)
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
@@ -245,7 +194,7 @@ func main() {
 		}
 		startClient(ctx, cfg)
 	default:
-		fmt.Println("Usage: tlsvpn -c config.json   (or -mode server|client with flags; -print-config for a template)")
+		fmt.Fprintln(os.Stderr, "Usage: tlsvpn -c config.json   (-print-config for a template)")
 		os.Exit(1)
 	}
 

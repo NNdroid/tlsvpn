@@ -9,9 +9,11 @@
 #   E  go_srv  <- go_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #   F  go_srv  <- rs_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #
-# All groups use the in-memory TAP backend (-tap mem / --tap mem) so the test
-# runs on CI runners that cannot create a real TAP device (no CAP_NET_ADMIN).
-# The tunnel (TLS handshake, FEC, encryption) is exercised identically.
+# All groups use the in-memory TAP backend ("tap": "mem" / --tap mem) so the
+# test runs on CI runners that cannot create a real TAP device (no
+# CAP_NET_ADMIN). The tunnel (TLS handshake, FEC, encryption) is exercised
+# identically. The Go binary is launched with -c <generated config>; the Rust
+# binary keeps its command-line flags.
 #
 # Binaries come from GitHub releases in CI, or local build otherwise
 # (see scripts/lib_e2e.sh). Set E2E_USE_RELEASE=0 to force local build.
@@ -24,35 +26,32 @@ source "$SCRIPT_DIR/lib_e2e.sh"
 PASS=0
 FAIL=0
 
-# Emit the flag style for a given binary. Go uses single-dash flags
-# (-mode/-addr/-socks5); Rust uses long-only flags (--mode/--addr/--socks5).
-# We map a logical "verb" to the concrete flag string for the binary.
-#   $1 = binary path
-#   $2 = verb: mode|addr|socks5
-# Prints the flag prefix WITHOUT the value (caller appends " value").
-flag_for() {
-  local bin="$1" verb="$2"
-  # Match the tlsvpn_rs binary regardless of a platform suffix such as .exe
-  # (Windows local builds are named tlsvpn_rs.exe); anything else → Go flags.
-  case "$(basename "$bin")" in
-    tlsvpn_rs*) case "$verb" in mode) echo "--mode";; addr) echo "--addr";; socks5) echo "--socks5";; tap) echo "--tap";; cert) echo "--cert";; key) echo "--key";; esac ;;
-    *)          case "$verb" in mode) echo "-mode";;  addr) echo "-addr";;  socks5) echo "-socks5";; tap) echo "-tap";;  cert) echo "-cert";;  key) echo "-key";;  esac ;;
-  esac
+# Generate a Go-side JSON config. Only long-standing fields (present since the
+# original JSON config support) are written, so the same generator also works
+# against E2E_USE_RELEASE release binaries; newer fields keep their defaults.
+#   $1 = output path  $2 = mode  $3 = addr  $4 = socks5 (optional, client only)
+write_go_config() {
+  local out="$1" mode="$2" addr="$3" socks5="${4:-}"
+  local socks_line=""
+  [ -n "$socks5" ] && socks_line=",
+  \"socks5\": \"$socks5\""
+  cat >"$out" <<EOF
+{
+  "mode": "$mode",
+  "addr": "$addr",
+  "tap": "mem"$socks_line
+}
+EOF
 }
 
 # Start a server in background.
 #   $1 = binary path
 #   $2 = listen port
-#   $3 = extra args (optional)
+#   $3+ = extra args (optional, passed through to the Rust binary only)
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
+# The Go binary is config-file-only (flags were removed): launch with -c.
 start_server() {
   local bin="$1" port="$2"; shift 2
-  local mode_flag addr_flag tap_flag cert_flag key_flag
-  mode_flag="$(flag_for "$bin" mode)"
-  addr_flag="$(flag_for "$bin" addr)"
-  tap_flag="$(flag_for "$bin" tap)"
-  cert_flag="$(flag_for "$bin" cert)"
-  key_flag="$(flag_for "$bin" key)"
   # Provide a self-signed cert so the Rust server (which requires --cert/--key,
   # unlike Go which self-signs when omitted) can start. Generated once per env.
   if [ ! -f "$TEST_DIR/e2e_cert.pem" ]; then
@@ -60,8 +59,22 @@ start_server() {
       || { err "could not generate e2e TLS cert (openssl missing or failed)"; return 1; }
   fi
   local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
-  "$bin" "$@" "$mode_flag" server "$addr_flag" ":$port" "$tap_flag" mem \
-    "$cert_flag" "$TEST_DIR/e2e_cert.pem" "$key_flag" "$TEST_DIR/e2e_key.pem" >"$log" 2>&1 &
+  case "$(basename "$bin")" in
+    tlsvpn_rs*)
+      "$bin" "$@" --mode server --addr ":$port" --tap mem \
+        --cert "$TEST_DIR/e2e_cert.pem" --key "$TEST_DIR/e2e_key.pem" >"$log" 2>&1 &
+      ;;
+    *)
+      # -print-config doubles as a capability probe: release binaries that
+      # predate JSON config support fail here with an actionable message
+      # instead of a mysterious start failure.
+      "$bin" -print-config >/dev/null 2>&1 \
+        || { err "$bin lacks JSON config support; cut a newer release or set E2E_USE_RELEASE=0"; return 1; }
+      local cfg="$TEST_DIR/go_srv_$port.json"
+      write_go_config "$cfg" server ":$port"
+      "$bin" -c "$cfg" "$@" >"$log" 2>&1 &
+      ;;
+  esac
   local pid=$!
   echo "$pid" >"$TEST_DIR/srv_$port.pid"
   if wait_for_port 127.0.0.1 "$port" 20; then
@@ -87,15 +100,24 @@ stop_server() {
 # tunnel came up by checking the process stays alive and emits a startup/connected
 # marker, then leaves it running so the caller stops it with stop_client.
 #   $1 = binary  $2 = port (pid-file key)  $3 = server addr  rest = extra args
+#   (Go extras: "-socks5 <addr>" is folded into the config; Rust extras such as
+#   "--socks5 <addr>" pass through unchanged)
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
-  local mode_flag addr_flag tap_flag
-  mode_flag="$(flag_for "$bin" mode)"
-  addr_flag="$(flag_for "$bin" addr)"
-  tap_flag="$(flag_for "$bin" tap)"
   local log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
-  "$bin" "$@" "$mode_flag" client "$addr_flag" "$addr" "$tap_flag" mem >"$log" 2>&1 &
+  case "$(basename "$bin")" in
+    tlsvpn_rs*)
+      "$bin" "$@" --mode client --addr "$addr" --tap mem >"$log" 2>&1 &
+      ;;
+    *)
+      local socks=""
+      [ "${1:-}" = "-socks5" ] && socks="${2:-}"
+      local cfg="$TEST_DIR/go_cli_$port.json"
+      write_go_config "$cfg" client "$addr" "$socks"
+      "$bin" -c "$cfg" >"$log" 2>&1 &
+      ;;
+  esac
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
   local ok=0

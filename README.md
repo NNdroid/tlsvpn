@@ -53,7 +53,7 @@ The shipped `config.client.json` connects to two server addresses with 4 TCP lin
 
 ### 4. JSON Config File
 
-`-c config.json` makes the file the **single source of truth** — all other command-line flags are ignored. Unknown fields are rejected to catch typos; missing fields fall back to the same defaults documented below.
+`-c config.json` makes the file the **single source of truth** — it is the only configuration interface (the legacy command-line flags were removed). Unknown fields are rejected to catch typos; missing fields fall back to the same defaults documented below.
 
 ```bash
 # Ready-made examples ship in the repo root — copy, edit, run (see above)
@@ -84,7 +84,7 @@ The shipped `config.client.json` connects to two server addresses with 4 TCP lin
 
 ## 🛠️ Configuration Reference (JSON)
 
-Values and defaults are identical whether you use the config file or the legacy command-line flags (appendix at the bottom). Nested sections are omitted entirely in the examples for modes that don't use them.
+Values and defaults below apply to the config file. Nested sections are omitted entirely in the examples for modes that don't use them.
 
 ### 🟢 Global
 
@@ -162,23 +162,14 @@ Security: `web.auth` (Basic Auth), optional HTTPS via `web.cert`/`web.key`, and 
 
 ---
 
-## 📎 Appendix: Legacy Command-Line Flags
+## 📎 Configuration Interface
 
-All flags still work for quick one-liners; `-c config.json` overrides everything. Flag names map 1:1 to the JSON fields above (`-brutal-up` ↔ `brutal_up`, etc.).
+The JSON config file is the **only** configuration interface — the legacy command-line flags have been removed (they were a second surface guaranteed to drift from the panel's save & apply, which writes the same file).
 
 ```bash
-# Server one-liner
-sudo ./tlsvpn -mode server -psk "your_secret_key" -addr ":4000" -encrypt -brutal -web ":8080" -web-auth "admin:pass"
-
-# Client one-liner
-sudo ./tlsvpn -mode client -addr "1.1.1.1:4000,[::1]:4000" -psk "your_secret_key" \
-  -conns 4 -fec -encrypt -brutal -brutal-down 500
-
-# Shared flags: -psk -tap -mac -loglevel -encrypt -brutal -brutal-up -brutal-down -web -web-auth -web-cert -web-key
-# Server only : -v4cidr -v6cidr -cert -key
-# Client only : -conns -fec -fec-group -req-v4 -req-v6 -sni -insecure -cert-sha256 -fwmark -socks5
+tlsvpn -c config.json              # run with a config file (the only way to configure)
+tlsvpn -print-config > config.json # generate the full template, then edit it
+tlsvpn -h                          # the two flags above, nothing else
 ```
-
----
 
 *Disclaimer: This project is for educational and authorized network testing purposes only.*
