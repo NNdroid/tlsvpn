@@ -1,175 +1,108 @@
 # tlsvpn
 
-**tlsvpn** is a high-performance, high-stealth Layer 2 VPN tunnel written in Go. It transmits Ethernet frames over standard TCP TLS protocols and integrates multipath backup, FEC (Forward Error Correction), and TCP Brutal congestion control. It is purpose-built for extreme stability and connection acceleration in complex or restricted network environments.
+A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over standard TCP + TLS, with optional inner AES-256-GCM encryption, XOR FEC, multipath MinRTT load balancing and TCP Brutal — built for stability and throughput on lossy or restricted networks.
 
-## 🌟 Core Features
+## Features
 
-* **🛡️ Ultimate Camouflage**: Simulates standard HTTPS traffic with ALPN (h2/http1.1) support. When receiving non-VPN handshakes or invalid PSKs, it automatically falls back to a built-in Nginx camouflage page (Tarpan Tarpit).
-* **🔐 Hardened Inner Encryption (Optional)**: With `encrypt: true`, payloads are additionally encrypted **inside** the TLS tunnel using AES-256-GCM with per-session random salts (separate salt per direction, nonce = seq‖salt) — providing integrity protection and immunity to keystream replay across sessions/restarts. Older peers automatically fall back to the legacy AES-CTR mode.
-* **⚡ TCP Brutal Acceleration**: Integrates the TCP Brutal congestion control algorithm, forcefully maintaining preset bandwidth even in high packet-loss environments.
-* **🔗 Multipath Dynamic Load Balancing**: Supports parallel transmission across multiple TCP connections.
-    * **MinRTT Mode**: Automatically routes packets through the link with the lowest latency.
-    * **FEC Redundancy Mode (XOR Parity)**: Every K data frames are accompanied by one XOR parity frame (overhead ≈ 1/K). Data frames are striped across links while the parity frame is broadcast to all of them, so any single lost frame is transparently reconstructed at the receiver. Legacy packet-duplication mode remains available as an automatic fallback when the peer does not support XOR FEC.
-* **🌐 Multi-IP Link Backup**: Clients can connect to multiple server IPv4/IPv6 addresses simultaneously. It utilizes round-robin connection allocation for true physical path redundancy.
-* **📦 Layer 2 Tunneling (TAP)**: Built on TAP virtual network interfaces, fully supporting all Layer 2 protocols including ARP, DHCP, and IPv6, alongside static MAC/IP bindings.
-* **📊 Real-time Dashboard**: Built-in Web UI (optional) for real-time monitoring, log tailing, live log-level switching, client ban/kick management, and a Prometheus `/metrics` endpoint.
-* **⚙️ Automated Routing**: Integrated policy routing (`fwmark`) auto-configuration, offering native support for transparent proxying setups.
+- **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
+- **Inner encryption** — `encrypt: true` adds AES-256-GCM inside the tunnel: per-session per-direction salts, `nonce = seq‖salt`, AAD-bound integrity. Old peers fall back to legacy AES-CTR automatically; `min_enc` enforces a floor.
+- **XOR FEC** — one parity frame per K data frames (overhead ≈ 1/K) reconstructs any single lost frame; legacy duplication remains as the fallback.
+- **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
+- **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
+- **Layer-2 TAP** — ARP/DHCP/IPv6 all pass; static MAC/IP bindings; sharded MAC learning with anti-spoofing.
+- **Web dashboard + `/metrics`** — live monitoring, client ban/kick, in-panel config editor with hot-apply; Prometheus text endpoint.
 
----
+## Quick Start
 
-## 🚀 Quick Start
-
-### 1. Installation
-
-Ensure you have Go 1.21+ installed, along with the necessary Linux headers for compilation.
+Requires Go 1.26+ (build) and root + `/dev/net/tun` (run).
 
 ```bash
 git clone https://github.com/NNdroid/tlsvpn.git
-cd tlsvpn
-go build -o tlsvpn main.go
+cd tlsvpn && go build -o tlsvpn .        # or: bash scripts/build.sh
 ```
 
-### 2. Server
-
-Root privileges are required to create the TAP device. Copy the shipped example config, adjust `psk` (always!), and run:
+Server and client are configured **only** through a JSON file:
 
 ```bash
-cp config.server.json config.json
-# edit config.json: change psk, set web.auth, optionally set server.cert/key
+cp config.server.json config.json        # or config.client.json
+vi config.json                           # change psk (always!), addr, web.auth
 sudo ./tlsvpn -c config.json
 ```
 
-The shipped `config.server.json` enables inner encryption, TCP Brutal and the web dashboard on `:8080` — a good starting point.
-
-### 3. Client
-
 ```bash
-cp config.client.json config.json
-# edit config.json: change psk, set addr to your server, set client.cert_sha256
-sudo ./tlsvpn -c config.json
+tlsvpn -print-config > config.json       # generate the full template instead
+tlsvpn -h                                # shows only -c and -print-config
 ```
 
-The shipped `config.client.json` connects to two server addresses with 4 TCP links, XOR FEC (K=4) and Brutal — a good starting point for high availability.
+The command-line interface is exactly that: `-c` and `-print-config`. All tuning lives in the config file, which the dashboard's *Save & apply* edits in place — one source of truth, nothing to drift.
 
-### 4. JSON Config File
-
-`-c config.json` makes the file the **single source of truth** — it is the only configuration interface (the legacy command-line flags were removed). Unknown fields are rejected to catch typos; missing fields fall back to the same defaults documented below.
-
-```bash
-# Ready-made examples ship in the repo root — copy, edit, run (see above)
-
-# Or generate the full template from the binary itself
-./tlsvpn -print-config > config.json
-```
-
-`config.client.json` (shipped in the repo root):
+Minimal examples (full files ship in the repo root):
 
 ```json
-{
-  "mode": "client",
-  "psk": "change-me-please",
-  "addr": "203.0.113.10:4000,[2001:db8::10]:4000",
-  "encrypt": true,
-  "brutal": true, "brutal_up": 100, "brutal_down": 500,
-  "web": { "addr": ":8080", "auth": "admin:change-me" },
-  "client": { "conns": 4, "fec": true, "fec_group": 4 }
-}
+{"mode": "server", "psk": "change-me", "addr": ":4000", "encrypt": true}
+{"mode": "client", "psk": "change-me", "addr": "203.0.113.10:4000", "encrypt": true}
 ```
 
-`config.server.json` uses `"mode": "server"` with a `server` section (`v4_cidr`, `v6_cidr`, `cert`, `key`) instead of the `client` section. Full field-by-field reference below.
+## Configuration Reference
 
-> When the server starts without `cert`/`key`, it generates a self-signed certificate **and persists it to disk** (`tlsvpn-selfsigned-cert.pem` / `tlsvpn-selfsigned-key.pem`), logging the SHA-256 fingerprint. Restarting reuses the same certificate, so `client.cert_sha256` pinning survives server restarts.
+Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.session_token` and `server.max_sessions` are JSON-only — there are no CLI flags at all.
 
----
-
-## 🛠️ Configuration Reference (JSON)
-
-Values and defaults below apply to the config file. Nested sections are omitted entirely in the examples for modes that don't use them.
-
-### 🟢 Global
+### Top-level
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `mode` | (Required) | `server` or `client` |
-| `psk` | `quic_secret` ⚠️ | Pre-shared key. The default is refused loud with a warning — always set your own |
-| `addr` | server `0.0.0.0:4000` / client (Required) | **Server**: listen address. **Client**: target list, comma-separated for multi-IP round-robin (e.g. `1.2.3.4:4000,[2001:db8::1]:4000`) |
-| `tap` | `tap0` | TAP device name. Special value `"mem"` uses an in-memory backend (CI/e2e only) |
-| `mac` | (Empty) | Manually specify the TAP interface MAC address |
-| `log_level` | `info` | `debug` / `info` / `warn` / `error` (switchable live from the dashboard) |
-| `encrypt` | `false` | Inner AES-256-GCM payload encryption with per-session salts (legacy CTR fallback for old peers) |
-| `min_enc` | (Empty) | Minimum inner-cipher strength: `ctr` or `gcm`. Server rejects clients below the floor; client treats a weaker negotiation as handshake failure. Empty = no floor. Requires `encrypt: true` |
-| `pad_mode` | `bucket` | Obfuscation padding: `bucket` (pad small frames to fixed length buckets — ~2% overhead at MTU), `legacy` (old random padding, 6–9× on small frames), `off` (no padding) |
-| `brutal` | `false` | Enable TCP Brutal congestion control (requires the kernel `tcp_brutal` module) |
-| `brutal_up` | `100` | Upload rate limit in Mbps |
-| `brutal_down` | `500` | Download rate limit in Mbps |
-| `socks5` | (Empty) | Client: route ALL outbound sockets through a SOCKS5 proxy, e.g. `127.0.0.1:1080` or `user:pass@host:port` |
+| `psk` | (Warns) | Pre-shared key — the root of trust; change it |
+| `addr` | `:4000` / (Required) | Server: listen address. Client: comma-separated target list for multipath |
+| `tap` | `tap0` | TAP device name; `"mem"` = in-memory backend (CI/e2e) |
+| `mac` | (Empty) | Pin the TAP interface MAC |
+| `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
+| `encrypt` | `false` | Inner AES-256-GCM with per-session salts |
+| `min_enc` | (Empty) | Strength floor: `ctr`/`gcm` — weaker negotiations are refused (needs `encrypt`) |
+| `pad_mode` | `bucket` | Obfuscation padding: `bucket` (fixed length buckets, ~2% at MTU), `legacy` (random, 6–9× on small frames), `off` |
+| `socks5` | (Empty) | Client: route all outbound sockets through a SOCKS5 proxy |
+| `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |
 
-### 🌐 web (Optional — dashboard is off unless `web.addr` is set)
+### `web` (dashboard off unless `addr` is set)
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `addr` | (Empty) | Dashboard listen address (e.g. `:8080`). Empty = dashboard disabled. The port part is always used |
-| `bind` | `all` | `tunnel` = bind **only to the tunnel IPs** (server: pool gateway IPv4+IPv6; client: assigned IPs after first handshake) — the panel is then reachable exclusively from inside the VPN and occupies no host-side port; `all` = bind every interface (legacy) |
-| `auth` | (Empty) | Basic Auth as `user:pass`. Strongly recommended when binding a non-loopback address |
-| `cert` / `key` | (Empty) | Serve the dashboard over HTTPS (both must be provided together) |
+| `addr` | (Empty) | e.g. `:8080` |
+| `bind` | `all` | `tunnel` = bind only the tunnel IPs (panel reachable exclusively from inside the VPN) |
+| `auth` | (Empty) | Basic Auth `user:pass` — required outside loopback in practice |
+| `cert` / `key` | (Empty) | HTTPS for the dashboard (pair) |
 
-### 🔵 server (Server mode only)
-
-| Field | Default | Description |
-| --- | --- | --- |
-| `v4_cidr` | `10.0.0.0/24` | IPv4 address pool for clients |
-| `v6_cidr` | `fd00::/64` | IPv6 address pool for clients |
-| `cert` / `key` | (Empty) | Custom TLS certificate pair. Empty = generate & persist a self-signed cert |
-| `session_token` | `false` | Require a per-session token (delivered only inside the session's own TLS handshake) to re-attach to an existing session. Blocks session hijacking by other PSK holders. Opt-in: old clients cannot re-attach while it is on |
-| `max_sessions` | `1024` | Cap on concurrent client sessions. New handshakes are dropped (camouflaged as auth failures) once the cap is reached |
-
-### 🟡 client (Client mode only)
+### `server`
 
 | Field | Default | Description |
 | --- | --- | --- |
-| `conns` | `1` | Number of parallel TCP connections (multi-IP round-robin, MinRTT/FEC multipath) |
-| `fec` | `false` | Enable FEC over multipath (XOR parity when the server supports it, else packet duplication) |
-| `fec_group` | `4` | XOR FEC group size K (2–64); parity overhead is 1/K |
-| `sni` | `www.cloudflare.com` | SNI domain used during the TLS handshake for camouflage |
-| `insecure` | `false` | Skip server TLS certificate verification (prefer `cert_sha256` instead) |
-| `cert_sha256` | (Empty) | Pin the server certificate by SHA-256 fingerprint (hex; colon-separated tolerated). Survives server restarts thanks to certificate persistence |
-| `req_v4` / `req_v6` | (Empty) | Request a specific internal IPv4/IPv6 address |
-| `fwmark` | `0` | Enable policy routing with the given fwmark (transparent proxies / traffic splitting) |
+| `v4_cidr` / `v6_cidr` | `10.0.0.0/24` / `fd00::/64` | Address pools handed to clients |
+| `cert` / `key` | (Empty) | TLS pair; empty = self-signed, generated once and **persisted** so `cert_sha256` pinning survives restarts |
+| `session_token` | `false` | Opt-in: re-attaching a live session requires a token delivered only inside that session's own TLS handshake — other PSK holders cannot hijack it |
+| `max_sessions` | `1024` | Concurrent session cap; excess handshakes are tarpitted |
+
+### `client`
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `conns` | `1` | Parallel TCP connections |
+| `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64, overhead 1/K) |
+| `sni` | `www.cloudflare.com` | Camouflage SNI |
+| `insecure` | `false` | Skip TLS verification (prefer `cert_sha256`) |
+| `cert_sha256` | (Empty) | Pin the server certificate fingerprint |
+| `req_v4` / `req_v6` | (Empty) | Request specific tunnel IPs |
+| `fwmark` | `0` | Policy routing mark for transparent-proxy setups |
+
+## Dashboard & Metrics
+
+Set `web.addr` to enable: live throughput chart, FEC/loss/drop counters, per-connection details and the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), zh-CN/en UI. Prometheus metrics at `/metrics` (authenticated like the rest of the panel). Security: Basic Auth, optional HTTPS, CSRF header guard on control actions.
+
+## Notes
+
+1. **Brutal** needs the `tcp_brutal` kernel module; **TAP** needs root (or `CAP_NET_ADMIN`).
+2. **Certificate pinning**: the persisted self-signed cert logs its SHA-256 fingerprint at startup — pin it with `client.cert_sha256` (colon/case tolerant).
+3. **Interop**: protocol extensions (`fec_group`, `enc_algo`, `enc_salt*`, `session_token`) are additive and negotiated — mixed old/new versions interoperate in fallback mode. The Rust implementation ([tlsvpn-rs](https://github.com/NNdroid/tlsvpn-rs)) shares this wire protocol.
 
 ---
 
-## 📈 Web Dashboard (Optional)
-
-The dashboard is **off by default**. Enable it by setting `web.addr` (works for **both** server and client). Features include:
-
-* **Throughput Chart**: A live up/down sparkline covering the last 120 seconds.
-* **FEC & Loss Observability**: Parity frames sent, frames recovered by XOR FEC, frames confirmed lost, and queue-overflow drops.
-* **Connection Details**: Per-physical-connection table (client: target/remote/RTT/retries/last error; server: per-connection RTT via kernel TCP_INFO), plus the MAC learning table and IP-pool usage.
-* **Runtime Controls**: Live log-level switching, in-panel log tail (last 500 lines in memory, downloadable), forced reconnect (client), manual GC.
-* **In-Panel Config Editor**: View the live JSON config, edit it, **Save** (atomically writes back to the `-c` file) and **Save & apply** (hot-applies in-process without restarting the service — client-side params like psk/addr/conns/fec/sni/encrypt/brutal take effect on the next reconnect; fields that cannot be hot-applied are reported as `needs_restart`).
-* **Client Management**: Kick (closes physical TCP connections), ban with TTL or permanently (banned clients are routed to the tarpit), kick-all, unban — all effective immediately.
-* **i18n**: Chinese / English UI with browser-language auto-detection and a language switcher (persisted).
-* **Prometheus Metrics**: `/metrics` endpoint (text format) for Grafana/Alertmanager integration.
-
-Security: `web.auth` (Basic Auth), optional HTTPS via `web.cert`/`web.key`, and a CSRF header guard on all control actions.
-
-## ⚠️ Important Notes
-
-1. **Kernel Module**: If using Brutal mode, ensure the system kernel has the `tcp_brutal` congestion control module loaded.
-2. **Permissions**: `/dev/net/tun` access is required, typically root.
-3. **Certificate Pinning**: Without `cert`/`key`, the server generates a self-signed certificate and persists it to disk, logging its SHA-256 fingerprint. Pin it on clients via `client.cert_sha256`.
-4. **Rust Peer Sync**: Handshake fields `fec_group`, `enc_algo`, `enc_salt`, `enc_salt2` are additive; older peers interoperate in fallback mode.
-
----
-
-## 📎 Configuration Interface
-
-The JSON config file is the **only** configuration interface — the legacy command-line flags have been removed (they were a second surface guaranteed to drift from the panel's save & apply, which writes the same file).
-
-```bash
-tlsvpn -c config.json              # run with a config file (the only way to configure)
-tlsvpn -print-config > config.json # generate the full template, then edit it
-tlsvpn -h                          # the two flags above, nothing else
-```
-
-*Disclaimer: This project is for educational and authorized network testing purposes only.*
+*For educational and authorized network testing use only.*
