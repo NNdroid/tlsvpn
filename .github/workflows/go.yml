@@ -94,7 +94,6 @@ jobs:
   e2e:
     # Run e2e independently of the unit-test job so a pre-existing
     # linux-only/network test failure does not block the integration run.
+    # The Go side is built from this repo's checkout; the Rust side is cloned
+    # from its default branch and built as well.
     uses: ./.github/workflows/e2e.yml
-    with:
-      go_tag: "latest"
-      rs_tag: "latest"

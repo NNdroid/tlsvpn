@@ -10,8 +10,10 @@
 # Usage:
 #   E2E_GO_SRC=/path/to/tlsvpn E2E_RS_SRC=/path/to/tlsvpn-rs ./scripts/run_all_tests.sh
 #
-# In CI both E2E_*_SRC default to the checked-out workspace; e2e binary sourcing
-# defaults to GitHub releases (see lib_e2e.sh).
+# E2E_*_SRC only steer the Go unit/perf tests, protocol conformance and e2e
+# when a checkout is already present. A missing Rust checkout is NOT an error:
+# lib_e2e.sh clones the Rust repository from source and builds it, so the Rust
+# unit/conformance steps simply skip while e2e still runs the full matrix.
 #
 set -uo pipefail
 
@@ -21,7 +23,11 @@ GO_SRC="${E2E_GO_SRC:-$REPO_ROOT}"
 RS_SRC="${E2E_RS_SRC:-${REPO_ROOT}/../tlsvpn-rs}"
 
 export E2E_GO_SRC="$GO_SRC"
-export E2E_RS_SRC="$RS_SRC"
+# Only export E2E_RS_SRC when a checkout exists, so a missing sibling
+# tlsvpn-rs does not shadow lib_e2e.sh's source clone.
+if [[ -n "$RS_SRC" && -d "$RS_SRC" ]]; then
+  export E2E_RS_SRC="$RS_SRC"
+fi
 
 TOTAL=0
 FAILED=0

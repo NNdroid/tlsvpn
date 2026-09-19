@@ -9,14 +9,16 @@
 #   E  go_srv  <- go_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #   F  go_srv  <- rs_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #
-# All groups use the in-memory TAP backend ("tap": "mem" / --tap mem) so the
-# test runs on CI runners that cannot create a real TAP device (no
-# CAP_NET_ADMIN). The tunnel (TLS handshake, FEC, encryption) is exercised
-# identically. The Go binary is launched with -c <generated config>; the Rust
-# binary keeps its command-line flags.
+# All groups use the in-memory TAP backend ("tap": "mem") so the test runs on
+# CI runners that cannot create a real TAP device (no CAP_NET_ADMIN). The
+# tunnel (TLS handshake, FEC, encryption) is exercised identically. Both
+# binaries are launched the same way, with -c <generated config>; the two
+# implementations share one JSON schema.
 #
-# Binaries come from GitHub releases in CI, or local build otherwise
-# (see scripts/lib_e2e.sh). Set E2E_USE_RELEASE=0 to force local build.
+# Binaries are always built from source (see scripts/lib_e2e.sh): the two
+# repositories are checked out — this repo for Go, plus a clone of the Rust
+# implementation unless E2E_GO_SRC / E2E_RS_SRC point at local checkouts — and
+# each is compiled for the host before the control groups run.
 #
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,20 +28,30 @@ source "$SCRIPT_DIR/lib_e2e.sh"
 PASS=0
 FAIL=0
 
-# Generate a Go-side JSON config. Only long-standing fields (present since the
-# original JSON config support) are written, so the same generator also works
-# against E2E_USE_RELEASE release binaries; newer fields keep their defaults.
-#   $1 = output path  $2 = mode  $3 = addr  $4 = socks5 (optional, client only)
-write_go_config() {
-  local out="$1" mode="$2" addr="$3" socks5="${4:-}"
-  local socks_line=""
+# Generate a JSON config accepted by BOTH implementations. The two repos share
+# the same schema and both reject unknown fields, so one writer serves Go and
+# Rust: mode/addr/tap/socks5 are top-level, cert/key nest under "server". Only
+# long-standing fields are written, so the same generator also works against
+# older commits pinned via E2E_GO_REF; newer fields keep their defaults.
+#   $1 = output path  $2 = mode  $3 = addr
+#   $4 = socks5 (optional, client only)
+#   $5 = cert path  $6 = key path  (optional, server only — the Rust server
+#        has no self-sign fallback and aborts with an empty cert/key)
+write_config() {
+  local out="$1" mode="$2" addr="$3" socks5="${4:-}" cert="${5:-}" key="${6:-}"
+  local socks_line="" server_block=""
   [ -n "$socks5" ] && socks_line=",
   \"socks5\": \"$socks5\""
+  [ -n "$cert" ] && server_block=",
+  \"server\": {
+    \"cert\": \"$cert\",
+    \"key\": \"$key\"
+  }"
   cat >"$out" <<EOF
 {
   "mode": "$mode",
   "addr": "$addr",
-  "tap": "mem"$socks_line
+  "tap": "mem"$socks_line$server_block
 }
 EOF
 }
@@ -52,29 +64,21 @@ EOF
 # The Go binary is config-file-only (flags were removed): launch with -c.
 start_server() {
   local bin="$1" port="$2"; shift 2
-  # Provide a self-signed cert so the Rust server (which requires --cert/--key,
-  # unlike Go which self-signs when omitted) can start. Generated once per env.
+  # The Rust server has no self-sign fallback and aborts on an empty cert/key,
+  # so generate one pair per env and hand it to both implementations.
   if [ ! -f "$TEST_DIR/e2e_cert.pem" ]; then
     gen_e2e_cert "$TEST_DIR/e2e_key.pem" "$TEST_DIR/e2e_cert.pem" \
       || { err "could not generate e2e TLS cert (openssl missing or failed)"; return 1; }
   fi
   local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
-  case "$(basename "$bin")" in
-    tlsvpn_rs*)
-      "$bin" "$@" --mode server --addr ":$port" --tap mem \
-        --cert "$TEST_DIR/e2e_cert.pem" --key "$TEST_DIR/e2e_key.pem" >"$log" 2>&1 &
-      ;;
-    *)
-      # -print-config doubles as a capability probe: release binaries that
-      # predate JSON config support fail here with an actionable message
-      # instead of a mysterious start failure.
-      "$bin" -print-config >/dev/null 2>&1 \
-        || { err "$bin lacks JSON config support; cut a newer release or set E2E_USE_RELEASE=0"; return 1; }
-      local cfg="$TEST_DIR/go_srv_$port.json"
-      write_go_config "$cfg" server ":$port"
-      "$bin" -c "$cfg" "$@" >"$log" 2>&1 &
-      ;;
-  esac
+  local cfg="$TEST_DIR/srv_$(basename "$bin")_$port.json"
+  # The paths live inside file contents, which MSYS never translates, so they
+  # must be rendered in the form the child process understands.
+  local cert key
+  cert="$(json_path "$TEST_DIR/e2e_cert.pem")"
+  key="$(json_path "$TEST_DIR/e2e_key.pem")"
+  write_config "$cfg" server ":$port" "" "$cert" "$key"
+  "$bin" -c "$cfg" "$@" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/srv_$port.pid"
   if wait_for_port 127.0.0.1 "$port" 20; then
@@ -83,6 +87,7 @@ start_server() {
     err "server failed to start: $bin :$port"
     echo "----- $bin server log (port $port) -----"
     cat "$log"
+    echo "----- config used: $([ -f "$cfg" ] && cat "$cfg" || echo MISSING) -----"
     echo "----- cert present: $([ -f "$TEST_DIR/e2e_cert.pem" ] && echo yes || echo no) -----"
     kill "$pid" 2>/dev/null || true
     return 1
@@ -100,24 +105,19 @@ stop_server() {
 # tunnel came up by checking the process stays alive and emits a startup/connected
 # marker, then leaves it running so the caller stops it with stop_client.
 #   $1 = binary  $2 = port (pid-file key)  $3 = server addr  rest = extra args
-#   (Go extras: "-socks5 <addr>" is folded into the config; Rust extras such as
-#   "--socks5 <addr>" pass through unchanged)
+#   ("-socks5 <addr>" or "--socks5 <addr>" is folded into the config; both
+#   implementations read the same top-level "socks5" field)
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
   local log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
-  case "$(basename "$bin")" in
-    tlsvpn_rs*)
-      "$bin" "$@" --mode client --addr "$addr" --tap mem >"$log" 2>&1 &
-      ;;
-    *)
-      local socks=""
-      [ "${1:-}" = "-socks5" ] && socks="${2:-}"
-      local cfg="$TEST_DIR/go_cli_$port.json"
-      write_go_config "$cfg" client "$addr" "$socks"
-      "$bin" -c "$cfg" >"$log" 2>&1 &
-      ;;
-  esac
+  local socks=""
+  if [[ "${1:-}" == "-socks5" || "${1:-}" == "--socks5" ]]; then
+    socks="${2:-}"; shift 2
+  fi
+  local cfg="$TEST_DIR/cli_$(basename "$bin")_$port.json"
+  write_config "$cfg" client "$addr" "$socks"
+  "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
   local ok=0
@@ -190,26 +190,24 @@ run_group_E() {
 }
 
 # Group F: Rust client through SOCKS5 proxy -> Go server (client-only feature).
-# Rust --socks5 shipped in release v1.0.20260809 and later; this group runs in
-# both release and local-build modes (requires microsocks for the proxy).
+# Same "socks5" config field as group E, across languages (needs microsocks).
 run_group_F() {
   local port; port="$(ensure_socks5_proxy)" || { log "group F (rs-socks5): microsocks not installed — skipping"; return 0; }
   start_server "$BIN_GO" 18085 || { teardown_socks5_proxy; return 1; }
-  run_client "$BIN_RS" 18085 "127.0.0.1:18085" --socks5 "127.0.0.1:$port" || { stop_server 18085; teardown_socks5_proxy; return 1; }
+  run_client "$BIN_RS" 18085 "127.0.0.1:18085" -socks5 "127.0.0.1:$port" || { stop_server 18085; teardown_socks5_proxy; return 1; }
   stop_client 18085; stop_server 18085; teardown_socks5_proxy
 }
 
 # Group G: in-process performance suite (LibreSpeed/ping/traceroute equivalents
-# over the real tunnel pipeline with mem tap). Runs Go-side tests from the
-# checked-out source; requires a Go toolchain. In release mode the repo is not
-# checked out by resolve_binaries unless E2E_KEEP_SRC=1, so we skip gracefully
-# outside CI-source runs.
+# over the real tunnel pipeline with mem tap). Runs the Go-side tests from the
+# source tree that resolve_binaries built, so no separate checkout is needed.
 run_group_G() {
   if ! command -v go >/dev/null 2>&1; then
     log "group G (perf): go toolchain not found — skipping"
     return 0
   fi
-  go test -count=1 -timeout 10m -run 'TestPerf' -v ./... | tee "$TEST_DIR/perf.txt"
+  ( cd "$E2E_GO_SRC" && go test -count=1 -timeout 10m -run 'TestPerf' -v ./... ) \
+    | tee "$TEST_DIR/perf.txt"
   if grep -qE '^--- FAIL' "$TEST_DIR/perf.txt"; then
     err "group G: perf tests failed (see $TEST_DIR/perf.txt)"
     return 1
