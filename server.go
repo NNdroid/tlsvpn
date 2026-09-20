@@ -259,7 +259,8 @@ type ClientSession struct {
 	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
 	FecMode     string            // 面板展示：xor:K / dup / off
-	EncAlgo     int               // 内层加密算法（0=legacy，2=GCM）
+	EncAlgo     int               // 内层加密算法号（encAlgoLegacyCTR / GCM / GCMv2）
+	Encrypt     bool              // 建会话时 encrypt 的取值；EncAlgo=0 时靠它区分"未加密"与 legacy CTR
 	SaltA       [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
 	SaltB       [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
 	icTx        *innerCipher      // s2c 加密器
@@ -632,12 +633,18 @@ func startServer(ctx context.Context, cfg *Config) {
 		if err := setTapMac(cfg.Tap, cfg.Mac); err != nil {
 			log.Warnf("Server failed to set tap MAC: %v", err)
 		}
-		if link, err := netlink.LinkByName(cfg.Tap); err == nil {
-			v4Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)))
-			v6Addr, _ := netlink.ParseAddr(fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)))
-			netlink.AddrReplace(link, v4Addr)
-			netlink.AddrReplace(link, v6Addr)
-			netlink.LinkSetUp(link)
+		if link, err := netlink.LinkByName(cfg.Tap); err != nil {
+			// 设备名对不上时整段跳过：网关地址从未落到接口上，隧道网关与
+			// web.bind=tunnel 都会对着一个不存在的地址反复失败
+			log.Warnf("Server cannot assign gateway addresses: tap %s not found: %v", cfg.Tap, err)
+		} else {
+			// 先 up 再挂地址：bind 要求 IFF_UP，且 v6 在接口 up 的瞬间会
+			// 重新触发一次 DAD —— 顺序反了第一轮 web 绑定就白等一个探测窗口
+			if err := netlink.LinkSetUp(link); err != nil {
+				log.Errorf("Server failed to bring up tap %s: %v", cfg.Tap, err)
+			}
+			assignTapGateway(link, "v4", srv.v4Gw, maskSize(v4net.Mask))
+			assignTapGateway(link, "v6", srv.v6Gw, maskSize(v6net.Mask))
 		}
 	}
 	srv.tap = tap
@@ -662,7 +669,7 @@ func startServer(ctx context.Context, cfg *Config) {
 						// 客户端不通"。计数 + 限频日志让故障可观测。
 						n := srv.tapWriteErrs.Add(1)
 						if n == 1 || n%1000 == 0 {
-							log.Warnf("TAP 写入失败 #%d: %v", n, werr)
+							log.Warnf("TAP write failed #%d: %v", n, werr)
 						}
 					}
 					putFrame(vf.Data)
@@ -695,6 +702,29 @@ func startServer(ctx context.Context, cfg *Config) {
 	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", cfg.Addr)
 
 	serveListener(ctx, srv, listener, tlsConfig)
+}
+
+// assignTapGateway 在 tap 上配置一个隧道网关地址。
+// 失败必须可见：地址没配上时隧道网关不可达，web.bind=tunnel 也会对着一个
+// 不存在的地址反复 bind 失败，否则只能靠"面板连不上"反推。
+func assignTapGateway(link netlink.Link, fam, ip string, prefix int) {
+	if ip == "" {
+		return
+	}
+	addr, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", ip, prefix))
+	if err != nil {
+		log.Errorf("Server invalid %s gateway address %s/%d: %v", fam, ip, prefix, err)
+		return
+	}
+	if fam == "v6" {
+		// ULA 网关由配置指定，不存在需要探测的重复地址：挂上即 permanent，
+		// 省掉内核 1~2s 的 DAD 窗口（取不到 RA 时地址会一直 tentative，v6 bind 永久失败）
+		addr.Flags = ifaNoDAD
+	}
+	if err := netlink.AddrReplace(link, addr); err != nil {
+		log.Errorf("Server failed to assign %s gateway %s/%d to %s: %v",
+			fam, ip, prefix, link.Attrs().Name, err)
+	}
 }
 
 // serveListener 阻塞接受连接直到 ctx 取消。独立成函数以便测试进程内启动。
@@ -786,13 +816,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	var req HandshakeReq
 	if err := json.Unmarshal(reqData, &req); err != nil {
-		log.Warnf("握手数据解析失败. 开启伪装焦油坑.")
+		log.Warnf("Handshake data parse failed; engaging camouflage tar pit.")
 		putFrame(reqData)
 		camouflageProbe(conn)
 		return
 	}
 	putFrame(reqData)
-	log.Debugf("<= 收到客户端握手请求 (HandshakeReq): %+v", req)
+	log.Debugf("<= received client handshake request (HandshakeReq): %+v", req)
 
 	// 一次性快照鉴权参数（ApplyConfig 会在 s.mu 下改写，无锁读是数据竞争）
 	s.mu.RLock()
@@ -811,44 +841,44 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 限流：超限后直接断链而不是进焦油坑——焦油坑会让 goroutine
 		// 挂到读超时，无限触发等于给攻击者一个零成本内存放大器。
 		if s.pskFailExceeded(tcpConn.RemoteAddr().String()) {
-			log.Warnf("PSK 校验失败，远端 %s 已超预算，直接断链", tcpConn.RemoteAddr().String())
+			log.Warnf("PSK verification failed; remote %s exceeded its budget, dropping the connection", tcpConn.RemoteAddr().String())
 			return
 		}
-		log.Warnf("PSK 验证失败 (Hash不匹配)，远端 %s", tcpConn.RemoteAddr().String())
+		log.Warnf("PSK verification failed (hash mismatch), remote %s", tcpConn.RemoteAddr().String())
 		camouflageProbe(conn)
 		return
 	}
 	if req.Encrypt != encrypt {
-		log.Warnf("加密配置不匹配 (Client: %v, Server: %v)", req.Encrypt, encrypt)
+		log.Warnf("Encryption settings mismatch (Client: %v, Server: %v)", req.Encrypt, encrypt)
 		camouflageProbe(conn)
 		return
 	}
 	// 强度下限：运维强制 GCM 时拒绝能力不足的客户端。这里刻意**不**走焦油坑——
 	// 这是运维侧的期望结果（客户端版本过旧），需要一条明确可查的失败记录。
 	if encrypt && minEnc > 0 && encAlgoRank(req.EncAlgo) < minEnc {
-		log.Warnf("拒绝连接: 客户端加密能力 (algo=%d) 低于 min_enc 下限，远端 %s",
+		log.Warnf("connection refused: client cipher capability (algo=%d) is below the min_enc floor, remote %s",
 			req.EncAlgo, tcpConn.RemoteAddr().String())
 		return
 	}
 	clientID := req.ClientID
 	if clientID == "" {
-		log.Warnf("拒绝连接: 缺少 ClientID")
+		log.Warnf("connection refused: ClientID is missing")
 		return
 	}
 	// 格式校验：clientID/MAC 会大量进入日志与面板，畸形值既可能是坏客户端，
 	// 也可能被用于换行注入伪造日志行。直接断链，刻意不走焦油坑——这不是探测，
 	// 无需伪装成服务故障。
 	if !isValidClientID(clientID) {
-		log.Warnf("拒绝连接: ClientID 格式非法（须为 UUID），长度 %d", len(clientID))
+		log.Warnf("connection refused: malformed ClientID (must be a UUID), length %d", len(clientID))
 		return
 	}
 	if !isValidMACString(req.MAC) {
-		log.Warnf("[%s] 拒绝连接: MAC 格式非法", clientID)
+		log.Warnf("[%s] connection refused: malformed MAC", clientID)
 		return
 	}
 	// 封禁检查：命中直接进焦油坑（与 PSK 错误同等对待，不泄露 ban 状态）
 	if s.IsBanned(clientID) {
-		log.Warnf("[%s] 已封禁，拒绝接入", clientID)
+		log.Warnf("[%s] banned; access denied", clientID)
 		camouflageProbe(conn)
 		return
 	}
@@ -862,7 +892,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	session, exists := s.activeClients[clientID]
 	if exists {
 		if !hmac.Equal([]byte(req.MAC), []byte(session.MAC)) {
-			log.Warnf("[%s] 拒绝连接: MAC 不匹配", clientID)
+			log.Warnf("[%s] connection refused: MAC mismatch", clientID)
 			s.mu.Unlock()
 			camouflageProbe(conn)
 			return
@@ -871,7 +901,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 就能算出对方 clientID 走"会话复活"分支接管其隧道流量。令牌只在原
 		// 会话自己的 TLS 会话内下发一次，第三方从未见过，无法冒充。
 		if sessionToken && !verifySessionToken(psk, session.SessionID, req.SessionToken) {
-			log.Warnf("[%s] 拒绝重连: 会话令牌无效（疑似冒充在线会话）", clientID)
+			log.Warnf("[%s] reconnect refused: invalid session token (possible impersonation of an active session)", clientID)
 			s.mu.Unlock()
 			camouflageProbe(conn)
 			return
@@ -881,7 +911,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 重新派生，两者不匹配时 GCM 标签校验全部失败→静默丢帧（legacy CTR
 		// 则是静默乱码）。此时必须整体丢弃会话让客户端重建，而不是"复活"。
 		if session.pskHash != pskHash {
-			log.Warnf("[%s] 会话密钥与当前 PSK 不匹配，丢弃旧会话强制重建", clientID)
+			log.Warnf("[%s] session key does not match the current PSK; dropping the stale session and forcing a rebuild", clientID)
 			s.destroySessionLocked(session, clientID)
 			exists = false
 		}
@@ -892,25 +922,39 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if session.destroyTimer != nil {
 			session.destroyTimer.Stop()
 			session.destroyTimer = nil
-			log.Infof("[%s] ⚡ 会话在销毁倒计时内成功复活！(无缝接续)", clientID)
+			log.Infof("[%s] ⚡ session revived before the destroy countdown expired (seamless handover)", clientID)
+		}
+		// 进程级重启：上一代物理连接已全部断开，客户端的 txSeq 计数器重新
+		// 从 1 起。会话复活的旧重排缓冲还停在旧水位，新包全部 diff<0 被判
+		// "太老"丢弃，表现为"下行正常、上行彻底不通"。
+		// 只有 ActiveConns==0 才说明整代连接结束；Conns>1 时后续连接的到达
+		// 不会走到这里，共享的 txPort 序号也确实在跨连接连续。
+		if session.ActiveConns == 0 {
+			if session.RxReorder != nil {
+				session.RxReorder.Reset()
+			}
+			if session.FecDec != nil {
+				session.FecDec.Reset()
+			}
+			log.Infof("[%s] 🔄 session revived: the previous connection generation ended, reset the upstream reorder buffer to realign with the new process sequence numbers", clientID)
 		}
 		session.ActiveConns++
 		session.sessionMu.Unlock()
 
-		log.Infof("[%s] 🔗 已有会话增加新物理连接 (当前连接数: %d)", clientID, session.ActiveConns)
+		log.Infof("[%s] 🔗 existing session gained a new physical connection (active connections: %d)", clientID, session.ActiveConns)
 	} else {
 		// 会话数与地址池双上限：达到任一即按认证失败处理（焦油坑），
 		// 不向攻击者泄露服务端内部状态。
 		if s.maxSessions > 0 && len(s.activeClients) >= s.maxSessions {
 			s.mu.Unlock()
-			log.Warnf("拒绝连接: 会话数已达上限 %d", s.maxSessions)
+			log.Warnf("connection refused: session limit reached (%d)", s.maxSessions)
 			camouflageProbe(conn)
 			return
 		}
 		v4ip, v6ip := s.assignIPsLocked(req.IPv4, req.IPv6)
 		if v4ip == "" {
 			s.mu.Unlock()
-			log.Warnf("拒绝连接: IPv4 地址池已耗尽 (%s)", s.v4Net.String())
+			log.Warnf("connection refused: IPv4 address pool exhausted (%s)", s.v4Net.String())
 			camouflageProbe(conn)
 			return
 		}
@@ -958,7 +1002,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		session = &ClientSession{
 			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,
 			ActiveConns: 1, FecEncK: fecEncK, FecMode: fecMode,
-			EncAlgo: encAlgo, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
+			EncAlgo: encAlgo, Encrypt: encrypt, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
 			conns: make(map[*connInfo]struct{}),
 		}
 		// 解析失败则保持零值；归属校验对 MAC 为空的会话放行（见 validateSrcMAC）
@@ -977,7 +1021,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
 		}
 		s.vswitch.AddPort(port)
-		log.Infof("[%s] 新逻辑 Client 上线 (FEC=%s EncAlgo=%d), Assigned IPs: %s, %s", clientID, fecMode, encAlgo, v4ip, v6ip)
+		log.Infof("[%s] new logical client online (FEC=%s EncAlgo=%d), Assigned IPs: %s, %s", clientID, fecMode, encAlgo, v4ip, v6ip)
 	}
 
 	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
@@ -1045,7 +1089,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		session.ActiveConns--
 		if session.ActiveConns <= 0 {
 			// 不要立刻删除！给它 120 秒的“僵尸续命期”
-			log.Infof("[%s] ⚠️ 客户端所有物理连接已断开，会话进入 120 秒保留期...", clientID)
+			log.Infof("[%s] ⚠️ all physical connections are down; the session enters a 120s retention period...", clientID)
 
 			session.destroyTimer = time.AfterFunc(120*time.Second, func() {
 				s.mu.Lock()
@@ -1054,7 +1098,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				// 120 秒后再次检查，如果还是没连上，才彻底销毁
 				if session.ActiveConns <= 0 {
 					s.destroySessionLocked(session, clientID)
-					log.Infof("[%s] 💀 会话超时彻底销毁，释放 IP 及内存资源", clientID)
+					log.Infof("[%s] 💀 session timed out and was destroyed, releasing its IPs and memory", clientID)
 				}
 
 				session.sessionMu.Unlock()
@@ -1084,7 +1128,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				_, werr := conn.Write(sendBuffer)
 				conn.SetWriteDeadline(time.Time{})
 				if werr != nil {
-					log.Debugf("[%s] 下行写入失败，关闭连接: %v", clientID, werr)
+					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
 					conn.Close()
 					return
 				}
@@ -1109,7 +1153,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
-			log.Debugf("[%s] 链接断开: %v", clientID, err)
+			log.Debugf("[%s] connection lost: %v", clientID, err)
 			return
 		}
 
@@ -1218,7 +1262,7 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
 		SessionToken: sessionToken,
 	}
-	log.Debugf("[%s] => 发送握手响应 (HandshakeResp): %+v", clientID, resp)
+	log.Debugf("[%s] => sending handshake response (HandshakeResp): %+v", clientID, resp)
 	d, _ := json.Marshal(resp)
 	writeStreamFrame(w, d)
 }

@@ -29,16 +29,18 @@ import (
 
 // Config 顶层配置
 type Config struct {
-	Mode       string       `json:"mode"`                // 必填：server | client
-	PSK        string       `json:"psk"`                 // 预共享密钥
-	Tap        string       `json:"tap,omitempty"`       // TAP 设备名（默认 tap0）
-	Mac        string       `json:"mac,omitempty"`       // 手动指定 MAC
-	Addr       string       `json:"addr"`                // server: 监听地址；client: 目标地址列表
-	LogLevel   string       `json:"log_level,omitempty"` // 默认 info
-	Encrypt    bool         `json:"encrypt,omitempty"`   // 内层加密（GCM 协商）
-	MinEnc     string       `json:"min_enc,omitempty"`   // 最低内层加密强度：ctr | gcm（空=无下限）
-	PadMode    string       `json:"pad_mode,omitempty"`  // 混淆填充：legacy | bucket | off（默认 bucket）
-	Socks5     string       `json:"socks5,omitempty"`    // 全局 SOCKS5 出口（client）
+	Mode     string `json:"mode"`                // 必填：server | client
+	PSK      string `json:"psk"`                 // 预共享密钥
+	Tap      string `json:"tap,omitempty"`       // TAP 设备名（默认 tap0）
+	Mac      string `json:"mac,omitempty"`       // 手动指定 MAC
+	Addr     string `json:"addr"`                // server: 监听地址；client: 目标地址列表
+	LogLevel string `json:"log_level,omitempty"` // 默认 info
+	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
+	// 显式的 false，下次重载又被默认值翻回 true。
+	Encrypt    bool         `json:"encrypt"`
+	MinEnc     string       `json:"min_enc,omitempty"`  // 最低内层加密强度：ctr | gcm（空=无下限）
+	PadMode    string       `json:"pad_mode,omitempty"` // 混淆填充：legacy | bucket | off（默认 bucket）
+	Socks5     string       `json:"socks5,omitempty"`   // 全局 SOCKS5 出口（client）
 	Brutal     bool         `json:"brutal,omitempty"`
 	BrutalUp   uint64       `json:"brutal_up,omitempty"`   // Mbps
 	BrutalDown uint64       `json:"brutal_down,omitempty"` // Mbps
@@ -49,6 +51,9 @@ type Config struct {
 	// SourcePath 配置文件来源路径（-c 指定）；面板"保存配置"写回此文件。
 	// 经命令行标志启动时为空，此时面板保存返回错误提示。
 	SourcePath string `json:"-"`
+	// EncryptPresent 标记配置文件里是否显式写了 encrypt。bool 无法自辨"字段
+	// 缺失"与"显式 false"，靠这个标记让 loadConfigFile 能把"未写"当成开启处理。
+	EncryptPresent bool `json:"-"`
 }
 
 // WebConfig Web 面板（可选，addr 留空则不启动）
@@ -142,6 +147,9 @@ const exampleConfigJSON = `{
 }`
 
 // loadConfigFile 读取并解析 JSON 配置（未知字段报错），不包含默认值填充。
+// 唯一例外是 encrypt：bool 无法自辨"字段缺失"与"显式 false"，而这里
+// 是唯一还能看到原始 JSON 的地方，所以"未写按开启处理"的默认放在这里，
+// 而不是放进共享的 applyDefaults。
 func loadConfigFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -152,6 +160,19 @@ func loadConfigFile(path string) (*Config, error) {
 	cfg := &Config{}
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %v", path, err)
+	}
+	var probe struct {
+		Encrypt *bool `json:"encrypt"`
+	}
+	if json.Unmarshal(data, &probe) == nil {
+		cfg.EncryptPresent = probe.Encrypt != nil
+		// 未写 encrypt 按开启处理：-print-config 模板一直输出 true，省略字段若仍
+		// 按 bool 零值 false 处理，整条链路会静默跑明文，与模板读起来完全相反。
+		// 只在这里默认，不进 applyDefaults——那是共享路径，按代码构造的
+		// Config{Encrypt: false}（含测试与内嵌调用）不该被静默翻成加密。
+		if probe.Encrypt == nil {
+			cfg.Encrypt = true
+		}
 	}
 	return cfg, nil
 }

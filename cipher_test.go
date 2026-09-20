@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"go.uber.org/zap/zapcore"
-
-	mathrand "math/rand/v2"
 )
 
 // TestMain 初始化全局日志器（被测代码路径大量使用 log.*）
@@ -200,15 +198,53 @@ func TestGCMCrossSaltAndDirectionSeparation(t *testing.T) {
 
 func TestNonceNeverRepeats(t *testing.T) {
 	ic, _ := newGCMInnerCipher("nonce_psk", randomSalt())
-	seen := make(map[string]bool, 10000)
-	for i := 0; i < 10000; i++ {
-		seq := uint32(mathrand.IntN(1 << 30))
-		n := string(ic.gcmNonce(seq))
-		if seen[n] {
-			t.Fatalf("nonce 重复: seq=%d", seq)
+	seqs := nonceCoverageSeqs()
+
+	// 前提：抽到的 seq 必须互不相同。旧实现用 mathrand.IntN(1<<30) 抽随机 seq，
+	// 10000 次抽样落在 2^30 的空间里期望碰撞数约 1e8/2^31 ≈ 0.05，即约 4.6%
+	// 的概率随机撞上一个重复 seq 而判失败——那测的是 RNG 而不是 nonce。
+	// nonce = seq(4BE) ‖ salt(8B)，salt 对同一 ic 恒定，所以
+	// "seq 互异 ⇒ nonce 互异"才是要断言的性质；改用确定性序列覆盖全 uint32
+	// 范围，零随机、零抖动。
+	saw := make(map[uint32]bool, len(seqs))
+	for _, seq := range seqs {
+		if saw[seq] {
+			t.Fatalf("测试数据错误：seq=%d 重复", seq)
 		}
-		seen[n] = true
+		saw[seq] = true
 	}
+
+	seen := make(map[string]uint32, len(seqs))
+	for _, seq := range seqs {
+		n := string(ic.gcmNonce(seq))
+		if prev, dup := seen[n]; dup {
+			t.Fatalf("nonce 重复：seq=%d 与 seq=%d 生成了同一 nonce", seq, prev)
+		}
+		seen[n] = seq
+	}
+
+	// 换个盐：同一 seq 必须给出不同 nonce，否则两端盐不一致时会互相解开对方密文
+	other, _ := newGCMInnerCipher("nonce_psk", randomSalt())
+	if string(ic.gcmNonce(77)) == string(other.gcmNonce(77)) {
+		t.Fatal("不同盐的 nonce 应不同")
+	}
+}
+
+// nonceCoverageSeqs 返回 10100 个互不相同的 seq：0..99 连续段、0 附近、
+// 2^30 中段、uint32 满值附近，覆盖低位进位与大端边界。
+func nonceCoverageSeqs() []uint32 {
+	out := make([]uint32, 0, 10000)
+	for i := uint32(0); i < 100; i++ {
+		out = append(out, i, 0x1000000+i)
+	}
+	for i := uint32(100); i < 10000; i++ {
+		if i < 500 {
+			out = append(out, 0xFFFFFFFF-i)
+		} else {
+			out = append(out, 0x400000+i)
+		}
+	}
+	return out
 }
 
 func TestFrameGCMWireRoundtrip(t *testing.T) {
@@ -674,5 +710,28 @@ func TestReconnectBackoff(t *testing.T) {
 	}
 	if d5 <= d0 {
 		t.Fatalf("退避应单调递增区间: d0=%s d5=%s", d0, d5)
+	}
+}
+
+// TestEncAlgoForDisplay 锁定面板上报口径：0=未加密、1=legacy CTR、2=GCM。
+// 回归点是历史上真实出现过的两个缺陷——未加密与 legacy CTR 都拿到原始算法号
+// 0（无法区分），以及 GCM-v2=3 面板不认识而显示成"明文"。
+func TestEncAlgoForDisplay(t *testing.T) {
+	cases := []struct {
+		name    string
+		encAlgo int
+		encrypt bool
+		want    int
+	}{
+		{"无内层加密", encAlgoLegacyCTR, false, 0},
+		{"legacy CTR", encAlgoLegacyCTR, true, 1},
+		{"GCM v1", encAlgoGCM, true, 2},
+		{"GCM v2", encAlgoGCMv2, true, 2},
+	}
+	for _, tc := range cases {
+		if got := encAlgoForDisplay(tc.encAlgo, tc.encrypt); got != tc.want {
+			t.Errorf("%s: encAlgo=%d encrypt=%v 期望 %d，实际 %d",
+				tc.name, tc.encAlgo, tc.encrypt, tc.want, got)
+		}
 	}
 }

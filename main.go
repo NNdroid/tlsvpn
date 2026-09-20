@@ -146,6 +146,9 @@ func main() {
 	cfg.applyDefaults()
 	initLogger(cfg.LogLevel)
 	log.Infof("Loaded configuration from %s", *configPath)
+	if !cfg.EncryptPresent {
+		log.Warnf("Config does not set 'encrypt'; defaulting to enabled. Write \"encrypt\": false to run without inner encryption")
+	}
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}

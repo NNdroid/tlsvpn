@@ -263,28 +263,28 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
- filter_ph:'输入关键字过滤…',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',
+ filter_ph:'输入关键字过滤…',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
  perm:'永久',confirm_kick:'确定要强制断开该客户端吗？',confirm_ban:'确定封禁该客户端吗？',need_id:'请输入 ClientID',
  st:{up:'up',connecting:'connecting'},
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
  tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',
  set:{hint:'编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数（列出的字段需重启生效）。',
-   load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'},
+   load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'}},
 'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
  chart:{title:'Throughput',win:'(last 120s)'},legend:{up:'Up',down:'Down'},
  tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',logs:'Logs',settings:'Settings'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
- filter_ph:'Type to filter…',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',
+ filter_ph:'Type to filter…',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
  perm:'Permanent',confirm_kick:'Force-disconnect this client?',confirm_ban:'Ban this client?',need_id:'Please enter a ClientID',
  st:{up:'up',connecting:'connecting'},
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
  tls_http:'HTTP (HTTPS recommended)',mode_local:'local',
  set:{hint:'Edit the JSON config. Save: write back to the config file. Save & apply: write back and hot-apply runtime parameters (listed fields require a restart).',
-   load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}};
+   load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}}};
 let LANG=localStorage.getItem('tlsvpn_lang')||((navigator.language||'zh-CN').toLowerCase().startsWith('zh')?'zh-CN':'en');
 function t(path){let o=I18N[LANG];for(const k of path.split('.'))o=o?o[k]:undefined;return o===undefined?(I18N['en'][path]||path):o;}
 function applyI18n(){
@@ -367,8 +367,8 @@ async function fetchStats(){
         '<td>'+fmtBytes(c.tx_bytes)+'</td><td>'+fmtBytes(c.rx_bytes)+'</td>'+
         '<td class="speed">'+fmtBytes(sx,true)+'</td><td class="speed">'+fmtBytes(sr,true)+'</td>'+
         '<td class="hide-sm">'+badge(c.fec)+'</td><td class="hide-sm">'+encBadge(c.enc_algo)+'</td>'+
-        '<td>'+(data.mode==='server'?'<button class="btn" onclick="kickClient(\\''+id+'\\')">'+t('th.kick')+'</button>'+
-          '<button class="btn blue" onclick="banClient(\\''+id+'\\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
+        '<td>'+(data.mode==='server'?'<button class="btn" onclick="kickClient(\''+id+'\')">'+t('th.kick')+'</button>'+
+          '<button class="btn blue" onclick="banClient(\''+id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
     };
     if(data.mode==='server'){for(const [id,c] of Object.entries(data.clients||{}))if(passFilter(Object.assign({id:id},c),cf))proc(id,c);}
     else if(data.clients&&data.clients.local)proc('local',data.clients.local);
@@ -419,7 +419,7 @@ function renderConns(data){
       r.state==='connecting'?'<span class="badge b-dup">'+t('st.connecting')+'</span>':
       '<span class="badge b-off">'+esc(r.state||'-')+'</span>';
     const rtt=r.rtt>=100000?'-':r.rtt+' ms';
-    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn" onclick="kickClient(\\''+r.fullId+'\\')">'+t('th.kick')+'</button>':'';
+    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
     return '<tr><td>'+esc(r.owner)+'</td><td>'+esc(r.target||'-')+'</td><td>'+esc(r.remote||'-')+'</td><td>'+st+'</td>'+
       '<td>'+rtt+'</td><td>'+fmtBytes(r.tx)+'</td><td>'+fmtBytes(r.rx)+'</td>'+
       '<td class="hide-sm">'+(r.retries===''?'-':r.retries)+'</td><td class="hide-sm">'+(r.age?fmtDur(r.age):'-')+'</td>'+
@@ -428,18 +428,18 @@ function renderConns(data){
 }
 function renderMacs(data){
   const tb=document.getElementById('macs-body');
-  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" style="color:#777">-</td></tr>';return;}
+  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" style="color:#777">'+t('srv_only')+'</td></tr>';return;}
   const list=data.mac_table||[];
   tb.innerHTML=list.map(e=>'<tr><td>'+esc(e.mac)+'</td><td>'+esc(e.port)+'</td><td>'+e.age_sec+'s</td></tr>').join('')||
     '<tr><td colspan="3" style="color:#777">'+t('no_macs')+'</td></tr>';
 }
 function renderBans(data){
   const tb=document.getElementById('bans-body');
-  if(data.mode!=='server'){tb.innerHTML='';return;}
+  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" style="color:#777">'+t('srv_only')+'</td></tr>';return;}
   const bans=data.banned||{};
   tb.innerHTML=Object.entries(bans).map(([id,left])=>'<tr><td title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
     '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':fmtDur(left))+'</td>'+
-    '<td><button class="btn gray" onclick="unban(\\''+id+'\\')">'+t('th.unban')+'</button></td></tr>').join('')||
+    '<td><button class="btn gray" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>').join('')||
     '<tr><td colspan="3" style="color:#777">'+t('no_bans')+'</td></tr>';
 }
 
@@ -797,7 +797,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			conns := session.ActiveConns
 			session.sessionMu.Unlock()
 			snapClients[id] = tmpSession{
-				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: session.EncAlgo, conns: conns,
+				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: encAlgoForDisplay(session.EncAlgo, session.Encrypt), conns: conns,
 				txB: atomic.LoadUint64(&session.TxBytes),
 				rxB: atomic.LoadUint64(&session.RxBytes),
 				txP: atomic.LoadUint64(&session.TxPackets),
@@ -842,12 +842,11 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		cli.sessionMu.Unlock()
 		conns := int(atomic.LoadInt32(&cli.liveConns))
 		fec := cli.fecStatus
-		enc := cli.encAlgo
 		lv := cli.live.Load()
+		// 发射前归一化成 0/1/2：原始算法号里 0 同时表示"未加密"和 legacy CTR，
+		// 而 GCM-v2=3 面板不认识会落进"明文"兜底分支。
+		enc := encAlgoForDisplay(cli.encAlgo, lv != nil && lv.encrypt)
 		stats.ActiveClients = 1
-		if enc == 0 && lv != nil && lv.encrypt {
-			enc = 1 // legacy CTR 依旧算"已加密"
-		}
 		stats.Clients["local"] = map[string]interface{}{
 			"client_id": cli.clientID, "ipv4": v4, "ipv6": v6, "mac": mac, "active_conns": conns,
 			"tx_bytes": atomic.LoadUint64(&cli.TxBytes), "rx_bytes": atomic.LoadUint64(&cli.RxBytes),

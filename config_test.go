@@ -238,3 +238,66 @@ func TestSelfSignedCertPersistence(t *testing.T) {
 		t.Fatalf("两次启动应复用同一张自签证书: %s != %s", fp1, fp2)
 	}
 }
+
+// TestEncryptDefaultWhenAbsent 省略 encrypt 必须按开启处理：-print-config 模板
+// 输出的是 true，省略字段若按 bool 零值 false 处理会让链路静默跑明文。
+// 同时显式 "encrypt": false 必须原样保留，不能被默认值覆盖。
+func TestEncryptDefaultWhenAbsent(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantEnc bool
+		wantSet bool
+	}{
+		{"省略 encrypt", `{"mode":"client","addr":"1.2.3.4:4000"}`, true, false},
+		{"显式 true", `{"mode":"client","addr":"1.2.3.4:4000","encrypt":true}`, true, true},
+		{"显式 false", `{"mode":"client","addr":"1.2.3.4:4000","encrypt":false}`, false, true},
+	}
+	for _, tc := range cases {
+		cfg, err := loadConfigFile(writeTempConfig(t, tc.body))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if cfg.EncryptPresent != tc.wantSet {
+			t.Fatalf("%s: EncryptPresent 期望 %v，实际 %v", tc.name, tc.wantSet, cfg.EncryptPresent)
+		}
+		cfg.applyDefaults()
+		if cfg.Encrypt != tc.wantEnc {
+			t.Errorf("%s: Encrypt 期望 %v，实际 %v", tc.name, tc.wantEnc, cfg.Encrypt)
+		}
+	}
+
+	// 回归：默认只作用于"从配置文件加载"这一条路径。按代码构造的 Config
+	//（测试、内嵌调用）显式写 Encrypt=false 必须原样保留，不能被翻成加密。
+	lit := &Config{Mode: "client", Addr: "1.2.3.4:4000", Encrypt: false}
+	lit.applyDefaults()
+	if lit.Encrypt {
+		t.Errorf("代码构造的 Encrypt=false 被 applyDefaults 翻成 true")
+	}
+}
+
+// TestSaveConfigFileKeepsExplicitEncryptFalse 面板"保存配置"必须原样写回显式的
+// "encrypt": false。Encrypt 刻意不带 omitempty：带了的话 false 会被省略，重载
+// 时又被 loadConfigFile 的默认值翻回 true，用户显式关闭内层加密的意图静默丢失。
+func TestSaveConfigFileKeepsExplicitEncryptFalse(t *testing.T) {
+	p := writeTempConfig(t, `{"mode":"client","addr":"1.2.3.4:4000","encrypt":false}`)
+	cfg, err := loadConfigFile(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	cfg.SourcePath = p
+	if err := SaveConfigFile(cfg); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	round, err := loadConfigFile(p)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	round.applyDefaults()
+	if round.Encrypt {
+		t.Fatalf("保存重载后 Encrypt 应为 false，实际 true（omitempty 丢掉了显式值）")
+	}
+	if !round.EncryptPresent {
+		t.Fatalf("保存重载后 encrypt 字段应仍存在，实际缺失")
+	}
+}

@@ -324,6 +324,9 @@ type Client struct {
 	gwV4      string     // 记录网关以便退出时清理
 	gwV6      string     // 记录网关以便退出时清理
 	sessionMu sync.Mutex // 保护状态防止并发写
+	stateMu   sync.Mutex // 保护 state（多条物理连接的握手协程会并发落盘）
+	stateFile string     // 身份状态文件路径；""=不持久化
+	state     *clientState
 	// live 指向当前生效配置；面板热更时整体替换该指针，
 	// dialAndServe 每轮重拨前取最新值
 	live          atomic.Pointer[liveConfig]
@@ -459,11 +462,58 @@ func startClient(ctx context.Context, cfg *Config) {
 	c.Run(ctx)
 }
 
+// applyTapMac 决定并应用客户端的 TAP MAC。MAC 是 clientID 的输入，进而决定
+// 服务端会话与分配的隧道 IP；Linux 上 water 每次创建 TAP 都发随机 MAC，
+// 因此未显式配置时必须生成并落盘，否则每次重启都是一次全新会话——换新 IP，
+// 而旧会话还要占用旧 IP 满 120 秒。非 Linux 平台设置 MAC 是编译桩，此时不
+// 生成也不落盘：clientID 退化为仅由 PSK 派生，本身已跨进程稳定。
+func applyTapMac(tapName, configuredMac, statePath string, st *clientState) {
+	if !netlinkTunnelSupported() {
+		log.Warnf("Client: TAP MAC configuration is not available on this platform (tunnels target Linux); clientID is derived from PSK only")
+		return
+	}
+	mac := configuredMac
+	if mac == "" && st.MAC != "" {
+		mac = st.MAC
+		log.Infof("Restored persistent TAP MAC: %s", mac)
+	}
+	if mac == "" {
+		gen, err := generateTapMAC()
+		if err != nil {
+			log.Fatalf("Client failed to generate tap MAC: %v", err)
+		}
+		mac = gen
+	}
+	if err := setTapMac(tapName, mac); err != nil {
+		log.Warnf("Client failed to set tap MAC: %v", err)
+		return
+	}
+	if configuredMac == "" && st.MAC != mac {
+		st.MAC = mac
+		if err := saveClientState(statePath, st); err != nil {
+			log.Warnf("Client failed to persist TAP MAC: %v", err)
+		} else {
+			log.Infof("Generated and persisted TAP MAC: %s", mac)
+		}
+	}
+}
+
 // NewClient 构造客户端运行体（TAP、密钥、面板、连接注册表），供进程启动
 // 与测试进程内使用。
 func NewClient(ctx context.Context, cfg *Config) *Client {
 	cl := cfg.Client
 	log.Infof("Starting TCP TLS client process...")
+
+	statePath := clientStatePath(cfg)
+	var st *clientState
+	st, loadErr := loadClientState(statePath)
+	if loadErr != nil {
+		log.Warnf("Client failed to read identity state %s: %v", statePath, loadErr)
+	}
+	if st == nil {
+		st = &clientState{}
+	}
+
 	var iface io.ReadWriteCloser
 	if cfg.Tap == "mem" {
 		iface = newMemTap(ctx)
@@ -474,9 +524,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 			log.Fatalf("Client TAP creation error: %v", err)
 		}
 		iface = t
-		if err := setTapMac(cfg.Tap, cfg.Mac); err != nil {
-			log.Warnf("Client failed to set tap MAC: %v", err)
-		}
+		applyTapMac(cfg.Tap, cfg.Mac, statePath, st)
 	}
 	go func() { <-ctx.Done(); iface.Close() }()
 
@@ -495,6 +543,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		clientID: clientID, tapName: cfg.Tap,
 		tap: iface, macAddr: actualMac, connsCount: int32(cl.Conns),
 		txPort:    NewAsyncPort(ctx, "client_tx_port", cl.FEC),
+		stateFile: statePath, state: st,
 		startedAt: time.Now(),
 	}
 	lv := liveFromCfg(cfg)
@@ -502,9 +551,20 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	c.wake = make(chan struct{}, 1)
 	c.live.Store(lv)
 	if len(lv.targetAddrs) == 0 {
-		log.Fatalf("Client addr 解析结果为空，请检查配置文件中的 addr 字段")
+		log.Fatalf("Client addr resolved to zero endpoints; check the addr field in the config file")
 	}
 	c.fecStatus = "off"
+
+	// 恢复会话身份：冷启动进程第一次握手就能携带旧令牌接回既有会话，
+	// 不必等 120 秒僵尸会话过期。按 clientID 绑定校验——MAC/PSK 变了
+	// clientID 就变了，旧令牌与旧会话 ID 一律不沿用。
+	if st.ClientID == clientID && st.SessionID != "" {
+		c.serverSessionID = st.SessionID
+		if st.SessionToken != "" {
+			c.sessionToken = st.SessionToken
+			log.Infof("Restored session token for %s; next handshake will rejoin the existing session", st.SessionID)
+		}
+	}
 
 	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
 	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
@@ -512,7 +572,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 			// 旧实现静默丢弃错误：TAP 故障时表现为"隧道在线但本机不通"
 			n := c.tapWriteErrs.Add(1)
 			if n == 1 || n%1000 == 0 {
-				log.Warnf("[Client] TAP 写入失败 #%d: %v", n, werr)
+				log.Warnf("[Client] TAP write failed #%d: %v", n, werr)
 			}
 		}
 	})
@@ -848,7 +908,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		EncAlgo:      clientEncAlgoSupport,
 		SessionToken: sessionToken,
 	}
-	log.Debugf("[Conn %d] => 发送握手请求 (HandshakeReq): %+v", connIndex, req)
+	log.Debugf("[Conn %d] => sending handshake request (HandshakeReq): %+v", connIndex, req)
 	reqData, _ := json.Marshal(req)
 	writeStreamFrame(tlsConn, reqData)
 
@@ -865,7 +925,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 	// 握手完成：后续数据帧恢复线路全量上限
 	scanner.SetMaxDataLen(maxWireDataLen)
-	log.Debugf("[Conn %d] <= 收到握手响应 (HandshakeResp): %+v", connIndex, resp)
+	log.Debugf("[Conn %d] <= received handshake response (HandshakeResp): %+v", connIndex, resp)
 
 	if resp.Encrypt != lv.encrypt {
 		return 0, fmt.Errorf("server encryption mismatch")
@@ -963,12 +1023,24 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	c.sessionMu.Unlock()
 
 	if isNewSession {
-		log.Infof("[Conn %d] 🔄 检测到服务端重置了会话，正在清理本地旧的接收缓冲池...", connIndex)
+		log.Infof("[Conn %d] 🔄 server reset the session; flushing stale local receive buffers...", connIndex)
 		c.rxReorder.Reset()
 	}
 
-	c.setupInterface(resp.IPv4, resp.IPv6)
-	setupPolicyRouting(c.tapName, lv.fwmark, resp.GwV4, resp.GwV6)
+	// 会话身份落盘：进程被杀后重启，第一次握手即回带旧令牌接回既有会话，
+	// 而不是等 120 秒僵尸会话过期才自然恢复连通。
+	c.persistSessionState(resp.SessionID, resp.SessionToken)
+
+	if netlinkTunnelSupported() {
+		// 失败必须可见：静默丢弃时表现为"隧道在线但本机不通"，重启后地址没
+		// 挂上却查不到任何线索。
+		if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
+			log.Errorf("[Conn %d] tunnel interface configuration failed; tunnel address not applied: %v", connIndex, err)
+		}
+		if err := setupPolicyRouting(c.tapName, lv.fwmark, resp.GwV4, resp.GwV6); err != nil {
+			log.Warnf("[Conn %d] policy routing configuration failed: %v", connIndex, err)
+		}
+	}
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1086,19 +1158,61 @@ func (c *Client) isParityFrame(frame []byte) bool {
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {
 	link, err := netlink.LinkByName(c.tapName)
 	if err != nil {
+		return fmt.Errorf("tap %s not found: %v", c.tapName, err)
+	}
+	// 先 up 再挂地址：web.bind=tunnel 第一轮就要能 bind（要求 IFF_UP），
+	// 且 v6 在接口 up 的瞬间还会重新触发一次 DAD
+	if err := netlink.LinkSetUp(link); err != nil {
+		log.Errorf("Client failed to bring up tap %s: %v", c.tapName, err)
+	}
+	if err := assignTapAddr(link, "v4", v4cidr); err != nil {
 		return err
 	}
-	if v4cidr != "/" && v4cidr != "" {
-		if addrV4, err := netlink.ParseAddr(v4cidr); err == nil {
-			netlink.AddrReplace(link, addrV4)
-		}
+	if err := assignTapAddr(link, "v6", v6cidr); err != nil {
+		return err
 	}
-	if v6cidr != "/" && v6cidr != "" {
-		if addrV6, err := netlink.ParseAddr(v6cidr); err == nil {
-			netlink.AddrReplace(link, addrV6)
-		}
+	return nil
+}
+
+// assignTapAddr 把服务端分配的隧道地址挂上 tap；空串或裸 "/" 视为未配置。
+// 失败必须向上返回而不是就地吞掉：静默丢弃时表现为"隧道在线但本机不通"，
+// 重启后接口地址没挂上却看不到任何线索。
+func assignTapAddr(link netlink.Link, fam, cidr string) error {
+	if cidr == "" || cidr == "/" {
+		return nil
 	}
-	return netlink.LinkSetUp(link)
+	addr, err := netlink.ParseAddr(cidr)
+	if err != nil {
+		return fmt.Errorf("invalid %s tunnel address %q: %v", fam, cidr, err)
+	}
+	if fam == "v6" {
+		addr.Flags = ifaNoDAD
+	}
+	if err := netlink.AddrReplace(link, addr); err != nil {
+		return fmt.Errorf("assign %s tunnel address %s to %s: %v",
+			fam, cidr, link.Attrs().Name, err)
+	}
+	return nil
+}
+
+// persistSessionState 把服务端下发的会话身份落盘，供进程重启后第一次握手
+// 复用既有会话。按 clientID（MAC+PSK 派生）绑定：配置变更后旧令牌自动失效。
+func (c *Client) persistSessionState(sessionID, token string) {
+	if c.stateFile == "" {
+		return
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	st := c.state
+	if st == nil {
+		st = &clientState{}
+	}
+	st.ClientID = c.clientID
+	st.SessionID = sessionID
+	st.SessionToken = token
+	if err := saveClientState(c.stateFile, st); err != nil {
+		log.Warnf("Client failed to persist session state: %v", err)
+	}
 }
 
 func incrementIP(ip net.IP) {

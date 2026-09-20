@@ -166,6 +166,20 @@ func (ic *innerCipher) gcmNonceAAD(seq uint32, wireLen uint32, buf *[gcmNonceSiz
 // legacy CTR（安全降级，绝不静默黑洞）——两端都升级后 GCM 恢复。
 const clientEncAlgoSupport = encAlgoGCMv2
 
+// encAlgoForDisplay 把协商出的内层算法号归一化成面板固定的三个值：
+// 0=无内层加密，1=legacy CTR，2=GCM（v1/v2 密钥派生不同，语义一致）。
+// 不能直接下发原始算法号：encAlgoLegacyCTR 的值是 0，与"未加密"撞号；
+// 而面板只认识 2，GCM-v2=3 会落进"明文"兜底分支。
+func encAlgoForDisplay(encAlgo int, encrypt bool) int {
+	if !encrypt {
+		return 0
+	}
+	if encAlgo == encAlgoGCM || encAlgo == encAlgoGCMv2 {
+		return 2
+	}
+	return 1
+}
+
 func (ic *innerCipher) isGCM() bool {
 	return ic != nil && (ic.algo == encAlgoGCM || ic.algo == encAlgoGCMv2)
 }
