@@ -49,8 +49,9 @@ func brutalAvailableAlgos() []string {
 	return brutalAvail
 }
 
-// brutalStatus 定义在 tap_other.go（两个平台共享的公共结构），这里只给 Linux
-// 实现读内核值的逻辑。
+// brutalStatus 定义在 api.go（两平台共用），这里只给 Linux 实现读内核值的逻辑。
+// 类型不能放 tap_other.go / net_linux.go 任何一边——带 build tag 的文件在另一侧
+// 不参与编译，跨平台的类型放那里会让其中一侧直接编不过。
 
 // brutalSystemStatus 系统级状态：内核是否提供 brutal 算法、全局当前算法、
 // 以及完整可用列表。面板用它区分"配置了但内核不支持"与"配置了且生效中"。

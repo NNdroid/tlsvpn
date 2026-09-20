@@ -35,15 +35,6 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 	return fmt.Errorf("TCP Brutal is only supported on Linux")
 }
 
-// brutalStatus 系统级 TCP Brutal 能力与状态。结构体与两个平台的实现分离：
-// 字段是面板协议的一部分，定义在公共代码里避免两份拷贝漂移。
-type brutalStatus struct {
-	supported bool
-	current   string
-	available []string
-	err       string
-}
-
 // 非 Linux 上不存在内核拥塞控制可查：面板把 brutal 状态显示为"平台不支持"，
 // 而不是把它当成配置错误或生效失败。
 func brutalSystemStatus() brutalStatus {

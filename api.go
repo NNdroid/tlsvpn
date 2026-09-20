@@ -1373,6 +1373,16 @@ func (c *Client) connsSummary() connBrutalSummary {
 	return st
 }
 
+// brutalStatus 系统级 TCP Brutal 能力与状态。字段是面板协议的一部分，只有一份
+// 定义、放公共代码里：brutalSystemStatus() 在 tap_other.go / net_linux.go 各有一份
+// 平台实现，但类型必须两平台共用——定义在任一带 build tag 的文件里，另一侧就编不过。
+type brutalStatus struct {
+	supported bool
+	current   string
+	available []string
+	err       string
+}
+
 // brutalSummary 系统级 + 配置的 brutal 状态摘要（不含逐连接统计，由各模式补）。
 func brutalSummary(enabled bool, up, down uint64, conns int64) brutalInfoJSON {
 	st := brutalSystemStatus()
