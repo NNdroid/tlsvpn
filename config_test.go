@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -13,6 +14,15 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestMergeConfigRejectsTrailingJSON(t *testing.T) {
+	old := &Config{Mode: "client", PSK: "old-secret", Addr: "127.0.0.1:4000"}
+	old.applyDefaults()
+	posted := json.RawMessage(`{"mode":"client","psk":"new-secret","addr":"127.0.0.1:4000"} {}`)
+	if _, _, err := mergeAndValidateConfig(old, posted, false, nil, nil); err == nil {
+		t.Fatal("config endpoint must reject a second trailing JSON value")
+	}
+}
 
 func rsaGenerateForTest() (*rsa.PrivateKey, error) {
 	return rsa.GenerateKey(rand.Reader, 2048)
@@ -61,7 +71,7 @@ func TestLoadConfigFileValid(t *testing.T) {
 		"psk": "my-secret",
 		"addr": "1.2.3.4:4000",
 		"encrypt": true,
-		"web": {"addr": ":8080", "auth": "admin:pw"},
+		"web": {"addr": "127.0.0.1:8080", "auth": "admin:pw"},
 		"client": {"conns": 4, "fec": true, "fec_group": 8}
 	}`)
 	cfg, err := loadConfigFile(p)
@@ -142,8 +152,13 @@ func TestExampleConfigParses(t *testing.T) {
 		t.Fatalf("-print-config 模板必须始终可解析: %v", err)
 	}
 	cfg.applyDefaults()
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "known placeholder") {
+		t.Fatalf("模板的占位凭据必须阻止直接启动，实际: %v", err)
+	}
+	cfg.PSK = "test-only-high-entropy-secret-4e390397818f"
+	cfg.Web.Auth = "admin:test-only-password-9b9f5d25"
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("模板必须通过校验: %v", err)
+		t.Fatalf("替换占位凭据后模板必须通过校验: %v", err)
 	}
 }
 
@@ -159,6 +174,8 @@ func TestRepoExampleConfigsValid(t *testing.T) {
 			continue
 		}
 		cfg.applyDefaults()
+		cfg.PSK = "test-only-high-entropy-secret-4e390397818f"
+		cfg.Web.Auth = "admin:test-only-password-9b9f5d25"
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("%s 校验失败: %v", name, err)
 			continue

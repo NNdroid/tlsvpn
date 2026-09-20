@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -181,4 +182,315 @@ func extractInlineScript(html string) string {
 // 调用方从这一行开始逐行计数。
 func scriptDocLine(html, js string) int {
 	return strings.Count(html[:strings.Index(html, js)], "\n") + 1
+}
+
+// TestDashboardTernaryBalance 守护三元条件的括号深度配平。
+//
+// 这类错配平检查完全放过：`((a||0)>0?((b).toFixed(1)+' MB':'-')` 里 `?` 留在外层
+// 括号、`:` 被推进内层括号，括号和引号全都配平，而 V8 报
+// "(索引):N Unexpected token ':'" 直接判死整段脚本，面板只剩静态骨架、
+// 一次网络请求都不发（Rust 仓库真出过这个事故）。
+//
+// 合法 JS 里 `?` 和它的 `:` 必定处在同一层括号深度上，所以每层括号单独计数、
+// 互不继承——继承了就把错层配平当成合法。三种不是三元冒号的情况要排除：
+//   - 对象字面量的属性冒号，以及 switch 的 case/default 标签；
+//   - 可选链 ?. 与空值合并 ??（两个 '?' 都不是条件运算）。
+//
+// 对象字面量里的属性冒号和三元冒号在同一括号深度上长得一模一样
+// （`{a: x?y:z}` 与 `?{a:1}` 都有深度 0 的 ':'），靠"开这个字面量时同层已经
+// 有多少未配对的 ?"分开：字面量里自己开出来的 '?' 才算三元。
+func TestDashboardTernaryBalance(t *testing.T) {
+	js := extractInlineScript(dashboardHTML)
+	if js == "" {
+		t.Fatal("dashboardHTML 里没有 <script> 块")
+	}
+	if err := checkTernary(js, scriptDocLine(dashboardHTML, js)); err != "" {
+		t.Fatalf("dashboardHTML 内联 <script> 三元配对错误：%s", err)
+	}
+
+	cases := []struct {
+		name    string
+		js      string
+		wantErr bool
+	}{
+		{"错层三元", "[\n  ['a',(m||0)>0?((m).toFixed(1)+' MB':'-')+' / '+(n>0?n:'-')],\n];\n", true},
+		{"配平正确", "[\n  ['a',(m>0?m.toFixed(1)+' MB':'-')+' / '+(n>0?n:'-')],\n];\n", false},
+		{"分支加括号", "const s=(a?(b):(c))+' / '+(d?e:f);\n", false},
+		{"分支是对象字面量", "const H=(u||p)?{A:'x'+u}:{};\n", false},
+		{"属性值是三元", "const k={a:b!==undefined?b:c,d:e?f:g};\n", false},
+		{"标签与可选链", "switch(k){case 1:a;break;default:a;break;}\nb?.c\nc??d\n", false},
+		{"正则含冒号", "s.replace(/[:.]/g,'-')+' / '+(b?c:d);\n", false},
+		// 下面这一组钉住「除号之后那个字符被跳掉」这类漏字符缺陷：Rust 仓库的检查器
+		// 在 '/' 分支里自己递增过下标，循环末尾又递增一次，把 `i/(MAXPTS-1)*W` 的 `(`
+		// 整个吃掉，于是它配对的 `)` 落到空栈上，误报「多余的 )」——脚本文本本身合法。
+		// 这里保持 '/' 分支只在注释/正则时递增、普通除法一律落到循环末尾那一次 i++。
+		{"除法后紧跟括号", "const x=i/(MAXPTS-1)*W;\n", false},
+		{"嵌套除法", "const x=a/(b/(c-1))*2;\n", false},
+		{"连续除法", "const x=a/b/c*(d+e);\n", false},
+		{"括号后接属性", "const x=a/(b).toFixed(1);\n", false},
+		{"括号后接下标", "const x=a/(b)[0];\n", false},
+		{"除号后接注释与正则", "a/=b;// 注释(里有\na/=b;/* 注释(里有 */s.replace(/[:.]/g,'-')\n", false},
+		{"多余冒号", "const s=(a:b);\n", true},
+		{"漏了冒号", "const s=a?b;\n", true},
+		{"括号配平但漏了冒号", "const s=(a?b);\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkTernary(tc.js, 1)
+			if (err != "") != tc.wantErr {
+				t.Fatalf("期望 err=%v，实际 %q", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+// checkTernary 返回第一个三元配对错误的描述，没有错误返回空串。docLine0 是脚本
+// 正文第一行对应的文档行号，报错行号从它开始算。
+//
+// 前提（与 TestDashboardInlineJSSyntax 一致）：脚本里没有模板字符串——
+// dashboardHTML 由反引号定界，内含反引号就无法编译；正则字面量不含花括号与引号，
+// 按普通字符处理即可。
+func checkTernary(js string, docLine0 int) string {
+	// qOpen[d] = 第 d 层括号里还没配上 ':' 的 '?' 所在文档行号。
+	// 新开括号必须另起一层，不能继承外层——合法 JS 里 '?' 和它的 ':' 一定在同一层。
+	qOpen := [][]int{{}}
+	// braceScope 记录每个花括号的作用域。obj 为真表示它在自己的括号深度上抑制 ':'
+	// （对象字面量的属性冒号 / switch 的 case 标签），qAtOpen 是开它时同层已有的
+	// 未配对 '?' 数，用来把属性冒号和字面量内部的三元冒号分开。
+	type braceScope struct {
+		depth   int
+		obj     bool
+		qAtOpen int
+	}
+	var scopes []braceScope
+	var lastSig byte
+	var ident strings.Builder
+	casePending := -1 // `case` 出现的括号深度，-1 = 没有
+	switchPending := false
+	var inString byte
+	inLineCT, inBlockCT := false, false
+	line := docLine0
+
+	for i := 0; i < len(js); {
+		c := js[i]
+		if c == '\n' {
+			line++
+		}
+		if inString != 0 {
+			if c == '\\' {
+				i += 2
+				continue
+			}
+			if c == inString {
+				inString = 0
+			}
+			i++
+			continue
+		}
+		if inLineCT {
+			if c == '\n' {
+				inLineCT = false
+			}
+			i++
+			continue
+		}
+		if inBlockCT {
+			if c == '*' && i+1 < len(js) && js[i+1] == '/' {
+				inBlockCT = false
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+
+		// 标识符字符先累积：case / default / return / switch 都要靠它们区分
+		if isIdentChar(c) {
+			ident.WriteByte(c)
+			lastSig = c
+			i++
+			continue
+		}
+		prevIdent := ident.String()
+		ident.Reset()
+		// 花括号分类要看「上一个有效字符」，而下面的赋值会把它覆盖成当前字符
+		prevSig := lastSig
+		depth := len(qOpen) - 1
+		if !isBlank(c) {
+			lastSig = c
+		}
+
+		// `case` 后面是 case 表达式，再接的 ':' 是标签；语句结束符让两个
+		// pending 状态失效，别把它们带出当前语句
+		if prevIdent == "case" {
+			casePending = depth
+		}
+		if c == ';' {
+			casePending = -1
+			switchPending = false
+		}
+
+		if c == '?' {
+			nxt := byte(0)
+			if i+1 < len(js) {
+				nxt = js[i+1]
+			}
+			if nxt == '?' {
+				// ?? 是空值合并，两个 '?' 一起跳过，否则第二个会被当成条件运算
+				i += 2
+				continue
+			}
+			if nxt != '.' {
+				top := len(qOpen) - 1
+				qOpen[top] = append(qOpen[top], line)
+			}
+		} else if c == ':' {
+			label := prevIdent == "default" || casePending == depth
+			casePending = -1
+			prop := false
+			if n := len(scopes); n > 0 {
+				s := scopes[n-1]
+				prop = s.obj && s.depth == depth && len(qOpen[depth]) <= s.qAtOpen
+			}
+			if !label && !prop {
+				top := len(qOpen) - 1
+				if len(qOpen[top]) == 0 {
+					return fmt.Sprintf(
+						"文档行 %d: 多余的 ':'（三元的 `?` 不在同一层括号里，V8 报 Unexpected token ':' 并使整段脚本失效）…%s",
+						line, ctx(js, i))
+				}
+				qOpen[top] = qOpen[top][:len(qOpen[top])-1]
+			}
+		} else if c == '\'' || c == '"' || c == '`' {
+			inString = c
+		} else if c == '/' {
+			if i+1 < len(js) && js[i+1] == '/' {
+				inLineCT = true
+				i += 2
+				continue
+			}
+			if i+1 < len(js) && js[i+1] == '*' {
+				inBlockCT = true
+				i += 2
+				continue
+			}
+			// 正则字面量：字面量本体里可以出现 ':' 与 '?'（本脚本就有
+			// replace(/[:.]/g,…)），按除法处理会把字符类里的冒号算成三元冒号
+			if startsRegex(prevSig, prevIdent) {
+				i++
+				inClass := false
+				for i < len(js) {
+					cc := js[i]
+					if cc == '\\' {
+						i += 2
+						continue
+					}
+					if cc == '\n' {
+						line++
+					}
+					if inClass {
+						inClass = cc != ']'
+						i++
+						continue
+					}
+					i++
+					if cc == '/' {
+						break
+					}
+					if cc == '[' {
+						inClass = true
+					}
+				}
+				continue
+			}
+		} else if c == '{' {
+			// 控制流块的花括号跟在 ) ; } > 或标识符（if/for/else/catch…）后面；
+			// 跟在 ( = , : ? ! & | + - * 后面的才是对象字面量
+			isObj := prevSig == '(' || prevSig == '=' || prevSig == ',' || prevSig == ':' ||
+				prevSig == '?' || prevSig == '!' || prevSig == '&' || prevSig == '|' ||
+				prevSig == '+' || prevSig == '-' || prevSig == '*' ||
+				prevIdent == "return" || prevIdent == "yield"
+			sw := switchPending
+			switchPending = false
+			scopes = append(scopes, braceScope{
+				depth:   depth,
+				obj:     isObj || sw,
+				qAtOpen: len(qOpen[depth]),
+			})
+		} else if c == '(' {
+			qOpen = append(qOpen, []int{})
+			// `switch(k){` 到这里时标识符已经消耗掉了，先记着等花括号用
+			switchPending = prevIdent == "switch"
+		} else if c == '}' {
+			if n := len(scopes); n > 0 {
+				scopes = scopes[:n-1]
+			}
+			casePending = -1
+			switchPending = false
+		} else if c == ')' {
+			if len(qOpen) > 1 {
+				// 这层括号关闭时 '?' 还没配上 ':'。合法 JS 里 '?' 和 ':' 同层，
+				// 所以一定是漏了 ':'（`(a?b)`）。错层的 ':' 在上面那个分支先报，
+				// 到这里还剩下的就是纯粹没写完的三元
+				leftover := qOpen[len(qOpen)-1]
+				qOpen = qOpen[:len(qOpen)-1]
+				if len(leftover) > 0 {
+					return fmt.Sprintf("文档行 %v: 未闭合的三元条件（`?` 之后没有配对的 `:`）", leftover)
+				}
+			}
+		}
+		i++
+	}
+
+	if inString != 0 {
+		return fmt.Sprintf("文档行 %d: 字符串未闭合", line)
+	}
+	if inBlockCT {
+		return fmt.Sprintf("文档行 %d: 块注释未闭合", line)
+	}
+	if last := qOpen[len(qOpen)-1]; len(last) > 0 {
+		return fmt.Sprintf("文档行 %v: 未闭合的三元条件（`?` 之后没有配对的 `:`）", last)
+	}
+	return ""
+}
+
+func isIdentChar(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
+func isBlank(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// startsRegex 判断这个 '/' 是正则字面量的开头还是除法运算符。正则的本体可以含 ':' 与 '?'，
+// 当成除号处理就会把三元冒号算错。
+//
+// 规则：前面一个 token 是标识符或数字、或者由 ) ] 收尾时是除法（H*i/4、a&&b/c）；
+// 其余情况按正则处理。前面是 return / typeof 这类关键字时也是正则——它们虽然是
+// 标识符，但语法上后面只能是表达式。
+func startsRegex(prevSig byte, prevIdent string) bool {
+	if prevSig == ')' || prevSig == ']' {
+		return false
+	}
+	switch prevIdent {
+	case "", "return", "typeof", "instanceof", "case", "delete", "void", "new",
+		"in", "of", "do", "else", "throw", "yield", "await":
+		return true
+	}
+	return false
+}
+
+// ctx 返回 pos 附近的一段脚本原文，换行折成空格，方便把报错行号对到具体代码
+func ctx(js string, pos int) string {
+	from := pos - 60
+	if from < 0 {
+		from = 0
+	}
+	to := pos + 60
+	if to > len(js) {
+		to = len(js)
+	}
+	s := js[from:to]
+	s = strings.ReplaceAll(s, "\n", " ")
+	return " " + s + " "
 }

@@ -33,14 +33,14 @@ type restartCase struct {
 //   - 下行：服务端 TAP 侧注帧 → VSwitch → client 端口 → TLS → client 重排缓冲 → client TAP
 func TestClientRecoversAfterServerRestart(t *testing.T) {
 	cases := []restartCase{
-		{name: "默认(encrypt,1连接,无FEC)"},
-		{name: "session_token开启", sessionToken: true},
-		{name: "FEC-XOR K=4", fecMode: true, fecGroup: 4},
-		{name: "FEC-传统复制模式", fecMode: true, fecGroup: 0},
-		{name: "FEC-XOR+session_token", fecMode: true, fecGroup: 4, sessionToken: true},
-		{name: "3条物理连接", conns: 3},
-		{name: "3连接+FEC+session_token", conns: 3, fecMode: true, fecGroup: 4, sessionToken: true},
-		{name: "客户端指定IP", reqV4: "10.0.0.9"},
+		{name: "默认(GCM,1连接,无FEC)", encrypt: true},
+		{name: "GCM+session_token开启", encrypt: true, sessionToken: true},
+		{name: "GCM+FEC-XOR K=4", encrypt: true, fecMode: true, fecGroup: 4},
+		{name: "GCM+FEC-传统复制模式", encrypt: true, fecMode: true, fecGroup: 0},
+		{name: "GCM+FEC-XOR+session_token", encrypt: true, fecMode: true, fecGroup: 4, sessionToken: true},
+		{name: "GCM+3条物理连接", encrypt: true, conns: 3},
+		{name: "GCM+3连接+FEC+session_token", encrypt: true, conns: 3, fecMode: true, fecGroup: 4, sessionToken: true},
+		{name: "GCM+客户端指定IP", encrypt: true, reqV4: "10.0.0.9"},
 		{name: "加密关闭", encrypt: false},
 	}
 	for _, tc := range cases {

@@ -1,70 +1,5 @@
 {
   "version": 1,
-  "cipher_contexts": [
-    {
-      "psk": "",
-      "key_hex": "cea84a0380a09d388d828de9dd92f91f1c1900c269380ae0396aa58948eafdf5",
-      "iv_hex": "249226194c5108b045cd2f03cd9d316f"
-    },
-    {
-      "psk": "test_psk",
-      "key_hex": "c6321f3b6cd90b032a201b8a82ce7a4f08ec1cbdacb1d54fa6324db994a3f0eb",
-      "iv_hex": "1d3415a57415753c0724f14a1701cecc"
-    },
-    {
-      "psk": "my_super_secret_test_key",
-      "key_hex": "81d73ec2fb877be5291dcfb3eb33aac377ae731193a41d150504961778c53cd4",
-      "iv_hex": "77e170ff740334f8f5b1d2611fe2522a"
-    },
-    {
-      "psk": "中文密钥🔑",
-      "key_hex": "78de5cce388313ed58b9e672531c598262280de81787f7ff4bd2de5fe3b907c7",
-      "iv_hex": "3aace9fd2c1de67b826c9889abc1fe9b"
-    },
-    {
-      "psk": "a",
-      "key_hex": "ea381936117db42540cef908e86cf0fee86942fc833fb6689378310d6488b3b2",
-      "iv_hex": "08b687a9a54305a16b93fd5bb97cc945"
-    }
-  ],
-  "xor_vectors": [
-    {
-      "psk": "test_psk",
-      "seq": 0,
-      "plaintext_hex": "68656c6c6f",
-      "ciphertext_hex": "280cc13852"
-    },
-    {
-      "psk": "test_psk",
-      "seq": 1,
-      "plaintext_hex": "68656c6c6f",
-      "ciphertext_hex": "5a3d6c1004"
-    },
-    {
-      "psk": "test_psk",
-      "seq": 42,
-      "plaintext_hex": "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
-      "ciphertext_hex": "2ebf73e5832695e50d37cb522e63c0d880f3903bd8535794ddf00857a5aa9935b57ef6aa8a5ef5f6194906"
-    },
-    {
-      "psk": "test_psk",
-      "seq": 4294967295,
-      "plaintext_hex": "00ff7f80",
-      "ciphertext_hex": "ff7fb196"
-    },
-    {
-      "psk": "my_super_secret_test_key",
-      "seq": 12345,
-      "plaintext_hex": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
-      "ciphertext_hex": "226a4f68d128446b4bbff1ae6cc6ffc5c45f0d77361136ec5196ebfc9d1b9ed45046200eac618ebef32fbe3093612b6dc65b4f97424554ca2fd00672687c306f"
-    },
-    {
-      "psk": "中文密钥🔑",
-      "seq": 7,
-      "plaintext_hex": "e5a49ae5ad97e88a822050534b20e6b4bee7949fe5bf85e9a1bbe4b880e887b4",
-      "ciphertext_hex": "5264d38a8fbee74f98c0107b2e08434104a6fe54ce45f920799336c7c0d18da7"
-    }
-  ],
   "psk_hashes": [
     {
       "psk": "",
@@ -85,6 +20,24 @@
     {
       "psk": "a",
       "hash": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+    }
+  ],
+  "gcm_domain_vectors": [
+    {
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "data",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "6b7d896fdb4baed8b0775ea1ee38aba4097de242650d322e5a3a6775c4f07c8b"
+    },
+    {
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "fec",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "108721428cf9bacbba87a5b5ca28423d6a4af4d23d0c3338a676c8a584088b56"
     }
   ],
   "frame_headers": [
@@ -117,6 +70,7 @@
     "brutal_rx",
     "brutal_tx",
     "client_id",
+    "client_instance",
     "enc_algo",
     "encrypt",
     "fec",
@@ -125,6 +79,7 @@
     "ipv6",
     "mac",
     "padding",
+    "protocol_version",
     "psk",
     "session_token"
   ],
@@ -144,6 +99,8 @@
     "ipv6",
     "message",
     "padding",
+    "protocol_version",
+    "session_epoch",
     "session_id",
     "session_token",
     "success"

@@ -158,9 +158,6 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 	srv.cfg.Store(cfg)
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
 	srv.usedV4[srv.v4Gw], srv.usedV6[srv.v6Gw] = true, true
-	if cfg.Encrypt {
-		srv.icLegacy = newLegacyInnerCipher(cfg.PSK)
-	}
 	srv.tap = newMemTap(ctx)
 	go func() { <-ctx.Done(); srv.tap.Close() }()
 

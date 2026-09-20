@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -15,11 +14,6 @@ import (
 
 // updateGolden 控制是否重写黄金向量文件
 var updateGolden = flag.Bool("update-golden", false, "重新生成协议黄金向量文件")
-
-func sha256Sum(b []byte) []byte {
-	h := sha256.Sum256(b)
-	return h[:]
-}
 
 // ==========================================
 // 跨语言协议一致性：黄金向量 (Golden Vectors)
@@ -40,14 +34,11 @@ const goldenPath = "testdata/protocol_golden.json"
 type GoldenVectors struct {
 	Version int `json:"version"`
 
-	// 密钥派生：给定 PSK，AES key 与 base IV 必须逐字节一致
-	CipherContexts []CipherContextVec `json:"cipher_contexts"`
-
-	// XOR/CTR 加密：给定明文与 seq，密文必须逐字节一致
-	XorVectors []XorVec `json:"xor_vectors"`
-
 	// PSK 哈希：握手鉴权依赖它，必须一致
 	PSKHashes []PSKHashVec `json:"psk_hashes"`
+
+	// GCM 数据/FEC 域分离：锁定 key label、nonce、AAD 与 tag 字节
+	GCMDomainVectors []GCMDomainVec `json:"gcm_domain_vectors"`
 
 	// 帧头布局：10 字节头 [4B dataLen][2B padLen][4B seq]
 	FrameHeaders []FrameHeaderVec `json:"frame_headers"`
@@ -57,14 +48,10 @@ type GoldenVectors struct {
 	HandshakeRespKeys []string `json:"handshake_resp_keys"`
 }
 
-type CipherContextVec struct {
-	PSK    string `json:"psk"`
-	KeyHex string `json:"key_hex"`
-	IVHex  string `json:"iv_hex"`
-}
-
-type XorVec struct {
+type GCMDomainVec struct {
 	PSK           string `json:"psk"`
+	SaltHex       string `json:"salt_hex"`
+	Domain        string `json:"domain"`
 	Seq           uint32 `json:"seq"`
 	PlaintextHex  string `json:"plaintext_hex"`
 	CiphertextHex string `json:"ciphertext_hex"`
@@ -86,42 +73,25 @@ type FrameHeaderVec struct {
 func buildGoldenVectors() *GoldenVectors {
 	gv := &GoldenVectors{Version: 1}
 
-	psks := []string{"", "test_psk", "my_super_secret_test_key", "中文密钥🔑", "a"}
-	for _, psk := range psks {
-		block, iv := getCipherContext(psk)
-		key := deriveKeyBytes(psk)
-		_ = block
-		gv.CipherContexts = append(gv.CipherContexts, CipherContextVec{
-			PSK:    psk,
-			KeyHex: hex.EncodeToString(key),
-			IVHex:  hex.EncodeToString(iv),
-		})
+	for _, psk := range []string{"", "test_psk", "my_super_secret_test_key", "中文密钥🔑", "a"} {
 		gv.PSKHashes = append(gv.PSKHashes, PSKHashVec{PSK: psk, Hash: hashPSK(psk)})
 	}
 
-	type xorCase struct {
-		psk  string
-		seq  uint32
-		data []byte
-	}
-	cases := []xorCase{
-		{"test_psk", 0, []byte("hello")},
-		{"test_psk", 1, []byte("hello")},
-		{"test_psk", 42, []byte("The quick brown fox jumps over the lazy dog")},
-		{"test_psk", 4294967295, []byte{0x00, 0xFF, 0x7F, 0x80}},
-		{"my_super_secret_test_key", 12345, bytes.Repeat([]byte{0xAB}, 64)},
-		{"中文密钥🔑", 7, []byte("多字节 PSK 派生必须一致")},
-	}
-	for _, c := range cases {
-		block, iv := getCipherContext(c.psk)
-		buf := make([]byte, len(c.data))
-		copy(buf, c.data)
-		xorCryptInPlace(buf, c.seq, block, iv)
-		gv.XorVectors = append(gv.XorVectors, XorVec{
-			PSK:           c.psk,
-			Seq:           c.seq,
-			PlaintextHex:  hex.EncodeToString(c.data),
-			CiphertextHex: hex.EncodeToString(buf),
+	gcmPSK := "cross-language-domain-vector"
+	gcmSalt := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77}
+	gcmPlain := []byte("ethernet-payload")
+	for _, domain := range []string{"data", "fec"} {
+		ic, err := newGCMInnerCipherDomain(gcmPSK, gcmSalt, domain)
+		if err != nil {
+			panic(err)
+		}
+		wire := make([]byte, len(gcmPlain)+gcmTagSize)
+		copy(wire, gcmPlain)
+		ic.sealInPlace(wire, len(gcmPlain), 0x01020304, uint32(len(wire)))
+		gv.GCMDomainVectors = append(gv.GCMDomainVectors, GCMDomainVec{
+			PSK: gcmPSK, SaltHex: hex.EncodeToString(gcmSalt),
+			Domain: domain, Seq: 0x01020304, PlaintextHex: hex.EncodeToString(gcmPlain),
+			CiphertextHex: hex.EncodeToString(wire),
 		})
 	}
 
@@ -152,11 +122,13 @@ func buildGoldenVectors() *GoldenVectors {
 	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
 	// 降级成单向子集）。
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
+		ProtocolVersion: 2, ClientInstance: "x",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "x",
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
+		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
@@ -164,12 +136,6 @@ func buildGoldenVectors() *GoldenVectors {
 	})
 
 	return gv
-}
-
-// deriveKeyBytes 复算 AES key 原始字节（getCipherContext 只返回 cipher.Block，
-// 拿不到原始 key，这里按同一算法重算，同时也验证了派生公式没有漂移）
-func deriveKeyBytes(psk string) []byte {
-	return sha256Sum([]byte(psk + "_enc_key"))
 }
 
 func jsonFieldNames(v any) []string {
@@ -248,33 +214,24 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		t.Fatalf("解析黄金向量失败: %v", err)
 	}
 
-	for _, c := range gv.CipherContexts {
-		_, iv := getCipherContext(c.PSK)
-		if got := hex.EncodeToString(iv); got != c.IVHex {
-			t.Errorf("PSK %q 的 IV 不一致，黄金 %s 实际 %s", c.PSK, c.IVHex, got)
-		}
-		if got := hex.EncodeToString(deriveKeyBytes(c.PSK)); got != c.KeyHex {
-			t.Errorf("PSK %q 的 key 不一致，黄金 %s 实际 %s", c.PSK, c.KeyHex, got)
-		}
-	}
-
 	for _, h := range gv.PSKHashes {
 		if got := hashPSK(h.PSK); got != h.Hash {
 			t.Errorf("PSK %q 的哈希不一致，黄金 %s 实际 %s", h.PSK, h.Hash, got)
 		}
 	}
 
-	for _, v := range gv.XorVectors {
-		plain, err := hex.DecodeString(v.PlaintextHex)
+	for _, v := range gv.GCMDomainVectors {
+		salt, _ := hex.DecodeString(v.SaltHex)
+		plain, _ := hex.DecodeString(v.PlaintextHex)
+		ic, err := newGCMInnerCipherDomain(v.PSK, salt, v.Domain)
 		if err != nil {
-			t.Fatalf("黄金向量明文解码失败: %v", err)
+			t.Fatalf("GCM domain vector init: %v", err)
 		}
-		block, iv := getCipherContext(v.PSK)
-		buf := make([]byte, len(plain))
-		copy(buf, plain)
-		xorCryptInPlace(buf, v.Seq, block, iv)
-		if got := hex.EncodeToString(buf); got != v.CiphertextHex {
-			t.Errorf("PSK %q seq %d 加密结果不一致\n黄金: %s\n实际: %s", v.PSK, v.Seq, v.CiphertextHex, got)
+		wire := make([]byte, len(plain)+gcmTagSize)
+		copy(wire, plain)
+		ic.sealInPlace(wire, len(plain), v.Seq, uint32(len(wire)))
+		if got := hex.EncodeToString(wire); got != v.CiphertextHex {
+			t.Errorf("GCM domain %s mismatch: got %s want %s", v.Domain, got, v.CiphertextHex)
 		}
 	}
 
@@ -298,11 +255,13 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		}
 	}
 	checkKeys("handshake_req_keys", gv.HandshakeReqKeys, jsonFieldNames(HandshakeReq{
+		ProtocolVersion: 2, ClientInstance: "x",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "x",
 	}))
 	checkKeys("handshake_resp_keys", gv.HandshakeRespKeys, jsonFieldNames(HandshakeResp{
+		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
@@ -315,20 +274,22 @@ func TestGoldenSelfConsistency(t *testing.T) {
 func TestHandshakeJSONContract(t *testing.T) {
 	// 全字段填充，确保 omitempty 字段也出现
 	req := HandshakeReq{
+		ProtocolVersion: 2, ClientInstance: "instance-1",
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
 		BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "tok",
 	}
 	wantReq := []string{
-		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "encrypt", "fec",
-		"fec_group", "ipv4", "ipv6", "mac", "padding", "psk", "session_token",
+		"brutal_rx", "brutal_tx", "client_id", "client_instance", "enc_algo", "encrypt", "fec",
+		"fec_group", "ipv4", "ipv6", "mac", "padding", "protocol_version", "psk", "session_token",
 	}
 	if got := jsonFieldNames(req); !equalStrings(got, wantReq) {
 		t.Errorf("HandshakeReq 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantReq, got)
 	}
 
 	resp := HandshakeResp{
+		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
 		Padding: "ab", BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true,
@@ -337,7 +298,7 @@ func TestHandshakeJSONContract(t *testing.T) {
 	wantResp := []string{
 		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
 		"encrypt", "fec", "fec_group", "gw_v4", "gw_v6", "ipv4", "ipv6", "message",
-		"padding", "session_id", "session_token", "success",
+		"padding", "protocol_version", "session_epoch", "session_id", "session_token", "success",
 	}
 	if got := jsonFieldNames(resp); !equalStrings(got, wantResp) {
 		t.Errorf("HandshakeResp 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantResp, got)
@@ -355,7 +316,7 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	json.Unmarshal(b, &m)
 
 	// 这些字段带 omitempty，零值时不出现
-	for _, k := range []string{"mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
+	for _, k := range []string{"protocol_version", "client_instance", "mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("字段 %q 应因 omitempty 而省略，实际出现了", k)
 		}
@@ -374,43 +335,6 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	for _, k := range []string{"success", "message", "client_id", "ipv4", "ipv6"} {
 		if _, ok := rm[k]; !ok {
 			t.Errorf("HandshakeResp 字段 %q 必须始终出现", k)
-		}
-	}
-}
-
-// TestFrameRoundTripWithEncryption 帧编解码闭环（含加密，legacy CTR）
-func TestFrameRoundTripWithEncryption(t *testing.T) {
-	psk := "roundtrip_key"
-	block, iv := getCipherContext(psk)
-	ic := encIC(block, iv)
-
-	payloads := [][]byte{
-		[]byte("a"),
-		[]byte("short"),
-		bytes.Repeat([]byte("x"), 199),  // < 200 分支
-		bytes.Repeat([]byte("y"), 500),  // < 800 分支
-		bytes.Repeat([]byte("z"), 1400), // >= 800 分支
-	}
-
-	buf := new(bytes.Buffer)
-	seqs := []uint32{1, 2, 3, 4, 5}
-	for i, p := range payloads {
-		f := appendPaddedFrame(nil, VPNFrame{Seq: seqs[i], Data: p}, ic)
-		buf.Write(f)
-	}
-
-	scanner := NewFrameScanner(buf)
-	for i, want := range payloads {
-		got, seq, err := scanner.ReadFrame()
-		if err != nil {
-			t.Fatalf("第 %d 帧读取失败: %v", i, err)
-		}
-		if seq != seqs[i] {
-			t.Errorf("第 %d 帧 seq 不符，预期 %d 实际 %d", i, seqs[i], seq)
-		}
-		xorCryptInPlace(got, seq, block, iv)
-		if !bytes.Equal(got, want) {
-			t.Errorf("第 %d 帧解密后与原文不符\n预期长度 %d\n实际长度 %d", i, len(want), len(got))
 		}
 	}
 }
@@ -453,10 +377,9 @@ func TestFrameGCMRoundTrip(t *testing.T) {
 
 // TestFrameSeqZeroNotEncrypted 控制帧 (seq=0) 不加密，两端必须一致
 func TestFrameSeqZeroNotEncrypted(t *testing.T) {
-	block, iv := getCipherContext("k")
 	payload := []byte("control frame must stay plaintext")
 
-	f := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, encIC(block, iv))
+	f := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, encIC("k"))
 	// 头部 10 字节之后即为负载，seq=0 时不应被加密
 	got := f[10 : 10+len(payload)]
 	if !bytes.Equal(got, payload) {
@@ -480,34 +403,6 @@ func TestFrameHeaderByteOrder(t *testing.T) {
 	}
 }
 
-// TestPadModeLegacyRanges legacy 填充长度分支必须与 Rust 端一致。
-// 入参是线路负载长度（明文 + 加密标签），不是明文长度。
-func TestPadModeLegacyRanges(t *testing.T) {
-	prev := setPadMode(padModeLegacy)
-	defer setPadMode(prev)
-
-	checks := []struct {
-		wireLen  int
-		min, max int
-	}{
-		{0, 100, 300},
-		{1, 300, 499},
-		{199, 300, 499},
-		{200, 100, 299},
-		{799, 100, 299},
-		{800, 0, 99},
-		{1400, 0, 99},
-	}
-	for _, c := range checks {
-		for i := 0; i < 200; i++ {
-			got := currentPadLength(c.wireLen)
-			if got < c.min || got > c.max {
-				t.Fatalf("wireLen=%d 的填充长度 %d 超出预期范围 [%d,%d]", c.wireLen, got, c.min, c.max)
-			}
-		}
-	}
-}
-
 // TestPadModeOff off 模式恒不填充
 func TestPadModeOff(t *testing.T) {
 	prev := setPadMode(padModeOff)
@@ -522,7 +417,8 @@ func TestPadModeOff(t *testing.T) {
 	}
 }
 
-// TestPadModeBucket bucket 模式必须把小帧恰好填到桶边界
+// TestPadModeBucket bucket 模式按完整记录（10B 头 + 载荷 + 填充）分桶，
+// 且除 off 外每条记录都必须有正填充，避免边界长度泄漏。
 func TestPadModeBucket(t *testing.T) {
 	prev := setPadMode(padModeBucket)
 	defer setPadMode(prev)
@@ -530,12 +426,13 @@ func TestPadModeBucket(t *testing.T) {
 	for _, c := range []struct {
 		wireLen, want int
 	}{
-		{0, 0},     // 零长控制帧不填充
-		{1, 127},   // 填到 128 桶
-		{128, 0},   // 正好在桶边界
-		{129, 127}, // 填到 256 桶
-		{1500, 14}, // 填到 1514 桶
-		{1514, 0},
+		{0, 118},
+		{1, 117},
+		{118, 128}, // 完整记录正好 128B 时推进到 256B 桶
+		{128, 118},
+		{129, 117},
+		{1500, 90},
+		{1514, 76},
 	} {
 		if got := currentPadLength(c.wireLen); got != c.want {
 			t.Fatalf("bucket 模式 wireLen=%d 应填 %d，实际 %d", c.wireLen, c.want, got)
@@ -543,8 +440,8 @@ func TestPadModeBucket(t *testing.T) {
 	}
 	// 超出最大桶的 jumbo 帧只加小额随机填充
 	for i := 0; i < 100; i++ {
-		if got := currentPadLength(1515); got < 0 || got > 99 {
-			t.Fatalf("jumbo 帧填充应为 [0,99]，实际 %d", got)
+		if got := currentPadLength(4090); got < 1 || got > 100 {
+			t.Fatalf("jumbo 帧填充应为 [1,100]，实际 %d", got)
 		}
 	}
 	if padModeName() != padModeBucket {
@@ -552,15 +449,37 @@ func TestPadModeBucket(t *testing.T) {
 	}
 }
 
-// TestPadModeFallback 非法值必须回落 legacy 而不是静默生效
-func TestPadModeFallback(t *testing.T) {
-	prev := setPadMode(padModeLegacy)
+func TestBucketPaddingCoversEveryNormalIPPacketLength(t *testing.T) {
+	prev := setPadMode(padModeBucket)
 	defer setPadMode(prev)
-	if got := setPadMode("bogus"); got != padModeLegacy {
-		t.Fatalf("非法 pad_mode 应回落 %q，实际 %q", padModeLegacy, got)
+	for wireLen := 1; wireLen <= 1514+gcmTagSize; wireLen++ {
+		pad := currentPadLength(wireLen)
+		if pad <= 0 {
+			t.Fatalf("wireLen=%d was emitted without padding", wireLen)
+		}
+		recordLen := 10 + wireLen + pad
+		found := false
+		for _, bucket := range padBuckets {
+			if recordLen == bucket {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("wireLen=%d produced non-bucket record length %d", wireLen, recordLen)
+		}
 	}
-	if padModeName() != padModeLegacy {
-		t.Fatalf("非法 pad_mode 后生效值应为 %q，实际 %q", padModeLegacy, padModeName())
+}
+
+// TestPadModeFallback 非法值必须回落 bucket 而不是静默生效
+func TestPadModeFallback(t *testing.T) {
+	prev := setPadMode(padModeBucket)
+	defer setPadMode(prev)
+	if got := setPadMode("bogus"); got != padModeBucket {
+		t.Fatalf("非法 pad_mode 应回落 %q，实际 %q", padModeBucket, got)
+	}
+	if padModeName() != padModeBucket {
+		t.Fatalf("非法 pad_mode 后生效值应为 %q，实际 %q", padModeBucket, padModeName())
 	}
 }
 

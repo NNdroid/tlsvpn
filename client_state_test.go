@@ -137,13 +137,13 @@ func TestPersistSessionState(t *testing.T) {
 
 	// 无状态文件路径（进程内测试）：不落盘
 	c := &Client{clientID: "cid-A", stateFile: ""}
-	c.persistSessionState("sess-1", "tok-1")
+	c.persistSessionState("sess-1", "tok-1", 1)
 	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
 		t.Errorf("stateFile 为空时不应创建文件，stat err=%v", err)
 	}
 
 	c = &Client{clientID: "cid-A", stateFile: statePath, state: &clientState{MAC: "02:00:00:00:00:01"}}
-	c.persistSessionState("sess-1", "tok-1")
+	c.persistSessionState("sess-1", "tok-1", 1)
 	st, err := loadClientState(statePath)
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -157,7 +157,7 @@ func TestPersistSessionState(t *testing.T) {
 
 	// clientID 变化（MAC/PSK 改配置）时旧令牌按绑定校验不沿用
 	c2 := &Client{clientID: "cid-B", stateFile: statePath, state: st}
-	c2.persistSessionState("sess-2", "tok-2")
+	c2.persistSessionState("sess-2", "tok-2", 2)
 	st2, err := loadClientState(statePath)
 	if err != nil {
 		t.Fatalf("load: %v", err)

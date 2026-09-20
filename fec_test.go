@@ -153,7 +153,7 @@ func TestFECDecoderRejectsPartialGroup(t *testing.T) {
 	}
 	d4b.OnParity(partialGroupParity(1, part)) // 应被忽略，不得终结分组
 	c2.expect(1)
-	d4b.OnParity(encodeGroup(4, nil, nil, 1, p4))
+	d4b.OnParity(encodeGroup(4, nil, 1, p4))
 	c2.waitDone(t)
 	if len(c2.seqs) != 1 || c2.seqs[0] != 4 {
 		t.Fatalf("忽略错误校验帧后分组应仍可恢复 seq=4, got %v", c2.seqs)
@@ -218,7 +218,7 @@ func TestFECRoundTripNoLoss(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 40),
 		bytes.Repeat([]byte{0x04}, 40),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 	c.expect(0)
 	for i, p := range payloads {
 		d.OnData(uint32(i+1), p)
@@ -238,7 +238,7 @@ func TestFECRecoverSingleLoss(t *testing.T) {
 		bytes.Repeat([]byte{0xCC}, 80),
 		bytes.Repeat([]byte{0xDD}, 120),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c.expect(1)
 	d.OnData(1, payloads[0])
@@ -266,7 +266,7 @@ func TestFECRecoverFirstFrameLoss(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 70),
 		bytes.Repeat([]byte{0x04}, 80),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c.expect(1)
 	d.OnData(2, payloads[1])
@@ -292,7 +292,7 @@ func TestFECUnrecoverableMultiLoss(t *testing.T) {
 		bytes.Repeat([]byte{0x0C}, 40),
 		bytes.Repeat([]byte{0x0D}, 40),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c.expect(0)
 	d.OnData(2, payloads[1])
@@ -306,16 +306,15 @@ func TestFECUnrecoverableMultiLoss(t *testing.T) {
 }
 
 func TestFECEncryptedRoundTrip(t *testing.T) {
-	block, baseIV := getCipherContext("fec_enc_test")
 	c, out := newFecCollector()
-	d := NewFECDecoder(4, encIC(block, baseIV), out)
+	d := NewFECDecoder(4, encIC("fec_enc_psk"), out)
 	payloads := [][]byte{
 		bytes.Repeat([]byte{0x11}, 200),
 		bytes.Repeat([]byte{0x22}, 200),
 		bytes.Repeat([]byte{0x33}, 200),
 		bytes.Repeat([]byte{0x44}, 200),
 	}
-	parity := encodeGroup(4, block, baseIV, 1, payloads)
+	parity := encodeGroup(4, encIC("fec_enc_psk"), 1, payloads)
 
 	c.expect(1)
 	d.OnData(1, payloads[0])
@@ -342,7 +341,7 @@ func TestFECDecoderDuplicateParity(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 30),
 		bytes.Repeat([]byte{0x04}, 30),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c.expect(1)
 	d.OnData(1, payloads[0])
@@ -370,7 +369,7 @@ func TestFECDecoderLateMemberAfterRecovery(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 30),
 		bytes.Repeat([]byte{0x04}, 30),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c.expect(1)
 	d.OnData(1, payloads[0])
@@ -390,7 +389,7 @@ func TestFECDecoderReset(t *testing.T) {
 	c, out := newFecCollector()
 	d := NewFECDecoder(4, nil, out)
 	payloads := [][]byte{bytes.Repeat([]byte{0x01}, 30), bytes.Repeat([]byte{0x02}, 30)}
-	parity := encodeGroup(2, nil, nil, 1, payloads)
+	parity := encodeGroup(2, nil, 1, payloads)
 
 	d.OnData(2, payloads[1])
 	d.Reset()
@@ -526,7 +525,7 @@ func TestFECProductionRecoveryRegression(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 1200),
 		bytes.Repeat([]byte{0x04}, 1100),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads) // 先用干净的池生成校验帧
+	parity := encodeGroup(4, nil, 1, payloads) // 先用干净的池生成校验帧
 
 	// 投毒：与 frame.go 的 FrameScanner.ReadFrame 完全相同的动作——网络帧缓冲
 	// 被截到 dataLen 后整块归还。必须放在 OnParity 之前：解码器取校验帧缓冲走
@@ -590,7 +589,7 @@ func TestFECDropsTruncatedParityThroughOnParity(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 80),
 		bytes.Repeat([]byte{0x04}, 120),
 	}
-	parity := encodeGroup(4, nil, nil, 1, payloads)
+	parity := encodeGroup(4, nil, 1, payloads)
 
 	c, out := newFecCollector()
 	d := NewFECDecoder(4, nil, out)

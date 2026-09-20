@@ -8,6 +8,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -28,6 +31,44 @@ func netlinkTunnelSupported() bool { return true }
 // ======================= TCP Brutal & RTT 探测 =======================
 const TCP_BRUTAL_PARAMS = 23301
 
+var (
+	brutalAvailOnce sync.Once
+	brutalAvail     []string
+)
+
+// brutalAvailableAlgos 内核提供的拥塞控制算法列表（运行期不变），读一次缓存。
+// 读不到（容器禁 /proc 之类）时返回 nil，调用方按"未知"处理，不阻断 apply 尝试。
+func brutalAvailableAlgos() []string {
+	brutalAvailOnce.Do(func() {
+		data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_available_congestion_control")
+		if err != nil {
+			return
+		}
+		brutalAvail = strings.Fields(string(data))
+	})
+	return brutalAvail
+}
+
+// brutalStatus 定义在 tap_other.go（两个平台共享的公共结构），这里只给 Linux
+// 实现读内核值的逻辑。
+
+// brutalSystemStatus 系统级状态：内核是否提供 brutal 算法、全局当前算法、
+// 以及完整可用列表。面板用它区分"配置了但内核不支持"与"配置了且生效中"。
+func brutalSystemStatus() brutalStatus {
+	st := brutalStatus{available: brutalAvailableAlgos()}
+	cur, curErr := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
+	st.current = strings.TrimSpace(string(cur))
+	if curErr != nil {
+		st.err = fmt.Sprintf("cannot read tcp_congestion_control: %v", curErr)
+	}
+	for _, a := range st.available {
+		if a == "brutal" {
+			st.supported = true
+		}
+	}
+	return st
+}
+
 func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 	// 经由 SOCKS5 代理时拿不到端到端的 TCP 句柄，此处直接跳过内核调优
 	if conn == nil {
@@ -35,6 +76,19 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 	}
 	if rateMbps == 0 {
 		return fmt.Errorf("TCP Brutal rate cannot be 0")
+	}
+	avail := brutalAvailableAlgos()
+	if avail != nil {
+		found := false
+		for _, a := range avail {
+			if a == "brutal" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("kernel has no 'brutal' congestion control: %s", strings.Join(avail, ","))
+		}
 	}
 	raw, err := conn.SyscallConn()
 	if err != nil {
@@ -44,7 +98,7 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 	err = raw.Control(func(fd uintptr) {
 		err := unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "brutal")
 		if err != nil {
-			sysErr = fmt.Errorf("TCP_CONGESTION=brutal 未生效: %v", err)
+			sysErr = fmt.Errorf("TCP_CONGESTION=brutal failed: %v", err)
 			return
 		}
 		rateBps := rateMbps * 1000 * 1000 / 8
@@ -53,7 +107,7 @@ func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
 		binary.LittleEndian.PutUint32(b[8:12], 20)
 		_, _, errno := unix.Syscall6(unix.SYS_SETSOCKOPT, fd, unix.IPPROTO_TCP, TCP_BRUTAL_PARAMS, uintptr(unsafe.Pointer(&b[0])), 12, 0)
 		if errno != 0 {
-			sysErr = fmt.Errorf("设置 TCP_BRUTAL_PARAMS 失败: %v", errno)
+			sysErr = fmt.Errorf("TCP_BRUTAL_PARAMS failed: %v", errno)
 		}
 	})
 	if err != nil {

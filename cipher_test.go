@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/cipher"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -31,14 +29,18 @@ func randomSalt() []byte {
 	return s
 }
 
-// encIC 用 legacy 算法参数构造 innerCipher（fec_test 辅助）
-func encIC(block cipher.Block, baseIV []byte) *innerCipher {
-	return &innerCipher{algo: encAlgoLegacyCTR, block: block, baseIV: baseIV}
+// testGCMSalt 测试用固定会话盐：FEC/帧测试需要确定性的加密器才能复算
+var testGCMSalt = []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+
+// encIC 构造 GCM 加密器（fec_test 辅助）
+func encIC(psk string) *innerCipher {
+	return mustGCM(psk, testGCMSalt)
 }
 
-// encodeGroup 用编码器处理一组 k 帧，返回校验帧（fec_test 辅助）
-func encodeGroup(k int, block cipher.Block, baseIV []byte, startSeq uint32, payloads [][]byte) []byte {
-	e := newFECEncoder(k, encIC(block, baseIV))
+// encodeGroup 用编码器处理一组 k 帧，返回校验帧（fec_test 辅助）。
+// ic 为 nil 时校验帧走明文（与 NewFECDecoder 传 nil 的解码端配对）。
+func encodeGroup(k int, ic *innerCipher, startSeq uint32, payloads [][]byte) []byte {
+	e := newFECEncoder(k, ic)
 	var parity []byte
 	for i, p := range payloads {
 		if par := e.add(VPNFrame{Seq: startSeq + uint32(i), Data: p}); par != nil {
@@ -76,63 +78,6 @@ func TestGCMSealOpenRoundtrip(t *testing.T) {
 		}
 	}
 }
-
-// TestGCMV2RoundTripAndKeySeparation 锁定 GCM-v2（算法 3）的语义：
-// 与 v1 线路格式一致，但密钥派生独立——v1 密文不得被 v2 密钥打开。
-func TestGCMV2RoundTripAndKeySeparation(t *testing.T) {
-	salt := randomSalt()
-	tx, err := newGCMInnerCipherAlgo("v2_psk", salt, encAlgoGCMv2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !tx.isGCM() {
-		t.Fatal("v2 加密器必须被 isGCM 识别（FEC 标签/AAD 依赖此判定）")
-	}
-	rx, _ := newGCMInnerCipherAlgo("v2_psk", salt, encAlgoGCMv2)
-	pt := bytes.Repeat([]byte{0xCD}, 300)
-	region := make([]byte, len(pt)+gcmTagSize)
-	copy(region, pt)
-	if written := tx.sealInPlace(region, len(pt), 42, uint32(len(pt)+gcmTagSize)); written != len(pt)+gcmTagSize {
-		t.Fatalf("v2 seal 写入 %d 字节, 预期 %d", written, len(pt)+gcmTagSize)
-	}
-	plain, err := rx.openInPlace(region, 42, uint32(len(pt)+gcmTagSize))
-	if err != nil || !bytes.Equal(plain, pt) {
-		t.Fatalf("v2 往返失败: %v", err)
-	}
-
-	// 密钥分离：v1 密文不得被 v2 密钥打开（反之亦然）。
-	// 这是把密钥分离做成分离协商值的全部意义。
-	tx1, _ := newGCMInnerCipher("sep_psk", salt)
-	rx2, _ := newGCMInnerCipherAlgo("sep_psk", salt, encAlgoGCMv2)
-	region1 := make([]byte, len(pt)+gcmTagSize)
-	copy(region1, pt)
-	tx1.sealInPlace(region1, len(pt), 7, uint32(len(pt)+gcmTagSize))
-	if _, err := rx2.openInPlace(region1, 7, uint32(len(pt)+gcmTagSize)); err == nil {
-		t.Fatal("v1 密文不得被 v2 密钥打开（密钥分离失效）")
-	}
-	tx2, _ := newGCMInnerCipherAlgo("sep_psk2", salt, encAlgoGCMv2)
-	rx1, _ := newGCMInnerCipher("sep_psk2", salt)
-	region2 := make([]byte, len(pt)+gcmTagSize)
-	copy(region2, pt)
-	tx2.sealInPlace(region2, len(pt), 8, uint32(len(pt)+gcmTagSize))
-	if _, err := rx1.openInPlace(region2, 8, uint32(len(pt)+gcmTagSize)); err == nil {
-		t.Fatal("v2 密文不得被 v1 密钥打开（密钥分离失效）")
-	}
-
-	// 未知算法值拒绝构造
-	if _, err := newGCMInnerCipherAlgo("x", salt, 99); err == nil {
-		t.Fatal("未知 GCM 算法值应拒绝构造")
-	}
-	// v2 与 v1 同强度档：min_enc=gcm 必须同时接受 2 与 3
-	if encAlgoRank(encAlgoGCMv2) != encRankGCM {
-		t.Fatal("GCM-v2 必须落在 GCM 强度档")
-	}
-	// 派生标签必须真正不同
-	if gcmKeyLabel(encAlgoGCM) == gcmKeyLabel(encAlgoGCMv2) {
-		t.Fatal("v1/v2 的密钥派生标签必须不同")
-	}
-}
-
 func TestGCMRejectsTampering(t *testing.T) {
 	salt := randomSalt()
 	tx, _ := newGCMInnerCipher("tamper_psk", salt)
@@ -193,6 +138,34 @@ func TestGCMCrossSaltAndDirectionSeparation(t *testing.T) {
 	a.sealInPlace(rc, len(pt), 6, uint32(len(pt)+gcmTagSize))
 	if bytes.Equal(ra[0:16], rc[0:16]) {
 		t.Fatal("同盐不同 seq 密文前缀不应相同")
+	}
+}
+
+// 数据帧和 XOR-FEC 校验帧都使用 seq 作为 GCM nonce 的高 32 位。即使
+// salt/seq 相同，它们也必须用不同 key domain，否则两条发送路径会复用 nonce。
+func TestGCMDataAndFECDomainSeparation(t *testing.T) {
+	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	dataIC, err := newGCMInnerCipherDomain("domain_psk", salt, "data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fecIC, err := newGCMInnerCipherDomain("domain_psk", salt, "fec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := []byte("same plaintext and sequence")
+	wireLen := uint32(len(plain) + gcmTagSize)
+	dataWire := make([]byte, wireLen)
+	fecWire := make([]byte, wireLen)
+	copy(dataWire, plain)
+	copy(fecWire, plain)
+	dataIC.sealInPlace(dataWire, len(plain), 77, wireLen)
+	fecIC.sealInPlace(fecWire, len(plain), 77, wireLen)
+	if bytes.Equal(dataWire, fecWire) {
+		t.Fatal("data/FEC domains produced identical ciphertext for the same salt and seq")
+	}
+	if _, err := dataIC.openInPlace(fecWire, 77, wireLen); err == nil {
+		t.Fatal("FEC ciphertext must not authenticate in the data domain")
 	}
 }
 
@@ -383,27 +356,6 @@ func mustGCM(psk string, salt []byte) *innerCipher {
 	}
 	return ic
 }
-
-func TestLegacyFallbackUnchanged(t *testing.T) {
-	// legacy 回退路径与历史行为逐字节一致（golden 向量以外的不变式）
-	ic := newLegacyInnerCipher("legacy_psk")
-	block, baseIV := getCipherContext("legacy_psk")
-	pt := []byte("legacy payload for compat check")
-
-	a := append([]byte(nil), pt...)
-	ic.sealInPlace(a, len(a), 999, uint32(len(a)))
-
-	b := append([]byte(nil), pt...)
-	xorCryptInPlace(b, 999, block, baseIV)
-
-	if !bytes.Equal(a, b) {
-		t.Fatal("legacy 回退实现与原 xorCryptInPlace 行为不一致")
-	}
-	if got := hex.EncodeToString(a); len(got) != 2*len(pt) {
-		t.Fatal("legacy 输出长度应与输入一致")
-	}
-}
-
 func TestHandshakeJSONGCMFields(t *testing.T) {
 	resp := HandshakeResp{
 		Success: true, Encrypt: true, EncAlgo: encAlgoGCM,
@@ -438,6 +390,10 @@ func TestHandshakeJSONGCMFields(t *testing.T) {
 }
 
 func TestWebAuthAndStats(t *testing.T) {
+	if !constantTimeCredentialEqual("admin:s3cret", "admin:s3cret") ||
+		constantTimeCredentialEqual("admin:s3cret", "admin:s3cret-longer") {
+		t.Fatal("fixed-length credential digest comparison contract failed")
+	}
 	// Basic Auth：正确凭据放行、缺失/错误凭据 401
 	h := basicAuthWrapper("admin:s3cret", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -534,7 +490,7 @@ func TestFECSupportCounters(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 30), bytes.Repeat([]byte{0x04}, 30),
 	}
 	// 组1: seq1-4，丢 seq2 → 恢复
-	parity1 := encodeGroup(4, nil, nil, 1, payloads)
+	parity1 := encodeGroup(4, nil, 1, payloads)
 	c.expect(1)
 	d.OnData(1, payloads[0])
 	d.OnData(3, payloads[2])
@@ -546,7 +502,7 @@ func TestFECSupportCounters(t *testing.T) {
 		t.Fatalf("组1: 应 recovered=1 lost=0, got %d/%d", rec, lost)
 	}
 	// 组2: seq5-8，丢 seq5、seq6 → 不可恢复，随后触发淘汰确认丢失
-	parity2 := encodeGroup(4, nil, nil, 5, payloads)
+	parity2 := encodeGroup(4, nil, 5, payloads)
 	d.OnData(7, payloads[2])
 	d.OnData(8, payloads[3])
 	d.OnParity(parity2)
@@ -710,28 +666,5 @@ func TestReconnectBackoff(t *testing.T) {
 	}
 	if d5 <= d0 {
 		t.Fatalf("退避应单调递增区间: d0=%s d5=%s", d0, d5)
-	}
-}
-
-// TestEncAlgoForDisplay 锁定面板上报口径：0=未加密、1=legacy CTR、2=GCM。
-// 回归点是历史上真实出现过的两个缺陷——未加密与 legacy CTR 都拿到原始算法号
-// 0（无法区分），以及 GCM-v2=3 面板不认识而显示成"明文"。
-func TestEncAlgoForDisplay(t *testing.T) {
-	cases := []struct {
-		name    string
-		encAlgo int
-		encrypt bool
-		want    int
-	}{
-		{"无内层加密", encAlgoLegacyCTR, false, 0},
-		{"legacy CTR", encAlgoLegacyCTR, true, 1},
-		{"GCM v1", encAlgoGCM, true, 2},
-		{"GCM v2", encAlgoGCMv2, true, 2},
-	}
-	for _, tc := range cases {
-		if got := encAlgoForDisplay(tc.encAlgo, tc.encrypt); got != tc.want {
-			t.Errorf("%s: encAlgo=%d encrypt=%v 期望 %d，实际 %d",
-				tc.name, tc.encAlgo, tc.encrypt, tc.want, got)
-		}
 	}
 }

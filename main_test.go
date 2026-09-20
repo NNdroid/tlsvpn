@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,13 +55,13 @@ func TestClientIDValidation(t *testing.T) {
 }
 
 func TestMACStringValidation(t *testing.T) {
-	if !isValidMACString("") {
-		t.Error("空 MAC（客户端未上报）应放行")
+	if isValidMACString("") {
+		t.Error("协议 v2 不允许空 MAC")
 	}
 	if !isValidMACString("00:1a:2b:3c:4d:5e") || !isValidMACString("00:1A:2B:3C:4D:5E") {
 		t.Error("合法 MAC 被误拒")
 	}
-	for _, s := range []string{"00:1a:2b:3c:4d", "00-1a-2b-3c-4d-5e", "zz:1a:2b:3c:4d:5e", "0:1a:2b:3c:4d:5e", "bad\nmac-xx"} {
+	for _, s := range []string{"00:00:00:00:00:00", "01:1a:2b:3c:4d:5e", "00:1a:2b:3c:4d", "00-1a-2b-3c-4d-5e", "zz:1a:2b:3c:4d:5e", "0:1a:2b:3c:4d:5e", "bad\nmac-xx"} {
 		if isValidMACString(s) {
 			t.Errorf("非法 MAC %q 被误放行", s)
 		}
@@ -67,6 +69,19 @@ func TestMACStringValidation(t *testing.T) {
 	m, ok := parseMACKey("00:1a:2b:3c:4d:5e")
 	if !ok || m != (macKey{0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e}) {
 		t.Errorf("parseMACKey 解析错误: %v ok=%v", m, ok)
+	}
+}
+
+func TestClientInstanceValidation(t *testing.T) {
+	for _, s := range []string{"123e4567-e89b-12d3-a456-426614174000", "0123456789abcdef0123456789abcdef"} {
+		if !isValidClientInstance(s) {
+			t.Errorf("valid client instance rejected: %q", s)
+		}
+	}
+	for _, s := range []string{"", "short", "123e4567-e89b-12d3-a456-426614174000\nforged", strings.Repeat("a", 65)} {
+		if isValidClientInstance(s) {
+			t.Errorf("invalid client instance accepted: %q", s)
+		}
 	}
 }
 
@@ -228,33 +243,6 @@ func TestIncrementIP(t *testing.T) {
 }
 
 // ==========================================
-// 加解密邏輯測試 (Cryptography)
-// ==========================================
-
-func TestXorCryptInPlace(t *testing.T) {
-	psk := "my_super_secret_test_key"
-	block, baseIV := getCipherContext(psk)
-
-	originalData := []byte("hello world, this is a test payload!")
-	data := make([]byte, len(originalData))
-	copy(data, originalData)
-
-	seq := uint32(12345)
-
-	// 第一步：加密
-	xorCryptInPlace(data, seq, block, baseIV)
-	if bytes.Equal(data, originalData) {
-		t.Fatal("資料加密後不應與原始資料相同")
-	}
-
-	// 第二步：解密 (再做一次 XOR)
-	xorCryptInPlace(data, seq, block, baseIV)
-	if !bytes.Equal(data, originalData) {
-		t.Fatalf("解密失敗！預期: %s, 實際: %s", string(originalData), string(data))
-	}
-}
-
-// ==========================================
 // 会话令牌与 PSK 失败限流测试
 // ==========================================
 
@@ -312,7 +300,10 @@ func TestPSKFailLimit(t *testing.T) {
 	}
 
 	// 窗口过期后计数重置
-	b := s.pskFail[remote]
+	b := s.pskFail["203.0.113.7"]
+	if b == nil {
+		t.Fatal("PSK 失败预算必须按 IP 聚合，而不是按临时源端口分裂")
+	}
 	b.first = time.Now().Add(-2 * time.Minute)
 	if s.pskFailExceeded(remote) {
 		t.Error("窗口过期后应重新计数")
@@ -321,6 +312,13 @@ func TestPSKFailLimit(t *testing.T) {
 	// 不同地址互不干扰：超限地址之外的新地址仍允许首次
 	if len(s.pskFail) < 2 {
 		t.Errorf("失败表应保留各地址条目，实际 %d", len(s.pskFail))
+	}
+	// 同一来源换端口仍共用预算，不能靠每次重连换临时端口绕过限制。
+	for i := 0; i < pskFailLimit; i++ {
+		_ = s.pskFailExceeded("192.0.2.9:" + fmt.Sprint(10000+i))
+	}
+	if !s.pskFailExceeded("192.0.2.9:20000") {
+		t.Error("同一 IP 更换源端口不应重置 PSK 失败预算")
 	}
 }
 
@@ -526,15 +524,15 @@ func (r *infiniteReader) Read(p []byte) (n int, err error) {
 
 func BenchmarkProtocolThroughput(b *testing.B) {
 	psk := "benchmark_secret_key"
-	block, baseIV := getCipherContext(psk)
 
 	payload := make([]byte, 1400)
 	for i := range payload {
 		payload[i] = byte(i)
 	}
 
+	rx := mustGCM(psk, testGCMSalt)
 	frameBuf := getFrame()[:0]
-	frameBuf = appendPaddedFrame(frameBuf, VPNFrame{Seq: 1, Data: payload}, newLegacyInnerCipher("benchmark_secret_key"))
+	frameBuf = appendPaddedFrame(frameBuf, VPNFrame{Seq: 1, Data: payload}, rx)
 
 	reader := &infiniteReader{data: frameBuf}
 	scanner := NewFrameScanner(reader)
@@ -547,8 +545,10 @@ func BenchmarkProtocolThroughput(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		// 模擬解密
-		xorCryptInPlace(data, seq, block, baseIV)
+		// 模拟解密（含 GCM 标签校验）
+		if _, err := rx.openInPlace(data, seq, uint32(len(data))); err != nil {
+			b.Fatal(err)
+		}
 		putFrame(data)
 	}
 }

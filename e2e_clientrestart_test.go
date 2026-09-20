@@ -41,10 +41,10 @@ type clientRestartCase struct {
 //     （客户端_state 落盘修复：MAC 跨进程持久化）。
 func TestClientRecoversAfterClientRestart(t *testing.T) {
 	cases := []clientRestartCase{
-		{name: "MAC不变-session_token关闭"},
-		{name: "MAC不变-session_token开启", sessionToken: true},
-		{name: "MAC变化-session_token关闭(模拟Linux随机MAC)", macShift: true},
-		{name: "MAC变化+session_token开启", sessionToken: true, macShift: true},
+		{name: "GCM-MAC不变-session_token关闭", encrypt: true},
+		{name: "GCM-MAC不变-session_token开启", encrypt: true, sessionToken: true},
+		{name: "GCM-MAC变化-session_token关闭(模拟Linux随机MAC)", encrypt: true, macShift: true},
+		{name: "GCM-MAC变化+session_token开启", encrypt: true, sessionToken: true, macShift: true},
 	}
 	for _, tc := range cases {
 		tc := tc

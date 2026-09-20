@@ -127,93 +127,72 @@ func freeFrames(batch []VPNFrame) {
 // 因为填充的唯一可见效果是改变线路上的总字节数。
 //
 //	off    不填充（吞吐优先）
-//	legacy 旧的随机填充：小帧加 300-500B，即 200-350% 的额外线路开销
 //	bucket 填充到固定长度桶：小帧开销降到 <30%，且线路长度分布固定
+//
+// 历史上的 legacy 模式是小帧加 300-500B 随机填充（200-350% 的额外线路开销），
+// 抗流量分析收益有限而带宽代价固定，已随旧协议兼容一并移除。
 //
 // 注意：填充本身不参与 GCM AAD（AAD 只绑定 [dataLen ‖ seq]），所以填充提供
 // 的抗流量分析能力有限；bucket 模式用"固定长度分布"这一更强属性替代随机填充。
 const (
 	padModeOff    = "off"
-	padModeLegacy = "legacy"
 	padModeBucket = "bucket"
 )
 
 // 发送路径按 int 码分派填充策略（Go 不允许比较函数值）
 const (
 	padCodeOff    = 0
-	padCodeLegacy = 1
-	padCodeBucket = 2
+	padCodeBucket = 1
 )
 
-// padBuckets 小帧填充目标桶（覆盖常见 MTU 1500 的帧及其含标签长度）
-var padBuckets = []int{128, 256, 384, 512, 768, 1024, 1280, 1514}
+// padBuckets 是完整线路记录（10B 头 + 密文/明文 + padding）的目标长度。
+// 1600 覆盖完整 1514B Ethernet 帧、16B GCM tag 与 10B 帧头。
+var padBuckets = []int{128, 256, 384, 512, 768, 1024, 1280, 1600, 2048, 4096}
 
 var padModeCode atomic.Int32
 
-func init() { padModeCode.Store(padCodeLegacy) }
+// 进程启动时配置尚未加载，先按 bucket 起步：这是唯一的默认值，也保证配置
+// 加载前后的填充行为一致，不会出现一段窗口按别的策略发包。
+func init() { padModeCode.Store(padCodeBucket) }
 
-// setPadMode 切换填充策略（非法值回落 legacy），返回实际生效的策略名
+// setPadMode 切换填充策略（非法值回落 bucket），返回实际生效的策略名
 func setPadMode(mode string) string {
 	switch mode {
 	case padModeOff:
 		padModeCode.Store(padCodeOff)
-	case padModeBucket:
-		padModeCode.Store(padCodeBucket)
 	default:
-		padModeCode.Store(padCodeLegacy)
-		return padModeLegacy
+		padModeCode.Store(padCodeBucket)
+		return padModeBucket
 	}
 	return mode
 }
 
 func padModeName() string {
-	switch padModeCode.Load() {
-	case padCodeOff:
+	if padModeCode.Load() == padCodeOff {
 		return padModeOff
-	case padCodeBucket:
-		return padModeBucket
-	default:
-		return padModeLegacy
 	}
+	return padModeBucket
 }
 
 func currentPadLength(wireLen int) int {
-	switch padModeCode.Load() {
-	case padCodeOff:
+	if padModeCode.Load() == padCodeOff {
 		return 0
-	case padCodeBucket:
-		return padBucket(wireLen)
-	default:
-		return padLegacy(wireLen)
 	}
-}
-
-// padLegacy 旧的随机填充（阈值语义与旧实现一致，入参改为线路长度）
-func padLegacy(wireLen int) int {
-	if wireLen == 0 {
-		return 100 + mathrand.IntN(201)
-	}
-	if wireLen < 200 {
-		return 300 + mathrand.IntN(200)
-	}
-	if wireLen < 800 {
-		return 100 + mathrand.IntN(200)
-	}
-	return mathrand.IntN(100)
+	return padBucket(wireLen)
 }
 
 // padBucket 小帧填充到固定桶；超出最大桶的大帧（jumbo）只加小额随机填充，
 // 避免为抗流量分析付出过大带宽代价。
 func padBucket(wireLen int) int {
-	if wireLen <= 0 {
-		return 0
-	}
+	recordLen := 10 + wireLen
 	for _, b := range padBuckets {
-		if wireLen <= b {
-			return b - wireLen
+		// 使用严格小于保证 bucket 模式的每条记录都有非零 padding；off 是
+		// 唯一允许零填充的模式，测试和运维语义不再含糊。
+		if recordLen < b {
+			return b - recordLen
 		}
 	}
-	return mathrand.IntN(100)
+	return 1 + mathrand.IntN(100)
 }
 
 // appendPaddedFrame 10 字节头部 [4B len][2B padLen][4B seq]
@@ -324,16 +303,17 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 		available := len(fs.buf) - fs.offset
 
 		if available >= HeaderSize {
-			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
+			rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
 			seq := binary.BigEndian.Uint32(fs.buf[fs.offset+6 : fs.offset+10])
-			totalLen := dataLen + padLen
 
-			if dataLen > fs.maxDataLen {
+			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
 				fs.buf = fs.buf[:0]
 				fs.offset = 0
-				return nil, 0, fmt.Errorf("invalid frame data length: %d", dataLen)
+				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
 			}
+			dataLen := int(rawDataLen)
+			totalLen := dataLen + padLen
 
 			if available >= HeaderSize+totalLen {
 				if dataLen == 0 {
@@ -373,10 +353,16 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 
 		available = len(fs.buf) - fs.offset
 		if available >= HeaderSize {
-			dataLen := int(binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4]))
+			rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
-			if fs.offset+HeaderSize+dataLen+padLen > requiredCap {
-				requiredCap = fs.offset + HeaderSize + dataLen + padLen
+			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+				fs.buf = fs.buf[:0]
+				fs.offset = 0
+				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
+			}
+			frameCap := uint64(fs.offset) + HeaderSize + uint64(rawDataLen) + uint64(padLen)
+			if frameCap > uint64(requiredCap) {
+				requiredCap = int(frameCap)
 			}
 		}
 
@@ -404,24 +390,25 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 
 // ======================= 协议结构 =======================
 type HandshakeReq struct {
-	ClientID string `json:"client_id"`
-	PSK      string `json:"psk"`
-	MAC      string `json:"mac,omitempty"`
-	IPv4     string `json:"ipv4,omitempty"`
-	IPv6     string `json:"ipv6,omitempty"`
-	Padding  string `json:"padding,omitempty"`
-	BrutalTx uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx uint64 `json:"brutal_rx,omitempty"`
-	FEC      bool   `json:"fec,omitempty"`
-	FecGroup int    `json:"fec_group,omitempty"`
-	Encrypt  bool   `json:"encrypt,omitempty"`
-	// EncAlgo：本端支持的最高内层加密算法（位集，bit1=GCM）。
-	// 旧版 Go/Rust 不发送本字段 → 0（legacy CTR）。
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	ClientInstance  string `json:"client_instance,omitempty"`
+	ClientID        string `json:"client_id"`
+	PSK             string `json:"psk"`
+	MAC             string `json:"mac,omitempty"`
+	IPv4            string `json:"ipv4,omitempty"`
+	IPv6            string `json:"ipv6,omitempty"`
+	Padding         string `json:"padding,omitempty"`
+	BrutalTx        uint64 `json:"brutal_tx,omitempty"`
+	BrutalRx        uint64 `json:"brutal_rx,omitempty"`
+	FEC             bool   `json:"fec,omitempty"`
+	FecGroup        int    `json:"fec_group,omitempty"`
+	Encrypt         bool   `json:"encrypt,omitempty"`
+	// EncAlgo：本端声明的内层加密算法（encAlgoNone / encAlgoGCM）。服务端
+	// 要求完全相等才启用内层加密，不接受更弱的回退。
 	EncAlgo int `json:"enc_algo,omitempty"`
 	// SessionToken：客户端回带上一次收到的会话令牌（hex）。
 	// 服务端开启 session_token 时，重连既有会话必须携带正确令牌，
 	// 仅持有共享 PSK 的第三方无法冒充既有会话（见 computeSessionToken）。
-	// 旧版实现不发送本字段 → 空串，配合服务端开关向后兼容。
 	SessionToken string `json:"session_token,omitempty"`
 }
 
@@ -431,27 +418,29 @@ type MacBinding struct {
 }
 
 type HandshakeResp struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message"`
-	SessionID string `json:"session_id,omitempty"`
-	ClientID  string `json:"client_id"`
-	IPv4      string `json:"ipv4"`
-	IPv6      string `json:"ipv6"`
-	GwV4      string `json:"gw_v4,omitempty"`
-	GwV6      string `json:"gw_v6,omitempty"`
-	Padding   string `json:"padding,omitempty"`
-	BrutalTx  uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx  uint64 `json:"brutal_rx,omitempty"`
-	FEC       bool   `json:"fec,omitempty"`
-	FecGroup  int    `json:"fec_group,omitempty"`
-	Encrypt   bool   `json:"encrypt,omitempty"`
-	// EncAlgo：协商选定的算法（0=legacy CTR，2=GCM）。仅当双方都支持
-	// GCM 时为 2；此时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	SessionEpoch    uint64 `json:"session_epoch,omitempty"`
+	Success         bool   `json:"success"`
+	Message         string `json:"message"`
+	SessionID       string `json:"session_id,omitempty"`
+	ClientID        string `json:"client_id"`
+	IPv4            string `json:"ipv4"`
+	IPv6            string `json:"ipv6"`
+	GwV4            string `json:"gw_v4,omitempty"`
+	GwV6            string `json:"gw_v6,omitempty"`
+	Padding         string `json:"padding,omitempty"`
+	BrutalTx        uint64 `json:"brutal_tx,omitempty"`
+	BrutalRx        uint64 `json:"brutal_rx,omitempty"`
+	FEC             bool   `json:"fec,omitempty"`
+	FecGroup        int    `json:"fec_group,omitempty"`
+	Encrypt         bool   `json:"encrypt,omitempty"`
+	// EncAlgo：协商选定的算法（encAlgoNone=无内层加密，encAlgoGCM=GCM）。
+	// 为 GCM 时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
 	// EncSalt2 为 s2c 方向盐（服务端加密/客户端解密）。
 	EncAlgo  int    `json:"enc_algo,omitempty"`
 	EncSalt  string `json:"enc_salt,omitempty"`  // hex(8B)：客户端→服务端方向
 	EncSalt2 string `json:"enc_salt2,omitempty"` // hex(8B)：服务端→客户端方向
 	// SessionToken：本次会话的重连接入令牌（hex），客户端须在下一次握手回带。
-	// 仅在服务端开启 session_token 时下发；旧服务端不下发 → 空串。
+	// 仅在服务端开启 session_token 时下发。
 	SessionToken string `json:"session_token,omitempty"`
 }

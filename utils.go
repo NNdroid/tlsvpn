@@ -62,13 +62,28 @@ func isValidClientID(id string) bool {
 	return true
 }
 
-// isValidMACString 校验自报 MAC 的形态（允许为空 = 客户端未上报）。
+// isValidMACString 要求可用于远端端口归属的非空单播 MAC。
 func isValidMACString(s string) bool {
-	if s == "" {
-		return true
+	m, ok := parseMACKey(s)
+	if !ok || m == (macKey{}) {
+		return false
 	}
-	_, ok := parseMACKey(s)
-	return ok
+	return m[0]&1 == 0
+}
+
+// isValidClientInstance 限制握手日志与会话密钥代际标识。Go 客户端使用
+// UUID，Rust 客户端使用 32 位 hex；共同闭集只需要 ASCII 字母数字与连字符。
+func isValidClientInstance(s string) bool {
+	if len(s) < 16 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func isHexDigit(c byte) bool {

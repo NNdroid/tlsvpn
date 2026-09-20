@@ -44,72 +44,69 @@ func verifySessionToken(psk, sessionID, want string) bool {
 	return hmac.Equal([]byte(want), []byte(computeSessionToken(psk, sessionID)))
 }
 
+// newSessionToken 生成独立于共享 PSK 和可预测会话标识的重连凭据。共享 PSK
+// 只证明“属于这个 VPN”，随机令牌才证明“拥有这个既有会话”。
+func newSessionToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate session token: %w", err)
+	}
+	return hex.EncodeToString(token[:]), nil
+}
+
+func verifyRandomSessionToken(stored, want string) bool {
+	return len(stored) == 64 && len(want) == 64 && hmac.Equal([]byte(stored), []byte(want))
+}
+
 // ======================= 内层加密 =======================
 
 const (
-	// encAlgoLegacyCTR 旧版 AES-CTR 异或：无完整性校验，密钥流仅由 (PSK, seq)
-	// 决定（跨会话/跨客户端重用）。仅在握手协商发现对端不支持 GCM 时回退使用。
-	encAlgoLegacyCTR = 0
+	// encAlgoNone 未启用内层加密（encrypt=false）：线路负载即明文，只靠 TLS。
+	// 与算法号区分：0 不再表示任何加密算法，面板可无歧义地显示"明文"。
+	encAlgoNone = 0
 	// encAlgoGCM AES-256-GCM：nonce = seq(4BE) || salt(8B)。salt 每会话随机
 	// 且 c2s/s2c 各一个，seq 会话内连续 —— 密钥流空间按 (salt, seq) 严格
 	// 不相交，根治密钥流重放；GCM 标签同时提供完整性，任何篡改/异源注入
 	// 的帧在解密时被丢弃（重放帧被重排窗口吸收或标签校验拦截）。
-	// 密钥派生 sha256(psk+"_enc_key")，与 legacy CTR 共用同一 AES 密钥
-	// （历史原因，协商值 2 保留旧派生以保证与既有实现互通）。
-	encAlgoGCM = 2
-	// encAlgoGCMv2 协商式 GCM 密钥分离：算法语义与 2 完全一致，仅密钥改为
-	// 独立标签 sha256(psk+"_enc_key_gcm_v2") 派生，消除"同一 AES 密钥同时
-	// 充当 GCM 的 GHASH 子密钥与 legacy CTR 密钥流"的分层混用。必须走协商：
-	// 直接改 2 的派生会让"新服务端+旧客户端"在双方都声明支持 GCM 的情况下
-	// 静默黑洞（协商成功、标签全败）；改为新算法值后旧对端自动回退 CTR。
-	// 新客户端声明 3，新服务端按 3 用 v2 密钥、按 2 用旧密钥。
-	encAlgoGCMv2 = 3
+	// 唯一支持的内层算法：旧版 AES-CTR（无完整性校验、密钥流仅由 (PSK, seq)
+	// 决定，跨会话/跨客户端重用）已随旧协议兼容一并移除，不再存在回退路径。
+	encAlgoGCM   = 2
 	gcmTagSize   = 16
 	gcmNonceSize = 12
 	encSaltSize  = 8
+	// gcmKeyLabel GCM 密钥派生标签；FEC 校验帧追加 "_fec"（见 newGCMInnerCipherDomain）
+	gcmKeyLabel = "_enc_key"
 )
 
-// innerCipher 封装内层载荷加密，两种算法共用一个调用面：
-//   - legacy：xorCryptInPlace，帧长不变；
-//   - gcm：密文后附 16B 标签（线路 dataLen = 明文长 + 16，帧格式不变），
-//     AAD 覆盖 [线路 dataLen(4BE) || seq(4BE)]，防止把有效密文挪到别的 seq 位置。
+// innerCipher 封装内层载荷加密（唯一算法 AES-256-GCM）：密文后附 16B 标签
+// （线路 dataLen = 明文长 + 16，帧格式不变），AAD 覆盖 [线路 dataLen(4BE) ||
+// seq(4BE)]，防止把有效密文挪到别的 seq 位置。nil 表示本方向未启用内层加密。
 type innerCipher struct {
-	algo   int
-	block  cipher.Block      // legacy
-	baseIV []byte            // legacy 16B IV
-	aead   cipher.AEAD       // gcm
-	salt   [encSaltSize]byte // gcm
+	aead cipher.AEAD
+	salt [encSaltSize]byte
 }
 
-func newLegacyInnerCipher(psk string) *innerCipher {
-	block, baseIV := getCipherContext(psk)
-	return &innerCipher{algo: encAlgoLegacyCTR, block: block, baseIV: baseIV}
-}
-
-// gcmKeyLabel 各 GCM 算法值的密钥派生标签。算法 2 保留旧标签以兼容既有
-// 实现；算法 3 用独立标签实现 GCM/CTR 密钥分离。
-func gcmKeyLabel(algo int) string {
-	if algo == encAlgoGCMv2 {
-		return "_enc_key_gcm_v2"
-	}
-	return "_enc_key"
-}
-
-// newGCMInnerCipher 用会话盐构造 GCM 加密器（算法 2，旧密钥派生）。
-// 两个方向各用一个实例（c2s 用 resp.enc_salt，s2c 用 resp.enc_salt2）。
+// newGCMInnerCipher 用会话盐构造数据帧加密器。两个方向各用一个实例
+// （c2s 用 resp.enc_salt，s2c 用 resp.enc_salt2）。
 func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
-	return newGCMInnerCipherAlgo(psk, salt, encAlgoGCM)
+	return newGCMInnerCipherDomain(psk, salt, "data")
 }
 
-// newGCMInnerCipherAlgo 按协商出的算法值构造 GCM 加密器（2 或 3）
-func newGCMInnerCipherAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
-	if algo != encAlgoGCM && algo != encAlgoGCMv2 {
-		return nil, fmt.Errorf("unknown GCM algo %d", algo)
+// newGCMInnerCipherDomain 为数据帧和 FEC 校验帧派生不同 AEAD key。FEC 仍以组首
+// seq 编号；独立 key 保证它不会和同 seq 的数据帧复用 (key, nonce)，
+// 同时保留现有帧格式。
+func newGCMInnerCipherDomain(psk string, salt []byte, domain string) (*innerCipher, error) {
+	if domain != "data" && domain != "fec" {
+		return nil, fmt.Errorf("unknown GCM domain %q", domain)
 	}
 	if len(salt) != encSaltSize {
 		return nil, fmt.Errorf("encryption salt must be %d bytes, got %d", encSaltSize, len(salt))
 	}
-	keyHash := sha256.Sum256([]byte(psk + gcmKeyLabel(algo)))
+	label := gcmKeyLabel
+	if domain == "fec" {
+		label += "_fec"
+	}
+	keyHash := sha256.Sum256([]byte(psk + label))
 	block, err := aes.NewCipher(keyHash[:])
 	if err != nil {
 		return nil, err
@@ -118,7 +115,7 @@ func newGCMInnerCipherAlgo(psk string, salt []byte, algo int) (*innerCipher, err
 	if err != nil {
 		return nil, err
 	}
-	ic := &innerCipher{algo: algo, block: block, aead: aead}
+	ic := &innerCipher{aead: aead}
 	copy(ic.salt[:], salt)
 	return ic, nil
 }
@@ -161,69 +158,31 @@ func (ic *innerCipher) gcmNonceAAD(seq uint32, wireLen uint32, buf *[gcmNonceSiz
 	return buf[:gcmNonceSize], buf[gcmNonceSize:]
 }
 
-// clientEncAlgoSupport 客户端握手请求里声明的本端最高算法支持。
-// 声明 v2(3)：新服务端按 3 协商 v2 密钥；旧服务端精确匹配 2 失败会回退
-// legacy CTR（安全降级，绝不静默黑洞）——两端都升级后 GCM 恢复。
-const clientEncAlgoSupport = encAlgoGCMv2
-
-// encAlgoForDisplay 把协商出的内层算法号归一化成面板固定的三个值：
-// 0=无内层加密，1=legacy CTR，2=GCM（v1/v2 密钥派生不同，语义一致）。
-// 不能直接下发原始算法号：encAlgoLegacyCTR 的值是 0，与"未加密"撞号；
-// 而面板只认识 2，GCM-v2=3 会落进"明文"兜底分支。
-func encAlgoForDisplay(encAlgo int, encrypt bool) int {
-	if !encrypt {
-		return 0
-	}
-	if encAlgo == encAlgoGCM || encAlgo == encAlgoGCMv2 {
-		return 2
-	}
-	return 1
-}
+// clientEncAlgoSupport 客户端握手请求里声明的本端内层算法能力。只有一种算法，
+// 因此直接声明 encAlgoGCM；服务端要求完全相等，声明不了 GCM 的对端一律拒连。
+const clientEncAlgoSupport = encAlgoGCM
 
 func (ic *innerCipher) isGCM() bool {
-	return ic != nil && (ic.algo == encAlgoGCM || ic.algo == encAlgoGCMv2)
+	return ic != nil
 }
 
 // ======================= 加密强度下限 =======================
 //
-// 旧实现里"是否加密"是一个布尔开关：一旦一端把 encrypt 关掉，整条链路
-// （含 FEC 校验帧）就只剩 TLS 一层。min_enc 把开关换成强度下限，允许运维
-// 强制"低于 GCM 一律拒连"。
-//
-// 取值："" 或 "any"（无下限，保持旧行为）、"ctr"、"gcm"
+// 只有一种内层算法（GCM），所以"强度下限"退化成一道开关：运维可以强制
+// "对端不声明 GCM 能力就拒连"。取值 ""/"any"（不设下限）与 "gcm"。
+// 历史上的 ctr / legacy 档位对应的 AES-CTR 回退路径已移除。
 
-// encAlgoRank 算法强度排序（数值越大越强），未知算法视为最弱。
-// 注意与算法 ID 区分：encAlgoLegacyCTR 的值恰为 0，若直接当强度用，
-// "最低要求 CTR" 会被解析成"不设下限"。
 const (
-	encRankNone = 0 // 不设下限
-	encRankCTR  = 1 // 最低要求 legacy CTR
-	encRankGCM  = 2 // 最低要求 GCM
+	minEncNone = 0 // 不设下限
+	minEncGCM  = 1 // 最低要求 GCM 能力声明
 )
-
-func encAlgoRank(algo int) int {
-	if algo == encAlgoGCM || algo == encAlgoGCMv2 {
-		return encRankGCM
-	}
-	return encRankCTR
-}
 
 // minEncRank 解析最低强度配置；0 表示不设下限
 func minEncRank(mode string) int {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "gcm":
-		return encRankGCM
-	case "ctr", "legacy":
-		return encRankCTR
-	default:
-		return encRankNone
+	if strings.EqualFold(strings.TrimSpace(mode), "gcm") {
+		return minEncGCM
 	}
-}
-
-// encAlgoSupported 对端声明的算法位集是否恰好包含某算法。
-// 用精确比较而非 >= ：未来若定义算法 3，旧实现对端不应被误判为"支持 GCM"。
-func encAlgoSupported(declared, want int) bool {
-	return declared == want
+	return minEncNone
 }
 
 // tagLen 该加密器在线路上额外占用的字节数
@@ -240,75 +199,35 @@ func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen
 	if ptLen == 0 || ic == nil {
 		return ptLen
 	}
-	switch ic.algo {
-	case encAlgoGCM, encAlgoGCMv2:
-		// 复用明文存储：dst = region[:0]，密文+标签原地覆盖
-		var scratch [gcmNonceSize + 8]byte
-		nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
-		out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
-		return len(out)
-	default:
-		xorCryptInPlace(region[:ptLen], seq, ic.block, ic.baseIV)
-		return ptLen
-	}
+	// 复用明文存储：dst = region[:0]，密文+标签原地覆盖
+	var scratch [gcmNonceSize + 8]byte
+	nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
+	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
+	return len(out)
 }
 
 // openInPlace 就地解密并校验，返回明文切片（dst 的前缀，复用原缓冲）。
-// legacy 模式无校验、恒成功；gcm 校验失败返回错误，data 内容不可信。
+// 校验失败返回错误，data 内容不可信。
 func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	if len(data) == 0 || ic == nil {
 		return data, nil
 	}
-	switch ic.algo {
-	case encAlgoGCM, encAlgoGCMv2:
-		var scratch [gcmNonceSize + 8]byte
-		nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
-		return ic.aead.Open(data[:0], nonce, data, aad)
-	default:
-		xorCryptInPlace(data, seq, ic.block, ic.baseIV)
-		return data, nil
-	}
+	var scratch [gcmNonceSize + 8]byte
+	nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
+	return ic.aead.Open(data[:0], nonce, data, aad)
 }
 
-// openTo 解密 src（GCM 时含标签）写入 dst（长度须等于明文长），返回明文。
-// legacy 模式 src 无标签，dst 长度等于 src。aad 必须与 seal 时一致。
+// openTo 解密 src（含标签）写入 dst（长度须等于明文长），返回明文。
+// aad 必须与 seal 时一致。
 func (ic *innerCipher) openTo(dst, src []byte, seq uint32, aad []byte) ([]byte, error) {
-	if ic.isGCM() {
-		if len(src) < gcmTagSize {
-			return nil, fmt.Errorf("gcm payload too short: %d", len(src))
-		}
-		return ic.aead.Open(dst[:0], ic.gcmNonce(seq), src, aad)
+	if ic == nil {
+		copy(dst, src)
+		return dst, nil
 	}
-	copy(dst, src)
-	if ic != nil {
-		xorCryptInPlace(dst, seq, ic.block, ic.baseIV)
+	if len(src) < gcmTagSize {
+		return nil, fmt.Errorf("gcm payload too short: %d", len(src))
 	}
-	return dst, nil
-}
-
-// getCipherContext 根据 PSK 派生出 AES 块和基础 IV（legacy CTR + GCM 共用密钥）
-func getCipherContext(psk string) (cipher.Block, []byte) {
-	keyHash := sha256.Sum256([]byte(psk + "_enc_key"))
-	ivHash := sha256.Sum256([]byte(psk + "_enc_iv"))
-	block, err := aes.NewCipher(keyHash[:]) // 衍生为 AES-256
-	if err != nil {
-		panic(err)
-	}
-	return block, ivHash[:16]
-}
-
-// xorCryptInPlace 高速流式异或，原址修改数据（加解密通用，legacy 专用）
-func xorCryptInPlace(data []byte, seq uint32, block cipher.Block, baseIV []byte) {
-	if len(data) == 0 || block == nil {
-		return
-	}
-	iv := make([]byte, 16)
-	copy(iv, baseIV)
-	// 将包的序列号(Seq)混淆进 IV，确保每个数据包的异或密钥流完全不同
-	binary.BigEndian.PutUint32(iv[12:], seq)
-
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(data, data) // 高速异或位运算
+	return ic.aead.Open(dst[:0], ic.gcmNonce(seq), src, aad)
 }
 
 // verifyCertHash 用服务器证书叶子证书的 SHA-256 指纹校验 -cert-sha256。

@@ -28,8 +28,9 @@ import (
 //	[1B 0xFE][4B groupStart(大端)][1B 成员数][成员数×4B 长度(大端)][异或载荷]
 //
 // 异或载荷为组内成员【明文】负载的异或，-encrypt 开启时以 groupStart 为
-// seq 用既有 AES-CTR 加密。seq=0 + 负载首字节 0xFE 即为识别标志；握手帧
-// 同为 seq=0 但以 '{' 开头，且仅出现在数据循环建立之前，不会混淆。
+// seq 用 GCM 独立 key domain 加密（见 newGCMInnerCipherDomain）。
+// seq=0 + 负载首字节 0xFE 即为识别标志；握手帧同为 seq=0 但以 '{' 开头，
+// 且仅出现在数据循环建立之前，不会混淆。
 //
 // 分组大小恒等于 K：解码端用 seq 的算术对齐（start ≡ 1 mod K）把数据帧归组，
 // 因此分组边界必须由两端独立算出、无法随帧协商。若允许"不满 K 的分组"，
@@ -278,8 +279,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	g.k = k
 	g.lens = lens
 	// 截断到 maxLen：后续恢复循环按 len(g.parity) 判断可用性，不能依赖池缓冲
-	// 恰好返回了什么长度（openTo 在 GCM 模式下按 dst[:0] 追加，legacy 模式按
-	// dst 当前长度拷贝，两种路径都以这里截断后的长度为界）。
+	// 恰好返回了什么长度（openTo 按 dst[:0] 追加，以这里截断后的长度为界）。
 	pb := getFrameAtLeast(maxLen)[:maxLen]
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
 	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]

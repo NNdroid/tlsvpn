@@ -16,6 +16,7 @@ type clientState struct {
 	MAC          string `json:"mac,omitempty"`
 	SessionID    string `json:"session_id,omitempty"`
 	SessionToken string `json:"session_token,omitempty"`
+	SessionEpoch uint64 `json:"session_epoch,omitempty"`
 }
 
 // clientStatePath 状态文件紧随配置文件（<config>.state）。未从文件加载配置

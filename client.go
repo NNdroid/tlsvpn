@@ -37,7 +37,16 @@ type AsyncPort struct {
 	fecMode    bool
 	encoder    *fecEncoder
 	txSeq      uint32
+	resetEpoch chan portEpochReset
+	exhausted  atomic.Bool
+	onExhaust  func()
 	dropped    uint64 // 各环节丢弃帧计数（面板/metrics）
+}
+
+type portEpochReset struct {
+	k    int
+	ic   *innerCipher
+	done chan struct{}
 }
 
 // Dropped 累计丢弃帧数（队列满、后端投递失败、无后端）
@@ -59,7 +68,7 @@ func (p *AsyncPort) dropN(n int) {
 
 func NewAsyncPort(ctx context.Context, id string, fecMode bool) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
-	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, fecMode: fecMode}
+	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, fecMode: fecMode, resetEpoch: make(chan portEpochReset)}
 	go p.run()
 	return p
 }
@@ -68,7 +77,38 @@ func NewAsyncPort(ctx context.Context, id string, fecMode bool) *AsyncPort {
 // （开销约 1/K，可恢复组内单帧丢失）。须在数据流开始前调用一次。
 // ic 为本端发送方向的内层加密器（-encrypt 关闭时为 nil，校验帧明文）。
 func (p *AsyncPort) AttachFEC(k int, ic *innerCipher) {
-	p.encoder = newFECEncoder(k, ic)
+	p.ResetEpoch(k, ic)
+}
+
+// ResetEpoch 原子切换发送密钥代际：序号从 1 重新开始前必须先安装新密钥。
+func (p *AsyncPort) ResetEpoch(k int, ic *innerCipher) {
+	done := make(chan struct{})
+	select {
+	case <-p.ctx.Done():
+		return
+	case p.resetEpoch <- portEpochReset{k: k, ic: ic, done: done}:
+	}
+	select {
+	case <-p.ctx.Done():
+	case <-done:
+	}
+}
+
+func (p *AsyncPort) SetSequenceExhaustedHandler(fn func()) { p.onExhaust = fn }
+
+func (p *AsyncPort) nextSeq() (uint32, bool) {
+	for {
+		cur := atomic.LoadUint32(&p.txSeq)
+		if cur == ^uint32(0) {
+			if p.exhausted.CompareAndSwap(false, true) && p.onExhaust != nil {
+				go p.onExhaust()
+			}
+			return 0, false
+		}
+		if atomic.CompareAndSwapUint32(&p.txSeq, cur, cur+1) {
+			return cur + 1, true
+		}
+	}
 }
 
 func (p *AsyncPort) ID() string { return p.id }
@@ -119,6 +159,15 @@ func (p *AsyncPort) run() {
 		select {
 		case <-p.ctx.Done():
 			return
+		case reset := <-p.resetEpoch:
+			atomic.StoreUint32(&p.txSeq, 0)
+			p.exhausted.Store(false)
+			if reset.k >= fecMinGroup {
+				p.encoder = newFECEncoder(reset.k, reset.ic)
+			} else {
+				p.encoder = nil
+			}
+			close(reset.done)
 		case frame := <-p.ch:
 			if len(frame) == 0 {
 				// 零长帧不携带数据：不消耗 seq、不参与 FEC 分组
@@ -126,10 +175,11 @@ func (p *AsyncPort) run() {
 				putFrame(frame)
 				continue
 			}
-			seq := atomic.AddUint32(&p.txSeq, 1)
-			if seq == 0 {
-				// 防止 uint32 溢出为 0。因为 0 被保留作为控制/心跳帧
-				seq = atomic.AddUint32(&p.txSeq, 1)
+			seq, ok := p.nextSeq()
+			if !ok {
+				p.dropN(1)
+				putFrame(frame)
+				continue
 			}
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
@@ -141,7 +191,12 @@ func (p *AsyncPort) run() {
 					putFrame(f)
 					continue
 				}
-				s := atomic.AddUint32(&p.txSeq, 1)
+				s, ok := p.nextSeq()
+				if !ok {
+					p.dropN(1)
+					putFrame(f)
+					continue
+				}
 				batch = append(batch, VPNFrame{Seq: s, Data: f})
 				batchBytes += len(f)
 			}
@@ -291,6 +346,13 @@ func (c *Client) ReconnectAttempts() uint64 { return atomic.LoadUint64(&c.reconn
 // 世代计数保证多次触发都能重置退避，且不会造成热循环。
 func (c *Client) ForceReconnect() {
 	atomic.AddUint64(&c.forceGen, 1)
+	c.connsMu.Lock()
+	for _, ci := range c.conns {
+		if v := ci.conn.Load(); v != nil {
+			v.(connHolder).CloseIfOpen()
+		}
+	}
+	c.connsMu.Unlock()
 	c.wakeAll()
 }
 func (p *AsyncPort) Close() { p.cancel() }
@@ -345,10 +407,9 @@ type Client struct {
 	RxBytes       uint64
 	TxPackets     uint64
 	RxPackets     uint64
-	icLegacy      *innerCipher           // 对端不支持协商时的回退加密器
 	icTx          *innerCipher           // 当前会话发送方向（GCM）
 	icRx          *innerCipher           // 当前会话接收方向（GCM）
-	encAlgo       int                    // 当前会话协商结果（0=legacy，2=GCM）
+	encAlgo       int                    // 当前会话协商结果（encAlgoNone / encAlgoGCM）
 	assignedV4    string                 // 服务端分配的 IPv4（面板展示）
 	assignedV6    string                 // 服务端分配的 IPv6（面板展示）
 	liveConns     int32                  // 当前已建立的物理连接数（面板展示）
@@ -356,10 +417,29 @@ type Client struct {
 	reconnects    uint64                 // 累计重连尝试次数（面板展示）
 	forceGen      uint64                 // 强制重连世代：递增即要求重连循环跳过退避
 	wake          chan struct{}          // 重连唤醒：强制重连/热更配置时广播（缓冲 1，非阻塞）
+	instanceID    atomic.Value           // string：本进程实例；变化即要求服务端换密钥代际
+	sessionEpoch  uint64                 // 服务端确认的密钥代际
+	negInfo       *sessionNeg            // 上次成功握手的协商快照（面板展示用）
+	cfgSnap       atomic.Pointer[Config] // 当前生效完整配置（面板"状态"页数据源）
 	bootCfg       atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
 	connsMu       sync.Mutex
 	conns         map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
 	startedAt     time.Time
+}
+
+// sessionNeg 最近一次握手成功的端到端协商结果快照。面板"状态"页展示的是
+// 它而不是本地配置值：配置写 brutal 不代表内核真做了 shaping，写 GCM 不
+// 代表服务端真的回了 GCM——两者必须分开看。
+type sessionNeg struct {
+	ProtocolVersion int
+	FEC             bool
+	FecGroup        int
+	EncAlgo         int
+	PadMode         string
+	SessionToken    bool
+	SessionEpoch    uint64
+	TxRateMbps      uint64 // 服务端为本端上行分配的整形速率
+	RxRateMbps      uint64 // 服务端为本端下行分配的整形速率
 }
 
 // liveConfig 客户端热更生效的连接相关参数快照（不含 TAP/MAC 等需重启项）
@@ -379,7 +459,7 @@ type liveConfig struct {
 	fecMode     bool
 	fecGroup    int
 	encrypt     bool
-	minEnc      int // 内层加密强度下限（encAlgoRank 值，0=不限）
+	minEnc      int // 内层加密强度下限（minEncRank 值，0=不限）
 }
 
 // liveFromCfg 从完整配置提取热更子集
@@ -398,38 +478,22 @@ func liveFromCfg(cfg *Config) *liveConfig {
 // conns 数量变化时重建连接注册表（新数量生效于下一次重拨）。
 func (c *Client) ApplyConfig(cfg *Config) {
 	lv := liveFromCfg(cfg)
-	c.bootCfg.Store(cfg)
-	c.wake = make(chan struct{}, 1)
 	c.live.Store(lv)
-
-	// 回退加密器由 PSK 派生，旧实现只在启动时构造一次：热更 PSK 后新握手
-	// 仍会用旧 PSK 的密钥流，与对端算出的密钥不匹配（GCM 下表现为整链路
-	// 标签校验失败静默丢帧）。这里无条件重建，两个 SHA-256 + AES 造钥的
-	// 开销可忽略。已在使用的旧实例仍被本连接持有，不受影响。
-	c.sessionMu.Lock()
-	if cfg.Encrypt {
-		c.icLegacy = newLegacyInnerCipher(cfg.PSK)
-	} else {
-		c.icLegacy = nil
-	}
-	c.sessionMu.Unlock()
+	c.cfgSnap.Store(cfg)
+	// 内层加密器不在此处重建：GCM 实例由每次握手的会话盐派生，直接取自
+	// 刚更新的 lv.psk，无需额外的共享回退加密器。
 
 	// 填充策略全局生效于发送路径
 	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
 		log.Warnf("[Client] Invalid pad_mode %q, using %s", cfg.PadMode, actual)
 	}
 	if int32(lv.connsCount) != c.connsCount {
-		log.Warnf("[Client] conns %d -> %d takes effect on reconnect (registry rebuilt)", c.connsCount, lv.connsCount)
-		c.connsMu.Lock()
-		c.connsCount = int32(lv.connsCount)
-		c.conns = make(map[int]*clientConnInfo)
-		for i := 0; i < lv.connsCount; i++ {
-			c.conns[i] = &clientConnInfo{target: lv.targetAddrs[i%len(lv.targetAddrs)], rttCache: new(uint32)}
-			c.conns[i].state.Store("connecting")
-		}
-		c.connsMu.Unlock()
+		// 监督器数量属于进程拓扑，当前实现不在运行中增删 goroutine。保留启动
+		// 值并由 NeedsRestart 明确报告，避免面板声称已热更但实际没有生效。
+		lv.connsCount = int(c.connsCount)
+		log.Warnf("[Client] client.conns change requires restart (effective=%d requested=%d)", c.connsCount, cfg.Client.Conns)
 	}
-	c.wakeAll()
+	c.ForceReconnect()
 	log.Infof("[Client] Configuration hot-applied (conns=%d fec=%v fecGroup=%d encrypt=%v brutal=%v)",
 		lv.connsCount, lv.fecMode, lv.fecGroup, lv.encrypt, lv.brutal)
 }
@@ -453,7 +517,8 @@ type clientConnInfo struct {
 	txBytes   uint64
 	rxBytes   uint64
 	retries   uint64
-	linkedAt  int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
+	brutalErr string // 本连接的 TCP Brutal 生效结果（""=已生效，非空=跳过/失败原因）
+	linkedAt  int64  // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
@@ -534,6 +599,23 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 			actualMac = link.Attrs().HardwareAddr.String()
 		}
 	}
+	if actualMac == "" {
+		actualMac = st.MAC
+	}
+	if actualMac == "" {
+		var genErr error
+		actualMac, genErr = generateTapMAC()
+		if genErr != nil {
+			log.Fatalf("Client failed to generate stable identity MAC: %v", genErr)
+		}
+		st.MAC = actualMac
+		if err := saveClientState(statePath, st); err != nil {
+			log.Fatalf("Client failed to persist stable identity MAC: %v", err)
+		}
+	}
+	if parsed, ok := parseMACKey(actualMac); ok {
+		actualMac = fmtMAC(parsed)
+	}
 
 	ns := uuid.NewMD5(uuid.NameSpaceURL, []byte("my_vpn_tunnel"))
 	clientID := uuid.NewSHA1(ns, []byte(actualMac+cfg.PSK)).String()
@@ -548,18 +630,26 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	}
 	lv := liveFromCfg(cfg)
 	c.bootCfg.Store(cfg)
+	c.cfgSnap.Store(cfg)
 	c.wake = make(chan struct{}, 1)
+	c.instanceID.Store(uuid.New().String())
 	c.live.Store(lv)
 	if len(lv.targetAddrs) == 0 {
 		log.Fatalf("Client addr resolved to zero endpoints; check the addr field in the config file")
 	}
 	c.fecStatus = "off"
+	c.txPort.SetSequenceExhaustedHandler(func() {
+		c.instanceID.Store(uuid.New().String())
+		log.Warnf("[Client] sequence space exhausted; rotating the process instance and reconnecting with fresh keys")
+		c.ForceReconnect()
+	})
 
 	// 恢复会话身份：冷启动进程第一次握手就能携带旧令牌接回既有会话，
 	// 不必等 120 秒僵尸会话过期。按 clientID 绑定校验——MAC/PSK 变了
 	// clientID 就变了，旧令牌与旧会话 ID 一律不沿用。
 	if st.ClientID == clientID && st.SessionID != "" {
 		c.serverSessionID = st.SessionID
+		c.sessionEpoch = st.SessionEpoch
 		if st.SessionToken != "" {
 			c.sessionToken = st.SessionToken
 			log.Infof("Restored session token for %s; next handshake will rejoin the existing session", st.SessionID)
@@ -576,9 +666,6 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 			}
 		}
 	})
-	if cfg.Encrypt {
-		c.icLegacy = newLegacyInnerCipher(cfg.PSK)
-	}
 
 	// Web 面板（可选，web.addr 未指定时不启动）；携带完整配置供面板热更
 	if cfg.Web.Addr != "" {
@@ -674,11 +761,13 @@ func (c *Client) Run(ctx context.Context) {
 				attempt++
 				// 退避等待：热更/强制重连会唤醒并重置退避
 				timer := time.NewTimer(delay)
+				poll := time.NewTicker(250 * time.Millisecond)
 			waitLoop:
 				for {
 					select {
 					case <-ctx.Done():
 						timer.Stop()
+						poll.Stop()
 						return
 					case <-c.wake:
 						if g := atomic.LoadUint64(&c.forceGen); g != seenGen {
@@ -686,10 +775,18 @@ func (c *Client) Run(ctx context.Context) {
 							attempt = 0
 						}
 						break waitLoop // 立即重拨（消费新配置）
+					case <-poll.C:
+						if g := atomic.LoadUint64(&c.forceGen); g != seenGen {
+							seenGen = g
+							attempt = 0
+							break waitLoop
+						}
 					case <-timer.C:
 						break waitLoop
 					}
 				}
+				timer.Stop()
+				poll.Stop()
 			}
 		}(i)
 	}
@@ -733,6 +830,9 @@ type connSnapshot struct {
 	RxBytes   uint64 `json:"rx_bytes"`
 	Retries   uint64 `json:"retries"`
 	AgeSec    uint64 `json:"age_sec"`
+	// TCP Brutal 生效结果（客户端本地整形）
+	BrutalApplied bool   `json:"brutal_applied"`
+	BrutalErr     string `json:"brutal_error,omitempty"`
 }
 
 // snapshotConns 汇总所有物理连接明细
@@ -766,6 +866,8 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if la := atomic.LoadInt64(&ci.linkedAt); la > 0 {
 			snap.AgeSec = uint64(now - la)
 		}
+		snap.BrutalApplied = ci.brutalErr == ""
+		snap.BrutalErr = ci.brutalErr
 		out = append(out, snap)
 	}
 	return out
@@ -868,7 +970,10 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	// 初始以客户端期望的速率申请接管
 	if lv.brutal && clientTxRate > 0 {
-		applyTCPBrutal(tcpConn, clientTxRate)
+		if e := applyTCPBrutal(tcpConn, clientTxRate); e != nil {
+			ci.brutalErr = e.Error()
+			log.Warnf("[Conn %d] TCP Brutal shaping skipped: %v", connIndex, e)
+		}
 	}
 
 	rawConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
@@ -894,21 +999,24 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	c.sessionMu.Unlock()
 
 	req := HandshakeReq{
-		ClientID:     c.clientID,
-		PSK:          hashPSK(lv.psk),
-		MAC:          c.macAddr,
-		IPv4:         lv.reqV4,
-		IPv6:         lv.reqV6,
-		Padding:      generatePadding(100, 500),
-		FEC:          lv.fecMode,
-		FecGroup:     fecGroupReq,
-		BrutalTx:     clientTxRate,
-		BrutalRx:     clientRxRate,
-		Encrypt:      lv.encrypt,
-		EncAlgo:      clientEncAlgoSupport,
-		SessionToken: sessionToken,
+		ProtocolVersion: 2,
+		ClientInstance:  c.instanceID.Load().(string),
+		ClientID:        c.clientID,
+		PSK:             hashPSK(lv.psk),
+		MAC:             c.macAddr,
+		IPv4:            lv.reqV4,
+		IPv6:            lv.reqV6,
+		Padding:         generatePadding(100, 500),
+		FEC:             lv.fecMode,
+		FecGroup:        fecGroupReq,
+		BrutalTx:        clientTxRate,
+		BrutalRx:        clientRxRate,
+		Encrypt:         lv.encrypt,
+		EncAlgo:         clientEncAlgoSupport,
+		SessionToken:    sessionToken,
 	}
-	log.Debugf("[Conn %d] => sending handshake request (HandshakeReq): %+v", connIndex, req)
+	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
+		connIndex, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
 	reqData, _ := json.Marshal(req)
 	writeStreamFrame(tlsConn, reqData)
 
@@ -925,47 +1033,45 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 	// 握手完成：后续数据帧恢复线路全量上限
 	scanner.SetMaxDataLen(maxWireDataLen)
-	log.Debugf("[Conn %d] <= received handshake response (HandshakeResp): %+v", connIndex, resp)
+	log.Debugf("[Conn %d] <= handshake response session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
+		connIndex, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
+	if resp.ProtocolVersion != 2 {
+		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
+	}
 
 	if resp.Encrypt != lv.encrypt {
 		return 0, fmt.Errorf("server encryption mismatch")
 	}
 
-	// 内层加密协商：双方均声明 GCM 支持时启用（会话盐由服务端生成、
-	// 通过响应下发，服务端重启即换盐）；否则回退 legacy CTR。
-	// resp.enc_algo=3 为 GCM-v2（独立密钥标签），=2 为旧派生，二者语义一致。
-	encAlgo := encAlgoLegacyCTR
-	var icTx, icRx *innerCipher
+	// 内层加密：唯一算法 GCM。会话盐由服务端生成、通过响应下发，服务端重启
+	// 或会话重建即换盐，密钥流不再跨会话重用。
+	// 旧版 AES-CTR 回退路径已移除：协商不出 GCM 说明对端不再受支持，直接拒连。
+	encAlgo := encAlgoNone
+	var icTx, icRx, fecTx, fecRx *innerCipher
 	if lv.encrypt {
-		if encAlgoSupported(resp.EncAlgo, encAlgoGCM) || encAlgoSupported(resp.EncAlgo, encAlgoGCMv2) {
-			saltTx, err1 := hex.DecodeString(resp.EncSalt)  // c2s
-			saltRx, err2 := hex.DecodeString(resp.EncSalt2) // s2c
-			if err1 == nil && err2 == nil && len(saltTx) == encSaltSize && len(saltRx) == encSaltSize {
-				var errTx, errRx error
-				icTx, errTx = newGCMInnerCipherAlgo(lv.psk, saltTx, resp.EncAlgo)
-				icRx, errRx = newGCMInnerCipherAlgo(lv.psk, saltRx, resp.EncAlgo)
-				if errTx == nil && errRx == nil {
-					encAlgo = resp.EncAlgo
-				} else {
-					log.Warnf("[Conn %d] GCM cipher init failed, falling back to legacy CTR: %v/%v", connIndex, errTx, errRx)
-				}
-			} else {
-				log.Warnf("[Conn %d] Server sent invalid enc salts, falling back to legacy CTR", connIndex)
-			}
-		} else if lv.encrypt {
-			log.Infof("[Conn %d] Server lacks GCM support, using legacy CTR inner encryption", connIndex)
+		if resp.EncAlgo != encAlgoGCM {
+			return 0, fmt.Errorf("server negotiated inner cipher %d, GCM (%d) is required", resp.EncAlgo, encAlgoGCM)
 		}
-		if icTx == nil {
-			c.sessionMu.Lock()
-			icTx, icRx = c.icLegacy, c.icLegacy
-			c.sessionMu.Unlock()
+		saltTx, err1 := hex.DecodeString(resp.EncSalt)  // c2s
+		saltRx, err2 := hex.DecodeString(resp.EncSalt2) // s2c
+		if err1 != nil || err2 != nil || len(saltTx) != encSaltSize || len(saltRx) != encSaltSize {
+			return 0, fmt.Errorf("server sent invalid enc salts")
 		}
+		var errTx, errRx error
+		icTx, errTx = newGCMInnerCipher(lv.psk, saltTx)
+		icRx, errRx = newGCMInnerCipher(lv.psk, saltRx)
+		if errTx != nil || errRx != nil {
+			return 0, fmt.Errorf("GCM cipher init failed: %v/%v", errTx, errRx)
+		}
+		fecTx, _ = newGCMInnerCipherDomain(lv.psk, saltTx, "fec")
+		fecRx, _ = newGCMInnerCipherDomain(lv.psk, saltRx, "fec")
+		encAlgo = resp.EncAlgo
 	}
 
 	// 强度下限：协商结果低于本地要求时拒绝这条连接（服务端可能跑的是旧版，
 	// 或中间被降级）。这是运维显式声明的硬要求，不能静默降级。
-	if lv.minEnc > 0 && encAlgoRank(encAlgo) < lv.minEnc {
-		return 0, fmt.Errorf("server negotiated inner cipher %d is below min_enc=%d", encAlgo, lv.minEnc)
+	if lv.minEnc > 0 && encAlgo != encAlgoGCM {
+		return 0, fmt.Errorf("server negotiated inner cipher %d is below min_enc %q", encAlgo, "gcm")
 	}
 
 	// 会话级协商：首个连接的握手决定本端解码与端口编码模式，后续连接沿用。
@@ -980,7 +1086,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		} else {
 			c.fecNegotiated = -1
 			c.fecStatus = "dup"
-			log.Infof("[Conn %d] Server lacks XOR FEC support, falling back to legacy duplication mode", connIndex)
+			log.Infof("[Conn %d] Server lacks XOR FEC support, using per-connection duplication", connIndex)
 		}
 	}
 	useXorFec := false
@@ -998,8 +1104,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 		if fecRebuild {
 			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序
-			c.fecDec = NewFECDecoder(c.fecNegotiated, icRx, c.rxReorder.Insert)
-			c.txPort.AttachFEC(c.fecNegotiated, icTx)
+			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
+			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}
 	}
 	if c.encAlgo != encAlgo {
@@ -1008,13 +1114,27 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.icRx = icRx
 	}
 	isNewSession := false
-	if c.serverSessionID != resp.SessionID {
+	if c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {
 		isNewSession = true
 		c.serverSessionID = resp.SessionID
+		c.sessionEpoch = resp.SessionEpoch
 	}
 	// 记下服务端下发的会话令牌，供后续重连回带。服务端未开启 session_token
 	// 时该字段为空，行为与旧版一致。
 	c.sessionToken = resp.SessionToken
+	// 协商快照：面板展示的是服务端实际回传的取值，而不是本地配置声明。
+	// resp.BrutalTx/Rx 是服务端分配给本端上下行的整形速率（0 = 未整形）。
+	c.negInfo = &sessionNeg{
+		ProtocolVersion: resp.ProtocolVersion,
+		FEC:             resp.FEC,
+		FecGroup:        int(resp.FecGroup),
+		EncAlgo:         resp.EncAlgo,
+		PadMode:         padModeName(),
+		SessionToken:    resp.SessionToken != "",
+		SessionEpoch:    resp.SessionEpoch,
+		TxRateMbps:      resp.BrutalTx,
+		RxRateMbps:      resp.BrutalRx,
+	}
 	c.gwV4 = resp.GwV4
 	c.gwV6 = resp.GwV6
 	// 面板展示：分配的隧道地址
@@ -1023,13 +1143,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	c.sessionMu.Unlock()
 
 	if isNewSession {
+		if !useXorFec {
+			c.txPort.ResetEpoch(0, nil)
+		}
 		log.Infof("[Conn %d] 🔄 server reset the session; flushing stale local receive buffers...", connIndex)
 		c.rxReorder.Reset()
 	}
 
 	// 会话身份落盘：进程被杀后重启，第一次握手即回带旧令牌接回既有会话，
 	// 而不是等 120 秒僵尸会话过期才自然恢复连通。
-	c.persistSessionState(resp.SessionID, resp.SessionToken)
+	c.persistSessionState(resp.SessionID, resp.SessionToken, resp.SessionEpoch)
 
 	if netlinkTunnelSupported() {
 		// 失败必须可见：静默丢弃时表现为"隧道在线但本机不通"，重启后地址没
@@ -1197,7 +1320,7 @@ func assignTapAddr(link netlink.Link, fam, cidr string) error {
 
 // persistSessionState 把服务端下发的会话身份落盘，供进程重启后第一次握手
 // 复用既有会话。按 clientID（MAC+PSK 派生）绑定：配置变更后旧令牌自动失效。
-func (c *Client) persistSessionState(sessionID, token string) {
+func (c *Client) persistSessionState(sessionID, token string, epoch uint64) {
 	if c.stateFile == "" {
 		return
 	}
@@ -1207,9 +1330,15 @@ func (c *Client) persistSessionState(sessionID, token string) {
 	if st == nil {
 		st = &clientState{}
 	}
+	// 多条物理连接会并发完成握手。迟到的旧响应不能覆盖已经持久化的
+	// 新 epoch，否则下次进程重启会携带不匹配的令牌和代际。
+	if epoch < st.SessionEpoch {
+		return
+	}
 	st.ClientID = c.clientID
 	st.SessionID = sessionID
 	st.SessionToken = token
+	st.SessionEpoch = epoch
 	if err := saveClientState(c.stateFile, st); err != nil {
 		log.Warnf("Client failed to persist session state: %v", err)
 	}
@@ -1243,6 +1372,9 @@ func (c *Client) NeedsRestart(cfg *Config) []string {
 		}
 		if o.Client.Fwmark != cfg.Client.Fwmark {
 			out = append(out, "client.fwmark")
+		}
+		if o.Client.Conns != cfg.Client.Conns {
+			out = append(out, "client.conns")
 		}
 	}
 	return out

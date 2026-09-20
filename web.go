@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -85,7 +84,11 @@ func (w *WebManager) currentSpecs() []listenSpec {
 	cfg := w.Config()
 	port := webPort(cfg.Web.Addr)
 	if cfg.Web.Bind != "tunnel" {
-		return []listenSpec{{ip: "", port: port}}
+		host, _, err := net.SplitHostPort(cfg.Web.Addr)
+		if err != nil {
+			host = ""
+		}
+		return []listenSpec{{ip: strings.Trim(host, "[]"), port: port}}
 	}
 	var ips []string
 	if w.srv != nil {
@@ -128,9 +131,18 @@ func (w *WebManager) rebindIfNeeded() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if len(specs) == 0 {
-		// 隧道 IP 尚未就绪（client 首个会话建立前等），保留现状等下一轮
-		return
+	// 证书必须在关闭现有 listener 之前成功加载。换证配置写错时继续
+	// 服务旧证书，而不是先把管理面板关掉再发现新证书不可用。
+	var tlsCfg *tls.Config
+	if len(specs) > 0 {
+		var err error
+		tlsCfg, err = loadWebTLS(cfg)
+		if err != nil {
+			if w.onceWarn("tls|" + cfg.Web.Cert + "|" + cfg.Web.Key) {
+				log.Errorf("[Web] load TLS pair: %v (keeping current listeners)", err)
+			}
+			return
+		}
 	}
 
 	// 配置身份变化 → 整体重建。必须关旧再开新：证书/端口同址时两个
@@ -141,6 +153,11 @@ func (w *WebManager) rebindIfNeeded() {
 		}
 		w.listeners = nil
 		w.cfgStamp = stamp
+	}
+	if len(specs) == 0 {
+		// tunnel 模式尚未取得地址时必须保持“无监听”；不能保留切换前的
+		// all/loopback listener，否则 UI 显示已收窄而实际仍对外开放。
+		return
 	}
 
 	// 关闭规格已消失的监听（如删掉 v6_cidr、bind 从 tunnel 切回 all）
@@ -173,14 +190,6 @@ func (w *WebManager) rebindIfNeeded() {
 		}
 	}
 	if len(missing) == 0 {
-		return
-	}
-
-	tlsCfg, err := loadWebTLS(cfg)
-	if err != nil {
-		if w.onceWarn("tls|" + cfg.Web.Cert + "|" + cfg.Web.Key) {
-			log.Errorf("[Web] load TLS pair: %v (keeping current listeners)", err)
-		}
 		return
 	}
 
@@ -220,7 +229,14 @@ func loadWebTLS(cfg *Config) (*tls.Config, error) {
 // serve 起 http.Serve 循环。listener 被主动 Close() 后 http.Serve 返回是
 // 正常路径（规格变更、监听重建），不记日志。
 func (w *WebManager) serve(l net.Listener) {
-	if err := http.Serve(l, w.mux); err != nil && !errors.Is(err, net.ErrClosed) {
+	httpSrv := &http.Server{
+		Handler:           w.mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := httpSrv.Serve(l); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 		log.Warnf("[Web] serve stopped: %v", err)
 	}
 }
@@ -245,7 +261,7 @@ func (w *WebManager) auth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		user, pass, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(user+":"+pass), []byte(expected)) != 1 {
+		if !ok || !constantTimeCredentialEqual(user+":"+pass, expected) {
 			rw.Header().Set("WWW-Authenticate", `Basic realm="tlsvpn dashboard"`)
 			http.Error(rw, "Unauthorized", 401)
 			return

@@ -38,8 +38,8 @@ type Config struct {
 	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
 	// 显式的 false，下次重载又被默认值翻回 true。
 	Encrypt    bool         `json:"encrypt"`
-	MinEnc     string       `json:"min_enc,omitempty"`  // 最低内层加密强度：ctr | gcm（空=无下限）
-	PadMode    string       `json:"pad_mode,omitempty"` // 混淆填充：legacy | bucket | off（默认 bucket）
+	MinEnc     string       `json:"min_enc,omitempty"`  // 最低内层加密强度：gcm（空/any=不设下限）
+	PadMode    string       `json:"pad_mode,omitempty"` // 混淆填充：bucket | off（默认 bucket）
 	Socks5     string       `json:"socks5,omitempty"`   // 全局 SOCKS5 出口（client）
 	Brutal     bool         `json:"brutal,omitempty"`
 	BrutalUp   uint64       `json:"brutal_up,omitempty"`   // Mbps
@@ -78,11 +78,10 @@ type ServerConfig struct {
 	Cert   string `json:"cert,omitempty"`    // 留空则自动生成并持久化自签证书
 	Key    string `json:"key,omitempty"`
 	// SessionToken 要求重连接入既有会话时回带会话令牌。
-	// 关闭（默认）时保持旧行为：clientID + PSK + MAC 即可重连，
-	// 因此任何持密者只要知道目标 MAC 就能冒充既有会话（clientID 由 mac+psk 推导）。
+	// 关闭（默认）时：clientID + PSK + MAC 即可重连，因此任何持密者只要知道
+	// 目标 MAC 就能冒充既有会话（clientID 由 mac+psk 推导）。
 	// 开启后：令牌只在会话自己的 TLS 连接内下发一次，第三方无法取得，
-	// 冒充既有会话被拒。代价是旧版客户端无法重连既有会话（首次接入不受影响），
-	// 升级需两端同版本同时打开。
+	// 冒充既有会话被拒。首次接入不受影响，升级需两端同版本同时打开。
 	SessionToken bool `json:"session_token,omitempty"`
 	// MaxSessions 并发会话数上限（0 = 默认 1024）。v6 池在 /64 下实际不会
 	// 枯竭，没有上限的话任何持 PSK 者轮换 MAC 即可无限创建会话（每会话
@@ -107,7 +106,7 @@ type ClientConfig struct {
 // exampleConfigJSON -print-config 输出的模板（可直接改用）
 const exampleConfigJSON = `{
   "mode": "client",
-  "psk": "change-me-please",
+	  "psk": "REPLACE-WITH-A-RANDOM-SECRET",
   "addr": "203.0.113.10:4000,[2001:db8::10]:4000",
   "log_level": "info",
   "encrypt": true,
@@ -121,7 +120,8 @@ const exampleConfigJSON = `{
   "mac": "",
   "web": {
     "addr": ":8080",
-    "auth": "admin:change-me",
+	    "auth": "admin:REPLACE-WITH-A-RANDOM-PASSWORD",
+	    "bind": "tunnel",
     "cert": "",
     "key": ""
   },
@@ -141,7 +141,7 @@ const exampleConfigJSON = `{
     "v6_cidr": "fd00::/64",
     "cert": "",
     "key": "",
-    "session_token": false,
+	    "session_token": true,
     "max_sessions": 1024
   }
 }`
@@ -179,9 +179,6 @@ func loadConfigFile(path string) (*Config, error) {
 
 // applyDefaults 填充未指定的默认值（与命令行标志默认值保持一致）
 func (c *Config) applyDefaults() {
-	if c.PSK == "" {
-		c.PSK = "quic_secret"
-	}
 	if c.Tap == "" {
 		c.Tap = "tap0"
 	}
@@ -189,7 +186,7 @@ func (c *Config) applyDefaults() {
 		c.LogLevel = "info"
 	}
 	if c.PadMode == "" {
-		c.PadMode = padModeBucket // 小帧填充到固定长度桶，开销远低于 legacy
+		c.PadMode = padModeBucket // 小帧填充到固定长度桶，额外线路开销远低于随机填充
 	}
 	if c.BrutalUp == 0 {
 		c.BrutalUp = 100
@@ -200,9 +197,8 @@ func (c *Config) applyDefaults() {
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
 	}
-	if c.Web.Bind != "all" && c.Web.Bind != "tunnel" {
-		// 不在 Validate 报错——早期校验时 log 可能未初始化，统一在启动时检查
-		c.Web.Bind = "all"
+	if c.Encrypt && c.MinEnc == "" {
+		c.MinEnc = "gcm"
 	}
 	if c.Mode == "server" {
 		if c.Addr == "" {
@@ -243,6 +239,17 @@ func (c *Config) Validate() error {
 	if c.Addr == "" {
 		return fmt.Errorf("addr is required")
 	}
+	psk := strings.TrimSpace(c.PSK)
+	if psk == "" {
+		return fmt.Errorf("psk is required; generate a high-entropy random secret")
+	}
+	switch strings.ToLower(psk) {
+	case "quic_secret", "change-me", "change-me-please", "replace-with-a-random-secret":
+		return fmt.Errorf("psk uses a known placeholder; replace it with a high-entropy random secret")
+	}
+	if c.Mac != "" && !isValidMACString(c.Mac) {
+		return fmt.Errorf("invalid mac %q (want a non-zero unicast aa:bb:cc:dd:ee:ff address)", c.Mac)
+	}
 	var l zapcore.Level
 	if err := l.UnmarshalText([]byte(c.LogLevel)); err != nil {
 		return fmt.Errorf("invalid log_level %q", c.LogLevel)
@@ -250,24 +257,35 @@ func (c *Config) Validate() error {
 	if err := ensureBasicAuthFormat(c.Web.Auth); err != nil {
 		return err
 	}
+	if strings.EqualFold(c.Web.Auth, "admin:change-me") || strings.EqualFold(c.Web.Auth, "admin:replace-with-a-random-password") {
+		return fmt.Errorf("web.auth uses a known placeholder; replace it with a unique password")
+	}
 	if (c.Web.Cert == "") != (c.Web.Key == "") {
 		return fmt.Errorf("web.cert and web.key must be provided together")
 	}
-	if c.PSK == "quic_secret" {
-		log.Warnf("⚠️  PSK is the default value — change it via -psk or the config file!")
+	if c.Web.Bind != "all" && c.Web.Bind != "tunnel" {
+		return fmt.Errorf("invalid web.bind %q (want all or tunnel)", c.Web.Bind)
+	}
+	if c.Web.Addr != "" && c.Web.Auth == "" {
+		return fmt.Errorf("web.auth is required whenever the dashboard is enabled")
+	}
+	if c.Web.Addr != "" && c.Web.Bind == "all" && webAddrIsPublic(c.Web.Addr) {
+		if c.Web.Cert == "" || c.Web.Key == "" {
+			return fmt.Errorf("web.cert and web.key are required for a non-loopback dashboard listener")
+		}
 	}
 	switch c.MinEnc {
-	case "", "any", "ctr", "legacy", "gcm":
+	case "", "any", "gcm":
 	default:
-		return fmt.Errorf("invalid min_enc %q (want ctr, gcm or empty)", c.MinEnc)
+		return fmt.Errorf("invalid min_enc %q (want gcm, any or empty)", c.MinEnc)
 	}
 	switch c.PadMode {
-	case padModeOff, padModeLegacy, padModeBucket:
+	case padModeOff, padModeBucket:
 	default:
-		return fmt.Errorf("invalid pad_mode %q (want %s, %s or %s)",
-			c.PadMode, padModeOff, padModeLegacy, padModeBucket)
+		return fmt.Errorf("invalid pad_mode %q (want %s or %s)",
+			c.PadMode, padModeOff, padModeBucket)
 	}
-	if c.MinEnc != "" && !c.Encrypt {
+	if c.MinEnc != "" && c.MinEnc != "any" && !c.Encrypt {
 		return fmt.Errorf("min_enc %q requires encrypt=true", c.MinEnc)
 	}
 
@@ -300,6 +318,19 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func webAddrIsPublic(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
 }
 
 // SaveConfigFile 把配置以缩进 JSON 写回来源文件（面板"保存配置"用）。
