@@ -277,7 +277,10 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	g.k = k
 	g.lens = lens
-	pb := getFrameAtLeast(maxLen)
+	// 截断到 maxLen：后续恢复循环按 len(g.parity) 判断可用性，不能依赖池缓冲
+	// 恰好返回了什么长度（openTo 在 GCM 模式下按 dst[:0] 追加，legacy 模式按
+	// dst 当前长度拷贝，两种路径都以这里截断后的长度为界）。
+	pb := getFrameAtLeast(maxLen)[:maxLen]
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
 	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]
 	aad := gcmAAD(uint32(maxLen+tagLen), start)
@@ -349,6 +352,13 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 	}
 	if missing < 0 {
 		// 全员到齐，校验帧没有存在的意义了
+		d.finishGroupLocked(g)
+		return
+	}
+	// 描述符声明的成员长度超过解密后的异或载荷：载荷与描述符不自洽。
+	// 只能来自上游缓冲被截断（历史上的池长度 bug）或线路损坏，这里静默丢弃
+	// 整组并计入丢失——错误帧一律不 panic、不断连。
+	if missing >= len(g.lens) || g.lens[missing] > len(g.parity) {
 		d.finishGroupLocked(g)
 		return
 	}

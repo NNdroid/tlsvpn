@@ -6,8 +6,16 @@
 #   B  rs_srv  <- rs_cli      (Rust ↔ Rust, self-self)
 #   C  go_srv  <- rs_cli      (Go server, Rust client — cross-language)
 #   D  rs_srv  <- go_cli      (Rust server, Go client — cross-language)
+#   H  go_srv  <- rs_cli      (cross-language, hardened: GCM, bucket pad,
+#                              session token, FEC group 4)
+#   I  rs_srv  <- go_cli      (cross-language, hardened — reverse direction)
+#   J  go_srv  <- rs_cli      (cross-language, legacy: CTR, legacy pad,
+#                              session token off, FEC group 8)
+#   K  rs_srv  <- go_cli      (cross-language, plain: encryption, padding and
+#                              FEC all off)
 #   E  go_srv  <- go_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #   F  go_srv  <- rs_cli via SOCKS5 proxy   (proxy group, client-only feature)
+#   G  perf suite (in-process, Go side)
 #
 # All groups use the in-memory TAP backend ("tap": "mem") so the test runs on
 # CI runners that cannot create a real TAP device (no CAP_NET_ADMIN). The
@@ -28,40 +36,87 @@ source "$SCRIPT_DIR/lib_e2e.sh"
 PASS=0
 FAIL=0
 
-# Generate a JSON config accepted by BOTH implementations. The two repos share
-# the same schema and both reject unknown fields, so one writer serves Go and
-# Rust: mode/addr/tap/socks5 are top-level, cert/key nest under "server". Only
-# long-standing fields are written, so the same generator also works against
-# older commits pinned via E2E_GO_REF; newer fields keep their defaults.
-#   $1 = output path  $2 = mode  $3 = addr
-#   $4 = socks5 (optional, client only)
-#   $5 = cert path  $6 = key path  (optional, server only — the Rust server
-#        has no self-sign fallback and aborts with an empty cert/key)
-write_config() {
-  local out="$1" mode="$2" addr="$3" socks5="${4:-}" cert="${5:-}" key="${6:-}"
-  local socks_line="" server_block=""
-  [ -n "$socks5" ] && socks_line=",
-  \"socks5\": \"$socks5\""
-  [ -n "$cert" ] && server_block=",
-  \"server\": {
-    \"cert\": \"$cert\",
-    \"key\": \"$key\"
-  }"
-  cat >"$out" <<EOF
-{
-  "mode": "$mode",
-  "addr": "$addr",
-  "tap": "mem"$socks_line$server_block
-}
-EOF
+# cfg_json renders a JSON object from dotted key=value pairs.
+#
+# Values must already be JSON literals — so strings are pre-quoted by the
+# caller (addr='"127.0.0.1:18080"'), numbers and booleans stay bare
+# (client.fec_group=4). An empty value omits the key entirely, so both
+# implementations fall back to their own defaults. Dotted keys nest one level:
+# server.session_token and server.cert merge into a single "server" object.
+#
+# Top-level keys are emitted in a fixed order; nested sections in a fixed order
+# too, so a failing group's config is readable and diffable in CI logs.
+cfg_json() {
+  local -A v=()
+  local kv k lit out="" first=1 body
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    lit="${kv#*=}"
+    [ -n "$lit" ] && v["$k"]="$lit"
+  done
+  for k in mode addr psk tap socks5 log_level encrypt min_enc pad_mode \
+           brutal brutal_up brutal_down mac; do
+    [ -n "${v[$k]:-}" ] || continue
+    [ $first -eq 0 ] && out+=","
+    first=0
+    out+="\"$k\": ${v[$k]}"
+  done
+  for k in server client web; do
+    body=""
+    for key in "${!v[@]}"; do
+      [[ "$key" == "$k."* ]] || continue
+      [ -n "$body" ] && body+=","
+      body+="\"${key#"$k".}\": ${v[$key]}"
+    done
+    [ -n "$body" ] || continue
+    [ $first -eq 0 ] && out+=","
+    first=0
+    out+="\"$k\": {$body}"
+  done
+  printf '{%s}\n' "$out"
 }
 
+# write_config renders one JSON config accepted by BOTH implementations. The two
+# repos share the same schema and both reject unknown fields, so a single
+# emitter serves Go and Rust — and unknown-field rejection is what keeps this
+# emitter honest: a typo here fails both sides loudly instead of silently
+# disabling the knob under test.
+#   $1 = output path   $2..$n = dotted key=JSON_LITERAL (empty literal omits)
+write_config() {
+  local out="$1"; shift
+  cfg_json "$@" >"$out"
+}
+
+# Shared config matrices for the interop groups. Each element is one
+# key=JSON_LITERAL pair (strings pre-quoted). The same matrix is handed to BOTH
+# sides of a group, so every knob is exercised symmetrically and a mismatch is
+# never blamed on asymmetric configuration.
+#
+#   HARDENED — the combination the alignment acceptance criteria call out:
+#              GCM floor negotiated as enc_algo=3, bucket padding, session
+#              token reconnection, FEC group 4.
+#   LEGACY   — the oldest still-supported wire behaviour: CTR floor, legacy
+#              padding, session token off, larger FEC group 8.
+#   PLAIN    — encryption, padding and FEC all switched off: the shortest path
+#              through the protocol, where a byte-level difference between the
+#              implementations is most likely to surface.
+MATRIX_HARDENED=(
+  encrypt=true 'min_enc="gcm"' 'pad_mode="bucket"'
+  'client.fec=true' client.fec_group=4 server.session_token=true
+)
+MATRIX_LEGACY=(
+  encrypt=true 'min_enc="ctr"' 'pad_mode="legacy"'
+  'client.fec=true' client.fec_group=8 server.session_token=false
+)
+MATRIX_PLAIN=(
+  encrypt=false 'min_enc=""' 'pad_mode="off"'
+  'client.fec=false' client.fec_group=4 server.session_token=false
+)
+
 # Start a server in background.
-#   $1 = binary path
-#   $2 = listen port
-#   $3+ = extra args (optional, passed through to the Rust binary only)
-# Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
-# The Go binary is config-file-only (flags were removed): launch with -c.
+#   $1 = binary path  $2 = listen port  $3+ = key=JSON_LITERAL config overrides
+# Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN. Both
+# binaries are config-file-only (flags were removed): launch with -c.
 start_server() {
   local bin="$1" port="$2"; shift 2
   # The Rust server has no self-sign fallback and aborts on an empty cert/key,
@@ -70,15 +125,16 @@ start_server() {
     gen_e2e_cert "$TEST_DIR/e2e_key.pem" "$TEST_DIR/e2e_cert.pem" \
       || { err "could not generate e2e TLS cert (openssl missing or failed)"; return 1; }
   fi
-  local log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
-  local cfg="$TEST_DIR/srv_$(basename "$bin")_$port.json"
+  local log cfg cert key
+  log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
+  cfg="$TEST_DIR/srv_$(basename "$bin")_$port.json"
   # The paths live inside file contents, which MSYS never translates, so they
   # must be rendered in the form the child process understands.
-  local cert key
   cert="$(json_path "$TEST_DIR/e2e_cert.pem")"
   key="$(json_path "$TEST_DIR/e2e_key.pem")"
-  write_config "$cfg" server ":$port" "" "$cert" "$key"
-  "$bin" -c "$cfg" "$@" >"$log" 2>&1 &
+  write_config "$cfg" mode='"server"' addr="\":$port\"" tap='"mem"' \
+    server.cert="\"$cert\"" server.key="\"$key\"" "$@"
+  "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/srv_$port.pid"
   if wait_for_port 127.0.0.1 "$port" 20; then
@@ -104,19 +160,20 @@ stop_server() {
 # Run a client in the background (VPN clients are long-lived). Validates the
 # tunnel came up by checking the process stays alive and emits a startup/connected
 # marker, then leaves it running so the caller stops it with stop_client.
-#   $1 = binary  $2 = port (pid-file key)  $3 = server addr  rest = extra args
-#   ("-socks5 <addr>" or "--socks5 <addr>" is folded into the config; both
-#   implementations read the same top-level "socks5" field)
+#   $1 = binary  $2 = port (pid-file key)  $3 = server addr
+#   $4+ = key=JSON_LITERAL config overrides; the legacy "-socks5 <addr>" /
+#        "--socks5 <addr>" form is still accepted and folded into the config,
+#        since both implementations read the same top-level "socks5" field.
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
-  local log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
-  local socks=""
+  local log socks=""
+  log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
   if [[ "${1:-}" == "-socks5" || "${1:-}" == "--socks5" ]]; then
-    socks="${2:-}"; shift 2
+    socks="\"${2:-}\""; shift 2
   fi
   local cfg="$TEST_DIR/cli_$(basename "$bin")_$port.json"
-  write_config "$cfg" client "$addr" "$socks"
+  write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' socks5="$socks" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
@@ -181,6 +238,42 @@ run_group_D() {
   stop_client 18083; stop_server 18083
 }
 
+# Groups H-K: the same cross-language directions as C/D, but with a different
+# wire configuration on BOTH sides (see MATRIX_* above). A-D only ever ran the
+# default configuration, so a protocol divergence that shows up only under
+# encryption, padding or FEC settings stayed invisible:
+#
+#   H  go_srv <- rs_cli   hardened: encrypt + GCM floor, bucket padding,
+#                         session token on, FEC group 4
+#   I  rs_srv <- go_cli   hardened (reverse direction)
+#   J  go_srv <- rs_cli   legacy: encrypt + CTR floor, legacy padding,
+#                         session token off, FEC group 8
+#   K  rs_srv <- go_cli   plain: encryption, padding and FEC all off
+run_group_H() {
+  start_server "$BIN_GO" 18086 "${MATRIX_HARDENED[@]}" || return 1
+  run_client "$BIN_RS" 18086 "127.0.0.1:18086" "${MATRIX_HARDENED[@]}" \
+    || { stop_server 18086; return 1; }
+  stop_client 18086; stop_server 18086
+}
+run_group_I() {
+  start_server "$BIN_RS" 18087 "${MATRIX_HARDENED[@]}" || return 1
+  run_client "$BIN_GO" 18087 "127.0.0.1:18087" "${MATRIX_HARDENED[@]}" \
+    || { stop_server 18087; return 1; }
+  stop_client 18087; stop_server 18087
+}
+run_group_J() {
+  start_server "$BIN_GO" 18088 "${MATRIX_LEGACY[@]}" || return 1
+  run_client "$BIN_RS" 18088 "127.0.0.1:18088" "${MATRIX_LEGACY[@]}" \
+    || { stop_server 18088; return 1; }
+  stop_client 18088; stop_server 18088
+}
+run_group_K() {
+  start_server "$BIN_RS" 18089 "${MATRIX_PLAIN[@]}" || return 1
+  run_client "$BIN_GO" 18089 "127.0.0.1:18089" "${MATRIX_PLAIN[@]}" \
+    || { stop_server 18089; return 1; }
+  stop_client 18089; stop_server 18089
+}
+
 # Group E: Go client through SOCKS5 proxy -> Go server (client-only feature).
 run_group_E() {
   local port; port="$(ensure_socks5_proxy)" || { log "group E (go-socks5): microsocks not installed — skipping"; return 0; }
@@ -218,7 +311,9 @@ run_group_G() {
 main() {
   setup_test_env
   resolve_binaries
-  for g in A B C D E F G; do
+  # Interop groups first (A-D on the default configuration, H-K on varied
+  # configurations), then the proxy-only groups, then the perf suite.
+  for g in A B C D H I J K E F G; do
     if run_group "$g"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
   done
   cleanup_test_env

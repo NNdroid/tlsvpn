@@ -18,6 +18,9 @@ func newTapConfig(name string) water.Config {
 	return water.Config{DeviceType: water.TAP}
 }
 
+// 非 Linux 上隧道网卡的全部配置函数都是桩：不设置 MAC、不挂地址、不建策略路由。
+func netlinkTunnelSupported() bool { return false }
+
 func setTapMac(tapName, macStr string) error {
 	return fmt.Errorf("setTapMac is only supported on Linux")
 }

@@ -102,6 +102,7 @@ Set `web.addr` to enable: live throughput chart, FEC/loss/drop counters, per-con
 1. **Brutal** needs the `tcp_brutal` kernel module; **TAP** needs root (or `CAP_NET_ADMIN`).
 2. **Certificate pinning**: the persisted self-signed cert logs its SHA-256 fingerprint at startup — pin it with `client.cert_sha256` (colon/case tolerant).
 3. **Interop**: protocol extensions (`fec_group`, `enc_algo`, `enc_salt*`, `session_token`) are additive and negotiated — mixed old/new versions interoperate in fallback mode. The Rust implementation ([tlsvpn-rs](https://github.com/NNdroid/tlsvpn-rs)) shares this wire protocol.
+4. **Client identity**: with `mac` empty the client generates a TAP MAC and persists it, together with the session token, in `<config>.state` (mode `0600`). This keeps the assigned tunnel IP stable across restarts and lets a restarted client rejoin its existing session instead of waiting out the old session's retention window. Delete the file to force a fresh identity.
 
 ---
 

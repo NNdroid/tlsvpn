@@ -508,3 +508,114 @@ func TestFECDecoderConcurrentSafety(t *testing.T) {
 		t.Fatalf("应恢复 %d 帧, got %d", lost, len(c.seqs))
 	}
 }
+
+// TestFECProductionRecoveryRegression 线上崩溃的完整序列。
+//
+// 池缓冲被 FrameScanner 截到 66 字节后整块归还（len=66/cap=2048），随后一个
+// K=4 组在 lens=[1100,1100,1200,1100] 下丢 seq=3：maxLen=1200 使校验帧载荷
+// 取自同一个 2048 档，g.parity 的 len 停在 66，恢复循环遍历到 index 66 即
+// panic —— "runtime error: index out of range [66] with length 66"，整条服务端
+// 进程退出。该场景由两个改动共同兜住：池的长度不变量（主修）与 FEC 的防御性
+// 长度检查（防止同类回归再变成进程崩溃）。
+func TestFECProductionRecoveryRegression(t *testing.T) {
+	c, out := newFecCollector()
+	d := NewFECDecoder(4, nil, out)
+	payloads := [][]byte{
+		bytes.Repeat([]byte{0x01}, 1100),
+		bytes.Repeat([]byte{0x02}, 1100),
+		bytes.Repeat([]byte{0x03}, 1200),
+		bytes.Repeat([]byte{0x04}, 1100),
+	}
+	parity := encodeGroup(4, nil, nil, 1, payloads) // 先用干净的池生成校验帧
+
+	// 投毒：与 frame.go 的 FrameScanner.ReadFrame 完全相同的动作——网络帧缓冲
+	// 被截到 dataLen 后整块归还。必须放在 OnParity 之前：解码器取校验帧缓冲走
+	// getFrameAtLeast(maxLen)，与 getFrame() 同属 2048 档，这样才能拿到 len=66/
+	// cap=2048 的那块。放在 encodeGroup 之前是无效的——编码器会先消费掉它，测试
+	// 就退化成只测正常路径。
+	putFrame(getFrame()[:66])
+
+	c.expect(1)
+	d.OnData(1, payloads[0])
+	d.OnData(2, payloads[1])
+	d.OnData(4, payloads[3])
+	d.OnParity(parity) // seq=3 丢失 → 由校验帧恢复
+
+	c.waitDone(t)
+	if len(c.seqs) != 1 || c.seqs[0] != 3 {
+		t.Fatalf("应恰好恢复 seq=3, got %v", c.seqs)
+	}
+	if !bytes.Equal(c.frames[0], payloads[2]) {
+		t.Fatalf("恢复内容与原文不符: got %d bytes, want %d bytes",
+			len(c.frames[0]), len(payloads[2]))
+	}
+}
+
+// TestFECDropsInconsistentParity 校验帧描述符与异或载荷不自洽（声明的成员
+// 长度超过实际载荷长度）时整组静默丢弃并计入丢失，绝不 panic、绝不断连。
+// 直接构造不自洽的组状态来锁定这条降级路径——它独立于池的行为，是错误帧
+// 语义的一部分：FEC 失败只能表现为丢帧。
+func TestFECDropsInconsistentParity(t *testing.T) {
+	d := NewFECDecoder(4, nil, func(uint32, []byte) {})
+	g := &fecGroupState{
+		start:   1,
+		k:       4,
+		lens:    []int{1100, 1100, 1200, 1100}, // 描述符声称成员 2 长 1200
+		gotMask: 0b1011,                        // 仅成员 2 缺失
+		acc:     make([]byte, 1200),
+		parity:  make([]byte, 66), // 实际载荷只有 66 字节 → 不自洽
+	}
+	d.groups[1] = g
+
+	d.tryRecoverLocked(g) // 修复前在此 index out of range
+
+	if !d.isDoneLocked(1) {
+		t.Fatal("不自洽的组必须被终结")
+	}
+	if _, ok := d.groups[1]; ok {
+		t.Fatal("终结后的组必须从 groups 移除")
+	}
+	if _, lost := d.FECStats(); lost != 1 {
+		t.Fatalf("不自洽组应计入 1 帧丢失, got %d", lost)
+	}
+}
+
+// TestFECDropsTruncatedParityThroughOnParity 不自洽载荷走完整 OnParity 入口
+// （而非直接构造组状态）：载荷长度不足的校验帧必须在描述符自洽性校验处被
+// 忽略，且不得终结分组——随后的正确校验帧仍应能恢复。
+func TestFECDropsTruncatedParityThroughOnParity(t *testing.T) {
+	payloads := [][]byte{
+		bytes.Repeat([]byte{0x01}, 100),
+		bytes.Repeat([]byte{0x02}, 140),
+		bytes.Repeat([]byte{0x03}, 80),
+		bytes.Repeat([]byte{0x04}, 120),
+	}
+	parity := encodeGroup(4, nil, nil, 1, payloads)
+
+	c, out := newFecCollector()
+	d := NewFECDecoder(4, nil, out)
+	d.OnData(1, payloads[0])
+	d.OnData(2, payloads[1])
+	d.OnData(4, payloads[3])
+
+	// 把描述符里成员 1 的长度改成 4096（实际载荷只有 140）→ 自洽性校验失败
+	truncated := make([]byte, len(parity))
+	copy(truncated, parity)
+	binary.BigEndian.PutUint32(truncated[6+4:10+4], 4096)
+	d.OnParity(truncated)
+
+	time.Sleep(5 * time.Millisecond)
+	c.mu.Lock()
+	n := len(c.seqs)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("不自洽校验帧不应产生恢复输出, got %d", n)
+	}
+
+	c.expect(1)
+	d.OnParity(parity) // 分组未被终结，正确校验帧仍应可恢复
+	c.waitDone(t)
+	if len(c.seqs) != 1 || c.seqs[0] != 3 {
+		t.Fatalf("忽略不自洽帧后分组应仍可恢复 seq=3, got %v", c.seqs)
+	}
+}

@@ -2,10 +2,16 @@ name: Cross-Implementation E2E
 
 # End-to-end interop tests between the Go (tlsvpn) and Rust (tlsvpn-rs)
 # implementations. Both are fetched from their repositories and built from
-# source on the runner, then exercised as control groups: self-self
-# (Go<->Go, Rust<->Rust) and cross-language (Go-server<->Rust-client,
-# Rust-server<->Go-client) plus a SOCKS5 client group. Pre-compiled release
-# binaries are never downloaded, so the result reflects the code in the repos.
+# source on the runner, then exercised as control groups:
+#   - self-self:        Go<->Go, Rust<->Rust
+#   - cross-language:   Go-server<->Rust-client and Rust-server<->Go-client,
+#                       each on the default configuration AND on varied wire
+#                       configurations (encryption floor, padding mode,
+#                       session token, FEC group size), so a protocol
+#                       divergence hidden behind non-default settings is caught
+#   - SOCKS5 client proxy groups, and the in-process perf suite
+# Pre-compiled release binaries are never downloaded, so the result reflects
+# the code in the repos.
 
 # This workflow is intended to be invoked only via `workflow_call` (see the
 # `e2e` job in go.yml). A previous setup also had `on: push` here, which caused

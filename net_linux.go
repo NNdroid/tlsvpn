@@ -16,6 +16,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ifaNoDAD 关闭 DAD：隧道地址由对端显式分配、网关由配置指定，不存在需要
+// 探测的重复地址。挂上即 permanent，第一轮 web 绑定不用白等内核 1~2s 的
+// 探测窗口（等不到 RA 时地址会一直停在 tentative，v6 bind 永久失败）。
+const ifaNoDAD = unix.IFA_F_NODAD
+
+// netlinkTunnelSupported 报告本平台能否配置隧道网卡（MAC/地址/策略路由）。
+// 非 Linux 上这些函数都是编译桩，调用方据此跳过而不是每次握手按失败告警。
+func netlinkTunnelSupported() bool { return true }
+
 // ======================= TCP Brutal & RTT 探测 =======================
 const TCP_BRUTAL_PARAMS = 23301
 

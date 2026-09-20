@@ -43,17 +43,18 @@ func newFramePools(sizes []int) *framePools {
 	return p
 }
 
-// getFrameAtLeast 取一个 cap >= n 的池缓冲。
+// getFrameAtLeast 取一个容量 >= n 的池缓冲，并保证 len == cap == 分档尺寸。
 //
-// 尺寸严格匹配分档（putFrame 只回收 cap 恰好等于某档的缓冲），因此这里
-// 拿到的缓冲容量必然 >= n，不会发生 slice 越界。无合适分档（n 超过最大档）
-// 时直接分配，不入池。
+// 长度不只是容量：调用方普遍按 len 使用池缓冲（FEC 恢复的异或循环、校验帧
+// 描述符自洽性判断），带着一任使用者留下的旧长度交出去就会越界或读到残值。
+// 所以这里和 putFrame 共同维持两条不变量——入池的缓冲 cap 恰好命中某档，
+// 且 len 已被复位到该档；无合适分档（n 超过最大档）时直接分配，不入池。
 func (p *framePools) getFrameAtLeast(n int) []byte {
 	for i, s := range p.sizes {
 		if s >= n {
 			b := p.pools[i].Get().([]byte)
 			if cap(b) == s {
-				return b
+				return b[:s]
 			}
 			putFrame(b) // 理论上不可达：尺寸已被 putFrame 约束
 			return make([]byte, s)
@@ -64,6 +65,8 @@ func (p *framePools) getFrameAtLeast(n int) []byte {
 
 // putFrame 归还缓冲。只回收 cap 恰好命中某档的缓冲，保证每档内容同尺寸
 // （否则 getFrameAtLeast 可能反复 miss 同一块偏小缓冲）；其余交给 GC。
+// 归还前必须把 len 复位到 cap：调用方多半持有截断副本（frame[:66]），原样入池
+// 会让下一位使用者看到 len=66/cap=2048 的缓冲并按 len 越界。
 func (p *framePools) putFrame(b []byte) {
 	if b == nil {
 		return
@@ -74,7 +77,7 @@ func (p *framePools) putFrame(b []byte) {
 	default:
 		for i, s := range p.sizes {
 			if c == s {
-				p.pools[i].Put(b)
+				p.pools[i].Put(b[:s])
 				return
 			}
 		}
@@ -86,7 +89,7 @@ var framePoolSet = newFramePools(framePoolSizes)
 // getFrame 取默认分档缓冲（调用方随后会自行检查容量）
 func getFrame() []byte { return framePoolSet.getFrameAtLeast(defaultFrameSize) }
 
-// getFrameAtLeast 取一个 cap >= n 的池缓冲，避免 N > 池容量时的越界崩溃
+// getFrameAtLeast 取一个容量 >= n 的池缓冲（len == cap == 分档尺寸）
 func getFrameAtLeast(n int) []byte { return framePoolSet.getFrameAtLeast(n) }
 
 func putFrame(b []byte) { framePoolSet.putFrame(b) }
