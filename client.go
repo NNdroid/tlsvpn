@@ -833,10 +833,27 @@ type connSnapshot struct {
 	// TCP Brutal 生效结果（客户端本地整形）
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
+	// 服务端授予本端的整形速率。会话级取值（最近一次握手响应），不是逐连接：
+	// 服务端对每条物理连接各授各的，客户端只拿到握手响应里那一份，所以同一会话
+	// 的多条连接会显示同一组数——这是"客户端只有一份协商结果"的真实反映，
+	// 不是聚合错误。0 = 服务端没给（brutal 关或预算为 0）。
+	BrutalTxMbps uint64 `json:"brutal_tx_mbps"`
+	BrutalRxMbps uint64 `json:"brutal_rx_mbps"`
 }
 
 // snapshotConns 汇总所有物理连接明细
 func (c *Client) snapshotConns() []connSnapshot {
+	// negInfo 归 sessionMu，连接表归 connsMu。这里用两段不重叠的临界区各取各的，
+	// 而不是持着一把再拿另一把：现有代码里没有确定的锁序，嵌套一把就制造出
+	// 一个全仓库唯一的 connsMu→sessionMu 路径，将来谁在 sessionMu 里碰 connsMu
+	// 就死锁。握手侧只整体替换 negInfo 指针、不原地改字段，所以取出后即可无锁读。
+	c.sessionMu.Lock()
+	neg := c.negInfo
+	c.sessionMu.Unlock()
+	txRate, rxRate := uint64(0), uint64(0)
+	if neg != nil {
+		txRate, rxRate = neg.TxRateMbps, neg.RxRateMbps
+	}
 	c.connsMu.Lock()
 	defer c.connsMu.Unlock()
 	out := make([]connSnapshot, 0, len(c.conns))
@@ -847,12 +864,14 @@ func (c *Client) snapshotConns() []connSnapshot {
 			continue
 		}
 		snap := connSnapshot{
-			Index:   i,
-			Target:  ci.target,
-			RttMs:   atomic.LoadUint32(ci.rttCache) / 1000,
-			TxBytes: atomic.LoadUint64(&ci.txBytes),
-			RxBytes: atomic.LoadUint64(&ci.rxBytes),
-			Retries: atomic.LoadUint64(&ci.retries),
+			Index:        i,
+			Target:       ci.target,
+			RttMs:        atomic.LoadUint32(ci.rttCache) / 1000,
+			TxBytes:      atomic.LoadUint64(&ci.txBytes),
+			RxBytes:      atomic.LoadUint64(&ci.rxBytes),
+			Retries:      atomic.LoadUint64(&ci.retries),
+			BrutalTxMbps: txRate,
+			BrutalRxMbps: rxRate,
 		}
 		if v, okv := ci.remote.Load().(string); okv {
 			snap.Remote = v

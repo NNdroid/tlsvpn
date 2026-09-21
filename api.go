@@ -647,9 +647,9 @@ function renderConns(data){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({owner:shortId(c.client_id,10),fullId:c.client_id,target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:'',age:c.age_sec,err:'',enc:c.enc_algo,fec:c.fec||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',srvTx:c.brutal_srv_tx_mbps||0,cliTx:c.brutal_cli_tx_mbps||0}));
+    (data.server_conns||[]).forEach(c=>rows.push({owner:shortId(c.client_id,10),fullId:c.client_id,target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:'',age:c.age_sec,err:'',enc:c.enc_algo,fec:c.fec||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0}));
   }else{
-    (data.conns||[]).forEach(c=>rows.push({owner:'local',fullId:null,target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',srvTx:0,cliTx:0}));
+    (data.conns||[]).forEach(c=>rows.push({owner:'local',fullId:null,target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
   }
   const f=(document.getElementById('conn-filter').value||'').toLowerCase();
   if(f)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(f));
@@ -662,7 +662,7 @@ function renderConns(data){
     // 配置了但内核/平台不支持显示"未生效"，悬停看具体原因。
     let brutTxt='-',brutCls='b-off',brutTip='brutal off';
     if(r.brutErr){brutTxt=t('st.skip');brutCls='b-dup';brutTip='brutal skipped: '+r.brutErr;}
-    else if(r.cliTx||r.srvTx){brutTxt=r.cliTx+'↑/'+r.srvTx+'↓';brutCls='b-on';brutTip='brutal shaping '+r.cliTx+' Mbps upstream / '+r.srvTx+' Mbps downstream';}
+    else if(r.up||r.down){brutTxt=r.up+'↑/'+r.down+'↓';brutCls='b-on';brutTip='brutal shaping '+r.up+' Mbps upstream / '+r.down+' Mbps downstream';}
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
     const ops=(data.mode==='server'&&r.fullId)?'<button class="btn" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
     return '<tr><td>'+esc(r.owner)+'</td><td>'+esc(r.target||'-')+'</td><td>'+esc(r.remote||'-')+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+

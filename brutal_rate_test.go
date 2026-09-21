@@ -113,3 +113,47 @@ func TestConnsSummaryCountsHealthyConns(t *testing.T) {
 			st.minUp, st.maxUp)
 	}
 }
+
+// TestSnapshotConnsCarriesNegotiatedRates 锁定客户端连接快照携带上下行速率——
+// 面板逐连接 Brutal 列取的就是这两个字段。
+//
+// 曾因为 connSnapshot 根本没有速率字段、前端又对本地连接行硬编码 0，导致整形
+// 明明生效（brutal_error 为空）面板却永远显示 "-"。速率取自 negInfo，是会话级
+// （最近一次握手响应）的取值：服务端对每条物理连接各授各的，客户端只拿到握手
+// 响应里那一份，所以同一会话的多条连接显示同一组数是预期行为，不是聚合错误。
+func TestSnapshotConnsCarriesNegotiatedRates(t *testing.T) {
+	newClient := func(setNeg bool) *Client {
+		c := &Client{connsCount: 4, conns: map[int]*clientConnInfo{}}
+		for i := 0; i < 4; i++ {
+			// rttCache 是指针，生产里三处构造点都 new 了；这里不给就 nil deref。
+			c.conns[i] = &clientConnInfo{rttCache: new(uint32)}
+		}
+		if setNeg {
+			c.negInfo = &sessionNeg{TxRateMbps: 7, RxRateMbps: 125}
+		}
+		return c
+	}
+
+	got := newClient(true).snapshotConns()
+	if len(got) != 4 {
+		t.Fatalf("应有 4 条连接快照，实际 %d", len(got))
+	}
+	for i, s := range got {
+		if s.BrutalTxMbps != 7 {
+			t.Errorf("连接 %d 上行速率应为 7（服务端授予的上行），实际 %d", i, s.BrutalTxMbps)
+		}
+		if s.BrutalRxMbps != 125 {
+			t.Errorf("连接 %d 下行速率应为 125（服务端授予的下行），实际 %d", i, s.BrutalRxMbps)
+		}
+		if !s.BrutalApplied {
+			t.Errorf("连接 %d 无 brutalErr 应报告已生效", i)
+		}
+	}
+
+	// 还没握手成功（negInfo 为 nil）时不给速率，面板就该显示 "-"
+	zero := newClient(false).snapshotConns()
+	if zero[0].BrutalTxMbps != 0 || zero[0].BrutalRxMbps != 0 {
+		t.Errorf("未握手时速率应为 0，实际 %d/%d",
+			zero[0].BrutalTxMbps, zero[0].BrutalRxMbps)
+	}
+}
