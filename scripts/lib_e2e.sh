@@ -203,6 +203,25 @@ gen_e2e_cert() {
   fi
 }
 
+# Generate a fresh random PSK and print it as 64 hex chars (256 bits). Server
+# and client must hold the SAME secret: it seeds the handshake key material on
+# both sides. Prefer openssl (already a hard requirement for the e2e cert),
+# fall back to /dev/urandom so nothing extra has to be installed.
+gen_e2e_psk() {
+  local hex=""
+  if command -v openssl >/dev/null 2>&1; then
+    hex="$(MSYS_NO_PATHCONV=1 openssl rand -hex 32 2>/dev/null || true)"
+  fi
+  if ! [[ "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+    hex="$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \t\n')"
+  fi
+  if [[ ! "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+    err "could not generate a random PSK (need openssl or /dev/urandom)"
+    return 1
+  fi
+  printf '%s' "$hex"
+}
+
 # Wait until a TCP port is accepting connections (poll up to $2 seconds).
 wait_for_port() {
   local host="$1" port="$2" deadline=$(( $(date +%s) + ${3:-15} ))

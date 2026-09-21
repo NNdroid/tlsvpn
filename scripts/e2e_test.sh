@@ -95,8 +95,11 @@ write_config() {
 #   HARDENED — the combination the alignment acceptance criteria call out:
 #              GCM floor negotiated as enc_algo=3, bucket padding, session
 #              token reconnection, FEC group 4.
-#   LEGACY   — the oldest still-supported wire behaviour: CTR floor, legacy
-#              padding, session token off, larger FEC group 8.
+#   LEGACY   — the weakest encrypted path that still exists: no cipher floor
+#              (the ctr tier was removed with the AES-CTR fallback), no padding
+#              (the legacy tier was removed with it), session token off, larger
+#              FEC group 8. min_enc only accepts ""/any/gcm and pad_mode only
+#              off/bucket, so "ctr" and "legacy" no longer parse as configs.
 #   PLAIN    — encryption, padding and FEC all switched off: the shortest path
 #              through the protocol, where a byte-level difference between the
 #              implementations is most likely to surface.
@@ -105,13 +108,24 @@ MATRIX_HARDENED=(
   'client.fec=true' client.fec_group=4 server.session_token=true
 )
 MATRIX_LEGACY=(
-  encrypt=true 'min_enc="ctr"' 'pad_mode="legacy"'
+  encrypt=true 'min_enc="any"' 'pad_mode="off"'
   'client.fec=true' client.fec_group=8 server.session_token=false
 )
 MATRIX_PLAIN=(
   encrypt=false 'min_enc=""' 'pad_mode="off"'
   'client.fec=false' client.fec_group=4 server.session_token=false
 )
+
+# e2e_psk returns the shared PSK for this env, generating it once on first use.
+# Both implementations hard-fail config validation on an empty psk, so every
+# generated config needs one; server and client must hold the same value.
+e2e_psk() {
+  local f="$TEST_DIR/e2e_psk"
+  if [ ! -s "$f" ]; then
+    gen_e2e_psk >"$f" || return 1
+  fi
+  cat "$f"
+}
 
 # Start a server in background.
 #   $1 = binary path  $2 = listen port  $3+ = key=JSON_LITERAL config overrides
@@ -125,14 +139,15 @@ start_server() {
     gen_e2e_cert "$TEST_DIR/e2e_key.pem" "$TEST_DIR/e2e_cert.pem" \
       || { err "could not generate e2e TLS cert (openssl missing or failed)"; return 1; }
   fi
-  local log cfg cert key
+  local log cfg cert key psk
   log="$TEST_DIR/srv_$(basename "$bin")_$port.log"
   cfg="$TEST_DIR/srv_$(basename "$bin")_$port.json"
   # The paths live inside file contents, which MSYS never translates, so they
   # must be rendered in the form the child process understands.
   cert="$(json_path "$TEST_DIR/e2e_cert.pem")"
   key="$(json_path "$TEST_DIR/e2e_key.pem")"
-  write_config "$cfg" mode='"server"' addr="\":$port\"" tap='"mem"' \
+  psk="$(e2e_psk)" || return 1
+  write_config "$cfg" mode='"server"' addr="\":$port\"" tap='"mem"' psk="\"$psk\"" \
     server.cert="\"$cert\"" server.key="\"$key\"" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
@@ -167,13 +182,15 @@ stop_server() {
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
-  local log socks=""
+  local log socks="" psk
   log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
   if [[ "${1:-}" == "-socks5" || "${1:-}" == "--socks5" ]]; then
     socks="\"${2:-}\""; shift 2
   fi
   local cfg="$TEST_DIR/cli_$(basename "$bin")_$port.json"
-  write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' socks5="$socks" "$@"
+  psk="$(e2e_psk)" || return 1
+  write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' psk="\"$psk\"" \
+    socks5="$socks" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
