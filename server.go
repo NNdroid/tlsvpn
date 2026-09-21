@@ -1228,13 +1228,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	brutal, brutalUp, brutalDown := s.brutal, s.brutalUp, s.brutalDown
 	s.mu.Unlock()
 
-	serverTxRate, clientTxRate := brutalUp, brutalDown
-	if req.BrutalRx > 0 && (brutalUp == 0 || req.BrutalRx < brutalUp) {
-		serverTxRate = req.BrutalRx
-	}
-	if req.BrutalTx > 0 && (brutalDown == 0 || req.BrutalTx < brutalDown) {
-		clientTxRate = req.BrutalTx
-	}
+	// serverTxRate = 服务端→客户端（下行），由本端 socket 整形；clientTxRate =
+	// 客户端→服务端（上行），客户端自己整形，本端只裁进自己的上行预算内。
+	serverTxRate, clientTxRate := negotiateBrutalRates(brutalUp, brutalDown, req.BrutalTx, req.BrutalRx)
 	ci.brutalTx, ci.brutalRx = serverTxRate, clientTxRate
 
 	if brutal && serverTxRate > 0 {
@@ -1254,7 +1250,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		encSalt2 = hex.EncodeToString(saltB[:]) // s2c
 	}
 	// 会话令牌：仅原会话持有者可重连接管（见 handleConnection 的校验分支）
-	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, serverTxRate, clientTxRate, req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
+	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, clientTxRate, serverTxRate, req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1470,11 +1466,33 @@ func (s *Server) assignIPsLocked(reqV4, reqV6 string) (string, string) {
 	return v4, v6
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, srvTx, srvRx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) {
+// negotiateBrutalRates 把客户端申请的上下行速率裁进服务端自己的预算内，返回
+// (服务端→客户端的下行整形速率, 客户端→服务端的上行速率)。服务端预算为 0 表示
+// 不设上限（直通客户端申请值）；申请值 ≤ 预算时取申请值。
+//
+// 两个方向的预算绝不能互换：下行受 brutalDown 约束、上行受 brutalUp 约束。曾把
+// 两者写反，客户端面板出现"上行 125 Mbps 配 30 Mbps 上行总量"的矛盾读数。抽成纯
+// 函数是因为这段逻辑埋在 handleConnection 里、没有任何测试能看到它。
+func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cliTxRate uint64) {
+	srvTx = serverDown
+	if cliRx > 0 && (serverDown == 0 || cliRx < serverDown) {
+		srvTx = cliRx
+	}
+	cliTxRate = serverUp
+	if cliTx > 0 && (serverUp == 0 || cliTx < serverUp) {
+		cliTxRate = cliTx
+	}
+	return srvTx, cliTxRate
+}
+
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, cliTx, srvTx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
-		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: srvTx, BrutalRx: srvRx,
+		// BrutalTx/Rx 是客户端视角的上行/下行：cliTx 是客户端自己整形的上行速率，
+		// srvTx 是本端整形的下行速率（即客户端的 rx）。本端自己的 tx 是下行、不是上行，
+		// 传错方向会让两端视角整个对调——面板表现为上行显示下行预算。
+		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: cliTx, BrutalRx: srvTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
 		SessionToken: sessionToken,
 	}

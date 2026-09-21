@@ -1344,18 +1344,18 @@ func (c *Client) connsSummary() connBrutalSummary {
 		st.total++
 		if ci.brutalErr == "" {
 			st.applied++
-			continue
-		}
-		// 各连接的失败原因通常完全相同（例如"平台不支持"），只保留互不相同的
-		dup := false
-		for _, e := range st.errs {
-			if e == ci.brutalErr {
-				dup = true
-				break
+		} else {
+			// 各连接的失败原因通常完全相同（例如"平台不支持"），只保留互不相同的
+			dup := false
+			for _, e := range st.errs {
+				if e == ci.brutalErr {
+					dup = true
+					break
+				}
 			}
-		}
-		if !dup && len(st.errs) < 3 {
-			st.errs = append(st.errs, ci.brutalErr)
+			if !dup && len(st.errs) < 3 {
+				st.errs = append(st.errs, ci.brutalErr)
+			}
 		}
 		per := up / uint64(c.connsCount)
 		if up > 0 && per == 0 {
