@@ -7,10 +7,8 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"time"
 
 	"github.com/songgao/water"
-	"github.com/vishvananda/netlink"
 )
 
 // newTapConfig 在非 Linux 平台上不支持指定 TAP 网卡名（由驱动决定）。
@@ -25,10 +23,6 @@ func netlinkTunnelSupported() bool { return false }
 
 func setTapMac(tapName, macStr string) error {
 	return fmt.Errorf("setTapMac is only supported on Linux")
-}
-
-func waitForTap(tapName string, timeout time.Duration) (netlink.Link, error) {
-	return nil, fmt.Errorf("tunnel interface configuration is only supported on Linux")
 }
 
 func setupPolicyRouting(tapName string, spec policyRoutingSpec) error {

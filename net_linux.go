@@ -201,25 +201,6 @@ func setTapMac(tapName, macStr string) error {
 	return nil
 }
 
-// waitForTap 有界等待 TAP 接口出现。
-func waitForTap(tapName string, timeout time.Duration) (netlink.Link, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		link, err := netlink.LinkByName(tapName)
-		if err == nil {
-			return link, nil
-		}
-		if time.Now().After(deadline) {
-			return nil, err
-		}
-		if sleep := time.Until(deadline); sleep > 500*time.Millisecond {
-			time.Sleep(500 * time.Millisecond)
-		} else {
-			time.Sleep(sleep)
-		}
-	}
-}
-
 // removePolicyRules 删掉本进程为 fwmark 装的全部 ip rule，返回实际删除条数。
 // 不依赖 priority 匹配：热更改了优先级后旧规则的原值已经不在配置里，按
 // mark+table 定位才不会漏删。规则本就不存在（首次安装）时返回 0、无错误。
@@ -329,7 +310,8 @@ func setupPolicyRouting(tapName string, spec policyRoutingSpec) error {
 	if spec.mark <= 0 && len(spec.sourceRules) == 0 {
 		return nil
 	}
-	link, err := waitForTap(tapName, tapWaitTimeout)
+	// 不等待接口出现，理由见 Client.setupInterface；规则装失败会记入返回值
+	link, err := netlink.LinkByName(tapName)
 	if err != nil {
 		return fmt.Errorf("tap %s not available: %w", tapName, err)
 	}

@@ -480,11 +480,6 @@ func liveFromCfg(cfg *Config) *liveConfig {
 	}
 }
 
-// tapWaitTimeout 是等 TAP 接口出现的上限。tap 常由外部单元（systemd-networkd
-// 等）在本进程之后才建立；一次 LinkByName 失败就放弃会让地址和规则永远配不上，
-// 而失败表现恰好最难排查——隧道在线、本机不通、日志里什么都看不出。
-const tapWaitTimeout = 30 * time.Second
-
 // policyRoutingSpec 一次策略路由安装或清理所需的全部参数。拆成结构体是因为
 // 安装和清理必须拿到同一份：清理时按错表号或错优先级会把规则留在内核里。
 type policyRoutingSpec struct {
@@ -1488,9 +1483,12 @@ func (c *Client) isParityFrame(frame []byte) bool {
 }
 
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {
-	link, err := waitForTap(c.tapName, tapWaitTimeout)
+	// 不等待 TAP 出现：设备是本进程在 NewClient 里 water.New 建的，走到这里
+	// 必然已存在；mem 后端则永远没有同名 netlink 链接。这里若阻塞，会卡住整条
+	// 握手路径——每条物理连接白等一轮超时才上报，且晚到的接口下次重拨自会重试。
+	link, err := netlink.LinkByName(c.tapName)
 	if err != nil {
-		return fmt.Errorf("tap %s not available after %s: %v", c.tapName, tapWaitTimeout, err)
+		return fmt.Errorf("tap %s not available: %v", c.tapName, err)
 	}
 	// 先 up 再挂地址：web.bind=tunnel 第一轮就要能 bind（要求 IFF_UP），
 	// 且 v6 在接口 up 的瞬间还会重新触发一次 DAD
