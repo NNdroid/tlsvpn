@@ -146,33 +146,40 @@ type brutalInfoJSON struct {
 // runtimeCfgJSON 生效配置的扁平快照（已脱敏）。不直接下发完整 Config：
 // 面板需要的是"哪些开关现在是开/关"，而不是让浏览器缓存一份可保存的配置。
 type runtimeCfgJSON struct {
-	Mode       string `json:"mode"`
-	Encrypt    bool   `json:"encrypt"`
-	MinEnc     string `json:"min_enc"`
-	PadMode    string `json:"pad_mode"`
-	Brutal     bool   `json:"brutal"`
-	BrutalUp   uint64 `json:"brutal_up"`
-	BrutalDown uint64 `json:"brutal_down"`
-	Socks5     bool   `json:"socks5"`
-	FEC        bool   `json:"fec"`
-	FecGroup   int    `json:"fec_group"`
-	LogLevel   string `json:"log_level"`
-	Conns      int    `json:"conns"`
-	Tap        string `json:"tap"`
-	Mac        string `json:"mac"`
-	Addr       string `json:"addr"`
-	WebAddr    string `json:"web_addr"`
-	WebAuth    bool   `json:"web_auth"`
-	WebBind    string `json:"web_bind"`
-	WebHTTPS   bool   `json:"web_https"`
-	EncryptPSK bool   `json:"encrypt_psk"`
-	SessionEnc bool   `json:"session_encrypt"`
-	SessionTok bool   `json:"session_token"`
-	MaxSess    int    `json:"max_sessions"`
-	V4CIDR     string `json:"v4_cidr,omitempty"`
-	V6CIDR     string `json:"v6_cidr,omitempty"`
-	GwV4       string `json:"gw_v4,omitempty"`
-	GwV6       string `json:"gw_v6,omitempty"`
+	Mode           string   `json:"mode"`
+	Encrypt        bool     `json:"encrypt"`
+	MinEnc         string   `json:"min_enc"`
+	PadMode        string   `json:"pad_mode"`
+	Brutal         bool     `json:"brutal"`
+	BrutalUp       uint64   `json:"brutal_up"`
+	BrutalDown     uint64   `json:"brutal_down"`
+	Socks5         bool     `json:"socks5"`
+	FEC            bool     `json:"fec"`
+	FecGroup       int      `json:"fec_group"`
+	FecGroupMin    int      `json:"fec_group_min,omitempty"` // 服务端：接受的对端 FEC 分组 K 下限
+	FecGroupMax    int      `json:"fec_group_max,omitempty"` // 服务端：接受的对端 FEC 分组 K 上限
+	LogLevel       string   `json:"log_level"`
+	Conns          int      `json:"conns"`
+	Tap            string   `json:"tap"`
+	Mac            string   `json:"mac"`
+	Addr           string   `json:"addr"`
+	WebAddr        string   `json:"web_addr"`
+	WebAuth        bool     `json:"web_auth"`
+	WebBind        string   `json:"web_bind"`
+	WebHTTPS       bool     `json:"web_https"`
+	EncryptPSK     bool     `json:"encrypt_psk"`
+	SessionEnc     bool     `json:"session_encrypt"`
+	SessionTok     bool     `json:"session_token"`
+	MaxSess        int      `json:"max_sessions"`
+	V4CIDR         string   `json:"v4_cidr,omitempty"`
+	V6CIDR         string   `json:"v6_cidr,omitempty"`
+	GwV4           string   `json:"gw_v4,omitempty"`
+	GwV6           string   `json:"gw_v6,omitempty"`
+	Fwmark         int      `json:"fwmark,omitempty"`          // 客户端：策略路由标记
+	FwmarkPriority int      `json:"fwmark_priority,omitempty"` // 0 = 交给内核分配
+	FwmarkTable    int      `json:"fwmark_table,omitempty"`    // 与 fwmark 同号
+	ExtraRoutes    []string `json:"extra_routes,omitempty"`    // 额外路由（iproute2 语法）
+	SourceRules    []SourceRule `json:"source_rules,omitempty"` // 按源地址前缀的规则
 }
 
 // runtimeNegJSON 运行时协商结果快照。客户端模式是端到端会话的实际参数，
@@ -189,6 +196,10 @@ type runtimeNegJSON struct {
 	TxRateMbps      uint64         `json:"tx_rate_mbps"`
 	RxRateMbps      uint64         `json:"rx_rate_mbps"`
 	Brutal          brutalInfoJSON `json:"brutal"`
+	// 策略路由生效状态。fwmark>0 但这里为 false 就意味着规则没装进内核，
+	// 隧道在线而本机不通，只能靠面板看到。
+	PolicyRouting    bool   `json:"policy_routing,omitempty"`
+	PolicyRoutingErr string `json:"policy_routing_error,omitempty"`
 }
 
 // basicAuthWrapper 为管理面加一层 Basic Auth；expected 为空时放行
@@ -414,12 +425,12 @@ const I18N={
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
 	tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',theme_tip:'主题（跟随系统）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'运行模式',encrypt:'内层加密',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',session_token:'Session Token',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关'},
+ cfgk:{mode:'运行模式',encrypt:'内层加密',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',session_token:'Session Token',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
  stt:{title:'运行状态',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',
    restart:'以下字段已修改，需要重启进程才能生效：',norestart:'无字段需要重启生效',noneg:'尚未与对端完成握手',
    noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
    sys:{os:'操作系统',arch:'CPU 架构',go:'Go 版本',cpu:'CPU 核数',host:'主机名',cfgpath:'配置文件',ver:'程序版本'},
-   neg:{proto:'协议版本',fec:'FEC',grp:'FEC 分组',enc:'内层加密',pad:'填充模式',minenc:'最低加密要求',stoken:'Session Token',epoch:'密钥代际',tx:'客户端 → 服务端（上行）',rx:'服务端 → 客户端（下行）'},
+   neg:{proto:'协议版本',fec:'FEC',grp:'FEC 分组',enc:'内层加密',pad:'填充模式',minenc:'最低加密要求',stoken:'Session Token',epoch:'密钥代际',tx:'客户端 → 服务端（上行）',rx:'服务端 → 客户端（下行）',prroute:'策略路由生效'},
    brut:{en:'开关',up:'上行总量',down:'下行总量',kern:'内核支持',cur:'当前拥塞控制',avail:'可用拥塞控制',applied:'已生效 / 总数',perconn:'每连接速率',errs:'失败原因',off:'未启用'},
    yes:'是',no:'否'},
  set:{hint:'编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数（列出的字段需重启生效）。',
@@ -436,12 +447,12 @@ const I18N={
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
 	tls_http:'HTTP (HTTPS recommended)',mode_local:'local',theme_tip:'Theme (follow system)',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'Mode',encrypt:'Inner cipher',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',session_token:'Session token',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway'},
+ cfgk:{mode:'Mode',encrypt:'Inner cipher',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',session_token:'Session token',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
  stt:{title:'Runtime status',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',
    restart:'These fields changed and require a process restart:',norestart:'Nothing pending restart',noneg:'Handshake with peer not completed yet',
    noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
    sys:{os:'OS',arch:'CPU arch',go:'Go version',cpu:'CPU cores',host:'Hostname',cfgpath:'Config file',ver:'App version'},
-   neg:{proto:'Protocol version',fec:'FEC',grp:'FEC group',enc:'Inner cipher',pad:'Padding mode',minenc:'Minimum cipher',stoken:'Session token',epoch:'Key epoch',tx:'Client → server (uplink)',rx:'Server → client (downlink)'},
+   neg:{proto:'Protocol version',fec:'FEC',grp:'FEC group',enc:'Inner cipher',pad:'Padding mode',minenc:'Minimum cipher',stoken:'Session token',epoch:'Key epoch',tx:'Client → server (uplink)',rx:'Server → client (downlink)',prroute:'Policy routing applied'},
    brut:{en:'Enabled',up:'Upstream total',down:'Downstream total',kern:'Kernel support',cur:'Current CC',avail:'Available CC',applied:'Applied / total',perconn:'Per-conn rate',errs:'Failure reasons',off:'Not enabled'},
    yes:'yes',no:'no'},
  set:{hint:'Edit the JSON config. Save: write back to the config file. Save & apply: write back and hot-apply runtime parameters (listed fields require a restart).',
@@ -620,6 +631,12 @@ function renderStatus(data){
     nrw.push([t('stt.neg.epoch'),neg.session_epoch?String(neg.session_epoch):ntxt()]);
     nrw.push([t('stt.neg.tx'),(neg.tx_rate_mbps||0)+' Mbps']);
     nrw.push([t('stt.neg.rx'),(neg.rx_rate_mbps||0)+' Mbps']);
+    // 配了 fwmark 才显示：策略路由是否真的装进内核，以及失败原因。
+    if(neg.policy_routing!==undefined){
+      nrw.push([t('stt.neg.prroute'),neg.policy_routing_error
+        ?'<span class="badge b-off">'+esc(neg.policy_routing_error)+'</span>'
+        :yn(!!neg.policy_routing)]);
+    }
   }
   kv(document.getElementById('st-neg'),nrw);
   kv(document.getElementById('st-brutal'),[
@@ -636,6 +653,10 @@ function renderStatus(data){
   kv(document.getElementById('st-cfg'),Object.keys(cfg).map(function(k){
     const v=cfg[k];let cell;
     if(typeof v==='boolean')cell=yn(v);
+    else if(Array.isArray(v))cell=v.length?mtxt(v.map(function(x){
+      // 对象元素（source_rules）直接 join 会变成 [object Object]，转成 JSON 展示
+      return typeof x==='object'&&x!==null?JSON.stringify(x):x;
+    }).join(' ; ')):ntxt();
     else if(v===undefined||v===null||v==='')cell=ntxt();
     else cell=mtxt(v);
     const lab=t('cfgk.'+k);
@@ -662,7 +683,7 @@ function renderConns(data){
     // 配置了但内核/平台不支持显示"未生效"，悬停看具体原因。
     let brutTxt='-',brutCls='b-off',brutTip='brutal off';
     if(r.brutErr){brutTxt=t('st.skip');brutCls='b-dup';brutTip='brutal skipped: '+r.brutErr;}
-    else if(r.up||r.down){brutTxt=r.up+'↑/'+r.down+'↓';brutCls='b-on';brutTip='brutal shaping '+r.up+' Mbps upstream / '+r.down+' Mbps downstream';}
+    else if(r.brut===true){brutTxt=r.up+'↑/'+r.down+'↓';brutCls='b-on';brutTip='brutal shaping '+r.up+' Mbps upstream / '+r.down+' Mbps downstream';}
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
     const ops=(data.mode==='server'&&r.fullId)?'<button class="btn" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
     return '<tr><td>'+esc(r.owner)+'</td><td>'+esc(r.target||'-')+'</td><td>'+esc(r.remote||'-')+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
@@ -1123,9 +1144,12 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		// 逐连接 brutal 生效统计（服务端在握手时为每条 TCP 连接单独 setsockopt）
 		if sb := srv.serverConnsBrutal(); sb.TotalConns > 0 {
 			stats.Negotiate.Brutal.AppliedConns = sb.AppliedConns
-			if sb.TotalConns > stats.Negotiate.Brutal.TotalConns {
-				stats.Negotiate.Brutal.TotalConns = sb.TotalConns
-			}
+			stats.Negotiate.Brutal.TotalConns = sb.TotalConns
+			stats.Negotiate.Brutal.MinUpMbps = sb.MinUpMbps
+			stats.Negotiate.Brutal.MaxUpMbps = sb.MaxUpMbps
+			stats.Negotiate.Brutal.MinDownMbps = sb.MinDownMbps
+			stats.Negotiate.Brutal.MaxDownMbps = sb.MaxDownMbps
+			stats.Negotiate.Brutal.Errors = sb.Errors
 		}
 		var cfgPath string
 		if cfg != nil {
@@ -1231,6 +1255,15 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.V6CIDR = cfg.Server.V6CIDR
 	out.FEC = cfg.Client.FEC
 	out.FecGroup = cfg.Client.FecGroup
+	out.FecGroupMin = cfg.Server.FecGroupMin
+	out.FecGroupMax = cfg.Server.FecGroupMax
+	out.Fwmark = cfg.Client.Fwmark
+	out.FwmarkPriority = cfg.Client.FwmarkPriority
+	// 表号永远等于 fwmark 值，这不是巧合而是约定：面板把它显式列出来，
+	// 免得用户拿错表号去看 ip route。
+	out.FwmarkTable = cfg.Client.Fwmark
+	out.ExtraRoutes = cfg.Client.ExtraRoutes
+	out.SourceRules = cfg.Client.SourceRules
 	return out
 }
 
@@ -1257,14 +1290,15 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 	encrypt := s.encrypt
 	minEnc := s.minEnc
 	sessionToken := s.sessionToken
-	nClients := len(s.activeClients)
 	s.mu.RUnlock()
 
 	n := runtimeNegJSON{ProtocolVersion: 2, SessionToken: sessionToken, PadMode: padModeName()}
 	if cfg != nil {
 		n.FEC = cfg.Client.FEC
 		n.FecGroup = cfg.Client.FecGroup
-		n.Brutal = brutalSummary(cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown, int64(nClients))
+		// 服务端预算按逻辑客户端分组，不是全机连接数均分。逐会话的实际范围
+		// 由 serverConnsBrutal 在握手快照后补入。
+		n.Brutal = brutalSummary(cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown, 0)
 	}
 	if encrypt {
 		// 服务端 encrypt 开启时对所有会话给出 GCM：无内层加密的回退路径已移除。
@@ -1317,6 +1351,11 @@ func (c *Client) negSnapshot() runtimeNegJSON {
 		n.Brutal.MinUpMbps = st.minUp
 		n.Brutal.MaxUpMbps = st.maxUp
 	}
+	// 只在配了 fwmark 或 source_rules 时报状态：没配的时候这一栏不显示，
+	// 免得"未生效"被误读成配置错误。
+	if lv != nil && (lv.fwmark > 0 || len(lv.sourceRules) > 0) {
+		n.PolicyRouting, n.PolicyRoutingErr = c.policyRoutingResult()
+	}
 	return n
 }
 
@@ -1342,27 +1381,25 @@ func (c *Client) connsSummary() connBrutalSummary {
 			continue
 		}
 		st.total++
-		if ci.brutalErr == "" {
+		br := ci.brutal.Load()
+		if br != nil && br.Applied {
 			st.applied++
-		} else {
+		} else if br != nil && br.Error != "" {
 			// 各连接的失败原因通常完全相同（例如"平台不支持"），只保留互不相同的
 			dup := false
 			for _, e := range st.errs {
-				if e == ci.brutalErr {
+				if e == br.Error {
 					dup = true
 					break
 				}
 			}
 			if !dup && len(st.errs) < 3 {
-				st.errs = append(st.errs, ci.brutalErr)
+				st.errs = append(st.errs, br.Error)
 			}
 		}
-		per := up / uint64(c.connsCount)
-		if up > 0 && per == 0 {
-			per = 1
-		}
-		if per > 0 {
-			if st.minUp == 0 || per < st.minUp {
+		per := splitLegacyBrutalRate(up, int(c.connsCount), i)
+		if up > 0 {
+			if i == 0 || per < st.minUp {
 				st.minUp = per
 			}
 			if per > st.maxUp {
@@ -1399,18 +1436,12 @@ func brutalSummary(enabled bool, up, down uint64, conns int64) brutalInfoJSON {
 		b.Errors = []string{st.err}
 	}
 	if enabled && up > 0 && conns > 0 {
-		per := up / uint64(conns)
-		if per == 0 {
-			per = 1
-		}
-		b.MinUpMbps, b.MaxUpMbps = per, per
+		b.MinUpMbps = splitLegacyBrutalRate(up, int(conns), int(conns)-1)
+		b.MaxUpMbps = splitLegacyBrutalRate(up, int(conns), 0)
 	}
 	if enabled && down > 0 && conns > 0 {
-		per := down / uint64(conns)
-		if per == 0 {
-			per = 1
-		}
-		b.MinDownMbps, b.MaxDownMbps = per, per
+		b.MinDownMbps = splitLegacyBrutalRate(down, int(conns), int(conns)-1)
+		b.MaxDownMbps = splitLegacyBrutalRate(down, int(conns), 0)
 	}
 	return b
 }
@@ -1425,15 +1456,48 @@ func (s *Server) serverConnsBrutal() brutalInfoJSON {
 	}
 	s.mu.RUnlock()
 	var applied, total int
+	haveRates := false
 	for _, sess := range sessions {
 		sess.sessionMu.Lock()
+		n := len(sess.conns)
+		var sessionUp, sessionDown uint64
 		for ci := range sess.conns {
 			total++
-			if ci.brutalErr == "" {
+			sessionUp = atomic.LoadUint64(&ci.brutalRx)
+			sessionDown = atomic.LoadUint64(&ci.brutalTx)
+			if br := ci.brutal.Load(); br != nil && br.Applied {
 				applied++
+			} else if br != nil && br.Error != "" {
+				seen := false
+				for _, e := range out.Errors {
+					if e == br.Error {
+						seen = true
+						break
+					}
+				}
+				if !seen && len(out.Errors) < 3 {
+					out.Errors = append(out.Errors, br.Error)
+				}
 			}
 		}
 		sess.sessionMu.Unlock()
+		if n > 0 {
+			minUp, maxUp := splitLegacyBrutalRate(sessionUp, n, n-1), splitLegacyBrutalRate(sessionUp, n, 0)
+			minDown, maxDown := splitLegacyBrutalRate(sessionDown, n, n-1), splitLegacyBrutalRate(sessionDown, n, 0)
+			if !haveRates || minUp < out.MinUpMbps {
+				out.MinUpMbps = minUp
+			}
+			if maxUp > out.MaxUpMbps {
+				out.MaxUpMbps = maxUp
+			}
+			if !haveRates || minDown < out.MinDownMbps {
+				out.MinDownMbps = minDown
+			}
+			if maxDown > out.MaxDownMbps {
+				out.MaxDownMbps = maxDown
+			}
+			haveRates = true
+		}
 	}
 	out.AppliedConns, out.TotalConns = applied, total
 	return out

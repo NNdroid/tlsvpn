@@ -34,7 +34,6 @@ type AsyncPort struct {
 	cancel     context.CancelFunc
 	backendsMu sync.RWMutex
 	backends   []*Backend
-	fecMode    bool
 	encoder    *fecEncoder
 	txSeq      uint32
 	resetEpoch chan portEpochReset
@@ -66,9 +65,9 @@ func (p *AsyncPort) dropN(n int) {
 	}
 }
 
-func NewAsyncPort(ctx context.Context, id string, fecMode bool) *AsyncPort {
+func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
-	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, fecMode: fecMode, resetEpoch: make(chan portEpochReset)}
+	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, resetEpoch: make(chan portEpochReset)}
 	go p.run()
 	return p
 }
@@ -211,7 +210,6 @@ func (p *AsyncPort) run() {
 
 // dispatchBatch 把一批帧分发给后端，并接管 batch 内全部缓冲的所有权：
 //   - XOR FEC：数据帧 MinRTT 单路发送，校验帧向所有连接广播；
-//   - 传统 FEC（fecMode）：全部帧向所有连接复制；
 //   - 普通模式：MinRTT 单路发送。
 //
 // 每个后端收到的帧均经过深拷贝、彼此独立，由发送协程发送后归还内存池。
@@ -240,15 +238,6 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 				sendFrameTo(b, pf)
 			}
 			putFrame(par)
-		}
-		freeFrames(batch)
-		return
-	}
-
-	if p.fecMode {
-		// 传统模式：同一帧复制到所有连接（旧版实现互通用）
-		for _, b := range backends {
-			p.dropN(sendBatchTo(b, batch))
 		}
 		freeFrames(batch)
 		return
@@ -389,6 +378,18 @@ type Client struct {
 	stateMu   sync.Mutex // 保护 state（多条物理连接的握手协程会并发落盘）
 	stateFile string     // 身份状态文件路径；""=不持久化
 	state     *clientState
+	// 策略路由的安装记录：配置意图在 cfg 快照里，这里回答"现在到底生效
+	// 没有"。prMark/prGw* 是已实际写进内核的那一份参数，退出或热更时按它
+	// 清理，而不是按当前生效配置——配置改了之后旧规则还在内核里。
+	prMu        sync.Mutex
+	prMark      int
+	prGwV4      string
+	prGwV6      string
+	prExtra     []string
+	prSrc       []SourceRule
+	prInstalled []policyRoutingSpec
+	prOK        bool
+	prErr       string
 	// live 指向当前生效配置；面板热更时整体替换该指针，
 	// dialAndServe 每轮重拨前取最新值
 	live          atomic.Pointer[liveConfig]
@@ -396,7 +397,7 @@ type Client struct {
 	macAddr       string
 	tap           io.ReadWriteCloser
 	connsCount    int32  // 与 live.conns 一致的只读影子（连接注册表按此建）
-	fecNegotiated int    // 0=未协商, >0=XOR 分组大小, -1=服务端不支持（回退传统复制）
+	fecNegotiated int    // 0=未协商, >0=XOR 分组大小
 	fecStatus     string // 面板展示用
 	fecAlgo       int    // fecDec 绑定的加密算法（会话重建判据）
 	fecSaltKey    string // fecDec 绑定的盐（会话重建判据）
@@ -444,22 +445,25 @@ type sessionNeg struct {
 
 // liveConfig 客户端热更生效的连接相关参数快照（不含 TAP/MAC 等需重启项）
 type liveConfig struct {
-	psk         string
-	targetAddrs []string
-	reqV4       string
-	reqV6       string
-	sni         string
-	insecure    bool
-	certHash    string
-	fwmark      int
-	brutal      bool
-	brutalUp    uint64
-	brutalDown  uint64
-	connsCount  int
-	fecMode     bool
-	fecGroup    int
-	encrypt     bool
-	minEnc      int // 内层加密强度下限（minEncRank 值，0=不限）
+	psk            string
+	targetAddrs    []string
+	reqV4          string
+	reqV6          string
+	sni            string
+	insecure       bool
+	certHash       string
+	fwmark         int
+	fwmarkPriority int
+	extraRoutes    []string
+	sourceRules    []SourceRule
+	brutal         bool
+	brutalUp       uint64
+	brutalDown     uint64
+	connsCount     int
+	fecMode        bool
+	fecGroup       int
+	encrypt        bool
+	minEnc         int // 内层加密强度下限（minEncRank 值，0=不限）
 }
 
 // liveFromCfg 从完整配置提取热更子集
@@ -468,10 +472,171 @@ func liveFromCfg(cfg *Config) *liveConfig {
 		psk: cfg.PSK, targetAddrs: parseServerAddresses(cfg.Addr),
 		reqV4: cfg.Client.ReqV4, reqV6: cfg.Client.ReqV6,
 		sni: cfg.Client.SNI, insecure: cfg.Client.Insecure, certHash: cfg.Client.CertSHA256,
-		fwmark: cfg.Client.Fwmark, brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
+		fwmark: cfg.Client.Fwmark, fwmarkPriority: cfg.Client.FwmarkPriority, extraRoutes: cfg.Client.ExtraRoutes,
+		sourceRules: cfg.Client.SourceRules,
+		brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		connsCount: cfg.Client.Conns, fecMode: cfg.Client.FEC, fecGroup: cfg.Client.FecGroup,
 		encrypt: cfg.Encrypt, minEnc: minEncRank(cfg.MinEnc),
 	}
+}
+
+// tapWaitTimeout 是等 TAP 接口出现的上限。tap 常由外部单元（systemd-networkd
+// 等）在本进程之后才建立；一次 LinkByName 失败就放弃会让地址和规则永远配不上，
+// 而失败表现恰好最难排查——隧道在线、本机不通、日志里什么都看不出。
+const tapWaitTimeout = 30 * time.Second
+
+// policyRoutingSpec 一次策略路由安装或清理所需的全部参数。拆成结构体是因为
+// 安装和清理必须拿到同一份：清理时按错表号或错优先级会把规则留在内核里。
+type policyRoutingSpec struct {
+	mark        int          // 0 = 关闭 fwmark 规则
+	priority    uint32       // 0 = 交给内核分配
+	gwV4        string       // 空串 = 服务端未下发该族的网关，跳过
+	gwV6        string
+	extra       []string     // fwmark 表的额外路由，iproute2 序列化语法
+	sourceRules []SourceRule // 按源地址前缀的规则，与 fwmark 相互独立
+}
+
+// policyRoutingSpecFor 组合生效配置与服务端下发的网关。网关来自握手响应而非
+// 本地配置，因为前缀随服务器变化，写死在客户端配置里迟早过期。
+func policyRoutingSpecFor(lv *liveConfig, gwV4, gwV6 string) policyRoutingSpec {
+	return policyRoutingSpec{
+		mark: lv.fwmark, priority: uint32(lv.fwmarkPriority),
+		gwV4: gwV4, gwV6: gwV6, extra: lv.extraRoutes, sourceRules: lv.sourceRules,
+	}
+}
+
+// specEmpty 判断这份 spec 是否需要装任何东西。两类规则任一非空即需安装。
+func specEmpty(s policyRoutingSpec) bool {
+	return s.mark <= 0 && len(s.sourceRules) == 0
+}
+
+// sameStringSlice 判断两个字符串切片是否逐元素相等。
+func sameStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// samePolicySpec 判断两份 spec 是否描述了同一组内核对象。
+// 网关不参与比较：它来自握手响应，每次可能不同，而"同一组规则"只由 mark 和
+// source_rules 决定。
+func samePolicySpec(a, b policyRoutingSpec) bool {
+	if a.mark != b.mark || !sameStringSlice(a.extra, b.extra) {
+		return false
+	}
+	if len(a.sourceRules) != len(b.sourceRules) {
+		return false
+	}
+	for i := range a.sourceRules {
+		x, y := a.sourceRules[i], b.sourceRules[i]
+		if x.From != y.From || x.Table != y.Table || x.Priority != y.Priority {
+			return false
+		}
+		if !sameStringSlice(x.Routes, y.Routes) {
+			return false
+		}
+	}
+	return true
+}
+
+// containsPolicySpec 判断已安装清单里是否已有同一组规则。
+func containsPolicySpec(specs []policyRoutingSpec, spec policyRoutingSpec) bool {
+	for _, s := range specs {
+		if samePolicySpec(s, spec) {
+			return true
+		}
+	}
+	return false
+}
+
+// mergePolicySpecs 合并两份安装清单，已存在的条目保留原条目
+// （原条目带有当时真实写入内核的参数，覆盖会丢掉旧的优先级或额外路由）。
+func mergePolicySpecs(dst, src []policyRoutingSpec) []policyRoutingSpec {
+	for _, s := range src {
+		if specEmpty(s) || containsPolicySpec(dst, s) {
+			continue
+		}
+		dst = append(dst, s)
+	}
+	return dst
+}
+
+// policyRoutingResult 最近一次策略路由安装的结果快照。
+func (c *Client) policyRoutingResult() (ok bool, err string) {
+	c.prMu.Lock()
+	defer c.prMu.Unlock()
+	return c.prOK, c.prErr
+}
+
+// notePolicyRouting 记录本次安装结果，供面板的"策略路由是否生效"一栏读取。
+func (c *Client) notePolicyRouting(err error) {
+	c.prMu.Lock()
+	c.prOK = err == nil
+	if err == nil {
+		c.prErr = ""
+	} else {
+		c.prErr = err.Error()
+	}
+	c.prMu.Unlock()
+}
+
+// installedSpecFor 取出当前已写入内核的那一份 spec（调用方持有 prMu）。
+// 从未安装成功过返回 nil。
+func (c *Client) installedSpecFor() *policyRoutingSpec {
+	if c.prMark <= 0 && len(c.prSrc) == 0 {
+		return nil
+	}
+	s := policyRoutingSpec{mark: c.prMark, gwV4: c.prGwV4, gwV6: c.prGwV6,
+		extra: c.prExtra, sourceRules: c.prSrc}
+	return &s
+}
+
+// takePolicyRoutingInstalled 取出已安装清单并清空，进程退出时调用一次。
+func (c *Client) takePolicyRoutingInstalled() []policyRoutingSpec {
+	c.prMu.Lock()
+	defer c.prMu.Unlock()
+	out := c.prInstalled
+	c.prInstalled = nil
+	return out
+}
+
+// installPolicyRouting 安装当前生效配置的策略路由，并保证幂等：
+// 先清掉上一轮写进内核的东西，再装新的。清理必须用当时真实写入的参数
+// （优先级、额外路由都可能是旧值），所以不能拿当前配置去删。
+func (c *Client) installPolicyRouting(spec policyRoutingSpec) {
+	c.prMu.Lock()
+	snap := c.installedSpecFor()
+	if snap != nil && samePolicySpec(*snap, spec) {
+		// 同一组规则的重复安装：旧规则会撞 "File exists"，先按旧参数清干净。
+		// 网关来自握手响应可能变化（前缀按请求下发），所以用本轮的下发值
+		// 覆盖 snap 的网关，只保留它独有的旧优先级和旧额外路由。
+		snap.gwV4, snap.gwV6 = spec.gwV4, spec.gwV6
+		s := *snap
+		c.prInstalled = append(c.prInstalled, s)
+	}
+	c.prMark = spec.mark
+	c.prGwV4, c.prGwV6 = spec.gwV4, spec.gwV6
+	c.prExtra = spec.extra
+	c.prSrc = spec.sourceRules
+	if !containsPolicySpec(c.prInstalled, spec) {
+		c.prInstalled = append(c.prInstalled, spec)
+	}
+	c.prMu.Unlock()
+
+	if snap != nil && samePolicySpec(*snap, spec) {
+		cleanPolicyRouting(c.tapName, *snap)
+	}
+	err := setupPolicyRouting(c.tapName, spec)
+	if err != nil {
+		log.Warnf("policy routing configuration failed: %v", err)
+	}
+	c.notePolicyRouting(err)
 }
 
 // ApplyConfig 面板热更入口：原子替换生效配置并唤醒所有重连监督器。
@@ -517,8 +682,8 @@ type clientConnInfo struct {
 	txBytes   uint64
 	rxBytes   uint64
 	retries   uint64
-	brutalErr string // 本连接的 TCP Brutal 生效结果（""=已生效，非空=跳过/失败原因）
-	linkedAt  int64  // 最近一次握手成功时间（unix 秒，0=未连接过）
+	brutal    atomic.Pointer[brutalApplyResult] // 本连接的内核实际状态；nil=尚未尝试
+	linkedAt  int64                             // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
@@ -624,7 +789,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	c := &Client{
 		clientID: clientID, tapName: cfg.Tap,
 		tap: iface, macAddr: actualMac, connsCount: int32(cl.Conns),
-		txPort:    NewAsyncPort(ctx, "client_tx_port", cl.FEC),
+		txPort:    NewAsyncPort(ctx, "client_tx_port"),
 		stateFile: statePath, state: st,
 		startedAt: time.Now(),
 	}
@@ -685,8 +850,20 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 func (c *Client) Run(ctx context.Context) {
 	// 程序彻底退出时才清理系统路由表并停掉重排缓冲区的后台协程
 	defer func() {
-		lvNow := c.live.Load()
-		cleanPolicyRouting(c.tapName, lvNow.fwmark, c.gwV4, c.gwV6)
+		// 按已安装记录逐条清理，而不是只看当前生效配置：热更过 fwmark 时，
+		// 旧 mark 的规则还留在内核里，只按新配置清理会把它留成孤儿。
+		// 退出瞬间不再有新握手，先快照当前记录以免和清理互相覆盖。
+		c.prMu.Lock()
+		if snap := c.installedSpecFor(); snap != nil {
+			c.prInstalled = append(c.prInstalled, *snap)
+		}
+		c.prMu.Unlock()
+
+		specs := mergePolicySpecs(c.takePolicyRoutingInstalled(),
+			[]policyRoutingSpec{policyRoutingSpecFor(c.live.Load(), c.gwV4, c.gwV6)})
+		for _, spec := range specs {
+			cleanPolicyRouting(c.tapName, spec)
+		}
 		c.rxReorder.Close()
 		c.txPort.Close()
 	}()
@@ -885,8 +1062,10 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if la := atomic.LoadInt64(&ci.linkedAt); la > 0 {
 			snap.AgeSec = uint64(now - la)
 		}
-		snap.BrutalApplied = ci.brutalErr == ""
-		snap.BrutalErr = ci.brutalErr
+		if br := ci.brutal.Load(); br != nil {
+			snap.BrutalApplied = br.Applied
+			snap.BrutalErr = br.Error
+		}
 		out = append(out, snap)
 	}
 	return out
@@ -976,23 +1155,21 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
 	tcpConn := asTCPConn(rawConn)
 
-	// 1. 防御整除为 0 的陷阱
-	clientTxRate := lv.brutalUp / uint64(lv.connsCount)
-	if clientTxRate == 0 && lv.brutalUp > 0 {
-		clientTxRate = 1
-	}
-
-	clientRxRate := lv.brutalDown / uint64(lv.connsCount)
-	if clientRxRate == 0 && lv.brutalDown > 0 {
-		clientRxRate = 1
-	}
+	// 握手声明所有连接共享的总速率；服务端会按自己的配置裁剪，响应回来后再
+	// 用裁剪结果重新套用，避免多连接把总预算乘以连接数。
+	clientTxRateBps := splitLegacyBrutalRateBps(lv.brutalUp, lv.connsCount, connIndex)
+	instanceID := c.instanceID.Load().(string)
+	groupID := brutalGroupID("client", instanceID)
 
 	// 初始以客户端期望的速率申请接管
-	if lv.brutal && clientTxRate > 0 {
-		if e := applyTCPBrutal(tcpConn, clientTxRate); e != nil {
-			ci.brutalErr = e.Error()
-			log.Warnf("[Conn %d] TCP Brutal shaping skipped: %v", connIndex, e)
+	if lv.brutal && clientTxRateBps > 0 {
+		br := applyTCPBrutal(tcpConn, lv.brutalUp, clientTxRateBps, groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[Conn %d] TCP Brutal shaping skipped: %s", connIndex, br.Error)
 		}
+	} else {
+		ci.brutal.Store((&brutalApplyResult{}).clone())
 	}
 
 	rawConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
@@ -1019,7 +1196,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	req := HandshakeReq{
 		ProtocolVersion: 2,
-		ClientInstance:  c.instanceID.Load().(string),
+		ClientInstance:  instanceID,
 		ClientID:        c.clientID,
 		PSK:             hashPSK(lv.psk),
 		MAC:             c.macAddr,
@@ -1028,8 +1205,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		Padding:         generatePadding(100, 500),
 		FEC:             lv.fecMode,
 		FecGroup:        fecGroupReq,
-		BrutalTx:        clientTxRate,
-		BrutalRx:        clientRxRate,
+		BrutalGroups:    true,
+		BrutalTotalTx:   lv.brutalUp,
+		BrutalTotalRx:   lv.brutalDown,
+		BrutalConns:     lv.connsCount,
+		BrutalConnIndex: connIndex,
 		Encrypt:         lv.encrypt,
 		EncAlgo:         clientEncAlgoSupport,
 		SessionToken:    sessionToken,
@@ -1056,6 +1236,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		connIndex, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
 	if resp.ProtocolVersion != 2 {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
+	}
+
+	// 服务端返回的是会话总预算。收到响应后必须重新应用，服务端裁剪后的较低
+	// 上限才会真正落到客户端 socket 上；未协商出总额时保留初始应用值。
+	if lv.brutal && resp.BrutalGroups && resp.BrutalTotalTx > 0 {
+		legacyRateBps := splitLegacyBrutalRateBps(resp.BrutalTotalTx, lv.connsCount, connIndex)
+		br := applyTCPBrutal(tcpConn, resp.BrutalTotalTx, legacyRateBps, groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[Conn %d] negotiated TCP Brutal rate could not be applied: %s", connIndex, br.Error)
+		}
 	}
 
 	if resp.Encrypt != lv.encrypt {
@@ -1094,8 +1285,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 
 	// 会话级协商：首个连接的握手决定本端解码与端口编码模式，后续连接沿用。
-	// 服务端响应带 fec_group>0 表示支持 XOR 校验；否则回退传统复制模式
-	// （旧服务端会把校验帧当作未知控制帧丢弃，编码器就不必挂载）。
+	// 服务端响应带 fec_group >= fecMinGroup 表示启用了 XOR 校验；否则视为未
+	// 启用 FEC（不再有逐帧复制的回退路径，fecNegotiated 保持 0 以便后续连接重试）。
 	c.sessionMu.Lock()
 	if lv.fecMode && c.fecNegotiated == 0 {
 		if resp.FecGroup >= fecMinGroup {
@@ -1103,15 +1294,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.fecStatus = fmt.Sprintf("xor K=%d", resp.FecGroup)
 			log.Infof("[Conn %d] XOR FEC negotiated: K=%d (overhead 1/%d)", connIndex, resp.FecGroup, resp.FecGroup)
 		} else {
-			c.fecNegotiated = -1
-			c.fecStatus = "dup"
-			log.Infof("[Conn %d] Server lacks XOR FEC support, using per-connection duplication", connIndex)
+			c.fecStatus = "off"
+			log.Warnf("[Conn %d] FEC requested but server negotiated fec_group=%d, FEC disabled", connIndex, resp.FecGroup)
 		}
 	}
-	useXorFec := false
 	fecRebuild := false
-	if lv.fecMode && c.fecNegotiated > 0 {
-		useXorFec = true
+	useXorFec := lv.fecMode && c.fecNegotiated > 0
+	if useXorFec {
 		// FEC 编解码器绑定当前会话的加密器与盐：会话/盐变化即重建
 		if c.fecDec == nil || c.fecAlgo != encAlgo || c.fecSaltKey != resp.EncSalt {
 			if c.fecDec != nil {
@@ -1142,7 +1331,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// 时该字段为空，行为与旧版一致。
 	c.sessionToken = resp.SessionToken
 	// 协商快照：面板展示的是服务端实际回传的取值，而不是本地配置声明。
-	// resp.BrutalTx/Rx 是服务端分配给本端上下行的整形速率（0 = 未整形）。
+	// BrutalTotalTx/Rx 是服务端分配给本端上下行的整形总速率（0 = 未整形）。
+	negTx, negRx := resp.BrutalTotalTx, resp.BrutalTotalRx
 	c.negInfo = &sessionNeg{
 		ProtocolVersion: resp.ProtocolVersion,
 		FEC:             resp.FEC,
@@ -1151,8 +1341,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		PadMode:         padModeName(),
 		SessionToken:    resp.SessionToken != "",
 		SessionEpoch:    resp.SessionEpoch,
-		TxRateMbps:      resp.BrutalTx,
-		RxRateMbps:      resp.BrutalRx,
+		TxRateMbps:      negTx,
+		RxRateMbps:      negRx,
 	}
 	c.gwV4 = resp.GwV4
 	c.gwV6 = resp.GwV6
@@ -1179,9 +1369,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
 			log.Errorf("[Conn %d] tunnel interface configuration failed; tunnel address not applied: %v", connIndex, err)
 		}
-		if err := setupPolicyRouting(c.tapName, lv.fwmark, resp.GwV4, resp.GwV6); err != nil {
-			log.Warnf("[Conn %d] policy routing configuration failed: %v", connIndex, err)
-		}
+		// 面板要能区分"没配 fwmark"与"配了但装失败"：后者是最难发现的一类
+		// 故障，只能靠这里的状态位看出来。
+		c.installPolicyRouting(policyRoutingSpecFor(lv, resp.GwV4, resp.GwV6))
 	}
 
 	rttCache := new(uint32)
@@ -1298,9 +1488,9 @@ func (c *Client) isParityFrame(frame []byte) bool {
 }
 
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {
-	link, err := netlink.LinkByName(c.tapName)
+	link, err := waitForTap(c.tapName, tapWaitTimeout)
 	if err != nil {
-		return fmt.Errorf("tap %s not found: %v", c.tapName, err)
+		return fmt.Errorf("tap %s not available after %s: %v", c.tapName, tapWaitTimeout, err)
 	}
 	// 先 up 再挂地址：web.bind=tunnel 第一轮就要能 bind（要求 IFF_UP），
 	// 且 v6 在接口 up 的瞬间还会重新触发一次 DAD

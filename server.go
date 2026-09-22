@@ -258,7 +258,7 @@ type ClientSession struct {
 	RxReorder   *ReorderBuffer
 	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
-	FecMode     string            // 面板展示：xor:K / dup / off
+	FecMode     string            // 面板展示：xor K=d / off
 	EncAlgo     int               // 内层加密算法号（encAlgoNone / encAlgoGCM）
 	Encrypt     bool              // 建会话时 encrypt 的取值；仅用于面板展示，enc_algo 已足够区分
 	SaltA       [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
@@ -292,8 +292,8 @@ type connInfo struct {
 	rxBytes   uint64
 	txPackets uint64
 	rxPackets uint64
-	brutalErr string // TCP Brutal 生效结果（""=已生效，非空=失败/跳过原因）
-	linkedAt  int64  // 建立时间（unix 秒）
+	brutal    atomic.Pointer[brutalApplyResult] // 内核实际状态；nil=尚未尝试
+	linkedAt  int64                             // 建立时间（unix 秒）
 	brutalTx  uint64
 	brutalRx  uint64
 	epoch     uint64
@@ -327,6 +327,10 @@ type Server struct {
 	// maxSessions 并发会话数上限（0=不限）。v6 地址池在 /64 下实际不会枯竭，
 	// 无上限的会话创建等于把 OOM 做成持密者可远程触发的功能。
 	maxSessions int
+	// fecGroupMin/Max 服务端接受的对端 FEC 分组大小 K 区间（默认协议边界
+	// [2,64]）。请求 FEC 而越界即拒连，不夹取：对端要的是自己的编码参数，
+	// 静默改成别的 K 会让它在不知道的情况下多付 N/K 冗余开销。
+	fecGroupMin, fecGroupMax int
 	// bootCfg 启动时配置：NeedsRestart 的差异基准（当前 s.cfg 是热更后的值）
 	bootCfg *Config
 	// sessionToken 开启后，重连既有会话必须回带握手响应下发的会话令牌。
@@ -650,11 +654,16 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				RxPackets: atomic.LoadUint64(&ci.rxPackets),
 				AgeSec:    uint64(now - ci.linkedAt),
 				// brutalTx 是本端（服务端）下发方向整形速率，brutalRx 是客户端上行方向
-				BrutalApplied: ci.brutalErr == "",
-				BrutalErr:     ci.brutalErr,
-				BrutalSrvTx:   ci.brutalTx,
-				BrutalCliTx:   ci.brutalRx,
-				Epoch:         ci.epoch,
+				BrutalApplied: ci.brutal.Load() != nil && ci.brutal.Load().Applied,
+				BrutalErr: func() string {
+					if br := ci.brutal.Load(); br != nil {
+						return br.Error
+					}
+					return ""
+				}(),
+				BrutalSrvTx: atomic.LoadUint64(&ci.brutalTx),
+				BrutalCliTx: atomic.LoadUint64(&ci.brutalRx),
+				Epoch:       ci.epoch,
 			})
 		}
 	}
@@ -689,13 +698,31 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 func (s *Server) ApplyConfig(cfg *Config) []string {
 	needsRestart := s.NeedsRestart(cfg)
 	s.mu.Lock()
+	brutalChanged := s.brutal != cfg.Brutal || s.brutalUp != cfg.BrutalUp || s.brutalDown != cfg.BrutalDown
 	s.psk = cfg.PSK
 	s.encrypt = cfg.Encrypt
 	s.brutal, s.brutalUp, s.brutalDown = cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown
 	s.sessionToken = cfg.Server.SessionToken
 	s.minEnc = minEncRank(cfg.MinEnc)
 	s.maxSessions = cfg.Server.MaxSessions
+	s.fecGroupMin, s.fecGroupMax = cfg.Server.FecGroupMin, cfg.Server.FecGroupMax
+	var reconnect []*net.TCPConn
+	if brutalChanged {
+		for _, session := range s.activeClients {
+			session.sessionMu.Lock()
+			for ci := range session.conns {
+				reconnect = append(reconnect, ci.tcpConn)
+			}
+			session.sessionMu.Unlock()
+		}
+	}
 	s.mu.Unlock()
+	// TCP congestion state is socket-local. Closing physical connections is the
+	// only reliable way to apply enable/disable/rate changes while preserving the
+	// logical session; clients reconnect immediately with fresh negotiated state.
+	for _, conn := range reconnect {
+		_ = conn.Close()
+	}
 
 	// 填充策略是全局原子量，作用于本进程的全部发送路径
 	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
@@ -758,6 +785,7 @@ func startServer(ctx context.Context, cfg *Config) {
 		pskFail:      make(map[string]*pskFailBucket),
 		sessionToken: cfg.Server.SessionToken, minEnc: minEncRank(cfg.MinEnc),
 		maxSessions: cfg.Server.MaxSessions,
+		fecGroupMin: cfg.Server.FecGroupMin, fecGroupMax: cfg.Server.FecGroupMax,
 	}
 	srv.cfg.Store(cfg)
 	srv.bootCfg = cfg
@@ -807,7 +835,7 @@ func startServer(ctx context.Context, cfg *Config) {
 	}
 
 	tapBackend := make(chan []VPNFrame, 32)
-	tapPort := NewAsyncPort(ctx, tapPortID, false)
+	tapPort := NewAsyncPort(ctx, tapPortID)
 	tapPort.RegisterBackend(tapBackend, new(uint32))
 	srv.vswitch.AddPort(tapPort)
 
@@ -988,6 +1016,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	pskHash := hashPSK(psk)
 	encrypt := s.encrypt
 	minEnc := s.minEnc
+	fecGroupMin, fecGroupMax := s.fecGroupMin, s.fecGroupMax
 	s.mu.RUnlock()
 
 	// 常量时间比较：Go 字符串 == 逐字节短路，响应时延会泄露匹配前缀长度。
@@ -1037,6 +1066,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Warnf("[%s] connection refused: unsupported protocol_version=%d", clientID, req.ProtocolVersion)
 		return
 	}
+	// FEC 分组大小是请求形态，不是能力位：拒绝越界请求而非夹取。自己的客户端
+	// 发送前已夹到协议范围，因此这条只拦畸形/第三方 peer；fec_group=0 在
+	// fec=false 时合法，必须按 req.FEC 门控，否则所有非 FEC 握手都会被拒。
+	if req.FEC && (req.FecGroup < fecGroupMin || req.FecGroup > fecGroupMax) {
+		log.Warnf("[%s] connection refused: fec_group=%d outside server policy [%d, %d]",
+			clientID, req.FecGroup, fecGroupMin, fecGroupMax)
+		return
+	}
 	if !isValidClientInstance(req.ClientInstance) {
 		log.Warnf("[%s] connection refused: invalid client_instance", clientID)
 		return
@@ -1079,7 +1116,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.destroySessionLocked(session, clientID)
 			exists = false
 		}
-		if exists && req.ProtocolVersion >= 2 && session.InstanceID != req.ClientInstance {
+		if exists && session.InstanceID != req.ClientInstance {
 			if !verifyRandomSessionToken(session.ResumeToken, req.SessionToken) {
 				log.Warnf("[%s] reconnect refused: invalid session token for a new client instance", clientID)
 				s.mu.Unlock()
@@ -1128,11 +1165,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			camouflageProbe(conn)
 			return
 		}
-		// FEC 模式协商：req.FecGroup>=2 表示客户端请求 XOR 奇偶校验模式
-		// （服务端对下行也用同参数编码）；否则维持传统逐帧复制模式。
+		// FEC 协商：客户端请求 FEC 时按 XOR 奇偶校验编码（服务端下行用同参数）。
+		// K 直接取请求值——上面的拒连闸已保证它在 [fecGroupMin, fecGroupMax]
+		// ⊆ [fecMinGroup, fecMaxGroup] 内，无需再夹取；未请求 FEC 时为 0（不编码）。
 		fecEncK := 0
-		if req.ProtocolVersion >= 2 && req.FEC && int(req.FecGroup) >= fecMinGroup {
-			fecEncK = clampFecGroup(int(req.FecGroup))
+		if req.FEC {
+			fecEncK = int(req.FecGroup)
 		}
 		// 内层加密协商：encrypt 开启且客户端声明 GCM 能力时启用。会话盐每次
 		// 建会话随机生成（c2s/s2c 各一个），服务端重启或会话重建即换盐，密钥流
@@ -1151,11 +1189,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		fecMode := "off"
 		if fecEncK > 0 {
 			fecMode = fmt.Sprintf("xor K=%d", fecEncK)
-		} else if req.FEC {
-			fecMode = "dup"
 		}
 
-		port := NewAsyncPort(parentCtx, clientID, req.FEC && fecEncK == 0)
+		port := NewAsyncPort(parentCtx, clientID)
 		if fecEncK > 0 {
 			port.AttachFEC(fecEncK, fecTx)
 		}
@@ -1230,14 +1266,33 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	// serverTxRate = 服务端→客户端（下行），由本端 socket 整形；clientTxRate =
 	// 客户端→服务端（上行），客户端自己整形，本端只裁进自己的上行预算内。
-	serverTxRate, clientTxRate := negotiateBrutalRates(brutalUp, brutalDown, req.BrutalTx, req.BrutalRx)
-	ci.brutalTx, ci.brutalRx = serverTxRate, clientTxRate
+	groupOffer := req.BrutalGroups && req.BrutalConns > 0 && req.BrutalConns <= 1<<16 &&
+		req.BrutalConnIndex >= 0 && req.BrutalConnIndex < req.BrutalConns &&
+		req.BrutalTotalTx <= maxBrutalRateMbps && req.BrutalTotalRx <= maxBrutalRateMbps
+	var serverTxRate, clientTxRate, serverLegacyRateBps uint64
+	if groupOffer {
+		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, req.BrutalTotalTx, req.BrutalTotalRx)
+		serverLegacyRateBps = splitLegacyBrutalRateBps(serverTxRate, req.BrutalConns, req.BrutalConnIndex)
+	} else {
+		// 对端未声明 group 语义或字段越界：没有逐连接预算可裁剪，按本端配置整形
+		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, 0, 0)
+		serverLegacyRateBps, _ = brutalMbpsToBps(serverTxRate)
+	}
+	atomic.StoreUint64(&ci.brutalTx, serverTxRate)
+	atomic.StoreUint64(&ci.brutalRx, clientTxRate)
 
 	if brutal && serverTxRate > 0 {
-		if e := applyTCPBrutal(tcpConn, serverTxRate); e != nil {
-			ci.brutalErr = e.Error()
-			log.Warnf("[%s] TCP Brutal shaping skipped: %v", clientID, e)
+		groupID := uint64(0)
+		if groupOffer {
+			groupID = brutalGroupID("server", resumeToken)
 		}
+		br := applyTCPBrutal(tcpConn, serverTxRate, serverLegacyRateBps, groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[%s] TCP Brutal shaping skipped: %s", clientID, br.Error)
+		}
+	} else {
+		ci.brutal.Store((&brutalApplyResult{}).clone())
 	}
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
@@ -1250,7 +1305,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		encSalt2 = hex.EncodeToString(saltB[:]) // s2c
 	}
 	// 会话令牌：仅原会话持有者可重连接管（见 handleConnection 的校验分支）
-	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr, clientTxRate, serverTxRate, req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
+	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
+		groupOffer, clientTxRate, serverTxRate,
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1485,14 +1542,17 @@ func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cli
 	return srvTx, cliTxRate
 }
 
-func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string, cliTx, srvTx uint64, fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) {
+func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
+	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
+	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
-		// BrutalTx/Rx 是客户端视角的上行/下行：cliTx 是客户端自己整形的上行速率，
-		// srvTx 是本端整形的下行速率（即客户端的 rx）。本端自己的 tx 是下行、不是上行，
-		// 传错方向会让两端视角整个对调——面板表现为上行显示下行预算。
-		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500), BrutalTx: cliTx, BrutalRx: srvTx,
+		// BrutalTotalTx/Rx 是客户端视角的上行/下行总量：cliTotalTx 是客户端自己整形的
+		// 上行速率，srvTotalTx 是本端整形的下行速率（即客户端的 rx）。本端自己的 tx 是
+		// 下行、不是上行，传错方向会让两端视角整个对调——面板表现为上行显示下行预算。
+		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
+		BrutalGroups: brutalGroups, BrutalTotalTx: cliTotalTx, BrutalTotalRx: srvTotalTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
 		SessionToken: sessionToken,
 	}

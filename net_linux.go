@@ -5,12 +5,11 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -29,24 +28,14 @@ const ifaNoDAD = unix.IFA_F_NODAD
 func netlinkTunnelSupported() bool { return true }
 
 // ======================= TCP Brutal & RTT 探测 =======================
-const TCP_BRUTAL_PARAMS = 23301
-
-var (
-	brutalAvailOnce sync.Once
-	brutalAvail     []string
-)
-
-// brutalAvailableAlgos 内核提供的拥塞控制算法列表（运行期不变），读一次缓存。
-// 读不到（容器禁 /proc 之类）时返回 nil，调用方按"未知"处理，不阻断 apply 尝试。
+// brutalAvailableAlgos 每次读取实时列表；模块可在进程运行期间加载/卸载，面板
+// 不能把启动时的“不支持”永久缓存。读不到时返回 nil，apply 仍直接尝试 sockopt。
 func brutalAvailableAlgos() []string {
-	brutalAvailOnce.Do(func() {
-		data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_available_congestion_control")
-		if err != nil {
-			return
-		}
-		brutalAvail = strings.Fields(string(data))
-	})
-	return brutalAvail
+	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_available_congestion_control")
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(data))
 }
 
 // brutalStatus 定义在 api.go（两平台共用），这里只给 Linux 实现读内核值的逻辑。
@@ -70,51 +59,77 @@ func brutalSystemStatus() brutalStatus {
 	return st
 }
 
-func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
+type linuxBrutalSocket struct{ fd int }
+
+func mapBrutalSockoptError(err error) error {
+	if err == unix.EPERM {
+		return fmt.Errorf("%w: %v", errBrutalLocked, err)
+	}
+	return err
+}
+
+func (s linuxBrutalSocket) setCongestion(algo string) error {
+	return mapBrutalSockoptError(unix.SetsockoptString(s.fd, unix.IPPROTO_TCP, unix.TCP_CONGESTION, algo))
+}
+
+func (s linuxBrutalSocket) getCongestion() (string, error) {
+	return unix.GetsockoptString(s.fd, unix.IPPROTO_TCP, unix.TCP_CONGESTION)
+}
+
+func (s linuxBrutalSocket) getVersion() (uint32, error) {
+	v, err := unix.GetsockoptInt(s.fd, unix.IPPROTO_TCP, tcpBrutalVersionOption)
+	if err == unix.ENOPROTOOPT {
+		return 0, errBrutalNoVersion
+	}
+	return uint32(v), err
+}
+
+func (s linuxBrutalSocket) setParams(b []byte) error {
+	if len(b) == 0 {
+		return unix.EINVAL
+	}
+	_, _, errno := unix.Syscall6(unix.SYS_SETSOCKOPT, uintptr(s.fd), unix.IPPROTO_TCP,
+		tcpBrutalParamsOption, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0)
+	if errno != 0 {
+		return mapBrutalSockoptError(errno)
+	}
+	return nil
+}
+
+func (s linuxBrutalSocket) getParams(size int) ([]byte, error) {
+	if size != 12 && size != 20 {
+		return nil, unix.EINVAL
+	}
+	b := make([]byte, size)
+	n := uint32(size)
+	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, uintptr(s.fd), unix.IPPROTO_TCP,
+		tcpBrutalParamsOption, uintptr(unsafe.Pointer(&b[0])), uintptr(unsafe.Pointer(&n)), 0)
+	if errno != 0 {
+		return nil, mapBrutalSockoptError(errno)
+	}
+	if int(n) != size {
+		return nil, fmt.Errorf("TCP_BRUTAL_PARAMS returned %d bytes, want %d", n, size)
+	}
+	return b, nil
+}
+
+func applyTCPBrutal(conn *net.TCPConn, totalRate, legacyRate, groupID uint64) brutalApplyResult {
 	// 经由 SOCKS5 代理时拿不到端到端的 TCP 句柄，此处直接跳过内核调优
 	if conn == nil {
-		return fmt.Errorf("no raw TCP connection available (proxied?)")
-	}
-	if rateMbps == 0 {
-		return fmt.Errorf("TCP Brutal rate cannot be 0")
-	}
-	avail := brutalAvailableAlgos()
-	if avail != nil {
-		found := false
-		for _, a := range avail {
-			if a == "brutal" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("kernel has no 'brutal' congestion control: %s", strings.Join(avail, ","))
-		}
+		return brutalApplyResult{Error: "no raw TCP connection available (proxied?)"}
 	}
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return err
+		return brutalApplyResult{Attempted: true, Error: err.Error()}
 	}
-	var sysErr error
+	var result brutalApplyResult
 	err = raw.Control(func(fd uintptr) {
-		err := unix.SetsockoptString(int(fd), unix.IPPROTO_TCP, unix.TCP_CONGESTION, "brutal")
-		if err != nil {
-			sysErr = fmt.Errorf("TCP_CONGESTION=brutal failed: %v", err)
-			return
-		}
-		rateBps := rateMbps * 1000 * 1000 / 8
-		b := make([]byte, 12)
-		binary.LittleEndian.PutUint64(b[0:8], rateBps)
-		binary.LittleEndian.PutUint32(b[8:12], 20)
-		_, _, errno := unix.Syscall6(unix.SYS_SETSOCKOPT, fd, unix.IPPROTO_TCP, TCP_BRUTAL_PARAMS, uintptr(unsafe.Pointer(&b[0])), 12, 0)
-		if errno != 0 {
-			sysErr = fmt.Errorf("TCP_BRUTAL_PARAMS failed: %v", errno)
-		}
+		result = configureTCPBrutal(linuxBrutalSocket{fd: int(fd)}, totalRate, legacyRate, groupID)
 	})
 	if err != nil {
-		return err
+		return brutalApplyResult{Attempted: true, Error: err.Error()}
 	}
-	return sysErr
+	return result
 }
 
 func getTCPRTT(conn *net.TCPConn) (uint32, error) {
@@ -186,51 +201,336 @@ func setTapMac(tapName, macStr string) error {
 	return nil
 }
 
-func setupPolicyRouting(tapName string, mark int, gwV4, gwV6 string) error {
+// waitForTap 有界等待 TAP 接口出现。
+func waitForTap(tapName string, timeout time.Duration) (netlink.Link, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		link, err := netlink.LinkByName(tapName)
+		if err == nil {
+			return link, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		if sleep := time.Until(deadline); sleep > 500*time.Millisecond {
+			time.Sleep(500 * time.Millisecond)
+		} else {
+			time.Sleep(sleep)
+		}
+	}
+}
+
+// removePolicyRules 删掉本进程为 fwmark 装的全部 ip rule，返回实际删除条数。
+// 不依赖 priority 匹配：热更改了优先级后旧规则的原值已经不在配置里，按
+// mark+table 定位才不会漏删。规则本就不存在（首次安装）时返回 0、无错误。
+func removePolicyRules(mark int) (int, error) {
 	if mark <= 0 {
+		return 0, nil
+	}
+	removed := 0
+	var errs []string
+	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		rules, err := netlink.RuleList(family)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("rule list (family=%d): %v", family, err))
+			continue
+		}
+		for _, r := range rules {
+			if r.Mark != uint32(mark) || r.Table != mark {
+				continue
+			}
+			if err := netlink.RuleDel(&r); err != nil {
+				errs = append(errs, fmt.Sprintf("rule del (family=%d): %v", family, err))
+				continue
+			}
+			removed++
+		}
+	}
+	if len(errs) > 0 {
+		return removed, fmt.Errorf("policy routing: %s", strings.Join(errs, "; "))
+	}
+	return removed, nil
+}
+
+// removeSourceRules 删掉本进程为 source_rules 装的 ip rule。同样不依赖 priority：
+// 热更改了优先级后旧规则的原值已经不在配置里，按 src+table 定位才不会漏删。
+func removeSourceRules(rules []SourceRule) (int, error) {
+	removed := 0
+	var errs []string
+	for _, r := range rules {
+		prefix, err := netlink.ParseIPNet(r.From)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("rule del: invalid prefix %q: %v", r.From, err))
+			continue
+		}
+		family := netlink.FAMILY_V4
+		if prefix.IP.To4() == nil {
+			family = netlink.FAMILY_V6
+		}
+		list, err := netlink.RuleList(family)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("rule list (family=%d): %v", family, err))
+			continue
+		}
+		for _, exist := range list {
+			if exist.Table != r.Table || exist.Src == nil {
+				continue
+			}
+			// IPNet 含两个切片字段，结构体和掩码都不能直接 == 比较。
+			if exist.Src.String() != prefix.String() {
+				continue
+			}
+			if err := netlink.RuleDel(&exist); err != nil {
+				errs = append(errs, fmt.Sprintf("rule del (family=%d): %v", family, err))
+				continue
+			}
+			removed++
+		}
+	}
+	if len(errs) > 0 {
+		return removed, fmt.Errorf("policy routing: %s", strings.Join(errs, "; "))
+	}
+	return removed, nil
+}
+
+// parsePolicyRoute 把一条 extra 路由解析成 netlink 路由项并归位到指定表。
+// 未写 dev 时默认走隧道网卡，因为整张表本来就是隧道表。
+func parsePolicyRoute(link netlink.Link, table int, raw string) (*netlink.Route, error) {
+	prefix, dev, err := parseRouteSpec(raw)
+	if err != nil {
+		return nil, fmt.Errorf("extra route %q: %v", raw, err)
+	}
+	linkIdx := link.Attrs().Index
+	if dev != "" {
+		devLink, derr := netlink.LinkByName(dev)
+		if derr != nil {
+			return nil, fmt.Errorf("extra route %q: dev %q not found: %v", raw, dev, derr)
+		}
+		linkIdx = devLink.Attrs().Index
+	}
+	_, ipnet, perr := net.ParseCIDR(prefix)
+	if perr != nil {
+		return nil, fmt.Errorf("extra route %q: invalid prefix %q", raw, prefix)
+	}
+	family := netlink.FAMILY_V4
+	if ipnet.IP.To4() == nil {
+		family = netlink.FAMILY_V6
+	}
+	return &netlink.Route{LinkIndex: linkIdx, Dst: ipnet, Table: table, Family: family}, nil
+}
+
+// setupPolicyRouting 安装两类独立的策略路由：
+//   - fwmark 规则（表号 == mark 值），配合本进程 socket 的 SO_MARK；
+//   - source_rules（ip rule from <prefix> table N），按源地址匹配。
+//
+// 后者用于转发流量：内核转发的包没有 socket，SO_MARK 碰不到，只能按地址或
+// 由 netfilter 注入的 mark 匹配。两类规则互不依赖，任一配置了即需启动。
+func setupPolicyRouting(tapName string, spec policyRoutingSpec) error {
+	if spec.mark <= 0 && len(spec.sourceRules) == 0 {
 		return nil
 	}
-	link, err := netlink.LinkByName(tapName)
+	link, err := waitForTap(tapName, tapWaitTimeout)
 	if err != nil {
+		return fmt.Errorf("tap %s not available: %w", tapName, err)
+	}
+	// 先清后装保证幂等：重启/热更后旧规则还在，直接 add 可能撞 "File exists"。
+	if _, err := removePolicyRules(spec.mark); err != nil {
 		return err
 	}
-	setup := func(gwStr string, family int) {
-		if gwStr == "" {
-			return
-		}
-		gw := net.ParseIP(gwStr)
-		rule := netlink.NewRule()
-		rule.Mark, rule.Table, rule.Family = uint32(mark), mark, family
-		netlink.RuleDel(rule)
-		netlink.RuleAdd(rule)
-		route := &netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw, Table: mark}
-		netlink.RouteReplace(route)
+	if _, err := removeSourceRules(spec.sourceRules); err != nil {
+		return err
 	}
-	setup(gwV4, netlink.FAMILY_V4)
-	setup(gwV6, netlink.FAMILY_V6)
-	log.Infof("🔀 Policy routing configured (fwmark: %d)", mark)
+	var errs []string
+	errs = append(errs, setupFwmarkRoutes(link, spec)...)
+	errs = append(errs, setupSourceRuleRoutes(link, spec)...)
+	if len(errs) > 0 {
+		return fmt.Errorf("policy routing: %s", strings.Join(errs, "; "))
+	}
+	priority := "auto"
+	if spec.priority != 0 {
+		priority = strconv.FormatUint(uint64(spec.priority), 10)
+	}
+	log.Infof("🔀 Policy routing configured (fwmark: %d table %d priority %s, extra %d; source rules: %d)",
+		spec.mark, spec.mark, priority, len(spec.extra), len(spec.sourceRules))
 	return nil
 }
 
-func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {
-	if mark <= 0 {
-		return
+// setupFwmarkRoutes 装 fwmark 规则及其表内路由，返回该步的错误列表。
+func setupFwmarkRoutes(link netlink.Link, spec policyRoutingSpec) []string {
+	if spec.mark <= 0 {
+		return nil
 	}
-	link, err := netlink.LinkByName(tapName)
-	if err != nil {
-		return
+	var errs []string
+	addRule := func(family int) {
+		rule := netlink.NewRule()
+		rule.Mark, rule.Table, rule.Family = uint32(spec.mark), spec.mark, family
+		if spec.priority != 0 {
+			rule.Priority = int(spec.priority)
+		}
+		if err := netlink.RuleAdd(rule); err != nil {
+			errs = append(errs, fmt.Sprintf("rule add (family=%d): %v", family, err))
+		}
 	}
-	cleanup := func(gwStr string, family int) {
+	replaceDefault := func(gwStr string, family int) {
 		if gwStr == "" {
 			return
 		}
 		gw := net.ParseIP(gwStr)
-		rule := netlink.NewRule()
-		rule.Mark, rule.Table, rule.Family = uint32(mark), mark, family
-		netlink.RuleDel(rule)
-		route := &netlink.Route{LinkIndex: link.Attrs().Index, Gw: gw, Table: mark}
-		netlink.RouteDel(route)
+		if gw == nil {
+			errs = append(errs, fmt.Sprintf("route replace: invalid gateway %q", gwStr))
+			return
+		}
+		addRule(family)
+		if err := netlink.RouteReplace(&netlink.Route{
+			LinkIndex: link.Attrs().Index, Gw: gw, Table: spec.mark, Family: family,
+		}); err != nil {
+			errs = append(errs, fmt.Sprintf("route replace default via %s (family=%d): %v", gwStr, family, err))
+		}
 	}
-	cleanup(gwV4, netlink.FAMILY_V4)
-	cleanup(gwV6, netlink.FAMILY_V6)
+	replaceDefault(spec.gwV4, netlink.FAMILY_V4)
+	replaceDefault(spec.gwV6, netlink.FAMILY_V6)
+	for _, raw := range spec.extra {
+		route, err := parsePolicyRoute(link, spec.mark, raw)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		addRule(route.Family)
+		if err := netlink.RouteReplace(route); err != nil {
+			errs = append(errs, fmt.Sprintf("route replace %s: %v", raw, err))
+		}
+	}
+	return errs
+}
+
+// setupSourceRuleRoutes 逐条装 ip rule from <prefix> table N 及其表内路由。
+// 默认路由仍按握手下发的网关写入，和 fwmark 表共用同一份网关值。
+//
+// 规则只装到 from 自己的地址族：netlink 会拒绝把 IPv6 前缀装进 AF_INET 规则
+// （RTNETLINK answers: Invalid argument）。removeSourceRules 也按前缀判族，
+// 两边必须一致，否则会装出一条清理路径删不掉的规则。
+func setupSourceRuleRoutes(link netlink.Link, spec policyRoutingSpec) []string {
+	var errs []string
+	addRule := func(r SourceRule, family int) bool {
+		prefix, err := netlink.ParseIPNet(r.From)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("rule add: invalid prefix %q: %v", r.From, err))
+			return false
+		}
+		rule := netlink.NewRule()
+		rule.Src, rule.Table, rule.Family = prefix, r.Table, family
+		if r.Priority > 0 {
+			rule.Priority = int(r.Priority)
+		}
+		if err := netlink.RuleAdd(rule); err != nil {
+			errs = append(errs, fmt.Sprintf("rule add from %s table %d (family=%d): %v", r.From, r.Table, family, err))
+			return false
+		}
+		return true
+	}
+	for _, r := range spec.sourceRules {
+		prefix, err := netlink.ParseIPNet(r.From)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("source rule: invalid prefix %q: %v", r.From, err))
+			continue
+		}
+		family, gateway, label := netlink.FAMILY_V4, spec.gwV4, "IPv4"
+		if prefix.IP.To4() == nil {
+			family, gateway, label = netlink.FAMILY_V6, spec.gwV6, "IPv6"
+		}
+		// 服务端没下发该族网关：规则命中后表里查不到默认路由，流量只会落回主表。
+		// 静默跳过等于让整条规则失效而用户毫无察觉，必须报出来。
+		if gateway == "" {
+			errs = append(errs, fmt.Sprintf("source rule %s table %d: no %s gateway offered",
+				r.From, r.Table, label))
+			continue
+		}
+		gw := net.ParseIP(gateway)
+		if gw == nil {
+			errs = append(errs, fmt.Sprintf("source rule %s: invalid %s gateway %q",
+				r.From, label, gateway))
+			continue
+		}
+		// 规则先装一次就够了；表内的 extra 路由各自按前缀判族，不能反过来用它
+		// 的族去装规则，也不能重复 RuleAdd（第二次会撞 File exists）。
+		if !addRule(r, family) {
+			continue
+		}
+		if err := netlink.RouteReplace(&netlink.Route{
+			LinkIndex: link.Attrs().Index, Gw: gw, Table: r.Table, Family: family,
+		}); err != nil {
+			errs = append(errs, fmt.Sprintf("source rule %s: route replace default via %s (family=%d): %v",
+				r.From, gateway, family, err))
+		}
+		for _, raw := range r.Routes {
+			route, err := parsePolicyRoute(link, r.Table, raw)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("source rule %s: %v", r.From, err))
+				continue
+			}
+			if err := netlink.RouteReplace(route); err != nil {
+				errs = append(errs, fmt.Sprintf("source rule %s: route replace %s: %v", r.From, raw, err))
+			}
+		}
+	}
+	return errs
+}
+
+func cleanPolicyRouting(tapName string, spec policyRoutingSpec) {
+	if spec.mark <= 0 && len(spec.sourceRules) == 0 {
+		return
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil {
+		log.Warnf("policy routing cleanup: tap %s not found, skipping: %v", tapName, err)
+		return
+	}
+	if _, err := removePolicyRules(spec.mark); err != nil {
+		log.Warnf("policy routing cleanup: %v", err)
+	}
+	if _, err := removeSourceRules(spec.sourceRules); err != nil {
+		log.Warnf("policy routing cleanup: %v", err)
+	}
+	delRoute := func(table int, gwStr string, family int) {
+		if gwStr == "" {
+			return
+		}
+		gw := net.ParseIP(gwStr)
+		if gw == nil {
+			return
+		}
+		if err := netlink.RouteDel(&netlink.Route{
+			LinkIndex: link.Attrs().Index, Gw: gw, Table: table, Family: family,
+		}); err != nil {
+			log.Warnf("policy routing cleanup: route del default via %s table %d (family=%d): %v", gwStr, table, family, err)
+		}
+	}
+	delRoute(spec.mark, spec.gwV4, netlink.FAMILY_V4)
+	delRoute(spec.mark, spec.gwV6, netlink.FAMILY_V6)
+	for _, raw := range spec.extra {
+		route, err := parsePolicyRoute(link, spec.mark, raw)
+		if err != nil {
+			log.Warnf("policy routing cleanup: %v", err)
+			continue
+		}
+		if err := netlink.RouteDel(route); err != nil {
+			log.Warnf("policy routing cleanup: route del extra %s: %v", raw, err)
+		}
+	}
+	for _, r := range spec.sourceRules {
+		delRoute(r.Table, spec.gwV4, netlink.FAMILY_V4)
+		delRoute(r.Table, spec.gwV6, netlink.FAMILY_V6)
+		for _, raw := range r.Routes {
+			route, err := parsePolicyRoute(link, r.Table, raw)
+			if err != nil {
+				log.Warnf("policy routing cleanup: source rule %s: %v", r.From, err)
+				continue
+			}
+			if err := netlink.RouteDel(route); err != nil {
+				log.Warnf("policy routing cleanup: source rule %s route del %s: %v", r.From, raw, err)
+			}
+		}
+	}
+	log.Infof("🧹 Policy routing cleaned up (fwmark: %d table %d; source rules: %d)",
+		spec.mark, spec.mark, len(spec.sourceRules))
 }

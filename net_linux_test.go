@@ -21,7 +21,7 @@ func TestBrutalAndRTTNilSafe(t *testing.T) {
 		}
 	}()
 
-	if err := applyTCPBrutal(nil, 100); err == nil {
+	if got := applyTCPBrutal(nil, 100, 12_500_000, 1); got.Error == "" {
 		t.Error("nil 连接应返回错误而非成功")
 	}
 	if _, err := getTCPRTT(nil); err == nil {

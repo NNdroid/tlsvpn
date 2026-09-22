@@ -29,7 +29,7 @@ func TestRandomSessionTokensAreUniqueAndExact(t *testing.T) {
 func TestAsyncPortSequenceNeverWraps(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := NewAsyncPort(ctx, "sequence-test", false)
+	p := NewAsyncPort(ctx, "sequence-test")
 	atomic.StoreUint32(&p.txSeq, math.MaxUint32-1)
 	var exhausted atomic.Int32
 	p.SetSequenceExhaustedHandler(func() { exhausted.Add(1) })
@@ -114,7 +114,7 @@ func TestDestroySessionPointerGuardPreventsABARemoval(t *testing.T) {
 func TestKickDestroysLogicalSessionInsteadOfLeavingReusableState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	port := NewAsyncPort(ctx, "client", false)
+	port := NewAsyncPort(ctx, "client")
 	reorder := NewReorderBuffer(func([]byte) {})
 	session := &ClientSession{
 		SessionID: "session", Port: port, IPv4: "10.0.0.2", IPv6: "fd00::2",

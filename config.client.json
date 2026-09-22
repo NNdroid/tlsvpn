@@ -27,6 +27,9 @@
     "cert_sha256": "",
     "req_v4": "",
     "req_v6": "",
-    "fwmark": 0
+    "fwmark": 0,
+    "fwmark_priority": 0,
+    "extra_routes": [],
+    "source_rules": []
   }
 }

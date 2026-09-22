@@ -40,8 +40,11 @@ type handshakeReq struct {
 	IPv4            string `json:"ipv4,omitempty"`
 	Encrypt         bool   `json:"encrypt"`
 	EncAlgo         int    `json:"enc_algo"`
-	BrutalTx        uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx        uint64 `json:"brutal_rx,omitempty"`
+	BrutalGroups    bool   `json:"brutal_groups,omitempty"`
+	BrutalTotalTx   uint64 `json:"brutal_total_tx,omitempty"`
+	BrutalTotalRx   uint64 `json:"brutal_total_rx,omitempty"`
+	BrutalConns     int    `json:"brutal_conns,omitempty"`
+	BrutalConnIndex int    `json:"brutal_conn_index,omitempty"`
 }
 
 type handshakeResp struct {
@@ -234,8 +237,11 @@ func main() {
 		IPv4:            "10.7.0.77",
 		Encrypt:         true,
 		EncAlgo:         *encAlgo,
-		BrutalTx:        100,
-		BrutalRx:        500,
+		BrutalGroups:    true,
+		BrutalTotalTx:   100,
+		BrutalTotalRx:   500,
+		BrutalConns:     1,
+		BrutalConnIndex: 0,
 	}
 	reqJSON, err := json.Marshal(req)
 	if err != nil {

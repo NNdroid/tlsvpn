@@ -124,14 +124,17 @@ func buildGoldenVectors() *GoldenVectors {
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
 		ProtocolVersion: 2, ClientInstance: "x",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
-		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		Padding: "x", BrutalGroups: true,
+		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
+		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "x",
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
 		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
-		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
+		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
+		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
 	})
 
@@ -257,14 +260,17 @@ func TestGoldenSelfConsistency(t *testing.T) {
 	checkKeys("handshake_req_keys", gv.HandshakeReqKeys, jsonFieldNames(HandshakeReq{
 		ProtocolVersion: 2, ClientInstance: "x",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
-		Padding: "x", BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		Padding: "x", BrutalGroups: true,
+		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
+		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "x",
 	}))
 	checkKeys("handshake_resp_keys", gv.HandshakeRespKeys, jsonFieldNames(HandshakeResp{
 		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
-		BrutalTx: 1, BrutalRx: 1, FEC: true, FecGroup: 4, Encrypt: true,
+		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
+		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
 	}))
 }
@@ -277,11 +283,12 @@ func TestHandshakeJSONContract(t *testing.T) {
 		ProtocolVersion: 2, ClientInstance: "instance-1",
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
-		BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
+		BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, BrutalConns: 4, BrutalConnIndex: 1,
+		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
 		SessionToken: "tok",
 	}
 	wantReq := []string{
-		"brutal_rx", "brutal_tx", "client_id", "client_instance", "enc_algo", "encrypt", "fec",
+		"brutal_conn_index", "brutal_conns", "brutal_groups", "brutal_total_rx", "brutal_total_tx", "client_id", "client_instance", "enc_algo", "encrypt", "fec",
 		"fec_group", "ipv4", "ipv6", "mac", "padding", "protocol_version", "psk", "session_token",
 	}
 	if got := jsonFieldNames(req); !equalStrings(got, wantReq) {
@@ -292,11 +299,11 @@ func TestHandshakeJSONContract(t *testing.T) {
 		ProtocolVersion: 2, SessionEpoch: 1,
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
-		Padding: "ab", BrutalTx: 100, BrutalRx: 200, FEC: true, FecGroup: 4, Encrypt: true,
+		Padding: "ab", BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "tok",
 	}
 	wantResp := []string{
-		"brutal_rx", "brutal_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
+		"brutal_groups", "brutal_total_rx", "brutal_total_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
 		"encrypt", "fec", "fec_group", "gw_v4", "gw_v6", "ipv4", "ipv6", "message",
 		"padding", "protocol_version", "session_epoch", "session_id", "session_token", "success",
 	}
@@ -316,7 +323,7 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	json.Unmarshal(b, &m)
 
 	// 这些字段带 omitempty，零值时不出现
-	for _, k := range []string{"protocol_version", "client_instance", "mac", "ipv4", "ipv6", "padding", "brutal_tx", "brutal_rx", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
+	for _, k := range []string{"protocol_version", "client_instance", "mac", "ipv4", "ipv6", "padding", "brutal_groups", "brutal_total_tx", "brutal_total_rx", "brutal_conns", "brutal_conn_index", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("字段 %q 应因 omitempty 而省略，实际出现了", k)
 		}

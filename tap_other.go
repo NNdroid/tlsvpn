@@ -7,8 +7,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/songgao/water"
+	"github.com/vishvananda/netlink"
 )
 
 // newTapConfig 在非 Linux 平台上不支持指定 TAP 网卡名（由驱动决定）。
@@ -25,14 +27,18 @@ func setTapMac(tapName, macStr string) error {
 	return fmt.Errorf("setTapMac is only supported on Linux")
 }
 
-func setupPolicyRouting(tapName string, mark int, gwV4, gwV6 string) error {
+func waitForTap(tapName string, timeout time.Duration) (netlink.Link, error) {
+	return nil, fmt.Errorf("tunnel interface configuration is only supported on Linux")
+}
+
+func setupPolicyRouting(tapName string, spec policyRoutingSpec) error {
 	return fmt.Errorf("policy routing is only supported on Linux")
 }
 
-func cleanPolicyRouting(tapName string, mark int, gwV4, gwV6 string) {}
+func cleanPolicyRouting(tapName string, spec policyRoutingSpec) {}
 
-func applyTCPBrutal(conn *net.TCPConn, rateMbps uint64) error {
-	return fmt.Errorf("TCP Brutal is only supported on Linux")
+func applyTCPBrutal(conn *net.TCPConn, totalRate, legacyRate, groupID uint64) brutalApplyResult {
+	return brutalApplyResult{Attempted: true, Error: "TCP Brutal is only supported on Linux"}
 }
 
 // 非 Linux 上不存在内核拥塞控制可查：面板把 brutal 状态显示为"平台不支持"，

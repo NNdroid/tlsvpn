@@ -6,7 +6,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 
 - **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
 - **Inner encryption** — `encrypt: true` adds AES-256-GCM inside the tunnel: per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. There is exactly one inner algorithm and no weaker fallback: a peer that cannot negotiate GCM gets plaintext (TLS only).
-- **XOR FEC** — one parity frame per K data frames (overhead ≈ 1/K) reconstructs any single lost frame; per-connection duplication remains as the fallback.
+- **XOR FEC** — one parity frame per K data frames, broadcast to every backend, reconstructs any single lost frame. The redundancy ratio is N/K with N links, so larger K is cheaper in bandwidth.
 - **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
 - **Layer-2 TAP** — ARP/DHCP/IPv6 all pass; static MAC/IP bindings; sharded MAC learning with anti-spoofing.
@@ -45,7 +45,7 @@ Minimal examples (full files ship in the repo root):
 
 ## Configuration Reference
 
-Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.session_token` and `server.max_sessions` are JSON-only — there are no CLI flags at all.
+Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.session_token`, `server.max_sessions` and `server.fec_group_min`/`fec_group_max` are JSON-only — there are no CLI flags at all.
 
 ### Top-level
 
@@ -80,24 +80,30 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `cert` / `key` | (Empty) | TLS pair; empty = self-signed, generated once and **persisted** so `cert_sha256` pinning survives restarts |
 | `session_token` | `false` | Resuming an existing session requires the per-session resume token. Off: `client_id`+PSK+MAC is enough to resume, so a PSK holder who knows the target MAC can impersonate that session (the id is derived from mac+psk). On: the token only ever crosses the session's own TLS connection, so a third party cannot obtain it. First connection is unaffected; flip both ends together |
 | `max_sessions` | `1024` | Concurrent session cap; excess handshakes are tarpitted |
+| `fec_group_min` / `fec_group_max` | `2` / `64` | Range of peer FEC group sizes K the server will accept. A handshake that requests FEC with K outside the range is **refused** (not clamped) — the peer chose its own coding parameter, and silently changing K would make it pay a different redundancy ratio unknowingly. Defaults are the protocol limits, so no extra limit applies unless configured. Direction: the parity is broadcast to all N backends, so the ratio is N/K — raising `min` (floor) bounds bandwidth usage, lowering `max` (ceiling) bounds the pending-frame buffer and recovery latency |
 
 ### `client`
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `conns` | `1` | Parallel TCP connections |
-| `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64, overhead 1/K) |
+| `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; the parity is broadcast to all N backends, so the redundancy ratio is N/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
 | `sni` | `www.cloudflare.com` | Camouflage SNI |
 | `insecure` | `false` | Skip TLS verification (prefer `cert_sha256`) |
 | `cert_sha256` | (Empty) | Pin the server certificate fingerprint |
 | `req_v4` / `req_v6` | (Empty) | Request specific tunnel IPs |
-| `fwmark` | `0` | Policy routing mark for transparent-proxy setups |
+| `fwmark` | `0` | Policy routing mark for transparent-proxy setups; `0` disables the fwmark rule only — a non-empty `source_rules` still enables policy routing |
+| `fwmark_priority` | `0` | `ip rule` priority (uint32); `0` = let the kernel assign one. Use it on machines that already run policy routing to make this client's rule win or lose |
+| `extra_routes` | `[]` | Extra routes into the fwmark table, in iproute2 serialization form — one prefix plus an optional `dev`, e.g. `"fd99:10:5:8::/64 dev tap0"`. The address family is inferred from the prefix; with no `dev` the tunnel TAP is used. Validated when the config loads, not after the tunnel handshake |
+| `source_rules` | `[]` | Policy-routing rules matched on the packet's **source prefix** instead of `SO_MARK`: each entry installs `ip rule from <from> table <table>` plus that table's default routes (from the gateways the server sends) and any `routes` you list. For traffic that has no socket to mark — forwarded packets on an NPT gateway, whose return flow must be pinned to the tunnel TAP. `from` may be a bare address (completed to a host route); `table` is mandatory, in `[1, 65535]` and not the reserved `253`/`254`/`255`; `priority` uint32, `0` = kernel-assigned. Validated when the config loads |
+
+**Policy routing is owned by the process, not by systemd.** With a non-zero `fwmark` — or a non-empty `source_rules` — the client installs the `ip rule` entries and the routes itself, and removes everything it installed on exit. For the fwmark rule the table number is always equal to the fwmark value — `fwmark` `0x100` means table `256`; `source_rules` tables are whatever you configured and nothing derives them. It waits up to 30 s for the TAP to exist and be up before touching routing, so a network manager that creates the device later needs no separate ordering unit. Do **not** also keep an external drop-in doing the same work: two rules for one fwmark compete by priority, the kernel serves whichever wins, and each of them believes it owns the table.
 
 ## Dashboard & Metrics
 
 Set `web.addr` to enable: live throughput chart, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it) and the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), zh-CN/en UI.
 
-The **Runtime status** tab shows what the process is really doing rather than what the config file says: the host and build (`os`/`arch`/Go version/CPU count/hostname/config path/version+uptime); the negotiated protocol (version, inner cipher, FEC group, padding mode, cipher floor, session token, and — on clients — the key epoch plus the per-direction rates the server granted); a TCP Brutal breakdown that separates *configured* Mbps from *kernel support* (current and available congestion controllers) and *per-connection applied/total*, listing the failure reason when shaping was skipped; the effective config snapshot; and a restart banner when a hot-applied change needs a process restart. The theme follows the OS light/dark preference and can be pinned to either with a persisted choice.
+The **Runtime status** tab shows what the process is really doing rather than what the config file says: the host and build (`os`/`arch`/Go version/CPU count/hostname/config path/version+uptime); the negotiated protocol (version, inner cipher, FEC group, padding mode, cipher floor, session token, and — on clients — the key epoch, the per-direction rates the server granted, and whether policy routing actually took effect or the exact `ip` error it hit); a TCP Brutal breakdown that separates *configured* Mbps from *kernel support* (current and available congestion controllers) and *per-connection applied/total*, listing the failure reason when shaping was skipped; the effective config snapshot (including the fwmark, its rule priority, the route table number, any extra routes and any source rules); and a restart banner when a hot-applied change needs a process restart. The theme follows the OS light/dark preference and can be pinned to either with a persisted choice.
 
 Prometheus metrics at `/metrics` (authenticated like the rest of the panel). Security: Basic Auth, optional HTTPS, CSRF header guard on control actions.
 

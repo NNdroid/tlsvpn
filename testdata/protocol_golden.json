@@ -67,8 +67,11 @@
     }
   ],
   "handshake_req_keys": [
-    "brutal_rx",
-    "brutal_tx",
+    "brutal_conn_index",
+    "brutal_conns",
+    "brutal_groups",
+    "brutal_total_rx",
+    "brutal_total_tx",
     "client_id",
     "client_instance",
     "enc_algo",
@@ -84,8 +87,9 @@
     "session_token"
   ],
   "handshake_resp_keys": [
-    "brutal_rx",
-    "brutal_tx",
+    "brutal_groups",
+    "brutal_total_rx",
+    "brutal_total_tx",
     "client_id",
     "enc_algo",
     "enc_salt",

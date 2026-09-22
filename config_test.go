@@ -145,6 +145,20 @@ func TestValidateCertSHA256Length(t *testing.T) {
 	}
 }
 
+func TestValidateBrutalBounds(t *testing.T) {
+	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
+	cfg.applyDefaults()
+	cfg.BrutalUp = maxBrutalRateMbps + 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("超过内核 max_pacing_rate 的 brutal_up 应校验失败")
+	}
+	cfg.BrutalUp = 100
+	cfg.Client.Conns = 65537
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("超过握手上限的 client.conns 应校验失败")
+	}
+}
+
 func TestExampleConfigParses(t *testing.T) {
 	p := writeTempConfig(t, exampleConfigJSON)
 	cfg, err := loadConfigFile(p)

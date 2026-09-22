@@ -42,9 +42,9 @@ func TestNegotiateBrutalRates(t *testing.T) {
 	}
 }
 
-// TestSendRespRateDirections 锁定握手响应里两个速率的方向：brutal_tx 是客户端视角的
-// 上行、brutal_rx 是下行。服务端自己的 tx 是下行、不是上行——曾误按本端 tx/rx 填，
-// 两端视角正好相反，面板表现为上行/下行整体对调。
+// TestSendRespRateDirections 锁定握手响应里两个速率的方向：brutal_total_tx 是客户端
+// 视角的上行、brutal_total_rx 是下行。服务端自己的 tx 是下行、不是上行——曾误按本端
+// tx/rx 填，两端视角正好相反，面板表现为上行/下行整体对调。
 func TestSendRespRateDirections(t *testing.T) {
 	oldLog := log
 	log = zap.NewNop().Sugar()
@@ -54,7 +54,7 @@ func TestSendRespRateDirections(t *testing.T) {
 	// sendResp 内部吞掉写错误，所以这里靠下面的 ReadFrame 兜底：帧没写出来就读不到。
 	(&Server{}).sendResp(&buf, true, "OK", "cid", "sid",
 		"10.8.0.0/24", "fd00::/80",
-		7, 125, // cliTx（上行）, srvTx（下行）
+		true, 30, 500, // group 语义：客户端上行总量, 客户端下行总量
 		false, 0, encAlgoGCM, "", "", "", true, 2, 3)
 
 	// 走和客户端完全相同的读路径（client.go 的 handshake response 读取）
@@ -67,11 +67,14 @@ func TestSendRespRateDirections(t *testing.T) {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		t.Fatalf("解析握手响应失败：%v", err)
 	}
-	if resp.BrutalTx != 7 {
-		t.Errorf("brutal_tx = %d，应为 7（客户端上行）：上行/下行方向又被对调了", resp.BrutalTx)
+	if resp.BrutalTotalTx != 30 {
+		t.Errorf("brutal_total_tx = %d，应为 30（客户端上行）：上行/下行方向又被对调了", resp.BrutalTotalTx)
 	}
-	if resp.BrutalRx != 125 {
-		t.Errorf("brutal_rx = %d，应为 125（客户端下行）：上行/下行方向又被对调了", resp.BrutalRx)
+	if resp.BrutalTotalRx != 500 {
+		t.Errorf("brutal_total_rx = %d，应为 500（客户端下行）：上行/下行方向又被对调了", resp.BrutalTotalRx)
+	}
+	if !resp.BrutalGroups {
+		t.Error("brutal_groups 应为 true：总速率字段依赖 group 语义才成立")
 	}
 }
 
@@ -84,9 +87,11 @@ func TestConnsSummaryCountsHealthyConns(t *testing.T) {
 		c.live.Store(&liveConfig{brutalUp: 30, brutalDown: 500, connsCount: 4})
 		for i := 0; i < 4; i++ {
 			ci := &clientConnInfo{}
+			br := &brutalApplyResult{Attempted: true, Applied: healthy}
 			if !healthy {
-				ci.brutalErr = "kernel has no 'brutal' congestion control"
+				br.Error = "kernel has no 'brutal' congestion control"
 			}
+			ci.brutal.Store(br)
 			c.conns[i] = ci
 		}
 		return c
@@ -96,8 +101,8 @@ func TestConnsSummaryCountsHealthyConns(t *testing.T) {
 	if st.applied != 4 || st.total != 4 {
 		t.Fatalf("健康连接统计错误：applied=%d total=%d", st.applied, st.total)
 	}
-	if st.minUp != 7 || st.maxUp != 7 {
-		t.Errorf("4 条健康连接、上行总量 30 时每连接上行应为 7，实际 minUp=%d maxUp=%d",
+	if st.minUp != 7 || st.maxUp != 8 {
+		t.Errorf("4 条健康连接、上行总量 30 时精确分配应为 7..8，实际 minUp=%d maxUp=%d",
 			st.minUp, st.maxUp)
 	}
 
@@ -108,8 +113,8 @@ func TestConnsSummaryCountsHealthyConns(t *testing.T) {
 	if len(st.errs) != 1 {
 		t.Fatalf("错误去重失效：errs=%v", st.errs)
 	}
-	if st.minUp != 7 || st.maxUp != 7 {
-		t.Errorf("失败连接也应按配置给出每连接上行速率，实际 minUp=%d maxUp=%d",
+	if st.minUp != 7 || st.maxUp != 8 {
+		t.Errorf("失败连接也应按配置给出精确的每连接上行范围，实际 minUp=%d maxUp=%d",
 			st.minUp, st.maxUp)
 	}
 }
@@ -126,7 +131,9 @@ func TestSnapshotConnsCarriesNegotiatedRates(t *testing.T) {
 		c := &Client{connsCount: 4, conns: map[int]*clientConnInfo{}}
 		for i := 0; i < 4; i++ {
 			// rttCache 是指针，生产里三处构造点都 new 了；这里不给就 nil deref。
-			c.conns[i] = &clientConnInfo{rttCache: new(uint32)}
+			ci := &clientConnInfo{rttCache: new(uint32)}
+			ci.brutal.Store(&brutalApplyResult{Attempted: true, Applied: true})
+			c.conns[i] = ci
 		}
 		if setNeg {
 			c.negInfo = &sessionNeg{TxRateMbps: 7, RxRateMbps: 125}

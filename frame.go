@@ -398,8 +398,14 @@ type HandshakeReq struct {
 	IPv4            string `json:"ipv4,omitempty"`
 	IPv6            string `json:"ipv6,omitempty"`
 	Padding         string `json:"padding,omitempty"`
-	BrutalTx        uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx        uint64 `json:"brutal_rx,omitempty"`
+	// BrutalGroups advertises total-rate/group semantics: the peer wants one
+	// kernel traffic-control group shared across all connections, so the
+	// aggregate is split per connection locally.
+	BrutalGroups    bool   `json:"brutal_groups,omitempty"`
+	BrutalTotalTx   uint64 `json:"brutal_total_tx,omitempty"`
+	BrutalTotalRx   uint64 `json:"brutal_total_rx,omitempty"`
+	BrutalConns     int    `json:"brutal_conns,omitempty"`
+	BrutalConnIndex int    `json:"brutal_conn_index,omitempty"`
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
 	Encrypt         bool   `json:"encrypt,omitempty"`
@@ -429,8 +435,9 @@ type HandshakeResp struct {
 	GwV4            string `json:"gw_v4,omitempty"`
 	GwV6            string `json:"gw_v6,omitempty"`
 	Padding         string `json:"padding,omitempty"`
-	BrutalTx        uint64 `json:"brutal_tx,omitempty"`
-	BrutalRx        uint64 `json:"brutal_rx,omitempty"`
+	BrutalGroups    bool   `json:"brutal_groups,omitempty"`
+	BrutalTotalTx   uint64 `json:"brutal_total_tx,omitempty"`
+	BrutalTotalRx   uint64 `json:"brutal_total_rx,omitempty"`
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
 	Encrypt         bool   `json:"encrypt,omitempty"`

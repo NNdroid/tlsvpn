@@ -36,7 +36,7 @@ func TestClientRecoversAfterServerRestart(t *testing.T) {
 		{name: "默认(GCM,1连接,无FEC)", encrypt: true},
 		{name: "GCM+session_token开启", encrypt: true, sessionToken: true},
 		{name: "GCM+FEC-XOR K=4", encrypt: true, fecMode: true, fecGroup: 4},
-		{name: "GCM+FEC-传统复制模式", encrypt: true, fecMode: true, fecGroup: 0},
+		{name: "GCM+FEC-XOR K=2(下限)", encrypt: true, fecMode: true, fecGroup: fecMinGroup},
 		{name: "GCM+FEC-XOR+session_token", encrypt: true, fecMode: true, fecGroup: 4, sessionToken: true},
 		{name: "GCM+3条物理连接", encrypt: true, conns: 3},
 		{name: "GCM+3连接+FEC+session_token", encrypt: true, conns: 3, fecMode: true, fecGroup: 4, sessionToken: true},
@@ -145,13 +145,11 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		srv.tap.(*memTap).SetOnWrite(func([]byte) { got.Add(1) })
 		payload := make([]byte, 64)
 		binary.BigEndian.PutUint32(payload, 0xC0FFEE)
-		go func() {
-			for i := 0; i < 100; i++ {
-				cli.txPort.WriteFrame(buildEthFrame(uint32(i+1), payload))
-				time.Sleep(10 * time.Millisecond)
-			}
-		}()
-		time.Sleep(2 * time.Second)
+		deadline := time.Now().Add(5 * time.Second)
+		for i := uint32(1); time.Now().Before(deadline) && got.Load() == 0; i++ {
+			cli.txPort.WriteFrame(buildEthFrame(i, payload))
+			time.Sleep(10 * time.Millisecond)
+		}
 		n := got.Load()
 		t.Logf("%s 上行 交付到服务端 TAP: %d 帧", tag, n)
 		return n > 0
@@ -164,17 +162,15 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		cliTap.SetOnWrite(func([]byte) { got.Add(1) })
 		payload := make([]byte, 64)
 		binary.BigEndian.PutUint32(payload, 0xBEEF)
-		go func() {
-			for i := 0; i < 100; i++ {
-				f := buildEthFrame(uint32(i+1000), payload)
-				rev := append([]byte(nil), f...)
-				copy(rev[0:6], f[6:12]) // swap dst/src
-				copy(rev[6:12], f[0:6])
-				srv.vswitch.ProcessFrame(tapPortID, rev)
-				time.Sleep(10 * time.Millisecond)
-			}
-		}()
-		time.Sleep(2 * time.Second)
+		deadline := time.Now().Add(5 * time.Second)
+		for i := uint32(1000); time.Now().Before(deadline) && got.Load() == 0; i++ {
+			f := buildEthFrame(i, payload)
+			rev := append([]byte(nil), f...)
+			copy(rev[0:6], f[6:12]) // swap dst/src
+			copy(rev[6:12], f[0:6])
+			srv.vswitch.ProcessFrame(tapPortID, rev)
+			time.Sleep(10 * time.Millisecond)
+		}
 		n := got.Load()
 		t.Logf("%s 下行 交付到客户端 TAP: %d 帧", tag, n)
 		return n > 0

@@ -88,6 +88,13 @@ type ServerConfig struct {
 	// 3-4 个 goroutine + 4096 深发送队列 + 重排环形缓冲），直到 OOM。
 	// 达到上限后新握手按认证失败处理（焦油坑）。可热更，作用于新会话。
 	MaxSessions int `json:"max_sessions,omitempty"`
+	// FecGroupMin/Max 是服务端接受的对端 FEC 分组大小 K 的区间。请求 FEC 而
+	// K 越界的握手按请求形态错误拒连（不夹取、不降级，见 server.go 的拒连闸）。
+	// 默认 [2, 64] = 协议允许范围，即默认不额外限制。
+	// 方向注意：奇偶帧广播到全部 N 个后端，冗余开销是 N/K —— K 越大开销越小，
+	// 所以限带宽要调高 min（地板），调低 max 限的是待收帧缓冲与恢复时延上限。
+	FecGroupMin int `json:"fec_group_min,omitempty"`
+	FecGroupMax int `json:"fec_group_max,omitempty"`
 }
 
 // ClientConfig 客户端专属
@@ -98,9 +105,42 @@ type ClientConfig struct {
 	Insecure   bool   `json:"insecure,omitempty"`
 	CertSHA256 string `json:"cert_sha256,omitempty"` // 证书指纹锁定
 	Fwmark     int    `json:"fwmark,omitempty"`
-	Conns      int    `json:"conns,omitempty"` // 默认 1
-	FEC        bool   `json:"fec,omitempty"`
-	FecGroup   int    `json:"fec_group,omitempty"` // 默认 4
+	// FwmarkPriority 是策略路由规则的优先级；0 = 交给内核分配（默认）。
+	// 混有其他 ip rule 的机器上用它压住或抬高本项目的规则。
+	FwmarkPriority int `json:"fwmark_priority,omitempty"`
+	// ExtraRoutes 是 fwmark 表里除默认路由外的额外路由，语法取 iproute2 的序列化
+	// 形式：单个前缀 + 可选 dev，例如 "fd99:10:5:8::/64 dev tap0"。地址族由前缀
+	// 自动判定，无需再写 -4/-6；未写 dev 时默认走隧道网卡。配置加载期即校验。
+	ExtraRoutes []string `json:"extra_routes,omitempty"`
+	// SourceRules 按源地址前缀安装策略路由规则（ip rule from <from> table <table>）。
+	//
+	// 它和 Fwmark 匹配的东西根本不同：Fwmark 走 SO_MARK，只标记本进程自己写的包；
+	// SourceRules 匹配包上的源地址，内核转发的流量同样命中。转发包没有任何 socket，
+	// SO_MARK 碰不到它，所以"给 socket 打 mark"这条路对转发流量不适用，也只有
+	// netfilter（nftables）能在 PREROUTING 给转发包注入 mark——SourceRules 按源
+	// 前缀匹配，两者都不需要。
+	//
+	// 典型用途是 NPT 网关的回程路由：NPT 把内网地址翻译成公网前缀后，回程包的
+	// 源地址就落在该公网前缀里（conntrack 的反向 NAT 在 PREROUTING 完成，早于
+	// 路由决策），按源前缀即可把回程精确导向承载该前缀的接口。
+	SourceRules []SourceRule `json:"source_rules,omitempty"`
+	Conns       int          `json:"conns,omitempty"` // 默认 1
+	FEC         bool     `json:"fec,omitempty"`
+	FecGroup    int      `json:"fec_group,omitempty"` // 默认 4
+}
+
+// SourceRule 一条按源地址前缀匹配的策略路由规则。
+type SourceRule struct {
+	// From 源地址前缀，缺掩码时按主机路由补全（/32 或 /128）。
+	From string `json:"from"`
+	// Table 路由表号，必须显式给出。Fwmark 的表号等于 mark 值、不用填，这里没有
+	// 可推导的来源，所以不允许省略。
+	Table int `json:"table"`
+	// Priority 规则优先级；0 = 交给内核分配。
+	Priority int `json:"priority,omitempty"`
+	// Routes 该表里除默认路由外的额外路由，语法同 ExtraRoutes。默认路由由程序
+	// 按握手下发的网关自动写入，无需在这里重复声明。
+	Routes []string `json:"routes,omitempty"`
 }
 
 // exampleConfigJSON -print-config 输出的模板（可直接改用）
@@ -134,7 +174,10 @@ const exampleConfigJSON = `{
     "cert_sha256": "",
     "req_v4": "",
     "req_v6": "",
-    "fwmark": 0
+		"fwmark": 0,
+    "fwmark_priority": 0,
+    "extra_routes": [],
+    "source_rules": []
   },
   "server": {
     "v4_cidr": "10.0.0.0/24",
@@ -213,6 +256,13 @@ func (c *Config) applyDefaults() {
 		if c.Server.MaxSessions == 0 {
 			c.Server.MaxSessions = 1024
 		}
+		// 区间默认取协议边界，即未配置时不额外限制
+		if c.Server.FecGroupMin == 0 {
+			c.Server.FecGroupMin = fecMinGroup
+		}
+		if c.Server.FecGroupMax == 0 {
+			c.Server.FecGroupMax = fecMaxGroup
+		}
 	}
 	if c.Mode == "client" {
 		if c.Client.SNI == "" {
@@ -229,6 +279,12 @@ func (c *Config) applyDefaults() {
 
 // Validate 校验配置合法性。在 applyDefaults 之后调用。
 func (c *Config) Validate() error {
+	if c.BrutalUp > maxBrutalRateMbps || c.BrutalDown > maxBrutalRateMbps {
+		return fmt.Errorf("brutal_up/brutal_down must not exceed %d Mbps", maxBrutalRateMbps)
+	}
+	if c.Mode == "client" && c.Client.Conns > 1<<16 {
+		return fmt.Errorf("client.conns must not exceed 65536")
+	}
 	switch c.Mode {
 	case "server", "client":
 	case "":
@@ -293,6 +349,15 @@ func (c *Config) Validate() error {
 		if c.Server.MaxSessions < 0 || c.Server.MaxSessions > 1<<20 {
 			return fmt.Errorf("server.max_sessions %d out of range [0, 1048576]", c.Server.MaxSessions)
 		}
+		if c.Server.FecGroupMin < fecMinGroup || c.Server.FecGroupMin > fecMaxGroup {
+			return fmt.Errorf("server.fec_group_min %d must be in [%d, %d]", c.Server.FecGroupMin, fecMinGroup, fecMaxGroup)
+		}
+		if c.Server.FecGroupMax < fecMinGroup || c.Server.FecGroupMax > fecMaxGroup {
+			return fmt.Errorf("server.fec_group_max %d must be in [%d, %d]", c.Server.FecGroupMax, fecMinGroup, fecMaxGroup)
+		}
+		if c.Server.FecGroupMin > c.Server.FecGroupMax {
+			return fmt.Errorf("server.fec_group_min %d must be <= fec_group_max %d", c.Server.FecGroupMin, c.Server.FecGroupMax)
+		}
 		for name, cidr := range map[string]string{"v4_cidr": c.Server.V4CIDR, "v6_cidr": c.Server.V6CIDR} {
 			if _, _, err := net.ParseCIDR(cidr); err != nil {
 				return fmt.Errorf("invalid server.%s %q: %v", name, cidr, err)
@@ -309,6 +374,19 @@ func (c *Config) Validate() error {
 		}
 		if c.Client.Fwmark < 0 {
 			return fmt.Errorf("client.fwmark must be >= 0")
+		}
+		// 优先级是 uint32；0 是"交给内核分配"的保留值，所以区间是 [0, 2^32)
+		// ip rule 的 priority 是 uint32。负值不是合法的 uint32；上界不用
+		// 裸 0xffffffff 常量（32 位平台上 int 只有 32 位，常量直接溢出），
+		// 改用往返比较兜住两个方向。
+		if c.Client.FwmarkPriority < 0 || int(uint32(c.Client.FwmarkPriority)) != c.Client.FwmarkPriority {
+			return fmt.Errorf("client.fwmark_priority %d must be a uint32 in [0, 4294967295]", c.Client.FwmarkPriority)
+		}
+		if err := validateExtraRoutes(c.Client.ExtraRoutes); err != nil {
+			return err
+		}
+		if err := validateSourceRules(c.Client.SourceRules); err != nil {
+			return err
 		}
 		if c.Client.CertSHA256 != "" {
 			cleaned := strings.ToLower(strings.ReplaceAll(c.Client.CertSHA256, ":", ""))
