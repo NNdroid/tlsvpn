@@ -69,6 +69,11 @@ func nextPerfPort() int {
 	return int(perfPortCounter.Add(1)) + 18698
 }
 
+// perfHandshakeBudget 是等握手完成的时间预算。本地握手约 1s，但 CI 上这个
+// 套是十组子进程 e2e 之后才跑的最后一组（scripts/e2e_test.sh 的 group G），
+// 机器已被压过，10s 会整组卡在 deadline 上。测量阶段固定 8s，不受这里影响。
+const perfHandshakeBudget = 30 * time.Second
+
 // startPerfHarness 起一对真实进程内 server+client，等握手完成
 func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarness {
 	t.Helper()
@@ -131,8 +136,8 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 		close(h.cliDone)
 	}()
 
-	// 等握手完成（client 有活跃物理连接，或超时）
-	deadline := time.Now().Add(10 * time.Second)
+	// 等握手完成（client 有活跃物理连接，或超时），预算见 perfHandshakeBudget
+	deadline := time.Now().Add(perfHandshakeBudget)
 	for time.Now().Before(deadline) {
 		if atomic.LoadInt32(&h.cli.liveConns) > 0 {
 			time.Sleep(300 * time.Millisecond) // 等路由/交换机稳定
@@ -141,7 +146,7 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 		time.Sleep(50 * time.Millisecond)
 	}
 	cancel()
-	t.Fatal("tunnel did not come up in 10s")
+	t.Fatalf("tunnel did not come up in %s", perfHandshakeBudget)
 	return nil
 }
 

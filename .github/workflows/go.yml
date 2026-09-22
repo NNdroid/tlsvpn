@@ -63,6 +63,11 @@ jobs:
       # Reuses the in-process perf harness (real tunnel pipeline). Produces
       # pprof profiles; flame graphs can be viewed locally with
       # `go tool pprof -http=:8080 cpu.prof` after downloading the artifact.
+      # Soft-fail like the benchmark step above: this is an artifact producer,
+      # not a correctness gate, and it comes last in the job, right after the
+      # -count=5 benchmark, so the harness can time out on a contended runner.
+      # The golden-vector contract above and the e2e job remain hard gates.
+      continue-on-error: true
       run: |
         go test -run TestPerfThroughput -count=1 -timeout 10m \
           -cpuprofile cpu.prof -memprofile mem.prof ./...
