@@ -1488,7 +1488,7 @@ func (c *Client) setupInterface(v4cidr, v6cidr string) error {
 	// 握手路径——每条物理连接白等一轮超时才上报，且晚到的接口下次重拨自会重试。
 	link, err := netlink.LinkByName(c.tapName)
 	if err != nil {
-		return fmt.Errorf("tap %s not available: %v", c.tapName, err)
+		return fmt.Errorf("tap %s not found: %v", c.tapName, err)
 	}
 	// 先 up 再挂地址：web.bind=tunnel 第一轮就要能 bind（要求 IFF_UP），
 	// 且 v6 在接口 up 的瞬间还会重新触发一次 DAD

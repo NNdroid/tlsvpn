@@ -313,7 +313,7 @@ func setupPolicyRouting(tapName string, spec policyRoutingSpec) error {
 	// 不等待接口出现，理由见 Client.setupInterface；规则装失败会记入返回值
 	link, err := netlink.LinkByName(tapName)
 	if err != nil {
-		return fmt.Errorf("tap %s not available: %w", tapName, err)
+		return fmt.Errorf("tap %s not found: %w", tapName, err)
 	}
 	// 先清后装保证幂等：重启/热更后旧规则还在，直接 add 可能撞 "File exists"。
 	if _, err := removePolicyRules(spec.mark); err != nil {
