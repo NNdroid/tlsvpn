@@ -44,6 +44,7 @@ type AsyncPort struct {
 	dropped    uint64 // 各环节丢弃帧计数（面板/metrics）
 	paritySent    atomic.Uint64
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
+	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
 }
 
 type portEpochReset struct {
@@ -77,8 +78,9 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	return p
 }
 
-// AttachFEC 在端口上启用 XOR 奇偶校验 FEC：每 K 个数据帧广播 1 个校验帧
-// （开销约 1/K，可恢复组内单帧丢失）。须在数据流开始前调用一次。
+// AttachFEC 在端口上启用 XOR 奇偶校验 FEC：每 K 个数据帧发送 1 个校验帧。
+// parity 只需由会话级 decoder 收到一份，因此在健康物理连接间轮转，而不是
+// 向 N 条连接复制 N 份；线路开销从约 N/K 降回约 1/K。
 // ic 为本端发送方向的内层加密器（-encrypt 关闭时为 nil，校验帧明文）。
 func (p *AsyncPort) AttachFEC(k int, ic *innerCipher) {
 	p.ResetEpoch(k, ic)
@@ -213,10 +215,9 @@ func (p *AsyncPort) run() {
 }
 
 // dispatchBatch 把一批帧分发给后端，并接管 batch 内全部缓冲的所有权：
-//   - XOR FEC：数据帧 MinRTT 单路发送，校验帧向所有连接广播；
+//   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
 //   - 普通模式：MinRTT 单路发送。
-//
-// 每个后端收到的帧均经过深拷贝、彼此独立，由发送协程发送后归还内存池。
+// wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
 	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
@@ -242,11 +243,10 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		p.dropN(sendBatchToAny(backends, best, batch))
 		for _, par := range parities {
 			p.paritySent.Add(1)
-			pf := VPNFrame{Seq: 0, Data: par}
-			for _, b := range backends {
-				p.dropN(sendFrameTo(b, pf))
-			}
-			putFrame(par)
+			// parity 与数据尽量走不同物理路径，并在健康后端间轮转。decoder
+			// 是会话级共享状态，只需任意一条连接收到一份即可恢复单帧丢失。
+			target := p.pickParityBackend(backends, best)
+			p.dropN(sendOwnedFrameTo(target, VPNFrame{Seq: 0, Data: par}))
 		}
 		clear(parities) // 不让 scratch 长期持有已归池 payload
 		p.parityScratch = parities[:0]
@@ -318,6 +318,40 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	return bestBackend
 }
 
+
+// pickParityBackend 选择一条健康连接承载单份 parity。多连接时优先避开
+// 当前 data path，并从轮转游标开始扫描，避免所有 parity 固定压在同一 TCP 流。
+func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *Backend {
+	if len(backends) == 0 {
+		return nil
+	}
+	start := int(p.parityNext % uint32(len(backends)))
+	p.parityNext++
+	if len(backends) > 1 {
+		for i := 0; i < len(backends); i++ {
+			b := backends[(start+i)%len(backends)]
+			if b == dataBest {
+				continue
+			}
+			if _, ok := backendScore(b); ok {
+				return b
+			}
+		}
+	}
+	if dataBest != nil {
+		if _, ok := backendScore(dataBest); ok {
+			return dataBest
+		}
+	}
+	for i := 0; i < len(backends); i++ {
+		b := backends[(start+i)%len(backends)]
+		if _, ok := backendScore(b); ok {
+			return b
+		}
+	}
+	return backends[start]
+}
+
 // sendBatchToAny 把数据 batch 的 payload 所有权转移给某个可写后端。
 // 热路径先无阻塞尝试 preferred/其它连接；只有所有连接都满时才进入最多 5ms
 // 的短退让。这样可以显著减少“分配 seq 后再丢 batch”造成的重排序号洞。
@@ -377,7 +411,28 @@ func sendBatchTo(b *Backend, batch []VPNFrame) int {
 	return sendBatchToAny([]*Backend{b}, b, batch)
 }
 
-// parity 要广播到多个后端，payload 仍需独立副本；但单帧 batch 容器复用池。
+// sendOwnedFrameTo 把单帧 payload 所有权直接转移给一个后端；用于
+// 单份 FEC parity，避免旧广播路径的 N 次 clone/memcpy。
+func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
+	if b == nil {
+		if vf.Data != nil {
+			putFrame(vf.Data)
+		}
+		return 1
+	}
+	out := getVPNFrameBatch(1)
+	out[0] = vf
+	select {
+	case b.ch <- out:
+		return 0
+	default:
+		freeFrames(out)
+		putVPNFrameBatch(out)
+		return 1
+	}
+}
+
+// sendFrameTo 保留给需要独立副本的兼容/测试路径。
 func sendFrameTo(b *Backend, vf VPNFrame) int {
 	out := getVPNFrameBatch(1)
 	out[0] = VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
@@ -1612,21 +1667,31 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				}
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
-				for _, vf := range frames {
-					sendBuffer = appendPaddedFrame(sendBuffer, vf, icTx)
+				txPackets := 0
+			drainBatches:
+				for {
+					var n int
+					sendBuffer, n = appendOwnedFrameBatch(sendBuffer, frames, icTx)
+					txPackets += n
+					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+						break
+					}
+					select {
+					case frames = <-connTxChan:
+						continue
+					default:
+						break drainBatches
+					}
 				}
-				// payload 与 batch 描述符所有权都归本协程：发送前成帧完成后即可回池。
-				freeFrames(frames)
-				putVPNFrameBatch(frames)
 				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				_, err := tlsConn.Write(sendBuffer)
-				tlsConn.SetWriteDeadline(time.Time{})
-				if err != nil {
+				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
 				}
+				// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline
+				// 可少一次 runtime_pollSetDeadline syscall。
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&c.TxPackets, uint64(len(frames)))
+				atomic.AddUint64(&c.TxPackets, uint64(txPackets))
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
@@ -1638,17 +1703,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				// 链路已单向死亡。加超时后本端 10s 内自发现并重拨。
 				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
-					tlsConn.SetWriteDeadline(time.Time{})
 					errChan <- err
 					return
 				}
-				tlsConn.SetWriteDeadline(time.Time{})
 			}
 		}
 	}()
 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
+		var nextReadDeadlineRefresh time.Time
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -1661,7 +1725,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		defer flushRxStats()
 
 		for {
-			tlsConn.SetReadDeadline(time.Now().Add(15 * time.Second))
+			now := time.Now()
+			if nextReadDeadlineRefresh.IsZero() || !now.Before(nextReadDeadlineRefresh) {
+				// 1s 滚动刷新、16s deadline => 实际空闲判死约 15~16s，
+				// 不再为每个数据帧执行 runtime_pollSetDeadline syscall。
+				tlsConn.SetReadDeadline(now.Add(16 * time.Second))
+				nextReadDeadlineRefresh = now.Add(time.Second)
+			}
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
 				errChan <- err
