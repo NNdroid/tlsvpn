@@ -49,9 +49,30 @@ grep -Fq 'package/tlsvpn/compile' "${apk_builder}"
 grep -Fq 'package/luci-proto-tlsvpn/compile' "${apk_builder}"
 grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT' "${apk_builder}"
 
+# OpenWrt 25.12 sha256sums uses GNU binary-mode entries ("*filename").
+# Keep a behavioral regression check for the exact lookup form used by the
+# APK builder so official SDK checksums are not rejected again.
+checksum_fixture="$(mktemp)"
+trap 'rm -f "$checksum_fixture"' EXIT
+printf '%s\n' \
+	'0123456789abcdef *openwrt-sdk-test.Linux-x86_64.tar.zst' \
+	> "$checksum_fixture"
+checksum_match="$(
+	awk -v name='openwrt-sdk-test.Linux-x86_64.tar.zst' '
+		$2 == name || $2 == "*" name { print; exit }
+	' "$checksum_fixture"
+)"
+[ -n "$checksum_match" ] || {
+	echo "binary-mode OpenWrt checksum lookup failed" >&2
+	exit 1
+}
+grep -Fq '$2 == name || $2 == "*" name' "${apk_builder}"
+
 grep -Fq 'scripts/build_openwrt_apk.sh' "${release_workflow}"
 grep -Fq 'rockchip' "${release_workflow}"
 grep -Fq 'mediatek' "${release_workflow}"
 grep -Fq 'ath79' "${release_workflow}"
+grep -Fq "TLSVPN_PKG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}" "${release_workflow}"
+grep -Fq "VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.run_number) }}" "${release_workflow}"
 
 echo "[PASS] OpenWrt netifd/LuCI/APK release integration static checks passed"
