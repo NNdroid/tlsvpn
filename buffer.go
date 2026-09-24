@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -11,16 +12,17 @@ const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性�
 
 const reorderWindowMask = ReorderWindowSize - 1
 
-// 缺口跳过阈值：旧实现固定 20ms，一次普通的 25ms 网络停顿就会把在途的所有帧
-// 判为永久丢失（隧道内的 TCP ACK 一旦被丢会直接打掉吞吐）。现在阈值按观测到的
-// 最大推进间隔自适应，上下界之间取 8 倍余量。
-const (
-	reorderSkipFloor = 20 * time.Millisecond
-	reorderSkipCeil  = 500 * time.Millisecond
-	reorderSkipMult  = 8
-	// reorderIdlePoll 无缺口时的轮询间隔（替代旧的固定 5ms 空转）
-	reorderIdlePoll = 250 * time.Millisecond
-)
+// reorderSkipDelay 从“已经收到未来序号、确认存在缺口”的时刻开始计时。
+// 旧实现用历史最大推进间隔自适应；空闲流量或 4 秒心跳会把阈值永久推到
+// 500ms，叠加 250ms 轮询后形成明显的 0/突发吞吐。数据连接采用粘性选路后，
+// 50ms 足以覆盖正常调度抖动，同时不会让一个已丢帧长期阻塞内层 TCP。
+const reorderSkipDelay = 50 * time.Millisecond
+
+type ReorderBufferStats struct {
+	GapEvents      uint64
+	TimeoutFlushes uint64
+	SkippedFrames  uint64
+}
 
 // ReorderBuffer 按序输出收到的帧。
 //
@@ -32,14 +34,21 @@ type ReorderBuffer struct {
 	mu          sync.Mutex
 	expectedSeq uint32
 	ring        [][]byte
+	buffered    int
 	pending     [][]byte // 锁内收集、出锁后交给交付协程的批次
 
 	outChan chan [][]byte
 	outFunc func([]byte)
+	// deliverMu 在不把慢 TAP/VSwitch 写放回重排锁的前提下，保留多个 Insert
+	// 和超时协程从锁内取出批次时的先后次序。
+	deliverMu sync.Mutex
 
-	lastAdvance    time.Time // 最近一次推进时间
-	gapSince       time.Time // 当前缺口首次出现的时间（零值=无在决缺口）
-	maxAdvanceSpan time.Duration
+	gapSince time.Time // 第一个未来序号到达、确认存在缺口的时间
+	gapWake  chan struct{}
+
+	gapEvents      atomic.Uint64
+	timeoutFlushes atomic.Uint64
+	skippedFrames  atomic.Uint64
 
 	// shutting 由 Close 在锁内置位：之后的 Insert 直接释放帧而不再投递，
 	// 因此 outChan 里不会残留 outWorker 退出后无人消费的批次（无泄漏窗口）。
@@ -51,11 +60,11 @@ type ReorderBuffer struct {
 // NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
 func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 	rb := &ReorderBuffer{
-		ring:        make([][]byte, ReorderWindowSize),
-		outFunc:     outFunc,
-		outChan:     make(chan [][]byte, 64),
-		lastAdvance: time.Now(),
-		closed:      make(chan struct{}),
+		ring:    make([][]byte, ReorderWindowSize),
+		outFunc: outFunc,
+		outChan: make(chan [][]byte, 64),
+		gapWake: make(chan struct{}, 1),
+		closed:  make(chan struct{}),
 	}
 	go rb.timeoutWorker()
 	go rb.outWorker()
@@ -70,8 +79,12 @@ func (rb *ReorderBuffer) Close() {
 		rb.shutting = true
 		drain := rb.takePendingLocked()
 		rb.releaseRingLocked()
+		// 与 Insert/timeoutWorker 的锁顺序一致。等待已经从重排锁取出的批次
+		// 完成入队，再关闭 closed，避免 outWorker 排空后又有批次入队。
+		rb.deliverMu.Lock()
 		rb.mu.Unlock()
 		close(rb.closed)
+		rb.deliverMu.Unlock()
 		rb.freeBatch(drain)
 	})
 }
@@ -80,13 +93,23 @@ func (rb *ReorderBuffer) Close() {
 func (rb *ReorderBuffer) Reset() {
 	rb.mu.Lock()
 	drain := rb.takePendingLocked()
+	hadGap := !rb.gapSince.IsZero()
 	rb.expectedSeq = 0
 	rb.releaseRingLocked()
-	rb.maxAdvanceSpan = 0
 	rb.gapSince = time.Time{}
-	rb.lastAdvance = time.Time{}
 	rb.mu.Unlock()
+	if hadGap {
+		rb.signalGapWorker()
+	}
 	rb.freeBatch(drain)
+}
+
+func (rb *ReorderBuffer) Stats() ReorderBufferStats {
+	return ReorderBufferStats{
+		GapEvents:      rb.gapEvents.Load(),
+		TimeoutFlushes: rb.timeoutFlushes.Load(),
+		SkippedFrames:  rb.skippedFrames.Load(),
+	}
 }
 
 // Insert 将收到的包推入缓冲区
@@ -99,19 +122,28 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	}
 
 	rb.mu.Lock()
-	rb.insertLocked(seq, frame)
-	batch := rb.takePendingLocked()
-	shutting := rb.shutting
-	rb.mu.Unlock()
-	if shutting {
-		rb.freeBatch(batch)
+	if rb.shutting {
+		rb.mu.Unlock()
+		putFrame(frame)
 		return
 	}
+	wake := rb.insertLocked(seq, frame)
+	batch := rb.takePendingLocked()
+	if len(batch) > 0 {
+		rb.deliverMu.Lock()
+	}
+	rb.mu.Unlock()
+	if wake {
+		rb.signalGapWorker()
+	}
 	rb.deliver(batch)
+	if len(batch) > 0 {
+		rb.deliverMu.Unlock()
+	}
 }
 
 // insertLocked 单帧入槽 + 尝试按序输出（调用方须持锁）
-func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) {
+func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) bool {
 	if rb.expectedSeq == 0 {
 		rb.expectedSeq = seq
 	}
@@ -121,33 +153,36 @@ func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) {
 	// 丢弃太老的包
 	if diff < 0 {
 		putFrame(frame)
-		return
+		return false
 	}
 
 	// 乱序窗口超出限制，防极端情况内存溢出
 	if diff >= ReorderWindowSize {
 		putFrame(frame)
-		return
+		return false
 	}
 
 	// 去重：如果坑里已经有包了，说明是 FEC 冗余包
 	idx := seq & reorderWindowMask
 	if rb.ring[idx] != nil {
 		putFrame(frame)
-		return
+		return false
 	}
 
 	rb.ring[idx] = frame
+	rb.buffered++
 
 	// 刚好匹配，批量按序输出
 	if seq == rb.expectedSeq {
-		rb.drainLocked()
+		return rb.drainLocked()
 	}
+	return rb.refreshGapLocked(time.Now())
 }
 
 // drainLocked 按序提取连续的包进 pending（调用方须持锁）
-func (rb *ReorderBuffer) drainLocked() {
-	n := 0
+func (rb *ReorderBuffer) drainLocked() bool {
+	hadGap := !rb.gapSince.IsZero()
+	rb.gapSince = time.Time{}
 	for {
 		idx := rb.expectedSeq & reorderWindowMask
 		frame := rb.ring[idx]
@@ -156,21 +191,37 @@ func (rb *ReorderBuffer) drainLocked() {
 		}
 		rb.pending = append(rb.pending, frame)
 		rb.ring[idx] = nil
+		rb.buffered--
 		rb.expectedSeq++
-		n++
 	}
-	if n == 0 {
-		return // 没推进就不刷新时钟，否则会掩盖缺口的真实持续时间
+	startedGap := rb.refreshGapLocked(time.Now())
+	return hadGap || startedGap
+}
+
+// refreshGapLocked 只在缓冲区里确实存在未来帧时建立缺口计时。单纯空闲不算
+// 缺口，否则心跳间隔会污染超时状态。返回值表示应唤醒定时协程重算 deadline。
+func (rb *ReorderBuffer) refreshGapLocked(now time.Time) bool {
+	hasGap := rb.buffered > 0 && rb.expectedSeq != 0 && rb.ring[rb.expectedSeq&reorderWindowMask] == nil
+	if hasGap {
+		if rb.gapSince.IsZero() {
+			rb.gapSince = now
+			rb.gapEvents.Add(1)
+			return true
+		}
+		return false
 	}
-	// 每次 drain 只取一次时钟：逐帧 time.Now() 在高速流下是纯开销
-	now := time.Now()
-	if rb.lastAdvance.IsZero() {
-		rb.lastAdvance = now
-	} else if span := now.Sub(rb.lastAdvance); span > rb.maxAdvanceSpan {
-		rb.maxAdvanceSpan = span
+	if !rb.gapSince.IsZero() {
+		rb.gapSince = time.Time{}
+		return true
 	}
-	rb.lastAdvance = now
-	rb.gapSince = time.Time{}
+	return false
+}
+
+func (rb *ReorderBuffer) signalGapWorker() {
+	select {
+	case rb.gapWake <- struct{}{}:
+	default:
+	}
 }
 
 // takePendingLocked 取走已收集的批次（调用方须持锁）
@@ -188,6 +239,7 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 			rb.ring[i] = nil
 		}
 	}
+	rb.buffered = 0
 }
 
 // deliver 把批次交给交付协程（锁外调用）；已关闭时直接释放
@@ -237,22 +289,8 @@ func (rb *ReorderBuffer) freeBatch(batch [][]byte) {
 	}
 }
 
-// skipThreshold 当前缺口跳过阈值：按观测到的最大推进间隔自适应
-func (rb *ReorderBuffer) skipThreshold() time.Duration {
-	ms := int64(20)
-	if rb.maxAdvanceSpan > 0 {
-		ms = int64(rb.maxAdvanceSpan/time.Microsecond) * reorderSkipMult / 1000
-	}
-	if ms < int64(reorderSkipFloor/time.Millisecond) {
-		ms = int64(reorderSkipFloor / time.Millisecond)
-	}
-	if ms > int64(reorderSkipCeil/time.Millisecond) {
-		ms = int64(reorderSkipCeil / time.Millisecond)
-	}
-	return time.Duration(ms) * time.Millisecond
-}
-
-// timeoutWorker 在缺口持续超过自适应阈值时强制跳过，避免彻底丢包导致卡死
+// timeoutWorker 平时完全休眠；第一个未来帧确认缺口时由 Insert 唤醒并精确等待
+// deadline。缺口被补齐或 Reset 时同样会被唤醒重算，不再固定轮询。
 func (rb *ReorderBuffer) timeoutWorker() {
 	for {
 		rb.mu.Lock()
@@ -260,47 +298,71 @@ func (rb *ReorderBuffer) timeoutWorker() {
 			rb.mu.Unlock()
 			return
 		}
-		hasGap := rb.expectedSeq != 0 && rb.ring[rb.expectedSeq&reorderWindowMask] == nil
-		if !hasGap {
+		if rb.gapSince.IsZero() {
 			rb.mu.Unlock()
 			select {
 			case <-rb.closed:
 				return
-			case <-time.After(reorderIdlePoll):
+			case <-rb.gapWake:
 			}
 			continue
 		}
-		if rb.gapSince.IsZero() {
-			rb.gapSince = time.Now()
-		}
-		wait := rb.skipThreshold() - time.Since(rb.gapSince)
+		deadline := rb.gapSince.Add(reorderSkipDelay)
+		wait := time.Until(deadline)
 		rb.mu.Unlock()
 
 		if wait > 0 {
+			timer := time.NewTimer(wait)
 			select {
 			case <-rb.closed:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
-			case <-time.After(wait):
+			case <-rb.gapWake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				continue
+			case <-timer.C:
 			}
-			continue
 		}
 
 		rb.mu.Lock()
-		if rb.expectedSeq == 0 || rb.ring[rb.expectedSeq&reorderWindowMask] != nil {
+		if rb.gapSince.IsZero() || time.Now().Before(rb.gapSince.Add(reorderSkipDelay)) ||
+			rb.buffered == 0 || rb.expectedSeq == 0 || rb.ring[rb.expectedSeq&reorderWindowMask] != nil {
 			rb.mu.Unlock()
 			continue
 		}
 		// 预期的坑为空且已超时：确认丢包，往后找第一个有包的坑
+		skipped := uint32(0)
 		for i := uint32(1); i < ReorderWindowSize; i++ {
 			if rb.ring[(rb.expectedSeq+i)&reorderWindowMask] != nil {
 				rb.expectedSeq += i
+				skipped = i
 				break
 			}
 		}
 		rb.gapSince = time.Time{}
-		rb.drainLocked()
+		if skipped > 0 {
+			rb.timeoutFlushes.Add(1)
+			rb.skippedFrames.Add(uint64(skipped))
+			rb.drainLocked()
+		}
 		batch := rb.takePendingLocked()
+		if len(batch) > 0 {
+			rb.deliverMu.Lock()
+		}
 		rb.mu.Unlock()
 		rb.deliver(batch)
+		if len(batch) > 0 {
+			rb.deliverMu.Unlock()
+		}
 	}
 }
