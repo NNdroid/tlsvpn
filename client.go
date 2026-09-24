@@ -166,6 +166,7 @@ func (p *AsyncPort) run() {
 			return
 		case reset := <-p.resetEpoch:
 			p.txSeq = 0
+			p.parityNext = 0
 			p.exhausted.Store(false)
 			if reset.k >= fecMinGroup {
 				p.encoder = newFECEncoder(reset.k, reset.ic)
