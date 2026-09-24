@@ -54,10 +54,12 @@ SOURCE_DATE="${TLSVPN_SOURCE_DATE:-$(git show -s --format=%cs "$SOURCE_VERSION" 
 
 if [ -n "${TLSVPN_PKG_VERSION:-}" ]; then
     PACKAGE_VERSION="$TLSVPN_PKG_VERSION"
-elif [ -n "${GITHUB_REF_NAME:-}" ]; then
+elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
     PACKAGE_VERSION="$GITHUB_REF_NAME"
 else
-    PACKAGE_VERSION="$(git describe --tags --always 2>/dev/null || echo 0.0.0)"
+    short_source="$(printf '%s' "$SOURCE_VERSION" | cut -c1-12)"
+    source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
+    PACKAGE_VERSION="0.0.${source_day}+git.${short_source}"
 fi
 PACKAGE_VERSION="${PACKAGE_VERSION#v}"
 PACKAGE_VERSION="$(printf '%s' "$PACKAGE_VERSION" | tr -c 'A-Za-z0-9._+-' '-')"
@@ -105,7 +107,16 @@ fi
 
 curl --retry 4 --retry-all-errors --fail --silent --show-error --location     "$SDK_BASE_URL/sha256sums" -o "$sums"
 
-checksum_line="$(grep -E "[[:space:]]+$sdk_name$" "$sums" | head -n 1 || true)"
+# OpenWrt publishes GNU sha256sum binary-mode entries as
+#   <hash> *filename
+# while some mirrors/tools may use the text-mode form
+#   <hash>  filename
+# Match the filename field semantically instead of assuming either separator.
+checksum_line="$(
+    awk -v name="$sdk_name" '
+        $2 == name || $2 == "*" name { print; exit }
+    ' "$sums"
+)"
 if [ -z "$checksum_line" ]; then
     echo "error: checksum for $sdk_name not found in sha256sums" >&2
     exit 1
