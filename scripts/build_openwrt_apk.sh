@@ -67,7 +67,19 @@ PACKAGE_VERSION="${PACKAGE_VERSION%-}"
 [ -n "$PACKAGE_VERSION" ] || PACKAGE_VERSION="0.0.0"
 
 SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
-WORK_DIR="${OPENWRT_WORK_DIR:-$ROOT_DIR/.cache/openwrt-sdk/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
+
+# Keep the SDK workspace outside the repository tree. OpenWrt builds Go through
+# several bootstrap toolchains; if the SDK lives below ROOT_DIR, an older Go
+# command can walk up to ROOT_DIR/go.mod and incorrectly trigger automatic
+# toolchain selection for TLSVPN (for example, trying to download Go 1.26.x
+# while OpenWrt is still compiling its Go 1.24 bootstrap stage).
+if [ -n "${RUNNER_TEMP:-}" ]; then
+    DEFAULT_OPENWRT_WORK_ROOT="$RUNNER_TEMP/tlsvpn-openwrt-sdk"
+else
+    CACHE_HOME="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"
+    DEFAULT_OPENWRT_WORK_ROOT="$CACHE_HOME/tlsvpn/openwrt-sdk"
+fi
+WORK_DIR="${OPENWRT_WORK_DIR:-$DEFAULT_OPENWRT_WORK_ROOT/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
 DOWNLOAD_DIR="$WORK_DIR/download"
 SDK_DIR="$WORK_DIR/sdk"
 OUTPUT_DIR="${OPENWRT_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt/$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
