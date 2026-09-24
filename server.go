@@ -1357,71 +1357,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		linkedAt: time.Now().Unix(),
 		epoch:    sessionEpoch,
 	}
-	// 注册本物理连接到会话，供 Web 面板踢出/展示明细
+	// 注册本物理连接到会话，供 Web 面板踢出/展示明细。清理 defer 必须在
+	// 发送握手响应之前安装：响应写失败会直接 return，不能把 ActiveConns 或
+	// session.conns 留成“幽灵连接”。
 	session.sessionMu.Lock()
 	session.conns[ci] = struct{}{}
 	session.sessionMu.Unlock()
-	// 速率整形参数在锁内快照，避免与 ApplyConfig 的写构成数据竞争
-	brutal, brutalUp, brutalDown := s.brutal, s.brutalUp, s.brutalDown
-	s.mu.Unlock()
-
-	// serverTxRate = 服务端→客户端（下行），由本端 socket 整形；clientTxRate =
-	// 客户端→服务端（上行），客户端自己整形，本端只裁进自己的上行预算内。
-	groupOffer := req.BrutalGroups && req.BrutalConns > 0 && req.BrutalConns <= 1<<16 &&
-		req.BrutalConnIndex >= 0 && req.BrutalConnIndex < req.BrutalConns &&
-		req.BrutalTotalTx <= maxBrutalRateMbps && req.BrutalTotalRx <= maxBrutalRateMbps
-	var serverTxRate, clientTxRate, serverLegacyRateBps uint64
-	if groupOffer {
-		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, req.BrutalTotalTx, req.BrutalTotalRx)
-		serverLegacyRateBps = splitLegacyBrutalRateBps(serverTxRate, req.BrutalConns, req.BrutalConnIndex)
-	} else {
-		// 对端未声明 group 语义或字段越界：没有逐连接预算可裁剪，按本端配置整形
-		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, 0, 0)
-		serverLegacyRateBps, _ = brutalMbpsToBps(serverTxRate)
-	}
-	atomic.StoreUint64(&ci.brutalTx, serverTxRate)
-	atomic.StoreUint64(&ci.brutalRx, clientTxRate)
-
-	if brutal && serverTxRate > 0 {
-		groupID := uint64(0)
-		if groupOffer {
-			groupID = brutalGroupID("server", resumeToken)
-		}
-		br := applyTCPBrutal(tcpConn, serverTxRate, serverLegacyRateBps, groupID)
-		ci.brutal.Store(br.clone())
-		if !br.Applied {
-			log.Warnf("[%s] TCP Brutal shaping skipped: %s", clientID, br.Error)
-		} else if br.Error != "" {
-			log.Warnf("[%s] TCP Brutal shaping active with limited observability: %s", clientID, br.Error)
-		}
-	} else {
-		ci.brutal.Store((&brutalApplyResult{}).clone())
-	}
-
-	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
-	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
-	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
-	// GCM 未启用时不下发盐值（客户端也不启用加密器）。
-	encSalt, encSalt2 := "", ""
-	if encAlgo == encAlgoGCM {
-		encSalt = hex.EncodeToString(saltA[:])  // c2s
-		encSalt2 = hex.EncodeToString(saltB[:]) // s2c
-	}
-	// 会话令牌：仅原会话持有者可重连接管（见 handleConnection 的校验分支）
-	s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
-		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
-
-	rttCache := new(uint32)
-	atomic.StoreUint32(rttCache, 50000)
-	ci.rttCache = rttCache
-	go startRTTPoller(connCtx, tcpConn, rttCache)
-
-	connTxChan := make(chan []VPNFrame, 32)
-	port.RegisterBackend(connTxChan, rttCache)
-
 	defer func() {
-		port.UnregisterBackend(connTxChan)
 		// 从会话连接注册表移除本连接
 		session.sessionMu.Lock()
 		delete(session.conns, ci)
@@ -1457,6 +1399,75 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		session.sessionMu.Unlock()
 		s.mu.Unlock()
 	}()
+
+	// 速率整形参数在锁内快照，避免与 ApplyConfig 的写构成数据竞争
+	brutal, brutalUp, brutalDown := s.brutal, s.brutalUp, s.brutalDown
+	s.mu.Unlock()
+
+	// serverTxRate = 服务端→客户端（下行），由本端 socket 整形；clientTxRate =
+	// 客户端→服务端（上行），客户端自己整形，本端只裁进自己的上行预算内。
+	groupOffer := req.BrutalGroups && req.BrutalConns > 0 && req.BrutalConns <= 1<<16 &&
+		req.BrutalConnIndex >= 0 && req.BrutalConnIndex < req.BrutalConns &&
+		req.BrutalTotalTx <= maxBrutalRateMbps && req.BrutalTotalRx <= maxBrutalRateMbps
+	var serverTxRate, clientTxRate, serverLegacyRateBps uint64
+	if groupOffer {
+		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, req.BrutalTotalTx, req.BrutalTotalRx)
+		serverLegacyRateBps = splitLegacyBrutalRateBps(serverTxRate, req.BrutalConns, req.BrutalConnIndex)
+	} else {
+		// 对端未声明 group 语义或字段越界：没有逐连接预算可裁剪，按本端配置整形
+		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, 0, 0)
+		serverLegacyRateBps, _ = brutalMbpsToBps(serverTxRate)
+	}
+	atomic.StoreUint64(&ci.brutalTx, serverTxRate)
+	atomic.StoreUint64(&ci.brutalRx, clientTxRate)
+
+	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
+	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
+	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
+	// GCM 未启用时不下发盐值（客户端也不启用加密器）。
+	encSalt, encSalt2 := "", ""
+	if encAlgo == encAlgoGCM {
+		encSalt = hex.EncodeToString(saltA[:])  // c2s
+		encSalt2 = hex.EncodeToString(saltB[:]) // s2c
+	}
+	// 先完成 TLSVPN 应用层握手，再切 TCP congestion control。Brutal 是数据面
+	// 优化，不应阻塞/拖死客户端等待握手响应。给响应写入本身也加明确超时。
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
+		groupOffer, clientTxRate, serverTxRate,
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
+	conn.SetWriteDeadline(time.Time{})
+	if respErr != nil {
+		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
+		return
+	}
+
+	// HandshakeResp 已成功交给 TLS/TCP 写路径后，再尝试 Brutal。应用失败只降级
+	// 为当前 congestion control 并告警，不能把已经完成的 TLSVPN 握手判成失败。
+	if brutal && serverTxRate > 0 {
+		groupID := uint64(0)
+		if groupOffer {
+			groupID = brutalGroupID("server", resumeToken)
+		}
+		br := applyTCPBrutal(tcpConn, serverTxRate, serverLegacyRateBps, groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[%s] TCP Brutal shaping skipped after handshake: %s", clientID, br.Error)
+		} else if br.Error != "" {
+			log.Warnf("[%s] TCP Brutal shaping active with limited observability: %s", clientID, br.Error)
+		}
+	} else {
+		ci.brutal.Store((&brutalApplyResult{}).clone())
+	}
+
+	rttCache := new(uint32)
+	atomic.StoreUint32(rttCache, 50000)
+	ci.rttCache = rttCache
+	go startRTTPoller(connCtx, tcpConn, rttCache)
+
+	connTxChan := make(chan []VPNFrame, 32)
+	port.RegisterBackend(connTxChan, rttCache)
+	defer port.UnregisterBackend(connTxChan)
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
@@ -1647,7 +1658,7 @@ func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cli
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
 	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
-	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) {
+	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) error {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
@@ -1661,8 +1672,14 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 	}
 	log.Debugf("[%s] => handshake response session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		clientID, sessionID, protocolVersion, epoch, fec, fecGroup, encrypt, encAlgo, sessionToken != "")
-	d, _ := json.Marshal(resp)
-	writeStreamFrame(w, d)
+	d, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("marshal handshake response: %w", err)
+	}
+	if err := writeStreamFrame(w, d); err != nil {
+		return fmt.Errorf("write handshake response: %w", err)
+	}
+	return nil
 }
 
 // ======================= in-memory TAP =======================
