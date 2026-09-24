@@ -1507,7 +1507,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
-	go startRTTPoller(runCtx, tcpConn, rttCache)
 
 	// 连接明细：握手成功，进入 up 态
 	ci.rttCache = rttCache
@@ -1546,10 +1545,25 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
+
+		// RTT 刷新复用现有发送 goroutine，避免每条物理连接再起一个
+		// 200ms ticker goroutine。代理模式 tcpConn=nil 时 nil channel 自动禁用。
+		var rttTicker *time.Ticker
+		var rttC <-chan time.Time
+		if tcpConn != nil {
+			rttTicker = time.NewTicker(200 * time.Millisecond)
+			rttC = rttTicker.C
+			defer rttTicker.Stop()
+		}
+
 		for {
 			select {
 			case <-runCtx.Done():
 				return
+			case <-rttC:
+				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
+					atomic.StoreUint32(rttCache, rtt)
+				}
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				for _, vf := range frames {
