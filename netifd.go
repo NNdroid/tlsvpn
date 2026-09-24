@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 type netifdLinkState struct {
@@ -56,6 +57,12 @@ func (c *Client) notifyNetifdDown() error {
 	c.netifdMu.Lock()
 	defer c.netifdMu.Unlock()
 	if !c.netifdState.up {
+		return nil
+	}
+	// A reconnect may have incremented liveConns after the disconnecting
+	// backend observed 1 -> 0 but before it acquired this lock. Do not publish
+	// a stale DOWN after connectivity has already recovered.
+	if atomic.LoadInt32(&c.liveConns) != 0 {
 		return nil
 	}
 
