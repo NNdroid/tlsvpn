@@ -385,6 +385,28 @@ func TestFECDecoderLateMemberAfterRecovery(t *testing.T) {
 	}
 }
 
+func TestFECDecoderPendingGroupsStayBounded(t *testing.T) {
+	d := NewFECDecoder(4, nil, nil)
+	payload := make([]byte, 128)
+
+	// 每个组只送第一个成员，不送 parity，强制制造大量未完成组。
+	for i := 0; i < fecMaxPendingGroups+128; i++ {
+		seq := uint32(i*4 + 1)
+		d.OnData(seq, payload)
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if got := len(d.groups); got > fecMaxPendingGroups {
+		t.Fatalf("pending groups=%d, want <=%d", got, fecMaxPendingGroups)
+	}
+	latest := uint32((fecMaxPendingGroups+127)*4 + 1)
+	start := d.groupStartOf(latest)
+	if _, ok := d.groups[start]; !ok {
+		t.Fatalf("latest group %d was not retained after bounded eviction", start)
+	}
+}
+
 func TestFECDecoderReset(t *testing.T) {
 	c, out := newFecCollector()
 	d := NewFECDecoder(4, nil, out)
