@@ -44,7 +44,7 @@ FAIL=0
 # caller (addr='"127.0.0.1:18080"'), numbers and booleans stay bare
 # (client.fec_group=4). An empty value omits the key entirely, so both
 # implementations fall back to their own defaults. Dotted keys nest one level:
-# server.session_token and server.cert merge into a single "server" object.
+# server.max_sessions and server.cert merge into a single "server" object.
 #
 # Top-level keys are emitted in a fixed order; nested sections in a fixed order
 # too, so a failing group's config is readable and diffable in CI logs.
@@ -107,15 +107,15 @@ write_config() {
 #              implementations is most likely to surface.
 MATRIX_HARDENED=(
   encrypt=true 'min_enc="gcm"' 'pad_mode="bucket"'
-  'client.fec=true' client.fec_group=4 server.session_token=true
+  'client.fec=true' client.fec_group=4
 )
 MATRIX_LEGACY=(
   encrypt=true 'min_enc="any"' 'pad_mode="off"'
-  'client.fec=true' client.fec_group=8 server.session_token=false
+  'client.fec=true' client.fec_group=8
 )
 MATRIX_PLAIN=(
   encrypt=false 'min_enc=""' 'pad_mode="off"'
-  'client.fec=false' client.fec_group=4 server.session_token=false
+  'client.fec=false' client.fec_group=4
 )
 
 # e2e_psk returns the shared PSK for this env, generating it once on first use.
