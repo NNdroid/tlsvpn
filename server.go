@@ -268,8 +268,9 @@ type ClientSession struct {
 	pskHash     string            // 创建本会话时的 hashPSK（见 handleConnection 复活分支）
 	InstanceID  string            // 客户端进程实例；变化时必须切换密钥代际
 	Epoch       uint64            // 当前密钥代际
-	ResumeToken string            // CSPRNG 会话持有证明
-	CreatedAt   time.Time
+	ResumeToken        string // 当前已确认的 CSPRNG 会话持有证明
+	PendingResumeToken string // 两阶段 rollover：先下发、客户端回带后再正式替换 ResumeToken
+	CreatedAt          time.Time
 	ActiveConns int
 	TxBytes     uint64
 	RxBytes     uint64
@@ -438,6 +439,58 @@ func (l *connectionLimiter) release(addr net.Addr) {
 // rotateSessionEpochLocked 在客户端进程实例变化时切换完整密钥代际。调用方
 // 持有 s.mu；旧物理连接先被关闭，随后同时安装新盐、数据/FEC AEAD、发送
 // 序号和接收重放状态，绝不允许“重置 seq 但沿用 key+nonce salt”。
+// validSessionTokenFormat 只验证 token 的协议形态，不验证归属。
+// 新建 session 时服务端可能刚重启、内存态已丢失；若客户端仍携带上一次由
+// 服务端签发的 256-bit token，就沿用它作为新的 current token，避免“服务端
+// 重启后首个握手响应丢失 -> 客户端下次进程重启再也无法接回”的锁死窗口。
+func validSessionTokenFormat(token string) bool {
+	if len(token) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
+}
+
+// acceptSessionResumeToken 验证 current/pending 两个 token。pending 被客户端
+// 真正回带时才提升为 current；这就是 token rollover 的 ACK。旧 current 在
+// pending 被确认前始终可用，因此握手响应即使丢失也不会把客户端永久锁死。
+// 调用方必须持有 s.mu。
+func acceptSessionResumeToken(session *ClientSession, presented string) bool {
+	if verifyRandomSessionToken(session.ResumeToken, presented) {
+		return true
+	}
+	if session.PendingResumeToken != "" && verifyRandomSessionToken(session.PendingResumeToken, presented) {
+		session.ResumeToken = session.PendingResumeToken
+		session.PendingResumeToken = ""
+		return true
+	}
+	return false
+}
+
+// ensurePendingResumeToken 为当前 session 准备下一枚 token。若前一次 rollover
+// 尚未被客户端 ACK，则复用同一枚 pending token，不能再次覆盖；否则连续丢失
+// handshake response 时客户端永远追不上服务端的 token 世代。
+func ensurePendingResumeToken(session *ClientSession) error {
+	if session.PendingResumeToken != "" {
+		return nil
+	}
+	token, err := newSessionToken()
+	if err != nil {
+		return err
+	}
+	session.PendingResumeToken = token
+	return nil
+}
+
+// responseResumeToken 返回本次握手应该下发的 token：存在 pending 时持续下发
+// pending，直到某次后续握手回带它完成 ACK；否则返回 current。
+func responseResumeToken(session *ClientSession) string {
+	if session.PendingResumeToken != "" {
+		return session.PendingResumeToken
+	}
+	return session.ResumeToken
+}
+
 func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, psk string) error {
 	session.sessionMu.Lock()
 	defer session.sessionMu.Unlock()
@@ -465,15 +518,10 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 			return err
 		}
 	}
-	token, err := newSessionToken()
-	if err != nil {
-		return err
-	}
 	session.SaltA, session.SaltB = saltA, saltB
 	session.icTx, session.icRx = icTx, icRx
 	session.InstanceID = instanceID
 	session.Epoch++
-	session.ResumeToken = token
 	session.ActiveConns = 0
 	session.RxReorder.Reset()
 	if session.FecDec != nil {
@@ -1155,7 +1203,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			exists = false
 		}
 		if exists && session.InstanceID != req.ClientInstance {
-			if !verifyRandomSessionToken(session.ResumeToken, req.SessionToken) {
+			if !acceptSessionResumeToken(session, req.SessionToken) {
 				log.Warnf("[%s] reconnect refused: invalid session token for a new client instance", clientID)
 				s.mu.Unlock()
 				camouflageProbe(conn)
@@ -1166,7 +1214,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				s.mu.Unlock()
 				return
 			}
+			if err := ensurePendingResumeToken(session); err != nil {
+				log.Errorf("[%s] failed to prepare the next session token: %v", clientID, err)
+				s.mu.Unlock()
+				return
+			}
 			log.Infof("[%s] rotated session key epoch to %d for a new client process instance", clientID, session.Epoch)
+		} else if exists && session.PendingResumeToken != "" &&
+			verifyRandomSessionToken(session.PendingResumeToken, req.SessionToken) {
+			// 同一 client_instance 的后续物理连接/重拨已经拿到了 pending token：
+			// 视为 ACK，正式切换 current token，并废弃旧 token。
+			session.ResumeToken = session.PendingResumeToken
+			session.PendingResumeToken = ""
 		}
 	}
 	if exists {
@@ -1233,14 +1292,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if fecEncK > 0 {
 			port.AttachFEC(fecEncK, fecTx)
 		}
-		resumeToken, tokenErr := newSessionToken()
-		if tokenErr != nil {
-			delete(s.usedV4, v4ip)
-			delete(s.usedV6, v6ip)
-			port.Close()
-			s.mu.Unlock()
-			log.Errorf("[%s] failed to create a session token: %v", clientID, tokenErr)
-			return
+		resumeToken := req.SessionToken
+		if !validSessionTokenFormat(resumeToken) {
+			var tokenErr error
+			resumeToken, tokenErr = newSessionToken()
+			if tokenErr != nil {
+				delete(s.usedV4, v4ip)
+				delete(s.usedV6, v6ip)
+				port.Close()
+				s.mu.Unlock()
+				log.Errorf("[%s] failed to create a session token: %v", clientID, tokenErr)
+				return
+			}
 		}
 		session = &ClientSession{
 			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,
@@ -1284,7 +1347,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	encAlgo := session.EncAlgo
 	icTx, icRx := session.icTx, session.icRx
 	saltA, saltB := session.SaltA, session.SaltB
-	resumeToken := session.ResumeToken
+	resumeToken := responseResumeToken(session)
 	fecEncK := session.FecEncK
 	sessionEpoch := session.Epoch
 	sessionEncrypt := session.Encrypt
