@@ -120,6 +120,62 @@ func TestSendBatchFallsBackWhenPreferredBackendIsFull(t *testing.T) {
 	}
 }
 
+func TestFECParityIsSentOnceAcrossMultipleBackends(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := NewAsyncPort(ctx, "fec-single-parity")
+	p.AttachFEC(2, nil)
+
+	rtts := []uint32{1000, 2000, 3000}
+	chans := make([]chan []VPNFrame, 3)
+	for i := range chans {
+		chans[i] = make(chan []VPNFrame, 8)
+		p.RegisterBackend(chans[i], &rtts[i])
+		defer p.UnregisterBackend(chans[i])
+	}
+
+	if err := p.WriteFrame(bytes.Repeat([]byte{0x11}, 1400)); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.WriteFrame(bytes.Repeat([]byte{0x22}, 1400)); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	dataFrames, parityFrames := 0, 0
+	for time.Now().Before(deadline) && (dataFrames < 2 || parityFrames < 1) {
+		for _, ch := range chans {
+			for {
+				select {
+				case batch := <-ch:
+					for _, vf := range batch {
+						if vf.Seq == 0 {
+							parityFrames++
+						} else {
+							dataFrames++
+						}
+					}
+					freeFrames(batch)
+					putVPNFrameBatch(batch)
+				default:
+					goto nextBackend
+				}
+			}
+		nextBackend:
+		}
+		if dataFrames < 2 || parityFrames < 1 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if dataFrames != 2 {
+		t.Fatalf("data frames=%d, want 2", dataFrames)
+	}
+	if parityFrames != 1 {
+		t.Fatalf("parity copies=%d, want exactly 1 across all backends", parityFrames)
+	}
+}
+
 func TestParityQueueDropIsObservable(t *testing.T) {
 	rtt := uint32(1)
 	b := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rtt}
