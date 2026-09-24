@@ -19,7 +19,6 @@ import (
 type clientRestartCase struct {
 	name         string
 	encrypt      bool
-	sessionToken bool
 	// macShift 模拟客户端 MAC 在重启后发生变化。
 	// 真实场景：mac 配置留空时 clientID = uuid(MAC+PSK)，而 Linux 上
 	// water.New 创建的 TAP 设备由内核分配随机 MAC，因此客户端每次重启
@@ -35,16 +34,14 @@ type clientRestartCase struct {
 // 覆盖的三个缺陷：
 //   - 会话复活分支不复位服务端上行重排缓冲（server.go）：新进程 txSeq 从 1 起，
 //     旧缓冲把每帧都当旧包丢弃 → 上行断、下行正常。
-//   - session_token 开启时冷启动进程回带空令牌，被按"冒充在线会话"永久拒绝
-//     （客户端_state 落盘修复：令牌跨进程持久化）。
+//   - 固定启用的 session token 在冷启动时必须从 state 恢复，否则新进程会被
+//     按"冒充在线会话"永久拒绝（令牌跨进程持久化）。
 //   - Linux 上 water 每次创建 TAP 给随机 MAC → clientID 漂移 → 每次重启换新 IP
 //     （客户端_state 落盘修复：MAC 跨进程持久化）。
 func TestClientRecoversAfterClientRestart(t *testing.T) {
 	cases := []clientRestartCase{
-		{name: "GCM-MAC不变-session_token关闭", encrypt: true},
-		{name: "GCM-MAC不变-session_token开启", encrypt: true, sessionToken: true},
-		{name: "GCM-MAC变化-session_token关闭(模拟Linux随机MAC)", encrypt: true, macShift: true},
-		{name: "GCM-MAC变化+session_token开启", encrypt: true, sessionToken: true, macShift: true},
+		{name: "GCM-MAC不变-固定SessionToken", encrypt: true},
+		{name: "GCM-MAC变化-固定SessionToken(模拟Linux随机MAC)", encrypt: true, macShift: true},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -86,10 +83,8 @@ func runClientRestartCase(t *testing.T, tc clientRestartCase) {
 	if !h.waitLive(cli2, 20*time.Second) {
 		// 不在此中断：先看清服务端把这次握手处理成什么，再判定。
 		h.snapshot("第2轮（握手未成功）")
-		if tc.sessionToken {
-			if sess := h.findSession(cli1.clientID); sess != nil {
-				t.Logf("新进程令牌缓存=%q；落盘状态=%+v", cli2.sessionToken, cli2.state)
-			}
+		if sess := h.findSession(cli1.clientID); sess != nil {
+			t.Logf("新进程令牌缓存=%q；落盘状态=%+v", cli2.sessionToken, cli2.state)
 		}
 		t.Fatal("第2轮：新客户端进程永远建立不了连接（服务端拒绝重连，客户端无限重试）")
 	}
@@ -135,7 +130,7 @@ func newClientRestartHarness(t *testing.T, tc clientRestartCase) *clientRestartH
 	srvCfg := &Config{
 		Mode: "server", PSK: psk, Tap: "mem", Addr: addr,
 		Encrypt: tc.encrypt,
-		Server:  ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64", SessionToken: tc.sessionToken},
+		Server:  ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
 	}
 	srvCfg.applyDefaults()
 	if err := srvCfg.Validate(); err != nil {
@@ -144,9 +139,6 @@ func newClientRestartHarness(t *testing.T, tc clientRestartCase) *clientRestartH
 	srv, err := newServerForTest(srvCtx, srvCfg)
 	if err != nil {
 		t.Fatalf("server init: %v", err)
-	}
-	if tc.sessionToken {
-		srv.sessionToken = true
 	}
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
