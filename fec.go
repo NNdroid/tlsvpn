@@ -193,7 +193,6 @@ type fecDecoder struct {
 	groups    map[uint32]*fecGroupState // 组起点 → 组状态
 	doneRing  [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
 	spare     *fecGroupState
-	spareAc   []byte
 	recovered uint64 // 异或恢复帧计数
 	lost      uint64 // 确认丢失帧计数
 }
@@ -449,26 +448,33 @@ func (d *fecDecoder) releaseLocked(g *fecGroupState) {
 		putFECLens(g.lens)
 		g.lens = nil
 	}
-	if cap(g.acc) > cap(d.spareAc) {
-		d.spareAc = g.acc
+	if g.acc != nil {
+		putFrame(g.acc)
+		g.acc = nil
 	}
-	g.acc = nil
 	if d.spare == nil {
 		d.spare = g
 	}
 }
 
-// growAccLocked 复用回收的累加缓冲，不足时新分配；扩容区域必须清零
-// （异或累加器语义要求新区域等价于"尚无成员贡献"）。
+// growAccLocked 使用通用 size-class frame pool 扩展 FEC accumulator。
+// profile 显示旧单 spareAc 设计在多 pending group 场景下无法复用，
+// growAccLocked 独占约 38% alloc_space。每个 group 释放时直接归还分档池，
+// 后续任意 group 都可复用，不再受“一次只能留一个 spare”限制。
 func (d *fecDecoder) growAccLocked(old []byte, need int) []byte {
-	var buf []byte
-	if cap(d.spareAc) >= need {
-		buf = d.spareAc[:need]
-		d.spareAc = nil
-	} else {
-		buf = make([]byte, need)
+	if cap(old) >= need {
+		oldLen := len(old)
+		buf := old[:need]
+		clear(buf[oldLen:])
+		return buf
 	}
+
+	pooled := getFrameAtLeast(need)
+	buf := pooled[:need]
 	copy(buf, old)
 	clear(buf[len(old):])
+	if old != nil {
+		putFrame(old)
+	}
 	return buf
 }
