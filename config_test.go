@@ -195,6 +195,12 @@ func TestValidateNetifdInterfaceManager(t *testing.T) {
 	}
 
 	cfg = base()
+	cfg.Up = "/usr/libexec/tlsvpn-custom-up"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "netifd") {
+		t.Fatalf("netifd mode must reject generic lifecycle hooks, got %v", err)
+	}
+
+	cfg = base()
 	cfg.Client.InterfaceManager = "invalid"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "interface_manager") {
 		t.Fatalf("invalid interface manager should fail, got %v", err)
