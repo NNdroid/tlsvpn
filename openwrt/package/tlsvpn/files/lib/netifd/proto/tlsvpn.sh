@@ -59,7 +59,11 @@ _tlsvpn_write_config() {
 	insecure="$(_tlsvpn_bool_default "$insecure" 0)"
 	[ -n "$conns" ] || conns=1
 	[ -n "$fec_group" ] || fec_group=4
-	[ -n "$min_enc" ] || min_enc=gcm
+	if [ "$encrypt" = "1" ]; then
+		[ -n "$min_enc" ] || min_enc=gcm
+	else
+		min_enc=""
+	fi
 	[ -n "$pad_mode" ] || pad_mode=bucket
 	[ -n "$brutal_up" ] || brutal_up=100
 	[ -n "$brutal_down" ] || brutal_down=500
@@ -74,7 +78,7 @@ _tlsvpn_write_config() {
 	[ -n "$mac" ] && json_add_string mac "$mac"
 	json_add_string log_level "$log_level"
 	json_add_boolean encrypt "$encrypt"
-	json_add_string min_enc "$min_enc"
+	[ -n "$min_enc" ] && json_add_string min_enc "$min_enc"
 	json_add_string pad_mode "$pad_mode"
 	[ -n "$socks5" ] && json_add_string socks5 "$socks5"
 	json_add_boolean brutal "$brutal"
@@ -154,32 +158,65 @@ proto_tlsvpn_setup() {
 	config="/var/etc/tlsvpn-$interface.json"
 	mkdir -p /var/etc
 
-	_tlsvpn_write_config "$config" "$tap" "$server" "$psk" "$sni" 		"$cert_sha256" "$req_v4" "$req_v6" "$conns" "$fec" "$fec_group" 		"$encrypt" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" 		"$brutal_down" "$socks5" "$insecure" "$mac" "$log_level" || {
-		proto_notify_error "$interface" "CONFIG_GENERATION_FAILED"
-		proto_setup_failed "$interface"
-		return 1
-	}
-
-	# Pin every transport endpoint to the pre-tunnel routing domain. Without
-	# host dependencies a default route learned from TLSVPN can recursively
-	# route its own TCP/TLS transport back into the tunnel.
+	# Resolve every transport endpoint before tlsvpn starts and feed the exact
+	# same IP set to both the process and netifd host dependencies. If a
+	# hostname is allowed to be resolved again after the tunnel installs a
+	# default route, a different DNS answer could recursively route TLSVPN's
+	# own TCP transport into the tunnel.
 	local old_ifs="$IFS"
+	local resolved_server="" resolved_endpoint="" port=""
+	local endpoint_count=0 endpoint_deps=0
 	IFS=','
 	for endpoint in $server; do
 		endpoint="${endpoint# }"
 		endpoint="${endpoint% }"
 		host="$(_tlsvpn_endpoint_host "$endpoint")"
-		[ -n "$host" ] || continue
+		case "$endpoint" in
+			\[*\]:*) port="${endpoint##*:}" ;;
+			*:*) port="${endpoint##*:}" ;;
+			*) port="" ;;
+		esac
+		[ -n "$host" ] && [ -n "$port" ] || {
+			IFS="$old_ifs"
+			proto_notify_error "$interface" "INVALID_SERVER_ENDPOINT" "$endpoint"
+			proto_setup_failed "$interface"
+			return 1
+		}
+
+		endpoint_count=$((endpoint_count + 1))
+		endpoint_deps=0
 		for ip in $(resolveip -t 5 "$host" 2>/dev/null); do
+			case "$ip" in
+				*:*) resolved_endpoint="[$ip]:$port" ;;
+				*) resolved_endpoint="$ip:$port" ;;
+			esac
+			[ -n "$resolved_server" ] && resolved_server="$resolved_server,"
+			resolved_server="$resolved_server$resolved_endpoint"
 			( proto_add_host_dependency "$interface" "$ip" "$tunlink" )
 			dependency_count=$((dependency_count + 1))
+			endpoint_deps=$((endpoint_deps + 1))
 		done
+		if [ "$endpoint_deps" -eq 0 ]; then
+			IFS="$old_ifs"
+			proto_notify_error "$interface" "HOST_DEPENDENCY_FAILED" "$host"
+			proto_setup_failed "$interface"
+			return 1
+		fi
 	done
 	IFS="$old_ifs"
 
-	[ "$dependency_count" -gt 0 ] || {
-		rm -f "$config"
+	[ "$endpoint_count" -gt 0 ] && [ "$dependency_count" -gt 0 ] || {
 		proto_notify_error "$interface" "HOST_DEPENDENCY_FAILED"
+		proto_setup_failed "$interface"
+		return 1
+	}
+
+	_tlsvpn_write_config "$config" "$tap" "$resolved_server" "$psk" "$sni" \
+		"$cert_sha256" "$req_v4" "$req_v6" "$conns" "$fec" "$fec_group" \
+		"$encrypt" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" \
+		"$brutal_down" "$socks5" "$insecure" "$mac" "$log_level" || {
+		rm -f "$config"
+		proto_notify_error "$interface" "CONFIG_GENERATION_FAILED"
 		proto_setup_failed "$interface"
 		return 1
 	}
