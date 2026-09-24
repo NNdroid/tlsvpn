@@ -1248,18 +1248,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	instanceID := c.instanceID.Load().(string)
 	groupID := brutalGroupID("client", instanceID)
 
-	// 初始以客户端期望的速率申请接管
-	if lv.brutal && clientTxRateBps > 0 {
-		br := applyTCPBrutal(tcpConn, lv.brutalUp, clientTxRateBps, groupID)
-		ci.brutal.Store(br.clone())
-		if !br.Applied {
-			log.Warnf("[Conn %d] TCP Brutal shaping skipped: %s", connIndex, br.Error)
-		} else if br.Error != "" {
-			log.Warnf("[Conn %d] TCP Brutal shaping active with limited observability: %s", connIndex, br.Error)
-		}
-	} else {
-		ci.brutal.Store((&brutalApplyResult{}).clone())
-	}
+	// Brutal 是数据面优化，不能在 TLS / TLSVPN 握手前接管拥塞控制。
+	// 先保持系统当前 congestion control，等服务端返回协商后的会话预算再应用。
+	ci.brutal.Store((&brutalApplyResult{}).clone())
 
 	rawConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
 	tlsConn, err := c.negotiateUTLS(runCtx, rawConn, lv)
@@ -1305,8 +1296,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
-	reqData, _ := json.Marshal(req)
-	writeStreamFrame(tlsConn, reqData)
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		return 0, fmt.Errorf("marshal handshake request: %w", err)
+	}
+	tlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err = writeStreamFrame(tlsConn, reqData)
+	tlsConn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		return 0, fmt.Errorf("write handshake request: %w", err)
+	}
 
 	tlsConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	respData, _, err := scanner.ReadFrame()
@@ -1327,16 +1326,22 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
 
-	// 服务端返回的是会话总预算。收到响应后必须重新应用，服务端裁剪后的较低
-	// 上限才会真正落到客户端 socket 上；未协商出总额时保留初始应用值。
-	if lv.brutal && resp.BrutalGroups && resp.BrutalTotalTx > 0 {
-		legacyRateBps := splitLegacyBrutalRateBps(resp.BrutalTotalTx, lv.connsCount, connIndex)
-		br := applyTCPBrutal(tcpConn, resp.BrutalTotalTx, legacyRateBps, groupID)
+	// TLS 和 TLSVPN 应用层握手都已完成，现在才切换 TCP congestion control。
+	// 优先使用服务端裁剪后的会话总预算；若对端未提供 group 语义，则兼容旧端，
+	// 按客户端自己的配置使用原逐连接预算。这样 Brutal 永远不会影响 TLS 握手可靠性。
+	if lv.brutal && clientTxRateBps > 0 {
+		totalRate := lv.brutalUp
+		legacyRateBps := clientTxRateBps
+		if resp.BrutalGroups && resp.BrutalTotalTx > 0 {
+			totalRate = resp.BrutalTotalTx
+			legacyRateBps = splitLegacyBrutalRateBps(resp.BrutalTotalTx, lv.connsCount, connIndex)
+		}
+		br := applyTCPBrutal(tcpConn, totalRate, legacyRateBps, groupID)
 		ci.brutal.Store(br.clone())
 		if !br.Applied {
-			log.Warnf("[Conn %d] negotiated TCP Brutal rate could not be applied: %s", connIndex, br.Error)
+			log.Warnf("[Conn %d] TCP Brutal shaping skipped after handshake: %s", connIndex, br.Error)
 		} else if br.Error != "" {
-			log.Warnf("[Conn %d] negotiated TCP Brutal rate is active with limited observability: %s", connIndex, br.Error)
+			log.Warnf("[Conn %d] TCP Brutal shaping active after handshake with limited observability: %s", connIndex, br.Error)
 		}
 	}
 
