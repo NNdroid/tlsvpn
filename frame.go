@@ -17,6 +17,36 @@ type VPNFrame struct {
 	Data []byte
 }
 
+// 后端 channel 只需要复制 VPNFrame 描述符；payload 的所有权可以从
+// AsyncPort 批次直接转移给唯一数据后端，无需再次 clone 每个 []byte。
+// 小批次容器本身也池化，避免每次 dispatch 都 make([]VPNFrame, n)。
+const (
+	defaultVPNBatchCap = 64
+	maxPooledVPNBatchCap = 512
+)
+
+var vpnFrameBatchPool = sync.Pool{
+	New: func() any { return make([]VPNFrame, 0, defaultVPNBatchCap) },
+}
+
+func getVPNFrameBatch(n int) []VPNFrame {
+	b := vpnFrameBatchPool.Get().([]VPNFrame)
+	if cap(b) < n {
+		return make([]VPNFrame, n)
+	}
+	return b[:n]
+}
+
+func putVPNFrameBatch(b []VPNFrame) {
+	if b == nil {
+		return
+	}
+	clear(b) // 清掉 Data 指针，避免池对象把 frame buffer 长期保活
+	if cap(b) <= maxPooledVPNBatchCap {
+		vpnFrameBatchPool.Put(b[:0])
+	}
+}
+
 // framePoolSizes 帧缓冲尺寸分档。旧实现只有单一 32KB 缓冲，对典型 1500B
 // 以太网帧利用率约 5%：整页被标脏、放大 cache 行污染，并让 GC 扫描更大的
 // 可达对象图。按尺寸分档后每档都被真正写满。
