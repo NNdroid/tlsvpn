@@ -19,22 +19,20 @@ type VPNFrame struct {
 
 // 后端 channel 只需要复制 VPNFrame 描述符；payload 的所有权可以从
 // AsyncPort 批次直接转移给唯一数据后端，无需再次 clone 每个 []byte。
-// 小批次容器本身也池化，避免每次 dispatch 都 make([]VPNFrame, n)。
-const (
-	defaultVPNBatchCap = 64
-	maxPooledVPNBatchCap = 512
-)
+//
+// 典型 1500B 数据在 64KB 聚合上限下每批约 40~50 帧；128 档覆盖常见路径。
+// 池里存 *[128]VPNFrame 而不是 []VPNFrame，避免 slice header 装箱逃逸。
+const hotVPNBatchCap = 128
 
 var vpnFrameBatchPool = sync.Pool{
-	New: func() any { return make([]VPNFrame, 0, defaultVPNBatchCap) },
+	New: func() any { return new([hotVPNBatchCap]VPNFrame) },
 }
 
 func getVPNFrameBatch(n int) []VPNFrame {
-	b := vpnFrameBatchPool.Get().([]VPNFrame)
-	if cap(b) < n {
-		return make([]VPNFrame, n)
+	if n <= hotVPNBatchCap {
+		return vpnFrameBatchPool.Get().(*[hotVPNBatchCap]VPNFrame)[:n]
 	}
-	return b[:n]
+	return make([]VPNFrame, n)
 }
 
 func putVPNFrameBatch(b []VPNFrame) {
@@ -42,8 +40,8 @@ func putVPNFrameBatch(b []VPNFrame) {
 		return
 	}
 	clear(b) // 清掉 Data 指针，避免池对象把 frame buffer 长期保活
-	if cap(b) <= maxPooledVPNBatchCap {
-		vpnFrameBatchPool.Put(b[:0])
+	if cap(b) == hotVPNBatchCap {
+		vpnFrameBatchPool.Put((*[hotVPNBatchCap]VPNFrame)(b[:hotVPNBatchCap]))
 	}
 }
 
