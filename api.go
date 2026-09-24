@@ -65,6 +65,9 @@ type WebStats struct {
 	ServerConns []serverConnSnapshot `json:"server_conns,omitempty"` // server 模式物理连接明细
 	FecMode     string               `json:"fec_mode,omitempty"`     // client 模式 FEC 状态
 	EncAlgo     int                  `json:"enc_algo,omitempty"`
+	// client 模式会话级密钥代际。服务端逐连接有 session_epoch，客户端只有一条
+	// 逻辑会话，故放在顶层；连接表按列展示它，代际漂移一眼可见。
+	SessionEpoch uint64 `json:"session_epoch,omitempty"`
 	// 面板"状态"页数据源：生效配置、运行时协商、宿主系统
 	Cfg       runtimeCfgJSON `json:"cfg"`
 	Negotiate runtimeNegJSON `json:"negotiate"`
@@ -356,7 +359,7 @@ footer { text-align:center; color:var(--muted); font-size:.78em; margin-top:16px
   <div class="pane" id="pane-conns">
     <div class="logbar"><input id="conn-filter" data-i18n-ph="filter_ph" oninput="fetchStats()" style="width:220px"></div>
     <div style="overflow-x:auto"><table>
-      <thead><tr><th data-i18n="th.owner">-</th><th data-i18n="th.target">-</th><th data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th data-i18n="th.rtt">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th class="hide-sm" data-i18n="th.retries">-</th>	<th class="hide-sm" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
+      <thead><tr><th data-i18n="th.owner">-</th><th data-i18n="th.target">-</th><th data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th data-i18n="th.rtt">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th class="hide-sm" data-i18n="th.retries">-</th>	<th class="hide-sm" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.epoch">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
       <tbody id="conns-body"></tbody>
     </table></div>
   </div>
@@ -429,7 +432,7 @@ const I18N={
 'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',dropped:'丢帧(队列)',reorder:'重排跳过',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
  chart:{title:'吞吐趋势',win:'(近 120 秒)'},legend:{up:'上行',down:'下行'},
 	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',status:'运行状态',logs:'日志',settings:'设置'},
- th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',err:'最近错误'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
  filter_ph:'输入关键字过滤…',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
@@ -451,7 +454,7 @@ const I18N={
 'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',reorder:'Reorder skipped',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
  chart:{title:'Throughput',win:'(last 120s)'},legend:{up:'Up',down:'Down'},
 	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',status:'Runtime status',logs:'Logs',settings:'Settings'},
- th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',err:'Last error'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
  filter_ph:'Type to filter…',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
@@ -689,9 +692,9 @@ function renderConns(data){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({owner:shortId(c.client_id,10),fullId:c.client_id,target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:'',age:c.age_sec,err:'',enc:c.enc_algo,fec:c.fec||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0}));
+    (data.server_conns||[]).forEach(c=>rows.push({owner:shortId(c.client_id,10),fullId:c.client_id,target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:'',age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0}));
   }else{
-    (data.conns||[]).forEach(c=>rows.push({owner:'local',fullId:null,target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
+    (data.conns||[]).forEach(c=>rows.push({owner:'local',fullId:null,target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:data.session_epoch||0,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
   }
   const f=(document.getElementById('conn-filter').value||'').toLowerCase();
   if(f)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(f));
@@ -710,10 +713,11 @@ function renderConns(data){
     return '<tr><td>'+esc(r.owner)+'</td><td>'+esc(r.target||'-')+'</td><td>'+esc(r.remote||'-')+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td>'+rtt+'</td><td>'+fmtBytes(r.tx)+'</td><td>'+fmtBytes(r.rx)+'</td>'+
       '<td class="hide-sm">'+(r.retries===''?'-':r.retries)+'</td><td class="hide-sm">'+(r.age?fmtDur(r.age):'-')+'</td>'+
+      '<td class="hide-sm" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm" style="color:var(--err)" title="'+esc(r.err||r.brutErr)+'">'+esc(String(r.err||r.brutErr).slice(0,40))+'</td><td>'+ops+'</td></tr>';
-  }).join('')||'<tr><td colspan="14" style="color:var(--muted)">'+t('no_conns')+'</td></tr>';
+  }).join('')||'<tr><td colspan="15" style="color:var(--muted)">'+t('no_conns')+'</td></tr>';
 }
 function renderMacs(data){
   const tb=document.getElementById('macs-body');
@@ -1214,7 +1218,9 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		cli.sessionMu.Lock()
 		v4, v6 := cli.assignedV4, cli.assignedV6
 		mac := cli.macAddr
+		sessionEpoch := cli.sessionEpoch
 		cli.sessionMu.Unlock()
+		stats.SessionEpoch = sessionEpoch
 		conns := int(atomic.LoadInt32(&cli.liveConns))
 		fec := cli.fecStatus
 		lv := cli.live.Load()

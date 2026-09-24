@@ -1558,10 +1558,18 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
+				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
+				// （约 15 分钟才放弃），期间心跳停发，服务端先在自己的读超时上判死
+				// 本端连接，而本端读方向可能仍在正常收帧——面板显示 tunnel up 但
+				// 链路已单向死亡。加超时后本端 10s 内自发现并重拨。
+				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
+					tlsConn.SetWriteDeadline(time.Time{})
 					errChan <- err
 					return
 				}
+				tlsConn.SetWriteDeadline(time.Time{})
 			}
 		}
 	}()

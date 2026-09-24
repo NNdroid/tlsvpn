@@ -1510,10 +1510,19 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
+				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
+				// （约 15 分钟才放弃），期间心跳停发，客户端先在自己的读超时上判死
+				// 本端连接，而服务端仍自认为在线——"connection lost: i/o timeout"
+				// 的唯一成因。加超时后本端 10s 内自发现并断连。
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if _, err := conn.Write(sendBuffer); err != nil {
+					conn.SetWriteDeadline(time.Time{})
+					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
 					conn.Close()
 					return
 				}
+				conn.SetWriteDeadline(time.Time{})
 			}
 		}
 	}()
