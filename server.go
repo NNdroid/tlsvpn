@@ -176,7 +176,14 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 			return
 		}
 		srcShard.mu.Lock()
-		srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedAt: time.Now()}
+		now := time.Now()
+		if current := srcShard.macTable[srcMAC]; current != nil {
+			// 已学习 MAC 的 5s refresh 直接原位更新，避免周期性分配 *macEntry。
+			current.portID = srcPortID
+			current.updatedAt = now
+		} else {
+			srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedAt: now}
+		}
 		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
 		srcShard.mu.Unlock()
 	}
@@ -275,7 +282,7 @@ type ClientSession struct {
 	TxPackets          uint64
 	RxPackets          uint64
 	// 会话保活与生命周期控制
-	sessionMu    sync.Mutex
+	sessionMu    sync.RWMutex
 	destroyTimer *time.Timer
 	// 该会话的物理连接注册表：Web 面板踢出时逐个关闭，并输出连接明细
 	connsMu sync.Mutex
@@ -1552,11 +1559,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 
 		if err == nil && frame != nil {
-			session.sessionMu.Lock()
+			// 多条物理连接同时收包时这里只读会话 epoch/FEC/reorder 指针；
+			// RWMutex 允许并发读，避免原 Mutex 把所有 RX 热路径串行化。
+			session.sessionMu.RLock()
 			currentEpoch := session.Epoch
 			fecDec := session.FecDec
 			rxReorder := session.RxReorder
-			session.sessionMu.Unlock()
+			session.sessionMu.RUnlock()
 			if ci.epoch != currentEpoch {
 				putFrame(frame)
 				return
