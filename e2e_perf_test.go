@@ -254,6 +254,12 @@ func TestPerfThroughput(t *testing.T) {
 	mbps := float64(got*8) / duration.Seconds() / 1e6
 	t.Logf("throughput: %.1f Mbps delivered (%d frames injected, %d bytes in %v)",
 		mbps, injectedFrames.Load(), got, duration)
+	rec, lost := h.cli.FECStats()
+	t.Logf("dataplane stats: txPortDropped=%d parity=%d fecRecovered=%d fecLost=%d reorder=%+v txBytes=%d txPackets=%d rxBytes=%d rxPackets=%d",
+		h.cli.txPort.Dropped(), h.cli.txPort.ParitySent(), rec, lost,
+		h.cli.rxReorder.Stats(),
+		atomic.LoadUint64(&h.cli.TxBytes), atomic.LoadUint64(&h.cli.TxPackets),
+		atomic.LoadUint64(&h.cli.RxBytes), atomic.LoadUint64(&h.cli.RxPackets))
 	if mbps < 5 {
 		t.Fatalf("tunnel throughput below 5 Mbps: %.2f", mbps)
 	}
