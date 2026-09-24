@@ -215,9 +215,11 @@ func (p *AsyncPort) run() {
 //
 // 每个后端收到的帧均经过深拷贝、彼此独立，由发送协程发送后归还内存池。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
+	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
+	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
 	p.backendsMu.RLock()
-	backends := append([]*Backend(nil), p.backends...)
-	p.backendsMu.RUnlock()
+	defer p.backendsMu.RUnlock()
+	backends := p.backends
 	if len(backends) == 0 {
 		p.dropN(len(batch))
 		freeFrames(batch)
@@ -232,6 +234,8 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 			}
 		}
 		best := p.pickBackend(backends)
+		// 数据 batch 只发往一个 MinRTT 后端，payload 所有权可直接转移，
+		// 不再为每帧 cloneFrame + memcpy。
 		p.dropN(sendBatchTo(best, batch))
 		for _, par := range parities {
 			p.paritySent.Add(1)
@@ -241,12 +245,10 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 			}
 			putFrame(par)
 		}
-		freeFrames(batch)
 		return
 	}
 
 	p.dropN(sendBatchTo(p.pickBackend(backends), batch))
-	freeFrames(batch)
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -311,32 +313,35 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	return bestBackend
 }
 
-// sendBatchTo 深拷贝整批帧后投递给单个后端；队列满时丢弃并释放副本。
-// 返回实际丢弃的帧数（用于丢帧统计）。
+// sendBatchTo 把数据 batch 的 payload 所有权转移给唯一后端。
+// 只复制 VPNFrame 描述符，避免原实现每帧 cloneFrame 的 malloc+memcpy。
+// 成功或失败后，调用方 batch 中的 Data 都会被置 nil。
 func sendBatchTo(b *Backend, batch []VPNFrame) int {
-	copies := make([]VPNFrame, len(batch))
+	out := getVPNFrameBatch(len(batch))
+	copy(out, batch)
 	for i := range batch {
-		copies[i] = VPNFrame{Seq: batch[i].Seq, Data: cloneFrame(batch[i].Data)}
+		batch[i].Data = nil
 	}
 	select {
-	case b.ch <- copies:
+	case b.ch <- out:
 		return 0
 	default:
-		freeFrames(copies)
-		return len(copies)
+		freeFrames(out)
+		putVPNFrameBatch(out)
+		return len(out)
 	}
 }
 
-// sendFrameTo 深拷贝单帧后投递给单个后端；队列满时丢弃并释放副本
+// parity 要广播到多个后端，payload 仍需独立副本；但单帧 batch 容器复用池。
 func sendFrameTo(b *Backend, vf VPNFrame) int {
-	cp := VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
+	out := getVPNFrameBatch(1)
+	out[0] = VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
 	select {
-	case b.ch <- []VPNFrame{cp}:
+	case b.ch <- out:
 		return 0
 	default:
-		if cp.Data != nil {
-			putFrame(cp.Data)
-		}
+		freeFrames(out)
+		putVPNFrameBatch(out)
 		return 1
 	}
 }
@@ -1550,8 +1555,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				for _, vf := range frames {
 					sendBuffer = appendPaddedFrame(sendBuffer, vf, icTx)
 				}
-				// 副本所有权归本协程：发送后无条件归还（深拷贝分发保证独立）
+				// payload 与 batch 描述符所有权都归本协程：发送前成帧完成后即可回池。
 				freeFrames(frames)
+				putVPNFrameBatch(frames)
 				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				_, err := tlsConn.Write(sendBuffer)
 				tlsConn.SetWriteDeadline(time.Time{})
