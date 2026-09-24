@@ -30,21 +30,21 @@ func (c *Client) notifyNetifdUp(v4, v6, gw4, gw6 string) error {
 	}
 
 	c.netifdMu.Lock()
+	defer c.netifdMu.Unlock()
 	if sameNetifdLinkState(c.netifdState, v4, v6, gw4, gw6) {
-		c.netifdMu.Unlock()
 		return nil
 	}
-	c.netifdMu.Unlock()
 
+	// Serialize helper execution across multipath handshakes. Without holding
+	// this lock two connections can both observe the old state and race two
+	// netifd updates for the same interface.
 	if err := netifdLinkUp(c.netifdInterface, c.tapName, v4, v6, gw4, gw6); err != nil {
 		return err
 	}
 
-	c.netifdMu.Lock()
 	c.netifdState = netifdLinkState{
 		up: true, v4: v4, v6: v6, gw4: gw4, gw6: gw6,
 	}
-	c.netifdMu.Unlock()
 	return nil
 }
 
@@ -54,18 +54,15 @@ func (c *Client) notifyNetifdDown() error {
 	}
 
 	c.netifdMu.Lock()
+	defer c.netifdMu.Unlock()
 	if !c.netifdState.up {
-		c.netifdMu.Unlock()
 		return nil
 	}
-	c.netifdMu.Unlock()
 
 	if err := netifdLinkDown(c.netifdInterface, c.tapName); err != nil {
 		return err
 	}
 
-	c.netifdMu.Lock()
 	c.netifdState = netifdLinkState{}
-	c.netifdMu.Unlock()
 	return nil
 }
