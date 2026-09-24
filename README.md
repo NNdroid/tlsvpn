@@ -46,7 +46,7 @@ Minimal examples (full files ship in the repo root):
 
 ## Configuration Reference
 
-Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.session_token`, `server.max_sessions` and `server.fec_group_min`/`fec_group_max` are JSON-only — there are no CLI flags at all.
+Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.max_sessions` and `server.fec_group_min`/`fec_group_max` are JSON-only — there are no CLI flags at all.
 
 ### Top-level
 
@@ -76,11 +76,12 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 
 ### `server`
 
+Session resume tokens are mandatory and always enabled. There is no `server.session_token` switch; legacy configs containing that key are accepted during upgrade but the value is ignored.
+
 | Field | Default | Description |
 | --- | --- | --- |
 | `v4_cidr` / `v6_cidr` | `10.0.0.0/24` / `fd00::/64` | Address pools handed to clients |
 | `cert` / `key` | (Empty) | TLS pair; empty = self-signed, generated once and **persisted** so `cert_sha256` pinning survives restarts |
-| `session_token` | `false` | Resuming an existing session requires the per-session resume token. Off: `client_id`+PSK+MAC is enough to resume, so a PSK holder who knows the target MAC can impersonate that session (the id is derived from mac+psk). On: the token only ever crosses the session's own TLS connection, so a third party cannot obtain it. First connection is unaffected; flip both ends together |
 | `max_sessions` | `1024` | Concurrent session cap; excess handshakes are tarpitted |
 | `fec_group_min` / `fec_group_max` | `2` / `64` | Range of peer FEC group sizes K the server will accept. A handshake that requests FEC with K outside the range is **refused** (not clamped) — the peer chose its own coding parameter, and silently changing K would make it pay a different redundancy ratio unknowingly. Defaults are the protocol limits, so no extra limit applies unless configured. Direction: the parity is broadcast to all N backends, so the ratio is N/K — raising `min` (floor) bounds bandwidth usage, lowering `max` (ceiling) bounds the pending-frame buffer and recovery latency |
 
