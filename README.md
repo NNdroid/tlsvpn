@@ -86,6 +86,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 
 | Field | Default | Description |
 | --- | --- | --- |
+| `interface_manager` | `self` | L3 ownership: `self` keeps the normal Linux behavior; `netifd` is reserved for the OpenWrt protocol handler, where netifd owns addresses/routes/firewall lifecycle |
 | `conns` | `1` | Parallel TCP connections |
 | `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; the parity is broadcast to all N backends, so the redundancy ratio is N/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
 | `sni` | `www.cloudflare.com` | Camouflage SNI |
@@ -97,7 +98,40 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `extra_routes` | `[]` | Extra routes into the fwmark table, in iproute2 serialization form — one prefix plus an optional `dev`, e.g. `"fd99:10:5:8::/64 dev tap0"`. The address family is inferred from the prefix; with no `dev` the tunnel TAP is used. Validated when the config loads, not after the tunnel handshake |
 | `source_rules` | `[]` | Policy-routing rules matched on the packet's **source prefix** instead of `SO_MARK`: each entry installs `ip rule from <from> table <table>` plus that table's default routes (from the gateways the server sends) and any `routes` you list. For traffic that has no socket to mark — forwarded packets on an NPT gateway, whose return flow must be pinned to the tunnel TAP. `from` may be a bare address (completed to a host route); `table` is mandatory, in `[1, 65535]` and not the reserved `253`/`254`/`255`; `priority` uint32, `0` = kernel-assigned. Validated when the config loads |
 
-**Policy routing is owned by the process, not by systemd.** With a non-zero `fwmark` — or a non-empty `source_rules` — the client installs the `ip rule` entries and the routes itself, and removes everything it installed on exit. For the fwmark rule the table number is always equal to the fwmark value — `fwmark` `0x100` means table `256`; `source_rules` tables are whatever you configured and nothing derives them. It waits up to 30 s for the TAP to exist and be up before touching routing, so a network manager that creates the device later needs no separate ordering unit. Do **not** also keep an external drop-in doing the same work: two rules for one fwmark compete by priority, the kernel serves whichever wins, and each of them believes it owns the table.
+**Policy routing ownership depends on `client.interface_manager`.** In the default `self` mode, the process owns its `fwmark`/`source_rules` entries and route tables and removes everything it installed on exit. In `netifd` mode those fields are intentionally rejected: OpenWrt owns addresses, routes, metrics and firewall lifecycle, while TLSVPN only owns the TAP and data plane. Do not configure the same routes in both layers.
+
+## OpenWrt / netifd protocol mode
+
+The `feature/openwrt-netifd-proto` integration can expose a TLSVPN client as a native OpenWrt network interface. TLSVPN still creates the TAP and runs the TLS/FEC/multipath data plane, but it does **not** call `AddrReplace` or install policy-routing rules in this mode. Instead, fixed helpers under `/lib/netifd/` report the negotiated IPv4/IPv6 addresses and gateways to netifd.
+
+The repository contains two OpenWrt package templates:
+
+- `openwrt/package/tlsvpn`: builds the `tlsvpn` binary plus the `tlsvpn-proto` netifd handler.
+- `openwrt/luci-proto-tlsvpn`: adds **Network → Interfaces → Protocol: TLSVPN** to LuCI.
+
+A minimal UCI interface looks like:
+
+```uci
+config interface 'vpn'
+        option proto 'tlsvpn'
+        option server 'vpn.example.com:4000'
+        option psk 'REPLACE-WITH-A-HIGH-ENTROPY-SECRET'
+        option conns '4'
+        option fec '1'
+        option fec_group '4'
+        option encrypt '1'
+        option brutal '1'
+        option brutal_up '100'
+        option brutal_down '500'
+        option defaultroute '1'
+        option metric '10'
+```
+
+The protocol handler resolves every transport endpoint before starting TLSVPN, installs netifd host dependencies for exactly those resolved IPs, and passes the same fixed IP:port list to the process. This prevents a VPN default route from recursively capturing its own TLS transport after a later DNS answer. If an underlying OpenWrt network should be forced, set `option tunlink 'wan'` (or another network name).
+
+The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
+
+The package template tracks this development branch for convenience. Before publishing it as a feed package, replace `PKG_SOURCE_VERSION` with an immutable commit SHA and provide the corresponding mirror hash. The OpenWrt Go toolchain must also satisfy the Go version declared in this repository's `go.mod`.
 
 ## Dashboard & Metrics
 
