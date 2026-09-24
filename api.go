@@ -198,17 +198,18 @@ type runtimeCfgJSON struct {
 // runtimeNegJSON 运行时协商结果快照。客户端模式是端到端会话的实际参数，
 // 服务端模式是本机作为接收端的配置意图（真实结果逐连接看 server_conns）。
 type runtimeNegJSON struct {
-	ProtocolVersion int            `json:"protocol_version"`
-	FEC             bool           `json:"fec"`
-	FecGroup        int            `json:"fec_group"`
-	EncAlgo         int            `json:"enc_algo"`
-	PadMode         string         `json:"pad_mode"`
-	MinEnc          string         `json:"min_enc,omitempty"`
-	SessionToken    bool           `json:"session_token"`
-	SessionEpoch    uint64         `json:"session_epoch"`
-	TxRateMbps      uint64         `json:"tx_rate_mbps"`
-	RxRateMbps      uint64         `json:"rx_rate_mbps"`
-	Brutal          brutalInfoJSON `json:"brutal"`
+	ProtocolVersion int               `json:"protocol_version"`
+	FEC             bool              `json:"fec"`
+	FecGroup        int               `json:"fec_group"`
+	EncAlgo         int               `json:"enc_algo"`
+	PadMode         string            `json:"pad_mode"`
+	MinEnc          string            `json:"min_enc,omitempty"`
+	SessionToken    bool              `json:"session_token"`
+	SessionEpoch    uint64            `json:"session_epoch"`
+	TxRateMbps      uint64            `json:"tx_rate_mbps"`
+	RxRateMbps      uint64            `json:"rx_rate_mbps"`
+	TLS             *TLSHandshakeInfo `json:"tls,omitempty"`
+	Brutal          brutalInfoJSON    `json:"brutal"`
 	// 策略路由生效状态。fwmark>0 但这里为 false 就意味着规则没装进内核，
 	// 隧道在线而本机不通，只能靠面板看到。
 	PolicyRouting    bool   `json:"policy_routing,omitempty"`
@@ -443,7 +444,7 @@ const I18N={
    restart:'以下字段已修改，需要重启进程才能生效：',norestart:'无字段需要重启生效',noneg:'尚未与对端完成握手',
    noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
    sys:{os:'操作系统',arch:'CPU 架构',go:'Go 版本',cpu:'CPU 核数',host:'主机名',cfgpath:'配置文件',ver:'程序版本'},
-   neg:{proto:'协议版本',fec:'FEC',grp:'FEC 分组',enc:'内层加密',pad:'填充模式',minenc:'最低加密要求',stoken:'Session Token',epoch:'密钥代际',tx:'客户端 → 服务端（上行）',rx:'服务端 → 客户端（下行）',prroute:'策略路由生效'},
+	  neg:{proto:'协议版本',fec:'FEC',grp:'FEC 分组',enc:'内层加密',pad:'填充模式',minenc:'最低加密要求',stoken:'Session Token',epoch:'密钥代际',tx:'客户端 → 服务端（上行）',rx:'服务端 → 客户端（下行）',prroute:'策略路由生效',tlsfp:'最近连接 ClientHello 指纹（非 JA3/JA4）',tlsver:'TLS 协商版本',tlscipher:'TLS 协商套件',tlsalpn:'TLS ALPN',tlssni:'TLS SNI',tlsoffer:'ClientHello 特征数'},
    brut:{en:'开关',up:'上行总量',down:'下行总量',kern:'内核支持',cur:'当前拥塞控制',avail:'可用拥塞控制',applied:'已生效 / 总数',perconn:'每连接速率',errs:'失败原因',off:'未启用'},
    yes:'是',no:'否'},
  set:{hint:'编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数（列出的字段需重启生效）。',
@@ -465,7 +466,7 @@ const I18N={
    restart:'These fields changed and require a process restart:',norestart:'Nothing pending restart',noneg:'Handshake with peer not completed yet',
    noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
    sys:{os:'OS',arch:'CPU arch',go:'Go version',cpu:'CPU cores',host:'Hostname',cfgpath:'Config file',ver:'App version'},
-   neg:{proto:'Protocol version',fec:'FEC',grp:'FEC group',enc:'Inner cipher',pad:'Padding mode',minenc:'Minimum cipher',stoken:'Session token',epoch:'Key epoch',tx:'Client → server (uplink)',rx:'Server → client (downlink)',prroute:'Policy routing applied'},
+	  neg:{proto:'Protocol version',fec:'FEC',grp:'FEC group',enc:'Inner cipher',pad:'Padding mode',minenc:'Minimum cipher',stoken:'Session token',epoch:'Key epoch',tx:'Client → server (uplink)',rx:'Server → client (downlink)',prroute:'Policy routing applied',tlsfp:'Latest connection ClientHello fingerprint (not JA3/JA4)',tlsver:'Negotiated TLS version',tlscipher:'Negotiated TLS cipher',tlsalpn:'TLS ALPN',tlssni:'TLS SNI',tlsoffer:'ClientHello feature counts'},
    brut:{en:'Enabled',up:'Upstream total',down:'Downstream total',kern:'Kernel support',cur:'Current CC',avail:'Available CC',applied:'Applied / total',perconn:'Per-conn rate',errs:'Failure reasons',off:'Not enabled'},
    yes:'yes',no:'no'},
  set:{hint:'Edit the JSON config. Save: write back to the config file. Save & apply: write back and hot-apply runtime parameters (listed fields require a restart).',
@@ -618,7 +619,7 @@ function ntxt(){return '<span style="color:var(--muted)">-</span>';}
 function encName(a){return a===2?'AES-256-GCM':(a===0?'none (TLS only)':String(a));}
 function rateRange(lo,hi){if(!lo&&!hi)return '-';return (lo===hi?String(lo):lo+'~'+hi)+' Mbps';}
 function renderStatus(data){
-  const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},cfg=data.cfg||{};
+  const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{};
   const rw=document.getElementById('status-restart');
   const rn=sys.needs_restart||[];
   if(rn.length){rw.style.display='';rw.innerHTML='<strong>'+t('stt.restart')+'</strong><br><span class="mono">'+esc(rn.join(', '))+'</span>';}
@@ -646,6 +647,12 @@ function renderStatus(data){
     nrw.push([t('stt.neg.epoch'),neg.session_epoch?String(neg.session_epoch):ntxt()]);
     nrw.push([t('stt.neg.tx'),(neg.tx_rate_mbps||0)+' Mbps']);
     nrw.push([t('stt.neg.rx'),(neg.rx_rate_mbps||0)+' Mbps']);
+	  nrw.push([t('stt.neg.tlsfp'),tls.fingerprint_sha256?mtxt(tls.fingerprint_kind+':'+tls.fingerprint_sha256):ntxt()]);
+	  nrw.push([t('stt.neg.tlsver'),tls.version?mtxt(tls.version+' (0x'+Number(tls.version_id||0).toString(16).padStart(4,'0')+')'):ntxt()]);
+	  nrw.push([t('stt.neg.tlscipher'),tls.cipher_suite?mtxt(tls.cipher_suite+' (0x'+Number(tls.cipher_suite_id||0).toString(16).padStart(4,'0')+')'):ntxt()]);
+	  nrw.push([t('stt.neg.tlsalpn'),tls.alpn?mtxt(tls.alpn):ntxt()]);
+	  nrw.push([t('stt.neg.tlssni'),tls.sni?mtxt(tls.sni):ntxt()]);
+	  nrw.push([t('stt.neg.tlsoffer'),tls.fingerprint_sha256?mtxt((tls.offered_cipher_suites||[]).length+' cipher / '+(tls.offered_signature_schemes||[]).length+' sig / '+(tls.offered_groups||[]).length+' group / '+(tls.offered_alpn||[]).length+' ALPN'):ntxt()]);
     // 配了 fwmark 才显示：策略路由是否真的装进内核，以及失败原因。
     if(neg.policy_routing!==undefined){
       nrw.push([t('stt.neg.prroute'),neg.policy_routing_error
@@ -1366,6 +1373,7 @@ func (c *Client) negSnapshot() runtimeNegJSON {
 		n.SessionToken = neg.SessionToken
 		n.TxRateMbps = neg.TxRateMbps
 		n.RxRateMbps = neg.RxRateMbps
+		n.TLS = neg.TLS
 	}
 	if epoch != 0 {
 		n.SessionEpoch = epoch

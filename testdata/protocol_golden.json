@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "psk_hashes": [
     {
       "psk": "",
@@ -66,6 +66,39 @@
       "header_hex": "0000ffffffffffffffff"
     }
   ],
+  "tls_fingerprint_vectors": [
+    {
+      "cipher_suites": [
+        2570,
+        4865,
+        4866,
+        49199
+      ],
+      "signature_schemes": [
+        2052,
+        1027
+      ],
+      "groups": [
+        6682,
+        29,
+        23
+      ],
+      "alpn": [
+        "h2",
+        "http/1.1"
+      ],
+      "fingerprint_sha256": "34dbfe52fd7fd02415290a74053a9f194eae601e8e0c536566ca06fa27d58a2f"
+    },
+    {
+      "cipher_suites": [
+        4867
+      ],
+      "signature_schemes": [],
+      "groups": [],
+      "alpn": [],
+      "fingerprint_sha256": "3776d01dc44e9c2ed7f43f839c0273569b8cec4570cc18437797cd1258760c61"
+    }
+  ],
   "handshake_req_keys": [
     "brutal_conn_index",
     "brutal_conns",
@@ -107,6 +140,21 @@
     "session_epoch",
     "session_id",
     "session_token",
-    "success"
+    "success",
+    "tls"
+  ],
+  "tls_info_keys": [
+    "alpn",
+    "cipher_suite",
+    "cipher_suite_id",
+    "fingerprint_kind",
+    "fingerprint_sha256",
+    "offered_alpn",
+    "offered_cipher_suites",
+    "offered_groups",
+    "offered_signature_schemes",
+    "sni",
+    "version",
+    "version_id"
   ]
 }

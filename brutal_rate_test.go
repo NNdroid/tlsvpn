@@ -56,7 +56,7 @@ func TestSendRespRateDirections(t *testing.T) {
 	if err := (&Server{}).sendResp(&buf, true, "OK", "cid", "sid",
 		"10.8.0.0/24", "fd00::/80",
 		true, 30, 500, // group 语义：客户端上行总量, 客户端下行总量
-		false, 0, encAlgoGCM, "", "", "", true, 2, 3); err != nil {
+		false, 0, encAlgoGCM, "", "", "", true, 2, 3, nil); err != nil {
 		t.Fatalf("发送握手响应失败：%v", err)
 	}
 
@@ -95,7 +95,7 @@ func TestSendRespPropagatesWriteFailure(t *testing.T) {
 	err := (&Server{}).sendResp(failingHandshakeWriter{}, true, "OK", "cid", "sid",
 		"10.8.0.0/24", "fd00::/80",
 		false, 0, 0,
-		false, 0, encAlgoNone, "", "", "", false, 2, 1)
+		false, 0, encAlgoNone, "", "", "", false, 2, 1, nil)
 	if err == nil {
 		t.Fatal("sendResp swallowed the handshake response write failure")
 	}

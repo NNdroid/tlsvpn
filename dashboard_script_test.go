@@ -177,6 +177,23 @@ func TestDashboardEscapesHTMLAndAttributeDelimiters(t *testing.T) {
 	}
 }
 
+func TestDashboardRendersServerObservedTLS(t *testing.T) {
+	for _, token := range []string{
+		"fingerprint_sha256", "fingerprint_kind", "cipher_suite_id", "offered_cipher_suites",
+		"ClientHello fingerprint (not JA3/JA4)",
+	} {
+		if !strings.Contains(dashboardHTML, token) {
+			t.Fatalf("dashboard does not render server-observed TLS field %q", token)
+		}
+	}
+	// 这些值来自对端 ClientHello，必须经过 mtxt/esc 后才允许进入 innerHTML。
+	for _, token := range []string{"mtxt(tls.fingerprint_kind+':'+tls.fingerprint_sha256)", "mtxt(tls.cipher_suite", "mtxt(tls.sni)"} {
+		if !strings.Contains(dashboardHTML, token) {
+			t.Fatalf("server-observed TLS value is not HTML escaped via %q", token)
+		}
+	}
+}
+
 // extractInlineScript 取出 HTML 里第一个 <script>...</script> 的脚本正文（不含标签）。
 func extractInlineScript(html string) string {
 	m := regexp.MustCompile(`(?s)(<script[^>]*>)(.*?)(</script>)`).FindStringSubmatch(html)

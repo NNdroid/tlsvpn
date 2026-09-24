@@ -114,7 +114,7 @@ func rawHandshake(t *testing.T, srv *Server, fec bool, k int) (*HandshakeResp, e
 
 	select {
 	case srvConn := <-accepted:
-		go srv.handleConnection(ctx, srvConn, srvConn)
+		go srv.handleConnection(ctx, srvConn, srvConn, nil)
 	case <-time.After(2 * time.Second):
 		t.Fatal("server did not accept")
 	}

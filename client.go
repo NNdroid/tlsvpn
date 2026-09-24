@@ -489,6 +489,7 @@ type sessionNeg struct {
 	SessionEpoch    uint64
 	TxRateMbps      uint64 // 服务端为本端上行分配的整形速率
 	RxRateMbps      uint64 // 服务端为本端下行分配的整形速率
+	TLS             *TLSHandshakeInfo
 }
 
 // liveConfig 客户端热更生效的连接相关参数快照（不含 TAP/MAC 等需重启项）
@@ -1433,6 +1434,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		SessionEpoch:    resp.SessionEpoch,
 		TxRateMbps:      negTx,
 		RxRateMbps:      negRx,
+		TLS:             resp.TLS,
 	}
 	c.gwV4 = resp.GwV4
 	c.gwV6 = resp.GwV6

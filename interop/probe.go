@@ -48,16 +48,30 @@ type handshakeReq struct {
 }
 
 type handshakeResp struct {
-	ProtocolVersion int    `json:"protocol_version"`
-	SessionEpoch    uint64 `json:"session_epoch"`
-	Success         bool   `json:"success"`
-	Message         string `json:"message"`
-	SessionID       string `json:"session_id"`
-	IPv4            string `json:"ipv4"`
-	Encrypt         bool   `json:"encrypt"`
-	EncAlgo         int    `json:"enc_algo"`
-	EncSalt         string `json:"enc_salt"`
-	EncSalt2        string `json:"enc_salt2"`
+	ProtocolVersion int               `json:"protocol_version"`
+	SessionEpoch    uint64            `json:"session_epoch"`
+	Success         bool              `json:"success"`
+	Message         string            `json:"message"`
+	SessionID       string            `json:"session_id"`
+	IPv4            string            `json:"ipv4"`
+	Encrypt         bool              `json:"encrypt"`
+	EncAlgo         int               `json:"enc_algo"`
+	EncSalt         string            `json:"enc_salt"`
+	EncSalt2        string            `json:"enc_salt2"`
+	TLS             *tlsHandshakeInfo `json:"tls"`
+}
+
+type tlsHandshakeInfo struct {
+	FingerprintKind         string   `json:"fingerprint_kind"`
+	FingerprintSHA256       string   `json:"fingerprint_sha256"`
+	VersionID               uint16   `json:"version_id"`
+	CipherSuiteID           uint16   `json:"cipher_suite_id"`
+	ALPN                    string   `json:"alpn"`
+	SNI                     string   `json:"sni"`
+	OfferedCipherSuites     []uint16 `json:"offered_cipher_suites"`
+	OfferedSignatureSchemes []uint16 `json:"offered_signature_schemes"`
+	OfferedGroups           []uint16 `json:"offered_groups"`
+	OfferedALPN             []string `json:"offered_alpn"`
 }
 
 type recordScanner struct {
@@ -205,6 +219,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:4400", "server address")
 	psk := flag.String("psk", "e2e_secret", "pre-shared key")
 	mac := flag.String("mac", "aa:bb:cc:dd:ee:ff", "client MAC")
+	sni := flag.String("sni", "www.cloudflare.com", "TLS server name sent in ClientHello")
 	sendN := flag.Int("send", 8, "number of encrypted data records")
 	timeoutSec := flag.Int("timeout", 10, "overall timeout in seconds")
 	encAlgo := flag.Int("enc-algo", 2, "declared inner encryption algorithm")
@@ -214,6 +229,7 @@ func main() {
 	defer cancel()
 	d := &tls.Dialer{Config: &tls.Config{ // Test-only probe; production clients must verify or pin the certificate.
 		InsecureSkipVerify: true, //nolint:gosec
+		ServerName:         *sni,
 		NextProtos:         []string{"h2", "http/1.1"},
 	}}
 	connRaw, err := d.DialContext(ctx, "tcp", *addr)
@@ -266,6 +282,21 @@ func main() {
 	if resp.ProtocolVersion != 2 || resp.SessionEpoch == 0 {
 		fatalf("server lacks protocol-v2 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
 	}
+	if resp.TLS == nil {
+		fatalf("server did not return server-observed TLS summary")
+	}
+	state := conn.ConnectionState()
+	if resp.TLS.FingerprintKind != "tls-clienthello-v1" || len(resp.TLS.FingerprintSHA256) != 64 {
+		fatalf("invalid TLS fingerprint metadata: kind=%q sha256=%q", resp.TLS.FingerprintKind, resp.TLS.FingerprintSHA256)
+	}
+	if resp.TLS.VersionID != state.Version || resp.TLS.CipherSuiteID != state.CipherSuite ||
+		resp.TLS.ALPN != state.NegotiatedProtocol || !strings.EqualFold(resp.TLS.SNI, *sni) {
+		fatalf("server-observed TLS negotiation mismatch: server=%+v local={version=%#x cipher=%#x alpn=%q sni=%q}",
+			*resp.TLS, state.Version, state.CipherSuite, state.NegotiatedProtocol, *sni)
+	}
+	if len(resp.TLS.OfferedCipherSuites) == 0 || len(resp.TLS.OfferedSignatureSchemes) == 0 || len(resp.TLS.OfferedGroups) == 0 || len(resp.TLS.OfferedALPN) == 0 {
+		fatalf("server returned incomplete ClientHello feature lists: %+v", *resp.TLS)
+	}
 	if !resp.Encrypt || (resp.EncAlgo != 2 && resp.EncAlgo != 3) {
 		fatalf("unexpected encryption negotiation: enabled=%v algo=%d", resp.Encrypt, resp.EncAlgo)
 	}
@@ -296,7 +327,7 @@ func main() {
 			fatalf("read data: %v", err)
 		}
 		if seq == 0 && len(body) == 0 {
-			fmt.Printf("PASS protocol=2 epoch=%d algo=%d session=%s ipv4=%s\n", resp.SessionEpoch, resp.EncAlgo, resp.SessionID, resp.IPv4)
+			fmt.Printf("PASS protocol=2 epoch=%d algo=%d session=%s ipv4=%s tls=%s:%s\n", resp.SessionEpoch, resp.EncAlgo, resp.SessionID, resp.IPv4, resp.TLS.FingerprintKind, resp.TLS.FingerprintSHA256)
 			return
 		}
 		if seq != 0 && bytes.HasPrefix(body, []byte("FAIL")) {

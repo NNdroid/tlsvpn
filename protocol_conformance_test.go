@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -42,10 +43,13 @@ type GoldenVectors struct {
 
 	// 帧头布局：10 字节头 [4B dataLen][2B padLen][4B seq]
 	FrameHeaders []FrameHeaderVec `json:"frame_headers"`
+	// 服务端观测 ClientHello 的跨语言规范化摘要
+	TLSFingerprintVectors []TLSFingerprintVec `json:"tls_fingerprint_vectors"`
 
 	// 握手 JSON 字段名契约
 	HandshakeReqKeys  []string `json:"handshake_req_keys"`
 	HandshakeRespKeys []string `json:"handshake_resp_keys"`
+	TLSInfoKeys       []string `json:"tls_info_keys"`
 }
 
 type GCMDomainVec struct {
@@ -69,9 +73,28 @@ type FrameHeaderVec struct {
 	HeaderHex string `json:"header_hex"`
 }
 
+type TLSFingerprintVec struct {
+	CipherSuites     []uint16 `json:"cipher_suites"`
+	SignatureSchemes []uint16 `json:"signature_schemes"`
+	Groups           []uint16 `json:"groups"`
+	ALPN             []string `json:"alpn"`
+	Fingerprint      string   `json:"fingerprint_sha256"`
+}
+
+func fullTLSInfoSample() *TLSHandshakeInfo {
+	return &TLSHandshakeInfo{
+		FingerprintKind: tlsClientHelloFingerprintKind, FingerprintSHA256: "abc",
+		VersionID: tls.VersionTLS13, Version: "TLS 1.3",
+		CipherSuiteID: 0x1301, CipherSuite: "TLS_AES_128_GCM_SHA256",
+		ALPN: "h2", SNI: "example.com",
+		OfferedCipherSuites: []uint16{0x1301}, OfferedSignatureSchemes: []uint16{0x0804},
+		OfferedGroups: []uint16{0x001d}, OfferedALPN: []string{"h2"},
+	}
+}
+
 // buildGoldenVectors 用当前 Go 实现计算出全部向量
 func buildGoldenVectors() *GoldenVectors {
-	gv := &GoldenVectors{Version: 1}
+	gv := &GoldenVectors{Version: 2}
 
 	for _, psk := range []string{"", "test_psk", "my_super_secret_test_key", "中文密钥🔑", "a"} {
 		gv.PSKHashes = append(gv.PSKHashes, PSKHashVec{PSK: psk, Hash: hashPSK(psk)})
@@ -117,6 +140,13 @@ func buildGoldenVectors() *GoldenVectors {
 			HeaderHex: hex.EncodeToString(hdr[:]),
 		})
 	}
+	for _, v := range []TLSFingerprintVec{
+		{CipherSuites: []uint16{0x0a0a, 0x1301, 0x1302, 0xc02f}, SignatureSchemes: []uint16{0x0804, 0x0403}, Groups: []uint16{0x1a1a, 0x001d, 0x0017}, ALPN: []string{"h2", "http/1.1"}},
+		{CipherSuites: []uint16{0x1303}, SignatureSchemes: []uint16{}, Groups: []uint16{}, ALPN: []string{}},
+	} {
+		v.Fingerprint = tlsClientHelloFingerprint(v.CipherSuites, v.SignatureSchemes, v.Groups, v.ALPN)
+		gv.TLSFingerprintVectors = append(gv.TLSFingerprintVectors, v)
+	}
 
 	// 两个样本都必须把 omitempty 字段填成非零值，否则 jsonFieldNames 收不到它们，
 	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
@@ -135,8 +165,9 @@ func buildGoldenVectors() *GoldenVectors {
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
-		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
 	})
+	gv.TLSInfoKeys = jsonFieldNames(*fullTLSInfoSample())
 
 	return gv
 }
@@ -248,6 +279,11 @@ func TestGoldenSelfConsistency(t *testing.T) {
 				h.DataLen, h.PadLen, h.Seq, h.HeaderHex, got)
 		}
 	}
+	for _, v := range gv.TLSFingerprintVectors {
+		if got := tlsClientHelloFingerprint(v.CipherSuites, v.SignatureSchemes, v.Groups, v.ALPN); got != v.Fingerprint {
+			t.Errorf("TLS ClientHello fingerprint mismatch: got %s want %s", got, v.Fingerprint)
+		}
+	}
 
 	// 握手键列表：Rust 端读它来对齐 serde 字段名，漏一个字段两端就静默错配。
 	// 按全填充样本复算再比对——样本必须填满 omitempty 字段，否则会自己漏掉
@@ -271,8 +307,9 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
-		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x",
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
 	}))
+	checkKeys("tls_info_keys", gv.TLSInfoKeys, jsonFieldNames(*fullTLSInfoSample()))
 }
 
 // TestHandshakeJSONContract 锁定握手 JSON 的字段名。
@@ -300,12 +337,12 @@ func TestHandshakeJSONContract(t *testing.T) {
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
 		Padding: "ab", BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, FEC: true, FecGroup: 4, Encrypt: true,
-		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "tok",
+		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "tok", TLS: fullTLSInfoSample(),
 	}
 	wantResp := []string{
 		"brutal_groups", "brutal_total_rx", "brutal_total_tx", "client_id", "enc_algo", "enc_salt", "enc_salt2",
 		"encrypt", "fec", "fec_group", "gw_v4", "gw_v6", "ipv4", "ipv6", "message",
-		"padding", "protocol_version", "session_epoch", "session_id", "session_token", "success",
+		"padding", "protocol_version", "session_epoch", "session_id", "session_token", "success", "tls",
 	}
 	if got := jsonFieldNames(resp); !equalStrings(got, wantResp) {
 		t.Errorf("HandshakeResp 字段名契约被破坏\n预期: %v\n实际: %v\nRust 端 serde 必须同步", wantResp, got)
@@ -343,6 +380,9 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 		if _, ok := rm[k]; !ok {
 			t.Errorf("HandshakeResp 字段 %q 必须始终出现", k)
 		}
+	}
+	if _, ok := rm["tls"]; ok {
+		t.Error("HandshakeResp 字段 \"tls\" 应因 omitempty 在旧式/空响应中省略")
 	}
 }
 

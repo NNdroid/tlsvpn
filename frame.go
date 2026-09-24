@@ -450,4 +450,7 @@ type HandshakeResp struct {
 	// SessionToken：本次会话的重连接入令牌（hex），客户端须在下一次握手回带。
 	// 仅在服务端开启 session_token 时下发。
 	SessionToken string `json:"session_token,omitempty"`
+	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要。新增客户端接受
+	// 字段缺失，旧客户端会忽略该可选字段，支持滚动升级与回滚。
+	TLS *TLSHandshakeInfo `json:"tls,omitempty"`
 }

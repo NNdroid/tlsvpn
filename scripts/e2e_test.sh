@@ -13,6 +13,8 @@
 #                              session token off, FEC group 8)
 #   K  rs_srv  <- go_cli      (cross-language, plain: encryption, padding and
 #                              FEC all off)
+#   L  go/rs servers <- independent Go TLS probe (server-observed ClientHello
+#                      summary, negotiated fields and cross-server fingerprint)
 #   E  go_srv  <- go_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #   F  go_srv  <- rs_cli via SOCKS5 proxy   (proxy group, client-only feature)
 #   G  perf suite (in-process, Go side)
@@ -291,6 +293,41 @@ run_group_K() {
   stop_client 18089; stop_server 18089
 }
 
+# Group L validates the optional TLS diagnostics with an independent protocol
+# client. The probe checks that the server-observed version/cipher/ALPN/SNI match
+# its local TLS state and that all normalized ClientHello feature lists exist.
+# Running the exact same probe against both implementations must produce the
+# same fingerprint; this catches Go/Rust canonicalization or GREASE drift.
+run_group_L() {
+  local exe="" probe psk go_out rs_out go_fp rs_fp
+  [[ "$(go env GOOS)" == "windows" ]] && exe=".exe"
+  probe="$TEST_DIR/tlsinfo_probe$exe"
+  psk="$(e2e_psk)" || return 1
+  ( cd "$E2E_GO_SRC/interop" && go build -o "$probe" . ) || return 1
+
+  start_server "$BIN_GO" 18090 "${MATRIX_HARDENED[@]}" || return 1
+  if ! go_out="$("$probe" -addr 127.0.0.1:18090 -psk "$psk" -sni www.cloudflare.com -send 1 -timeout 8)"; then
+    stop_server 18090
+    return 1
+  fi
+  stop_server 18090
+
+  start_server "$BIN_RS" 18091 "${MATRIX_HARDENED[@]}" || return 1
+  if ! rs_out="$("$probe" -addr 127.0.0.1:18091 -psk "$psk" -sni www.cloudflare.com -send 1 -timeout 8)"; then
+    stop_server 18091
+    return 1
+  fi
+  stop_server 18091
+
+  go_fp="$(printf '%s\n' "$go_out" | sed -n 's/.* tls=\([^ ]*\).*/\1/p')"
+  rs_fp="$(printf '%s\n' "$rs_out" | sed -n 's/.* tls=\([^ ]*\).*/\1/p')"
+  if [[ -z "$go_fp" || "$go_fp" != "$rs_fp" ]]; then
+    err "group L: Go/Rust server TLS fingerprints differ: go=$go_fp rust=$rs_fp"
+    return 1
+  fi
+  ok "group L: server-observed TLS summary matched: $go_fp"
+}
+
 # Group E: Go client through SOCKS5 proxy -> Go server (client-only feature).
 run_group_E() {
   local port; port="$(ensure_socks5_proxy)" || { log "group E (go-socks5): microsocks not installed — skipping"; return 0; }
@@ -329,8 +366,11 @@ main() {
   setup_test_env
   resolve_binaries
   # Interop groups first (A-D on the default configuration, H-K on varied
-  # configurations), then the proxy-only groups, then the perf suite.
-  for g in A B C D H I J K E F G; do
+  # configurations), then the TLS-observation group, proxy-only groups and perf.
+  # E2E_GROUPS="L" (or a space-separated subset) makes focused regression runs
+  # cheap without weakening the default complete matrix.
+  local groups="${E2E_GROUPS:-A B C D H I J K L E F G}"
+  for g in $groups; do
     if run_group "$g"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
   done
   cleanup_test_env

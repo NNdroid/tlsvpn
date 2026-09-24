@@ -11,6 +11,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
 - **Layer-2 TAP** — ARP/DHCP/IPv6 all pass; static MAC/IP bindings; sharded MAC learning with anti-spoofing.
 - **Web dashboard + `/metrics`** — live monitoring, client ban/kick, in-panel config editor with hot-apply; Prometheus text endpoint.
+- **Server-observed TLS diagnostics** — every successful application handshake may include an optional `tls` summary containing the negotiated TLS version/cipher/ALPN/SNI plus the ordered ClientHello cipher, signature, group and ALPN features observed by the server. The client dashboard shows the resulting `tls-clienthello-v1` SHA-256. This project-specific digest filters GREASE and is deliberately labelled **not JA3/JA4** because the Go/Rust TLS APIs do not expose the complete raw extension order. It is diagnostic data, not an authentication identity; randoms, tickets, certificate bodies and key material are never returned.
 
 ## Quick Start
 

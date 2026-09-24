@@ -249,33 +249,33 @@ func (vs *VSwitch) allowFlood(srcPortID string) bool {
 
 // ======================= 服务端 =======================
 type ClientSession struct {
-	SessionID   string
-	Port        *AsyncPort
-	IPv4        string
-	IPv6        string
-	MAC         string
-	macBin      macKey // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
-	RxReorder   *ReorderBuffer
-	FecDec      *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
-	FecEncK     int               // 下行 XOR 分组大小（0 表示未启用）
-	FecMode     string            // 面板展示：xor K=d / off
-	EncAlgo     int               // 内层加密算法号（encAlgoNone / encAlgoGCM）
-	Encrypt     bool              // 建会话时 encrypt 的取值；仅用于面板展示，enc_algo 已足够区分
-	SaltA       [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
-	SaltB       [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
-	icTx        *innerCipher      // s2c 加密器
-	icRx        *innerCipher      // c2s 解密器
-	pskHash     string            // 创建本会话时的 hashPSK（见 handleConnection 复活分支）
-	InstanceID  string            // 客户端进程实例；变化时必须切换密钥代际
-	Epoch       uint64            // 当前密钥代际
-	ResumeToken        string // 当前已确认的 CSPRNG 会话持有证明
-	PendingResumeToken string // 两阶段 rollover：先下发、客户端回带后再正式替换 ResumeToken
+	SessionID          string
+	Port               *AsyncPort
+	IPv4               string
+	IPv6               string
+	MAC                string
+	macBin             macKey // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
+	RxReorder          *ReorderBuffer
+	FecDec             *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
+	FecEncK            int               // 下行 XOR 分组大小（0 表示未启用）
+	FecMode            string            // 面板展示：xor K=d / off
+	EncAlgo            int               // 内层加密算法号（encAlgoNone / encAlgoGCM）
+	Encrypt            bool              // 建会话时 encrypt 的取值；仅用于面板展示，enc_algo 已足够区分
+	SaltA              [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
+	SaltB              [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
+	icTx               *innerCipher      // s2c 加密器
+	icRx               *innerCipher      // c2s 解密器
+	pskHash            string            // 创建本会话时的 hashPSK（见 handleConnection 复活分支）
+	InstanceID         string            // 客户端进程实例；变化时必须切换密钥代际
+	Epoch              uint64            // 当前密钥代际
+	ResumeToken        string            // 当前已确认的 CSPRNG 会话持有证明
+	PendingResumeToken string            // 两阶段 rollover：先下发、客户端回带后再正式替换 ResumeToken
 	CreatedAt          time.Time
-	ActiveConns int
-	TxBytes     uint64
-	RxBytes     uint64
-	TxPackets   uint64
-	RxPackets   uint64
+	ActiveConns        int
+	TxBytes            uint64
+	RxBytes            uint64
+	TxPackets          uint64
+	RxPackets          uint64
 	// 会话保活与生命周期控制
 	sessionMu    sync.Mutex
 	destroyTimer *time.Timer
@@ -1037,7 +1037,19 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			c.SetReadBuffer(connReadBuf)
 			c.SetWriteBuffer(connWriteBuf)
 
-			tlsConn := tls.Server(prefixConn, tlsConfig)
+			// 每条连接使用独立配置副本捕获服务端实际收到的 ClientHello。
+			// GetConfigForClient 在证书选择阶段执行；保留已有回调的返回语义。
+			connTLSConfig := tlsConfig.Clone()
+			previousGetConfig := connTLSConfig.GetConfigForClient
+			var helloObservation tlsClientHelloObservation
+			connTLSConfig.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				helloObservation = observeTLSClientHello(hello)
+				if previousGetConfig != nil {
+					return previousGetConfig(hello)
+				}
+				return nil, nil
+			}
+			tlsConn := tls.Server(prefixConn, connTLSConfig)
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
@@ -1062,12 +1074,13 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 				return
 			}
 
-			srv.handleConnection(ctx, prefixConn2, c)
+			tlsInfo := tlsHandshakeInfoFromState(tlsConn.ConnectionState(), helloObservation)
+			srv.handleConnection(ctx, prefixConn2, c, tlsInfo)
 		}(conn)
 	}
 }
 
-func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn) {
+func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo) {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
@@ -1435,7 +1448,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch, tlsInfo)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -1658,7 +1671,8 @@ func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cli
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
 	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
-	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64) error {
+	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64,
+	tlsInfo *TLSHandshakeInfo) error {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
@@ -1668,7 +1682,7 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
 		BrutalGroups: brutalGroups, BrutalTotalTx: cliTotalTx, BrutalTotalRx: srvTotalTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
-		SessionToken: sessionToken,
+		SessionToken: sessionToken, TLS: tlsInfo,
 	}
 	log.Debugf("[%s] => handshake response session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		clientID, sessionID, protocolVersion, epoch, fec, fecGroup, encrypt, encAlgo, sessionToken != "")
