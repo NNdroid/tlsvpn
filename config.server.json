@@ -24,7 +24,6 @@
     "v6_cidr": "fd00::/64",
     "cert": "",
     "key": "",
-    "session_token": true,
     "max_sessions": 1024
   }
 }
