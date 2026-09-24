@@ -96,18 +96,16 @@ func (p *AsyncPort) ResetEpoch(k int, ic *innerCipher) {
 func (p *AsyncPort) SetSequenceExhaustedHandler(fn func()) { p.onExhaust = fn }
 
 func (p *AsyncPort) nextSeq() (uint32, bool) {
-	for {
-		cur := atomic.LoadUint32(&p.txSeq)
-		if cur == ^uint32(0) {
-			if p.exhausted.CompareAndSwap(false, true) && p.onExhaust != nil {
-				go p.onExhaust()
-			}
-			return 0, false
+	// txSeq 只在 AsyncPort.run goroutine 中递增；ResetEpoch 也通过 resetEpoch
+	// channel 在同一 goroutine 串行执行，因此无需每个数据帧做原子 CAS。
+	if p.txSeq == ^uint32(0) {
+		if p.exhausted.CompareAndSwap(false, true) && p.onExhaust != nil {
+			go p.onExhaust()
 		}
-		if atomic.CompareAndSwapUint32(&p.txSeq, cur, cur+1) {
-			return cur + 1, true
-		}
+		return 0, false
 	}
+	p.txSeq++
+	return p.txSeq, true
 }
 
 func (p *AsyncPort) ID() string { return p.id }
@@ -160,7 +158,7 @@ func (p *AsyncPort) run() {
 		case <-p.ctx.Done():
 			return
 		case reset := <-p.resetEpoch:
-			atomic.StoreUint32(&p.txSeq, 0)
+			p.txSeq = 0
 			p.exhausted.Store(false)
 			if reset.k >= fecMinGroup {
 				p.encoder = newFECEncoder(reset.k, reset.ic)
