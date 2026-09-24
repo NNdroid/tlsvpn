@@ -195,7 +195,7 @@ type fecDecoder struct {
 	groupOrder []uint32                 // group 创建顺序；已完成项 lazy skip
 	groupHead  int                      // groupOrder 首个可能仍活跃的位置
 	doneRing  [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
-	spare     *fecGroupState
+	spares    []*fecGroupState // decoder 内部 free-list，最多复用 pending 上限数量
 	recovered uint64 // 异或恢复帧计数
 	lost      uint64 // 确认丢失帧计数
 }
@@ -209,6 +209,7 @@ func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *
 		out:    out,
 		groups:     make(map[uint32]*fecGroupState, 64),
 		groupOrder: make([]uint32, 0, fecMaxPendingGroups+64),
+		spares:     make([]*fecGroupState, 0, fecMaxPendingGroups),
 	}
 }
 
@@ -348,9 +349,10 @@ func (d *fecDecoder) newGroupLocked(start uint32) *fecGroupState {
 		d.pruneGroupOrderLocked()
 	}
 
-	g := d.spare
-	if g != nil {
-		d.spare = nil
+	var g *fecGroupState
+	if n := len(d.spares); n > 0 {
+		g = d.spares[n-1]
+		d.spares = d.spares[:n-1]
 	} else {
 		g = &fecGroupState{}
 	}
@@ -487,8 +489,11 @@ func (d *fecDecoder) releaseLocked(g *fecGroupState) {
 		putFrame(g.acc)
 		g.acc = nil
 	}
-	if d.spare == nil {
-		d.spare = g
+	g.start = 0
+	g.k = 0
+	g.gotMask = 0
+	if len(d.spares) < fecMaxPendingGroups {
+		d.spares = append(d.spares, g)
 	}
 }
 
