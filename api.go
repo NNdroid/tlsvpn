@@ -56,6 +56,7 @@ type WebStats struct {
 	Dropped     uint64               `json:"dropped_frames"`
 	TapErrors   uint64               `json:"tap_write_errors"`
 	Fec         fecStatsJSON         `json:"fec"`
+	Reorder     reorderStatsJSON     `json:"reorder"`
 	Mem         memStatsJSON         `json:"mem"`
 	IPPool      *ipPoolJSON          `json:"ip_pool,omitempty"`
 	Banned      map[string]int64     `json:"banned,omitempty"`
@@ -97,6 +98,18 @@ type fecStatsJSON struct {
 	ParityTx  uint64 `json:"parity_tx"`
 	Recovered uint64 `json:"recovered"`
 	Lost      uint64 `json:"lost"`
+}
+
+type reorderStatsJSON struct {
+	GapEvents      uint64 `json:"gap_events"`
+	TimeoutFlushes uint64 `json:"timeout_flushes"`
+	SkippedFrames  uint64 `json:"skipped_frames"`
+}
+
+func addReorderStats(dst *reorderStatsJSON, src ReorderBufferStats) {
+	dst.GapEvents += src.GapEvents
+	dst.TimeoutFlushes += src.TimeoutFlushes
+	dst.SkippedFrames += src.SkippedFrames
 }
 
 type memStatsJSON struct {
@@ -146,40 +159,40 @@ type brutalInfoJSON struct {
 // runtimeCfgJSON 生效配置的扁平快照（已脱敏）。不直接下发完整 Config：
 // 面板需要的是"哪些开关现在是开/关"，而不是让浏览器缓存一份可保存的配置。
 type runtimeCfgJSON struct {
-	Mode           string   `json:"mode"`
-	Encrypt        bool     `json:"encrypt"`
-	MinEnc         string   `json:"min_enc"`
-	PadMode        string   `json:"pad_mode"`
-	Brutal         bool     `json:"brutal"`
-	BrutalUp       uint64   `json:"brutal_up"`
-	BrutalDown     uint64   `json:"brutal_down"`
-	Socks5         bool     `json:"socks5"`
-	FEC            bool     `json:"fec"`
-	FecGroup       int      `json:"fec_group"`
-	FecGroupMin    int      `json:"fec_group_min,omitempty"` // 服务端：接受的对端 FEC 分组 K 下限
-	FecGroupMax    int      `json:"fec_group_max,omitempty"` // 服务端：接受的对端 FEC 分组 K 上限
-	LogLevel       string   `json:"log_level"`
-	Conns          int      `json:"conns"`
-	Tap            string   `json:"tap"`
-	Mac            string   `json:"mac"`
-	Addr           string   `json:"addr"`
-	WebAddr        string   `json:"web_addr"`
-	WebAuth        bool     `json:"web_auth"`
-	WebBind        string   `json:"web_bind"`
-	WebHTTPS       bool     `json:"web_https"`
-	EncryptPSK     bool     `json:"encrypt_psk"`
-	SessionEnc     bool     `json:"session_encrypt"`
-	SessionTok     bool     `json:"session_token"`
-	MaxSess        int      `json:"max_sessions"`
-	V4CIDR         string   `json:"v4_cidr,omitempty"`
-	V6CIDR         string   `json:"v6_cidr,omitempty"`
-	GwV4           string   `json:"gw_v4,omitempty"`
-	GwV6           string   `json:"gw_v6,omitempty"`
-	Fwmark         int      `json:"fwmark,omitempty"`          // 客户端：策略路由标记
-	FwmarkPriority int      `json:"fwmark_priority,omitempty"` // 0 = 交给内核分配
-	FwmarkTable    int      `json:"fwmark_table,omitempty"`    // 与 fwmark 同号
-	ExtraRoutes    []string `json:"extra_routes,omitempty"`    // 额外路由（iproute2 语法）
-	SourceRules    []SourceRule `json:"source_rules,omitempty"` // 按源地址前缀的规则
+	Mode           string       `json:"mode"`
+	Encrypt        bool         `json:"encrypt"`
+	MinEnc         string       `json:"min_enc"`
+	PadMode        string       `json:"pad_mode"`
+	Brutal         bool         `json:"brutal"`
+	BrutalUp       uint64       `json:"brutal_up"`
+	BrutalDown     uint64       `json:"brutal_down"`
+	Socks5         bool         `json:"socks5"`
+	FEC            bool         `json:"fec"`
+	FecGroup       int          `json:"fec_group"`
+	FecGroupMin    int          `json:"fec_group_min,omitempty"` // 服务端：接受的对端 FEC 分组 K 下限
+	FecGroupMax    int          `json:"fec_group_max,omitempty"` // 服务端：接受的对端 FEC 分组 K 上限
+	LogLevel       string       `json:"log_level"`
+	Conns          int          `json:"conns"`
+	Tap            string       `json:"tap"`
+	Mac            string       `json:"mac"`
+	Addr           string       `json:"addr"`
+	WebAddr        string       `json:"web_addr"`
+	WebAuth        bool         `json:"web_auth"`
+	WebBind        string       `json:"web_bind"`
+	WebHTTPS       bool         `json:"web_https"`
+	EncryptPSK     bool         `json:"encrypt_psk"`
+	SessionEnc     bool         `json:"session_encrypt"`
+	SessionTok     bool         `json:"session_token"`
+	MaxSess        int          `json:"max_sessions"`
+	V4CIDR         string       `json:"v4_cidr,omitempty"`
+	V6CIDR         string       `json:"v6_cidr,omitempty"`
+	GwV4           string       `json:"gw_v4,omitempty"`
+	GwV6           string       `json:"gw_v6,omitempty"`
+	Fwmark         int          `json:"fwmark,omitempty"`          // 客户端：策略路由标记
+	FwmarkPriority int          `json:"fwmark_priority,omitempty"` // 0 = 交给内核分配
+	FwmarkTable    int          `json:"fwmark_table,omitempty"`    // 与 fwmark 同号
+	ExtraRoutes    []string     `json:"extra_routes,omitempty"`    // 额外路由（iproute2 语法）
+	SourceRules    []SourceRule `json:"source_rules,omitempty"`    // 按源地址前缀的规则
 }
 
 // runtimeNegJSON 运行时协商结果快照。客户端模式是端到端会话的实际参数，
@@ -313,7 +326,7 @@ footer { text-align:center; color:var(--muted); font-size:.78em; margin-top:16px
   <div class="card"><div class="sub" data-i18n="kpi.tx">-</div><div class="kpi" id="total-tx">0 B</div><div class="sub" id="total-tx-speed" class="speed">-</div></div>
   <div class="card"><div class="sub" data-i18n="kpi.rx">-</div><div class="kpi" id="total-rx">0 B</div><div class="sub" id="total-rx-speed" class="speed">-</div></div>
   <div class="card"><div class="sub" data-i18n="kpi.uptime">-</div><div class="kpi" id="uptime">-</div><div class="sub"><span data-i18n="kpi.version">-</span> <span id="ver">-</span> · <a href="#" onclick="doAction('gc');return false;" style="color:var(--blue)" data-i18n="kpi.gc">-</a></div></div>
-  <div class="card"><div class="sub" data-i18n="kpi.fec">-</div><div class="kpi" id="fec-kpi">-</div><div class="sub"><span data-i18n="kpi.parity">-</span> <span id="parity">-</span> · <span data-i18n="kpi.dropped">-</span> <span id="dropped">-</span></div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.fec">-</div><div class="kpi" id="fec-kpi">-</div><div class="sub"><span data-i18n="kpi.parity">-</span> <span id="parity">-</span> · <span data-i18n="kpi.dropped">-</span> <span id="dropped">-</span> · <span data-i18n="kpi.reorder">-</span> <span id="reorder-skipped">-</span></div></div>
   <div class="card"><div class="sub" data-i18n="kpi.mem">-</div><div class="kpi" id="mem">-</div><div class="sub"><span data-i18n="kpi.goroutines">-</span> <span id="goroutines">-</span></div></div>
   <div class="card" id="ippool-card" style="display:none"><div class="sub" data-i18n="kpi.pool">-</div><div class="kpi" id="ippool-kpi">-</div><div class="sub"><span data-i18n="kpi.v6used">-</span> <span id="v6used">-</span></div></div>
 </div>
@@ -413,7 +426,7 @@ footer { text-align:center; color:var(--muted); font-size:.78em; margin-top:16px
 </div>
 <script>
 const I18N={
-'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',dropped:'丢帧(队列)',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
+'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',dropped:'丢帧(队列)',reorder:'重排跳过',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
  chart:{title:'吞吐趋势',win:'(近 120 秒)'},legend:{up:'上行',down:'下行'},
 	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',status:'运行状态',logs:'日志',settings:'设置'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',err:'最近错误'},
@@ -435,7 +448,7 @@ const I18N={
    yes:'是',no:'否'},
  set:{hint:'编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数（列出的字段需重启生效）。',
    load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'}},
-'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
+'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',reorder:'Reorder skipped',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
  chart:{title:'Throughput',win:'(last 120s)'},legend:{up:'Up',down:'Down'},
 	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',status:'Runtime status',logs:'Logs',settings:'Settings'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',err:'Last error'},
@@ -488,7 +501,7 @@ function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'<
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
 function shortId(id,n){return id.length>n?id.slice(0,n)+'…':id;}
-function esc(x){return String(x==null?'':x).replace(/</g,'&lt;');}
+function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\x22/g,'&quot;').replace(/\x27/g,'&#39;');}
 function showPane(btn){document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
   btn.classList.add('on');document.getElementById('pane-'+btn.dataset.pane).classList.add('on');
@@ -576,6 +589,8 @@ async function fetchStats(){
     document.getElementById('fec-kpi').innerHTML=(f.recovered||0)+' <small>/</small> '+(f.lost||0);
     document.getElementById('parity').innerText=f.parity_tx||0;
     document.getElementById('dropped').innerText=data.dropped_frames||0;
+	const ro=data.reorder||{};
+	document.getElementById('reorder-skipped').innerText=ro.skipped_frames||0;
     const m=data.mem||{};
     document.getElementById('mem').innerHTML=(m.heap_alloc_mb||0).toFixed(1)+'<small> MB</small>';
     document.getElementById('goroutines').innerText=m.num_goroutine||0;
@@ -1039,7 +1054,8 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_ip_pool_v4_total", "IPv4 pool capacity", "gauge", fmt.Sprint(v4t))
 			emit("tlsvpn_ip_pool_v6_used", "Allocated IPv6 addresses", "gauge", fmt.Sprint(v6u))
 			srv.mu.RLock()
-			var rec, lost, parity uint64
+			var rec, lost, parity, portDropped uint64
+			var reorder reorderStatsJSON
 			for _, s2 := range srv.activeClients {
 				if s2.FecDec != nil {
 					r2, l2 := s2.FecDec.FECStats()
@@ -1047,11 +1063,19 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 					lost += l2
 				}
 				parity += s2.Port.ParitySent()
+				portDropped += s2.Port.Dropped()
+				if s2.RxReorder != nil {
+					addReorderStats(&reorder, s2.RxReorder.Stats())
+				}
 			}
 			srv.mu.RUnlock()
 			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(rec))
 			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(lost))
 			emit("tlsvpn_fec_parity_frames_total", "Parity frames generated", "counter", fmt.Sprint(parity))
+			emit("tlsvpn_port_dropped_frames_total", "Frames dropped due to backpressure", "counter", fmt.Sprint(portDropped))
+			emit("tlsvpn_reorder_gap_events_total", "Observed sequence gaps", "counter", fmt.Sprint(reorder.GapEvents))
+			emit("tlsvpn_reorder_timeout_flushes_total", "Gap timeouts that resumed delivery", "counter", fmt.Sprint(reorder.TimeoutFlushes))
+			emit("tlsvpn_reorder_skipped_frames_total", "Missing sequence slots skipped after timeout", "counter", fmt.Sprint(reorder.SkippedFrames))
 			emit("tlsvpn_tap_write_errors_total", "Frames dropped on TAP write failure", "counter", fmt.Sprint(srv.tapWriteErrs.Load()))
 			if srv.vswitch != nil {
 				emit("tlsvpn_spoofed_src_dropped_frames_total", "Frames dropped claiming another session's source MAC", "counter", fmt.Sprint(srv.vswitch.spoofDrops.Load()))
@@ -1074,6 +1098,12 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_port_dropped_frames_total", "Frames dropped due to backpressure", "counter", fmt.Sprint(cli.txPort.Dropped()))
 			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(cli.FECRecovered()))
 			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(cli.FECLost()))
+			if cli.rxReorder != nil {
+				reorder := cli.rxReorder.Stats()
+				emit("tlsvpn_reorder_gap_events_total", "Observed sequence gaps", "counter", fmt.Sprint(reorder.GapEvents))
+				emit("tlsvpn_reorder_timeout_flushes_total", "Gap timeouts that resumed delivery", "counter", fmt.Sprint(reorder.TimeoutFlushes))
+				emit("tlsvpn_reorder_skipped_frames_total", "Missing sequence slots skipped after timeout", "counter", fmt.Sprint(reorder.SkippedFrames))
+			}
 			emit("tlsvpn_tap_write_errors_total", "Frames dropped on TAP write failure", "counter", fmt.Sprint(cli.tapWriteErrs.Load()))
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -1119,7 +1149,8 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			}
 		}
 		stats.Banned = srv.BanList()
-		var rec, lost, parity uint64
+		var rec, lost, parity, portDropped uint64
+		var reorder reorderStatsJSON
 		for _, session := range srv.activeClients {
 			if session.FecDec != nil {
 				r2, l2 := session.FecDec.FECStats()
@@ -1127,6 +1158,10 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 				lost += l2
 			}
 			parity += session.Port.ParitySent()
+			portDropped += session.Port.Dropped()
+			if session.RxReorder != nil {
+				addReorderStats(&reorder, session.RxReorder.Stats())
+			}
 		}
 		stats.IPPool = &ipPoolJSON{}
 		stats.IPPool.V4Used, stats.IPPool.V4Total, stats.IPPool.V6Used = srv.IPPoolStatus()
@@ -1136,6 +1171,8 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		// 否则同 goroutine 递归 RLock 在写者排队时会死锁。
 		stats.ServerConns = srv.snapshotServerConns()
 		stats.Fec = fecStatsJSON{Enabled: true, ParityTx: parity, Recovered: rec, Lost: lost}
+		stats.Dropped = portDropped
+		stats.Reorder = reorder
 		stats.TapErrors = srv.tapWriteErrs.Load()
 
 		cfg := srv.curCfg()
@@ -1190,6 +1227,9 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			rec, lost := cli.FECStats()
 			fecEnabled := lv != nil && lv.fecMode
 			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityTx: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
+		}
+		if cli.rxReorder != nil {
+			addReorderStats(&stats.Reorder, cli.rxReorder.Stats())
 		}
 		stats.TapErrors = cli.tapWriteErrs.Load()
 		stats.FecMode = fec
@@ -1384,7 +1424,8 @@ func (c *Client) connsSummary() connBrutalSummary {
 		br := ci.brutal.Load()
 		if br != nil && br.Applied {
 			st.applied++
-		} else if br != nil && br.Error != "" {
+		}
+		if br != nil && br.Error != "" {
 			// 各连接的失败原因通常完全相同（例如"平台不支持"），只保留互不相同的
 			dup := false
 			for _, e := range st.errs {
@@ -1467,7 +1508,8 @@ func (s *Server) serverConnsBrutal() brutalInfoJSON {
 			sessionDown = atomic.LoadUint64(&ci.brutalTx)
 			if br := ci.brutal.Load(); br != nil && br.Applied {
 				applied++
-			} else if br != nil && br.Error != "" {
+			}
+			if br := ci.brutal.Load(); br != nil && br.Error != "" {
 				seen := false
 				for _, e := range out.Errors {
 					if e == br.Error {

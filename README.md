@@ -57,6 +57,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `tap` | `tap0` | TAP device name; `"mem"` = in-memory backend (CI/e2e) |
 | `mac` | (Empty) | Pin the TAP interface MAC |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
+| `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks; changing either through the dashboard requires a restart |
 | `encrypt` | `true` when omitted in JSON | Inner AES-256-GCM with per-session salts and separate data/FEC key domains |
 | `min_enc` | (Empty) | Strength floor: `gcm` refuses peers that cannot negotiate GCM, `any`/empty sets no floor (needs `encrypt`) |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
@@ -98,6 +99,19 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `source_rules` | `[]` | Policy-routing rules matched on the packet's **source prefix** instead of `SO_MARK`: each entry installs `ip rule from <from> table <table>` plus that table's default routes (from the gateways the server sends) and any `routes` you list. For traffic that has no socket to mark — forwarded packets on an NPT gateway, whose return flow must be pinned to the tunnel TAP. `from` may be a bare address (completed to a host route); `table` is mandatory, in `[1, 65535]` and not the reserved `253`/`254`/`255`; `priority` uint32, `0` = kernel-assigned. Validated when the config loads |
 
 **Policy routing is owned by the process, not by systemd.** With a non-zero `fwmark` — or a non-empty `source_rules` — the client installs the `ip rule` entries and the routes itself, and removes everything it installed on exit. For the fwmark rule the table number is always equal to the fwmark value — `fwmark` `0x100` means table `256`; `source_rules` tables are whatever you configured and nothing derives them. It waits up to 30 s for the TAP to exist and be up before touching routing, so a network manager that creates the device later needs no separate ordering unit. Do **not** also keep an external drop-in doing the same work: two rules for one fwmark compete by priority, the kernel serves whichever wins, and each of them believes it owns the table.
+
+### `up` / `down` lifecycle hooks
+
+```json
+{
+  "up": "/etc/openvpn/up.sh",
+  "down": "/etc/openvpn/down.sh"
+}
+```
+
+Hooks are executed directly (never through `sh -c`), so the file needs a shebang and executable permission (`chmod 0755`). Paths must be absolute. Each hook has a 30-second timeout and runs with the configuration directory as its working directory. `up` runs once after the TAP addresses and built-in policy routing are ready; parallel TCP connections and short reconnects do not run it again. `down` runs once while the TAP still exists on graceful shutdown, and also rolls back a partially successful `up`. A failing `up` aborts startup; a failing `down` makes the process exit unsuccessfully. Hooks run with the same UID/capabilities as tlsvpn and are **not a sandbox**: only point them at administrator-controlled files. The inherited environment is reduced to a safe PATH/locale (plus required Windows system variables), so service credentials are not forwarded. The timeout terminates the immediate hook process, not an arbitrary descendant tree; hook scripts must supervise and clean up any children they create. `SIGKILL`, a kernel panic, or power loss cannot run cleanup code.
+
+Scripts receive OpenVPN-style variables `script_type`, `dev`, `dev_type=tap`, `config`, `ifconfig_local`, `ifconfig_ipv6_local`, `route_vpn_gateway`, and `route_ipv6_gateway`. The unabridged values are also available as `TLSVPN_SCRIPT_TYPE`, `TLSVPN_MODE`, `TLSVPN_DEV`, `TLSVPN_CONFIG`, `TLSVPN_IPV4`, `TLSVPN_IPV6`, `TLSVPN_GATEWAY_V4`, and `TLSVPN_GATEWAY_V6`. The PSK is deliberately never exported.
 
 ## Dashboard & Metrics
 

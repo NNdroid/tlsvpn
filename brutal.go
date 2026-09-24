@@ -224,11 +224,16 @@ func configureTCPBrutal(ops brutalSocketOps, totalRate, legacyRateBps, groupID u
 	if readErr == nil {
 		result.RateBps, result.CwndGain, result.GroupID = actualRateBps, actualGain, actualGroup
 		result.RateMbps = brutalBpsToMbps(actualRateBps)
+	} else if result.RuleManaged && errors.Is(readErr, errBrutalLocked) {
+		// 锁定规则完全拥有参数，应用层既不能写也不能读。此时只能确认当前算法
+		// 是 brutal，不能把请求值伪装成内核实际值；真正速率应从规则表观察。
+		result.RateBps, result.RateMbps, result.GroupID = 0, 0, 0
+		result.Error = "TCP Brutal is active under a locked rule; actual rate is unavailable from this socket"
 	} else {
-		// A locked route can reject parameter access while brutal is already active.
-		// In that case it is safe to send; retain the requested values for observability.
+		// setParams 已成功时，读取失败不改变应用结果；保留请求值并暴露读取错误。
 		result.RateBps, result.CwndGain = rateBps, brutalDefaultCwndGain
 		result.RateMbps = brutalBpsToMbps(rateBps)
+		result.Error = fmt.Sprintf("TCP Brutal parameters applied but readback failed: %v", readErr)
 	}
 	result.Applied = true
 	return result

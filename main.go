@@ -189,13 +189,21 @@ func main() {
 		if cfg.Client.FEC {
 			log.Warnf("client FEC settings are ignored in server mode")
 		}
-		startServer(ctx, cfg)
+		if err := startServer(ctx, cfg); err != nil {
+			log.Errorf("Server stopped with an error: %v", err)
+			_ = log.Sync()
+			os.Exit(1)
+		}
 	case "client":
 		if cfg.Client.FEC && cfg.Client.Conns < 2 {
 			log.Warnf("FEC is enabled but conns < 2. Multipath redundancy needs conns >= 2; " +
 				"FEC will only guard against queue-overflow drops on the single link.")
 		}
-		startClient(ctx, cfg)
+		if err := startClient(ctx, cfg); err != nil {
+			log.Errorf("Client stopped with an error: %v", err)
+			_ = log.Sync()
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintln(os.Stderr, "Usage: tlsvpn -c config.json   (-print-config for a template)")
 		os.Exit(1)

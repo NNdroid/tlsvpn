@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"go.uber.org/zap/zapcore"
@@ -35,6 +36,8 @@ type Config struct {
 	Mac      string `json:"mac,omitempty"`       // 手动指定 MAC
 	Addr     string `json:"addr"`                // server: 监听地址；client: 目标地址列表
 	LogLevel string `json:"log_level,omitempty"` // 默认 info
+	Up       string `json:"up,omitempty"`        // 隧道就绪后执行一次（直接 exec，不经 shell）
+	Down     string `json:"down,omitempty"`      // 进程退出/启动回滚时执行一次
 	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
 	// 显式的 false，下次重载又被默认值翻回 true。
 	Encrypt    bool         `json:"encrypt"`
@@ -125,8 +128,8 @@ type ClientConfig struct {
 	// 路由决策），按源前缀即可把回程精确导向承载该前缀的接口。
 	SourceRules []SourceRule `json:"source_rules,omitempty"`
 	Conns       int          `json:"conns,omitempty"` // 默认 1
-	FEC         bool     `json:"fec,omitempty"`
-	FecGroup    int      `json:"fec_group,omitempty"` // 默认 4
+	FEC         bool         `json:"fec,omitempty"`
+	FecGroup    int          `json:"fec_group,omitempty"` // 默认 4
 }
 
 // SourceRule 一条按源地址前缀匹配的策略路由规则。
@@ -149,6 +152,8 @@ const exampleConfigJSON = `{
 	  "psk": "REPLACE-WITH-A-RANDOM-SECRET",
   "addr": "203.0.113.10:4000,[2001:db8::10]:4000",
   "log_level": "info",
+  "up": "",
+  "down": "",
   "encrypt": true,
   "min_enc": "gcm",
   "pad_mode": "bucket",
@@ -279,6 +284,12 @@ func (c *Config) applyDefaults() {
 
 // Validate 校验配置合法性。在 applyDefaults 之后调用。
 func (c *Config) Validate() error {
+	if err := validateHookPath("up", c.Up); err != nil {
+		return err
+	}
+	if err := validateHookPath("down", c.Down); err != nil {
+		return err
+	}
 	if c.BrutalUp > maxBrutalRateMbps || c.BrutalDown > maxBrutalRateMbps {
 		return fmt.Errorf("brutal_up/brutal_down must not exceed %d Mbps", maxBrutalRateMbps)
 	}
@@ -394,6 +405,21 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("client.cert_sha256 must be 64 hex chars (sha256)")
 			}
 		}
+	}
+	return nil
+}
+
+func validateHookPath(name, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.IndexByte(value, 0) >= 0 || strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("%s hook path contains control characters", name)
+	}
+	// filepath.IsAbs follows the host OS.  Accept a leading slash as well so a
+	// Linux deployment config can be validated by Windows-side tooling/tests.
+	if !filepath.IsAbs(value) && !strings.HasPrefix(value, "/") {
+		return fmt.Errorf("%s hook must be an absolute executable path", name)
 	}
 	return nil
 }

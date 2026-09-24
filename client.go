@@ -34,12 +34,14 @@ type AsyncPort struct {
 	cancel     context.CancelFunc
 	backendsMu sync.RWMutex
 	backends   []*Backend
+	preferred  atomic.Pointer[Backend]
 	encoder    *fecEncoder
 	txSeq      uint32
 	resetEpoch chan portEpochReset
 	exhausted  atomic.Bool
 	onExhaust  func()
 	dropped    uint64 // 各环节丢弃帧计数（面板/metrics）
+	paritySent atomic.Uint64
 }
 
 type portEpochReset struct {
@@ -53,10 +55,7 @@ func (p *AsyncPort) Dropped() uint64 { return atomic.LoadUint64(&p.dropped) }
 
 // ParitySent 已生成的 FEC 校验帧数（未启用 FEC 时为 0）
 func (p *AsyncPort) ParitySent() uint64 {
-	if p.encoder == nil {
-		return 0
-	}
-	return p.encoder.ParitySent()
+	return p.paritySent.Load()
 }
 
 func (p *AsyncPort) dropN(n int) {
@@ -121,6 +120,7 @@ func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 	defer p.backendsMu.Unlock()
 	for i, b := range p.backends {
 		if b.ch == ch {
+			p.preferred.CompareAndSwap(b, nil)
 			p.backends = append(p.backends[:i], p.backends[i+1:]...)
 			break
 		}
@@ -215,7 +215,7 @@ func (p *AsyncPort) run() {
 // 每个后端收到的帧均经过深拷贝、彼此独立，由发送协程发送后归还内存池。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 	p.backendsMu.RLock()
-	backends := p.backends
+	backends := append([]*Backend(nil), p.backends...)
 	p.backendsMu.RUnlock()
 	if len(backends) == 0 {
 		p.dropN(len(batch))
@@ -233,9 +233,10 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		best := p.pickBackend(backends)
 		p.dropN(sendBatchTo(best, batch))
 		for _, par := range parities {
+			p.paritySent.Add(1)
 			pf := VPNFrame{Seq: 0, Data: par}
 			for _, b := range backends {
-				sendFrameTo(b, pf)
+				p.dropN(sendFrameTo(b, pf))
 			}
 			putFrame(par)
 		}
@@ -247,22 +248,36 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 	freeFrames(batch)
 }
 
-// pickBackend MinRTT 选路：延迟 + 积压惩罚评分，全部拥塞时回落到首个后端
+const backendRTTHysteresisMin = 5_000 // 微秒
+
+func backendScore(b *Backend) (uint32, bool) {
+	qLen := len(b.ch)
+	if qLen >= cap(b.ch)-2 {
+		return math.MaxUint32, false
+	}
+	rtt := atomic.LoadUint32(b.rttCache)
+	penalty := uint64(0)
+	if qLen > 10 {
+		penalty = uint64(qLen-10) * 1000
+	}
+	score := uint64(rtt) + penalty
+	if score > math.MaxUint32 {
+		score = math.MaxUint32
+	}
+	return uint32(score), true
+}
+
+// pickBackend 使用 MinRTT + 积压评分，但为当前连接保留至少 12.5% RTT（最低
+// 5ms）的切换滞回。相近 WAN 路径的轻微 RTT 抖动不会让相邻批次跨 TCP 流
+// 来回切换；当前连接接近满队列时仍会立即转移。
 func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	var bestBackend *Backend
 	var minScore uint32 = math.MaxUint32
 	for _, b := range backends {
-		qLen := len(b.ch)
-		if qLen >= cap(b.ch)-2 {
+		score, ok := backendScore(b)
+		if !ok {
 			continue
 		}
-		rtt := atomic.LoadUint32(b.rttCache)
-		// 积压超过 10 个包才开始惩罚
-		penalty := uint32(0)
-		if qLen > 10 {
-			penalty = uint32((qLen - 10) * 1000)
-		}
-		score := rtt + penalty
 		if score < minScore {
 			minScore = score
 			bestBackend = b
@@ -270,7 +285,28 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	}
 	if bestBackend == nil {
 		bestBackend = backends[0]
+		p.preferred.Store(bestBackend)
+		return bestBackend
 	}
+	current := p.preferred.Load()
+	if current != nil && current != bestBackend {
+		present := false
+		for _, b := range backends {
+			if b == current {
+				present = true
+				break
+			}
+		}
+		if present {
+			if currentScore, ok := backendScore(current); ok {
+				hysteresis := max(uint32(backendRTTHysteresisMin), atomic.LoadUint32(current.rttCache)/8)
+				if uint64(currentScore) <= uint64(minScore)+uint64(hysteresis) {
+					bestBackend = current
+				}
+			}
+		}
+	}
+	p.preferred.Store(bestBackend)
 	return bestBackend
 }
 
@@ -291,14 +327,16 @@ func sendBatchTo(b *Backend, batch []VPNFrame) int {
 }
 
 // sendFrameTo 深拷贝单帧后投递给单个后端；队列满时丢弃并释放副本
-func sendFrameTo(b *Backend, vf VPNFrame) {
+func sendFrameTo(b *Backend, vf VPNFrame) int {
 	cp := VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
 	select {
 	case b.ch <- []VPNFrame{cp}:
+		return 0
 	default:
 		if cp.Data != nil {
 			putFrame(cp.Data)
 		}
+		return 1
 	}
 }
 
@@ -426,6 +464,11 @@ type Client struct {
 	connsMu       sync.Mutex
 	conns         map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
 	startedAt     time.Time
+	hooks         *LifecycleHooks
+	runCancel     context.CancelFunc
+	fatalOnce     sync.Once
+	fatalErr      chan error
+	networkSetup  sync.Mutex
 }
 
 // sessionNeg 最近一次握手成功的端到端协商结果快照。面板"状态"页展示的是
@@ -474,7 +517,7 @@ func liveFromCfg(cfg *Config) *liveConfig {
 		sni: cfg.Client.SNI, insecure: cfg.Client.Insecure, certHash: cfg.Client.CertSHA256,
 		fwmark: cfg.Client.Fwmark, fwmarkPriority: cfg.Client.FwmarkPriority, extraRoutes: cfg.Client.ExtraRoutes,
 		sourceRules: cfg.Client.SourceRules,
-		brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
+		brutal:      cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		connsCount: cfg.Client.Conns, fecMode: cfg.Client.FEC, fecGroup: cfg.Client.FecGroup,
 		encrypt: cfg.Encrypt, minEnc: minEncRank(cfg.MinEnc),
 	}
@@ -483,9 +526,9 @@ func liveFromCfg(cfg *Config) *liveConfig {
 // policyRoutingSpec 一次策略路由安装或清理所需的全部参数。拆成结构体是因为
 // 安装和清理必须拿到同一份：清理时按错表号或错优先级会把规则留在内核里。
 type policyRoutingSpec struct {
-	mark        int          // 0 = 关闭 fwmark 规则
-	priority    uint32       // 0 = 交给内核分配
-	gwV4        string       // 空串 = 服务端未下发该族的网关，跳过
+	mark        int    // 0 = 关闭 fwmark 规则
+	priority    uint32 // 0 = 交给内核分配
+	gwV4        string // 空串 = 服务端未下发该族的网关，跳过
 	gwV6        string
 	extra       []string     // fwmark 表的额外路由，iproute2 序列化语法
 	sourceRules []SourceRule // 按源地址前缀的规则，与 fwmark 相互独立
@@ -604,7 +647,7 @@ func (c *Client) takePolicyRoutingInstalled() []policyRoutingSpec {
 // installPolicyRouting 安装当前生效配置的策略路由，并保证幂等：
 // 先清掉上一轮写进内核的东西，再装新的。清理必须用当时真实写入的参数
 // （优先级、额外路由都可能是旧值），所以不能拿当前配置去删。
-func (c *Client) installPolicyRouting(spec policyRoutingSpec) {
+func (c *Client) installPolicyRouting(spec policyRoutingSpec) error {
 	c.prMu.Lock()
 	snap := c.installedSpecFor()
 	if snap != nil && samePolicySpec(*snap, spec) {
@@ -632,6 +675,7 @@ func (c *Client) installPolicyRouting(spec policyRoutingSpec) {
 		log.Warnf("policy routing configuration failed: %v", err)
 	}
 	c.notePolicyRouting(err)
+	return err
 }
 
 // ApplyConfig 面板热更入口：原子替换生效配置并唤醒所有重连监督器。
@@ -682,9 +726,36 @@ type clientConnInfo struct {
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
-func startClient(ctx context.Context, cfg *Config) {
-	c := NewClient(ctx, cfg)
-	c.Run(ctx)
+func startClient(ctx context.Context, cfg *Config) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	c := NewClient(runCtx, cfg)
+	defer c.tap.Close()
+	c.hooks = NewLifecycleHooks(cfg.Up, cfg.Down)
+	c.runCancel = cancel
+	c.fatalErr = make(chan error, 1)
+	c.Run(runCtx)
+	downErr := c.hooks.Down()
+	select {
+	case err := <-c.fatalErr:
+		if downErr != nil {
+			return fmt.Errorf("%v; cleanup failed: %w", err, downErr)
+		}
+		return err
+	default:
+		return downErr
+	}
+}
+
+func (c *Client) failProcess(err error) {
+	c.fatalOnce.Do(func() {
+		if c.fatalErr != nil {
+			c.fatalErr <- err
+		}
+		if c.runCancel != nil {
+			c.runCancel()
+		}
+	})
 }
 
 // applyTapMac 决定并应用客户端的 TAP MAC。MAC 是 clientID 的输入，进而决定
@@ -751,8 +822,6 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		iface = t
 		applyTapMac(cfg.Tap, cfg.Mac, statePath, st)
 	}
-	go func() { <-ctx.Done(); iface.Close() }()
-
 	actualMac := cfg.Mac
 	if actualMac == "" && cfg.Tap != "mem" {
 		if link, err := netlink.LinkByName(cfg.Tap); err == nil {
@@ -1162,6 +1231,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		ci.brutal.Store(br.clone())
 		if !br.Applied {
 			log.Warnf("[Conn %d] TCP Brutal shaping skipped: %s", connIndex, br.Error)
+		} else if br.Error != "" {
+			log.Warnf("[Conn %d] TCP Brutal shaping active with limited observability: %s", connIndex, br.Error)
 		}
 	} else {
 		ci.brutal.Store((&brutalApplyResult{}).clone())
@@ -1241,6 +1312,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		ci.brutal.Store(br.clone())
 		if !br.Applied {
 			log.Warnf("[Conn %d] negotiated TCP Brutal rate could not be applied: %s", connIndex, br.Error)
+		} else if br.Error != "" {
+			log.Warnf("[Conn %d] negotiated TCP Brutal rate is active with limited observability: %s", connIndex, br.Error)
 		}
 	}
 
@@ -1358,15 +1431,42 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// 而不是等 120 秒僵尸会话过期才自然恢复连通。
 	c.persistSessionState(resp.SessionID, resp.SessionToken, resp.SessionEpoch)
 
+	c.networkSetup.Lock()
+	var lifecycleErr error
 	if netlinkTunnelSupported() {
 		// 失败必须可见：静默丢弃时表现为"隧道在线但本机不通"，重启后地址没
 		// 挂上却查不到任何线索。
 		if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
 			log.Errorf("[Conn %d] tunnel interface configuration failed; tunnel address not applied: %v", connIndex, err)
+			lifecycleErr = err
 		}
 		// 面板要能区分"没配 fwmark"与"配了但装失败"：后者是最难发现的一类
 		// 故障，只能靠这里的状态位看出来。
-		c.installPolicyRouting(policyRoutingSpecFor(lv, resp.GwV4, resp.GwV6))
+		if err := c.installPolicyRouting(policyRoutingSpecFor(lv, resp.GwV4, resp.GwV6)); err != nil && lifecycleErr == nil {
+			lifecycleErr = err
+		}
+	}
+
+	if c.hooks != nil {
+		if c.hooks.Configured() {
+			cfgPath := ""
+			if snap := c.cfgSnap.Load(); snap != nil {
+				cfgPath = snap.SourcePath
+			}
+			hookEnv := HookEnv{Mode: "client", Dev: c.tapName, Config: cfgPath,
+				IPv4: resp.IPv4, IPv6: resp.IPv6, GatewayV4: resp.GwV4, GatewayV6: resp.GwV6}
+			if lifecycleErr != nil {
+				c.hooks.Activate(hookEnv)
+				lifecycleErr = fmt.Errorf("cannot run lifecycle up hook before tunnel networking is ready: %w", lifecycleErr)
+			} else if err := c.hooks.Up(hookEnv); err != nil {
+				lifecycleErr = err
+			}
+		}
+	}
+	c.networkSetup.Unlock()
+	if lifecycleErr != nil && c.hooks != nil && c.hooks.Configured() {
+		c.failProcess(lifecycleErr)
+		return 0, lifecycleErr
 	}
 
 	rttCache := new(uint32)
@@ -1582,6 +1682,9 @@ func (c *Client) NeedsRestart(cfg *Config) []string {
 		}
 		if o.Client.Conns != cfg.Client.Conns {
 			out = append(out, "client.conns")
+		}
+		if o.Up != cfg.Up || o.Down != cfg.Down {
+			out = append(out, "up/down")
 		}
 	}
 	return out

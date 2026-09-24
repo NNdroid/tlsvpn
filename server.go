@@ -767,12 +767,17 @@ func (s *Server) NeedsRestart(cfg *Config) []string {
 	if o.Socks5 != cfg.Socks5 {
 		out = append(out, "socks5")
 	}
+	if o.Up != cfg.Up || o.Down != cfg.Down {
+		out = append(out, "up/down")
+	}
 	return out
 }
 
 // startServer 以 JSON 配置启动服务端（cfg 已经过 applyDefaults + Validate）
-func startServer(ctx context.Context, cfg *Config) {
+func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	log.Infof("Starting TCP TLS server process...")
+	hooks := NewLifecycleHooks(cfg.Up, cfg.Down)
+	var tapSetupErrs []string
 	_, v4net, _ := net.ParseCIDR(cfg.Server.V4CIDR)
 	_, v6net, _ := net.ParseCIDR(cfg.Server.V6CIDR)
 
@@ -816,23 +821,25 @@ func startServer(ctx context.Context, cfg *Config) {
 			// 设备名对不上时整段跳过：网关地址从未落到接口上，隧道网关与
 			// web.bind=tunnel 都会对着一个不存在的地址反复失败
 			log.Warnf("Server cannot assign gateway addresses: tap %s not found: %v", cfg.Tap, err)
+			tapSetupErrs = append(tapSetupErrs, err.Error())
 		} else {
 			// 先 up 再挂地址：bind 要求 IFF_UP，且 v6 在接口 up 的瞬间会
 			// 重新触发一次 DAD —— 顺序反了第一轮 web 绑定就白等一个探测窗口
 			if err := netlink.LinkSetUp(link); err != nil {
 				log.Errorf("Server failed to bring up tap %s: %v", cfg.Tap, err)
+				tapSetupErrs = append(tapSetupErrs, err.Error())
 			}
-			assignTapGateway(link, "v4", srv.v4Gw, maskSize(v4net.Mask))
-			assignTapGateway(link, "v6", srv.v6Gw, maskSize(v6net.Mask))
+			if err := assignTapGateway(link, "v4", srv.v4Gw, maskSize(v4net.Mask)); err != nil {
+				log.Error(err)
+				tapSetupErrs = append(tapSetupErrs, err.Error())
+			}
+			if err := assignTapGateway(link, "v6", srv.v6Gw, maskSize(v6net.Mask)); err != nil {
+				log.Error(err)
+				tapSetupErrs = append(tapSetupErrs, err.Error())
+			}
 		}
 	}
 	srv.tap = tap
-
-	go func() { <-ctx.Done(); srv.tap.Close() }()
-
-	if cfg.Web.Addr != "" {
-		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
-	}
 
 	tapBackend := make(chan []VPNFrame, 32)
 	tapPort := NewAsyncPort(ctx, tapPortID)
@@ -878,22 +885,52 @@ func startServer(ctx context.Context, cfg *Config) {
 	if err != nil {
 		log.Fatalf("TCP Listen error: %v", err)
 	}
+	hookEnv := HookEnv{Mode: "server", Dev: cfg.Tap, Config: cfg.SourcePath,
+		IPv4:      fmt.Sprintf("%s/%d", srv.v4Gw, maskSize(v4net.Mask)),
+		IPv6:      fmt.Sprintf("%s/%d", srv.v6Gw, maskSize(v6net.Mask)),
+		GatewayV4: srv.v4Gw, GatewayV6: srv.v6Gw}
+	hooks.Activate(hookEnv)
+	if hooks.Configured() && len(tapSetupErrs) != 0 {
+		if downErr := hooks.Down(); downErr != nil {
+			log.Errorf("down hook after interface setup failure also failed: %v", downErr)
+		}
+		_ = listener.Close()
+		log.Fatalf("Server tunnel interface is not ready; refusing to run up hook: %s", strings.Join(tapSetupErrs, "; "))
+	}
+	if err := hooks.Up(hookEnv); err != nil {
+		if downErr := hooks.Down(); downErr != nil {
+			log.Errorf("down hook after up failure also failed: %v", downErr)
+		}
+		_ = listener.Close()
+		log.Fatalf("Server lifecycle hook failed: %v", err)
+	}
+	defer srv.tap.Close()
+	defer func() {
+		if err := hooks.Down(); err != nil {
+			log.Errorf("Server down hook failed: %v", err)
+			runErr = err
+		}
+	}()
+
+	if cfg.Web.Addr != "" {
+		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
+	}
 	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", cfg.Addr)
 
 	serveListener(ctx, srv, listener, tlsConfig)
+	return nil
 }
 
 // assignTapGateway 在 tap 上配置一个隧道网关地址。
 // 失败必须可见：地址没配上时隧道网关不可达，web.bind=tunnel 也会对着一个
 // 不存在的地址反复 bind 失败，否则只能靠"面板连不上"反推。
-func assignTapGateway(link netlink.Link, fam, ip string, prefix int) {
+func assignTapGateway(link netlink.Link, fam, ip string, prefix int) error {
 	if ip == "" {
-		return
+		return nil
 	}
 	addr, err := netlink.ParseAddr(fmt.Sprintf("%s/%d", ip, prefix))
 	if err != nil {
-		log.Errorf("Server invalid %s gateway address %s/%d: %v", fam, ip, prefix, err)
-		return
+		return fmt.Errorf("Server invalid %s gateway address %s/%d: %v", fam, ip, prefix, err)
 	}
 	if fam == "v6" {
 		// ULA 网关由配置指定，不存在需要探测的重复地址：挂上即 permanent，
@@ -901,9 +938,10 @@ func assignTapGateway(link netlink.Link, fam, ip string, prefix int) {
 		addr.Flags = ifaNoDAD
 	}
 	if err := netlink.AddrReplace(link, addr); err != nil {
-		log.Errorf("Server failed to assign %s gateway %s/%d to %s: %v",
+		return fmt.Errorf("Server failed to assign %s gateway %s/%d to %s: %v",
 			fam, ip, prefix, link.Attrs().Name, err)
 	}
+	return nil
 }
 
 // serveListener 阻塞接受连接直到 ctx 取消。独立成函数以便测试进程内启动。
@@ -1290,6 +1328,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		ci.brutal.Store(br.clone())
 		if !br.Applied {
 			log.Warnf("[%s] TCP Brutal shaping skipped: %s", clientID, br.Error)
+		} else if br.Error != "" {
+			log.Warnf("[%s] TCP Brutal shaping active with limited observability: %s", clientID, br.Error)
 		}
 	} else {
 		ci.brutal.Store((&brutalApplyResult{}).clone())

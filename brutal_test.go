@@ -12,6 +12,7 @@ type fakeBrutalSocket struct {
 	versionErr  error
 	setAlgoErr  error
 	setParamErr error
+	getParamErr error
 	params      []byte
 	algoCalls   []string
 }
@@ -34,6 +35,9 @@ func (f *fakeBrutalSocket) setParams(v []byte) error {
 	return nil
 }
 func (f *fakeBrutalSocket) getParams(size int) ([]byte, error) {
+	if f.getParamErr != nil {
+		return nil, f.getParamErr
+	}
 	if len(f.params) != size {
 		return nil, errors.New("no params")
 	}
@@ -70,6 +74,15 @@ func TestBrutalLockedRuleAndRollback(t *testing.T) {
 	got := configureTCPBrutal(locked, 30, legacy8, 42)
 	if !got.Applied || !got.RuleManaged || got.RateMbps != 125 || got.CwndGain != 15 || got.GroupID != 7 {
 		t.Fatalf("locked rule must be treated as active and read back: %+v", got)
+	}
+
+	lockedUnreadable := &fakeBrutalSocket{
+		congestion: "brutal", version: brutalV2Version,
+		setAlgoErr: errBrutalLocked, setParamErr: errBrutalLocked, getParamErr: errBrutalLocked,
+	}
+	got = configureTCPBrutal(lockedUnreadable, 30, legacy8, 42)
+	if !got.Applied || !got.RuleManaged || got.RateMbps != 0 || got.GroupID != 0 || got.Error == "" {
+		t.Fatalf("unreadable locked rule must not report the requested rate as actual: %+v", got)
 	}
 
 	failed := &fakeBrutalSocket{congestion: "cubic", version: brutalV2Version, setParamErr: errors.New("bad params")}

@@ -169,6 +169,14 @@ func TestDashboardNoAdjacentStrings(t *testing.T) {
 	}
 }
 
+func TestDashboardEscapesHTMLAndAttributeDelimiters(t *testing.T) {
+	for _, token := range []string{`replace(/&/g,'&amp;')`, `replace(/</g,'&lt;')`, `replace(/>/g,'&gt;')`, `replace(/\x22/g,'&quot;')`, `replace(/\x27/g,'&#39;')`} {
+		if !strings.Contains(dashboardHTML, token) {
+			t.Fatalf("dashboard esc() missing %q", token)
+		}
+	}
+}
+
 // extractInlineScript 取出 HTML 里第一个 <script>...</script> 的脚本正文（不含标签）。
 func extractInlineScript(html string) string {
 	m := regexp.MustCompile(`(?s)(<script[^>]*>)(.*?)(</script>)`).FindStringSubmatch(html)
