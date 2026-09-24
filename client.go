@@ -234,9 +234,9 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 			}
 		}
 		best := p.pickBackend(backends)
-		// 数据 batch 只发往一个 MinRTT 后端，payload 所有权可直接转移，
-		// 不再为每帧 cloneFrame + memcpy。
-		p.dropN(sendBatchTo(best, batch))
+		// 数据 batch 优先走 MinRTT，若该连接瞬时满则尝试其它后端；全部满时
+		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
+		p.dropN(sendBatchToAny(backends, best, batch))
 		for _, par := range parities {
 			p.paritySent.Add(1)
 			pf := VPNFrame{Seq: 0, Data: par}
@@ -248,7 +248,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		return
 	}
 
-	p.dropN(sendBatchTo(p.pickBackend(backends), batch))
+	p.dropN(sendBatchToAny(backends, p.pickBackend(backends), batch))
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -313,23 +313,63 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	return bestBackend
 }
 
-// sendBatchTo 把数据 batch 的 payload 所有权转移给唯一后端。
-// 只复制 VPNFrame 描述符，避免原实现每帧 cloneFrame 的 malloc+memcpy。
-// 成功或失败后，调用方 batch 中的 Data 都会被置 nil。
-func sendBatchTo(b *Backend, batch []VPNFrame) int {
+// sendBatchToAny 把数据 batch 的 payload 所有权转移给某个可写后端。
+// 热路径先无阻塞尝试 preferred/其它连接；只有所有连接都满时才进入最多 5ms
+// 的短退让。这样可以显著减少“分配 seq 后再丢 batch”造成的重排序号洞。
+// 成功或最终失败后，调用方 batch 中的 Data 都会被置 nil。
+func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) int {
 	out := getVPNFrameBatch(len(batch))
 	copy(out, batch)
 	for i := range batch {
 		batch[i].Data = nil
 	}
-	select {
-	case b.ch <- out:
-		return 0
-	default:
-		freeFrames(out)
-		putVPNFrameBatch(out)
-		return len(out)
+
+	trySend := func(b *Backend) bool {
+		if b == nil {
+			return false
+		}
+		select {
+		case b.ch <- out:
+			return true
+		default:
+			return false
+		}
 	}
+
+	tryAll := func() bool {
+		if trySend(preferred) {
+			return true
+		}
+		for _, b := range backends {
+			if b != preferred && trySend(b) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if tryAll() {
+		return 0
+	}
+
+	// 仅拥塞慢路径进入这里。5ms 远低于 50ms reorder skip deadline，
+	// 同时给 TLS writer 足够机会腾出一个 batch slot。
+	deadline := time.Now().Add(5 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		time.Sleep(50 * time.Microsecond)
+		if tryAll() {
+			return 0
+		}
+	}
+
+	freeFrames(out)
+	putVPNFrameBatch(out)
+	return len(out)
+}
+
+// sendBatchTo 保留给单后端测试/兼容调用；内部仍走同一所有权转移路径。
+func sendBatchTo(b *Backend, batch []VPNFrame) int {
+	return sendBatchToAny([]*Backend{b}, b, batch)
 }
 
 // parity 要广播到多个后端，payload 仍需独立副本；但单帧 batch 容器复用池。
