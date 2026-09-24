@@ -51,20 +51,38 @@ done
 
 SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 SOURCE_DATE="${TLSVPN_SOURCE_DATE:-$(git show -s --format=%cs "$SOURCE_VERSION" 2>/dev/null || date -u +%Y-%m-%d)}"
+SOURCE_EPOCH="$(git show -s --format=%ct "$SOURCE_VERSION" 2>/dev/null || date -u +%s)"
+source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
+
+# apk-tools v3 uses Alpine's version grammar. In particular, SemVer-style
+# build metadata such as "1.2.3+git.deadbeef" is not a valid package version.
+# Keep release tags when they are already apk-safe; map git-describe versions
+# to the supported "_pN" suffix; otherwise fall back to a deterministic
+# "_git<unix timestamp>" snapshot version. The exact source commit is still
+# carried separately by TLSVPN_SOURCE_VERSION.
+normalize_apk_version() {
+    local raw="${1#v}"
+
+    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]+)?$ ]]; then
+        printf '%s\n' "$raw"
+        return
+    fi
+
+    if [[ "$raw" =~ ^([0-9]+([.][0-9]+)*)-([0-9]+)-g[0-9A-Fa-f]+$ ]]; then
+        printf '%s_p%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+        return
+    fi
+
+    printf '0.0.%s_git%s\n' "$source_day" "$SOURCE_EPOCH"
+}
 
 if [ -n "${TLSVPN_PKG_VERSION:-}" ]; then
-    PACKAGE_VERSION="$TLSVPN_PKG_VERSION"
+    PACKAGE_VERSION="$(normalize_apk_version "$TLSVPN_PKG_VERSION")"
 elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
-    PACKAGE_VERSION="$GITHUB_REF_NAME"
+    PACKAGE_VERSION="$(normalize_apk_version "$GITHUB_REF_NAME")"
 else
-    short_source="$(printf '%s' "$SOURCE_VERSION" | cut -c1-12)"
-    source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
-    PACKAGE_VERSION="0.0.${source_day}+git.${short_source}"
+    PACKAGE_VERSION="0.0.${source_day}_git${SOURCE_EPOCH}"
 fi
-PACKAGE_VERSION="${PACKAGE_VERSION#v}"
-PACKAGE_VERSION="$(printf '%s' "$PACKAGE_VERSION" | tr -c 'A-Za-z0-9._+-' '-')"
-PACKAGE_VERSION="${PACKAGE_VERSION%-}"
-[ -n "$PACKAGE_VERSION" ] || PACKAGE_VERSION="0.0.0"
 
 SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
 
