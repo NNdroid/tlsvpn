@@ -8,7 +8,6 @@ device="$TLSVPN_DEVICE"
 [ -n "$interface" ] && [ -n "$device" ] || exit 1
 
 proto_init_update "$device" 1
-proto_set_keep 1
 
 if [ -n "$TLSVPN_IPV4" ] && [ "$TLSVPN_IPV4" != "/" ]; then
 	addr="${TLSVPN_IPV4%/*}"
