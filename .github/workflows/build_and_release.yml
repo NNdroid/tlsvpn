@@ -93,6 +93,7 @@ jobs:
           OPENWRT_TARGET: ${{ matrix.target }}
           OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
           OPENWRT_INCLUDE_ARCH_INDEPENDENT: ${{ matrix.include_arch_independent }}
+          OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-sdk/25.12.5-${{ matrix.target }}-${{ matrix.subtarget }}
           TLSVPN_SOURCE_VERSION: ${{ github.sha }}
           TLSVPN_PKG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           JOBS: "2"
