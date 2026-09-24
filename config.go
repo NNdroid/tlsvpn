@@ -80,12 +80,6 @@ type ServerConfig struct {
 	V6CIDR string `json:"v6_cidr,omitempty"` // 默认 fd00::/64
 	Cert   string `json:"cert,omitempty"`    // 留空则自动生成并持久化自签证书
 	Key    string `json:"key,omitempty"`
-	// SessionToken 要求重连接入既有会话时回带会话令牌。
-	// 关闭（默认）时：clientID + PSK + MAC 即可重连，因此任何持密者只要知道
-	// 目标 MAC 就能冒充既有会话（clientID 由 mac+psk 推导）。
-	// 开启后：令牌只在会话自己的 TLS 连接内下发一次，第三方无法取得，
-	// 冒充既有会话被拒。首次接入不受影响，升级需两端同版本同时打开。
-	SessionToken bool `json:"session_token,omitempty"`
 	// MaxSessions 并发会话数上限（0 = 默认 1024）。v6 池在 /64 下实际不会
 	// 枯竭，没有上限的话任何持 PSK 者轮换 MAC 即可无限创建会话（每会话
 	// 3-4 个 goroutine + 4096 深发送队列 + 重排环形缓冲），直到 OOM。
@@ -197,10 +191,42 @@ const exampleConfigJSON = `{
     "v6_cidr": "fd00::/64",
     "cert": "",
     "key": "",
-	    "session_token": true,
     "max_sessions": 1024
   }
 }`
+
+// stripDeprecatedSessionTokenConfig removes the former server.session_token
+// configuration switch before strict decoding. Session resume tokens are now a
+// mandatory protocol property; the legacy key is accepted only so upgrades do
+// not brick existing config files. Its value is intentionally ignored.
+func stripDeprecatedSessionTokenConfig(data []byte) []byte {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(data, &root); err != nil {
+		return data
+	}
+	rawServer, ok := root["server"]
+	if !ok {
+		return data
+	}
+	var server map[string]json.RawMessage
+	if err := json.Unmarshal(rawServer, &server); err != nil {
+		return data
+	}
+	if _, ok := server["session_token"]; !ok {
+		return data
+	}
+	delete(server, "session_token")
+	cleanServer, err := json.Marshal(server)
+	if err != nil {
+		return data
+	}
+	root["server"] = cleanServer
+	clean, err := json.Marshal(root)
+	if err != nil {
+		return data
+	}
+	return clean
+}
 
 // loadConfigFile 读取并解析 JSON 配置（未知字段报错），不包含默认值填充。
 // 唯一例外是 encrypt：bool 无法自辨"字段缺失"与"显式 false"，而这里
@@ -211,7 +237,8 @@ func loadConfigFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %v", err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
+	decodeData := stripDeprecatedSessionTokenConfig(data)
+	dec := json.NewDecoder(bytes.NewReader(decodeData))
 	dec.DisallowUnknownFields()
 	cfg := &Config{}
 	if err := dec.Decode(cfg); err != nil {
@@ -220,7 +247,7 @@ func loadConfigFile(path string) (*Config, error) {
 	var probe struct {
 		Encrypt *bool `json:"encrypt"`
 	}
-	if json.Unmarshal(data, &probe) == nil {
+	if json.Unmarshal(decodeData, &probe) == nil {
 		cfg.EncryptPresent = probe.Encrypt != nil
 		// 未写 encrypt 按开启处理：-print-config 模板一直输出 true，省略字段若仍
 		// 按 bool 零值 false 处理，整条链路会静默跑明文，与模板读起来完全相反。
