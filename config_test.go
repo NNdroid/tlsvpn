@@ -93,6 +93,30 @@ func TestLoadConfigFileValid(t *testing.T) {
 	}
 }
 
+func TestLoadConfigIgnoresDeprecatedSessionToken(t *testing.T) {
+	p := writeTempConfig(t, `{
+		"mode":"server",
+		"psk":"test-only-high-entropy-secret",
+		"addr":":4000",
+		"server":{"session_token":false}
+	}`)
+	cfg, err := loadConfigFile(p)
+	if err != nil {
+		t.Fatalf("legacy server.session_token must not break upgrades: %v", err)
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("legacy server.session_token value must be ignored: %v", err)
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "session_token") {
+		t.Fatalf("deprecated config switch leaked back into serialized config: %s", b)
+	}
+}
+
 func TestLoadConfigUnknownField(t *testing.T) {
 	p := writeTempConfig(t, `{"mode":"client","addr":"1.2.3.4:4000","conns":2}`)
 	// conns 在 client 子对象之下，顶层 conns 属未知字段
