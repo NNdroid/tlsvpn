@@ -24,6 +24,12 @@ define Package/luci-proto-tlsvpn/description
  Configure TLSVPN clients as native OpenWrt network interfaces from LuCI.
 endef
 
+# This package only installs static LuCI JavaScript. package.mk's default
+# Build/Compile invokes $(MAKE) inside PKG_BUILD_DIR, but there is no upstream
+# Makefile to build. Explicitly make the compile phase a no-op.
+define Build/Compile
+endef
+
 define Package/luci-proto-tlsvpn/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/protocol
 	$(INSTALL_DATA) ./htdocs/luci-static/resources/protocol/tlsvpn.js \
