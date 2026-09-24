@@ -354,15 +354,9 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 					return nil, seq, nil
 				}
 
-				var frame []byte
-				temp := getFrame()
-				if dataLen > cap(temp) {
-					putFrame(temp)
-					frame = make([]byte, dataLen)
-				} else {
-					frame = temp[:dataLen]
-				}
-
+				// 直接按所需长度取 size-class 缓冲。旧路径先拿 2KB，再对
+				// jumbo frame 走 make([]byte, dataLen)，绕开了现成的大档内存池。
+				frame := getFrameAtLeast(dataLen)[:dataLen]
 				copy(frame, fs.buf[fs.offset+HeaderSize:fs.offset+HeaderSize+dataLen])
 				fs.offset += HeaderSize + totalLen
 				return frame, seq, nil
