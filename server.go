@@ -1735,21 +1735,28 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 //
 // e2e 性能测试通过 TxBytes/RxBytes 计数与 onWrite 钩子观测注入帧的回环，
 // 等效于真实 TAP 上的 iperf/ping。
+type memTapWriteHook struct {
+	fn func([]byte)
+}
+
 type memTap struct {
-	ctx      context.Context
-	TxBytes  atomic.Uint64 // 写入（即隧道向该 TAP 交付）的字节数
-	TxPkts   atomic.Uint64
-	onWrite  func([]byte) // 测试钩子：每帧交付回调（可为 nil）
-	onWriteM sync.Mutex
+	ctx     context.Context
+	TxBytes atomic.Uint64 // 写入（即隧道向该 TAP 交付）的字节数
+	TxPkts  atomic.Uint64
+	// 测试/基准热路径只读。atomic.Pointer 避免每个交付帧都 lock/unlock，
+	// 否则 mem-TAP throughput 实际测到的是测试钩子 mutex。
+	onWrite atomic.Pointer[memTapWriteHook]
 }
 
 func newMemTap(ctx context.Context) *memTap { return &memTap{ctx: ctx} }
 
-// SetOnWrite 注册写入回调（测试观测用）
+// SetOnWrite 注册写入回调（测试观测用，更新是冷路径）
 func (m *memTap) SetOnWrite(f func([]byte)) {
-	m.onWriteM.Lock()
-	m.onWrite = f
-	m.onWriteM.Unlock()
+	if f == nil {
+		m.onWrite.Store(nil)
+		return
+	}
+	m.onWrite.Store(&memTapWriteHook{fn: f})
 }
 
 func (m *memTap) Read(p []byte) (int, error) {
@@ -1760,11 +1767,8 @@ func (m *memTap) Read(p []byte) (int, error) {
 func (m *memTap) Write(p []byte) (int, error) {
 	m.TxBytes.Add(uint64(len(p)))
 	m.TxPkts.Add(1)
-	m.onWriteM.Lock()
-	hook := m.onWrite
-	m.onWriteM.Unlock()
-	if hook != nil {
-		hook(p)
+	if hook := m.onWrite.Load(); hook != nil {
+		hook.fn(p)
 	}
 	return len(p), nil
 }
