@@ -25,7 +25,7 @@ jobs:
       - name: Run native build script
         env:
           HOST_ALIAS: "0"
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.run_number) }}
         run: |
           chmod +x scripts/build.sh
           ./scripts/build.sh
@@ -94,7 +94,7 @@ jobs:
           OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
           OPENWRT_INCLUDE_ARCH_INDEPENDENT: ${{ matrix.include_arch_independent }}
           TLSVPN_SOURCE_VERSION: ${{ github.sha }}
-          TLSVPN_PKG_VERSION: ${{ github.ref_name }}
+          TLSVPN_PKG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           JOBS: "2"
         run: |
           chmod +x scripts/build_openwrt_apk.sh
