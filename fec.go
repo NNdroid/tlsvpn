@@ -57,19 +57,20 @@ const (
 )
 
 var fecLensPool = sync.Pool{
-	New: func() any { return make([]int, fecMaxGroup) },
+	New: func() any { return new([fecMaxGroup]int) },
 }
 
 func getFECLens(k int) []int {
-	return fecLensPool.Get().([]int)[:k]
+	return fecLensPool.Get().(*[fecMaxGroup]int)[:k]
 }
 
 func putFECLens(lens []int) {
 	if cap(lens) != fecMaxGroup {
 		return
 	}
-	clear(lens[:cap(lens)])
-	fecLensPool.Put(lens[:cap(lens)])
+	full := lens[:fecMaxGroup]
+	clear(full)
+	fecLensPool.Put((*[fecMaxGroup]int)(full))
 }
 
 // clampFecGroup 把用户配置的组大小约束到协议允许范围
