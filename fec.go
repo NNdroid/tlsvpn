@@ -236,6 +236,7 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.isDoneLocked(start) {
+		putFECLens(lens)
 		return
 	}
 	g, ok := d.groups[start]
@@ -406,6 +407,8 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 	atomic.AddUint64(&d.recovered, 1)
 	if d.out != nil {
 		d.out(g.start+uint32(missing), rec)
+	} else {
+		putFrame(rec)
 	}
 }
 
