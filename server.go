@@ -1570,7 +1570,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			return
 		}
 
-		if err == nil && frame != nil {
+		if frame == nil {
+			flushRxStats()
+			continue
+		}
+		if err == nil {
 			// 多条物理连接同时收包时这里只读会话 epoch/FEC/reorder 指针；
 			// RWMutex 允许并发读，避免原 Mutex 把所有 RX 热路径串行化。
 			session.sessionMu.RLock()
