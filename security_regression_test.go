@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"net"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,64 @@ func TestRandomSessionTokensAreUniqueAndExact(t *testing.T) {
 	}
 	if !verifyRandomSessionToken(a, a) || verifyRandomSessionToken(a, b) || verifyRandomSessionToken(a, "") {
 		t.Fatal("random session-token comparison contract failed")
+	}
+}
+
+func TestSessionTokenRolloverSurvivesLostHandshakeResponse(t *testing.T) {
+	current, err := newSessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &ClientSession{ResumeToken: current}
+
+	if err := ensurePendingResumeToken(session); err != nil {
+		t.Fatal(err)
+	}
+	pending := session.PendingResumeToken
+	if pending == "" || pending == current {
+		t.Fatalf("pending token was not independently generated: current=%q pending=%q", current, pending)
+	}
+	if got := responseResumeToken(session); got != pending {
+		t.Fatalf("response token = %q, want pending %q", got, pending)
+	}
+
+	// 模拟服务端已经生成 pending，但携带它的 handshake response 在网络中丢失。
+	// 客户端只能继续拿旧 current 重试；服务端必须继续接受，而且不能把 pending
+	// 再次覆盖成第三枚 token，否则连续丢包时两端永远无法重新同步。
+	if !acceptSessionResumeToken(session, current) {
+		t.Fatal("current token was rejected while pending token was still unacknowledged")
+	}
+	if err := ensurePendingResumeToken(session); err != nil {
+		t.Fatal(err)
+	}
+	if session.PendingResumeToken != pending {
+		t.Fatalf("unacknowledged pending token was overwritten: got %q want %q", session.PendingResumeToken, pending)
+	}
+
+	// 客户端终于收到 pending 并在后续握手回带：这一次才完成 rollover ACK。
+	if !acceptSessionResumeToken(session, pending) {
+		t.Fatal("pending token was not accepted as rollover acknowledgement")
+	}
+	if session.ResumeToken != pending || session.PendingResumeToken != "" {
+		t.Fatalf("pending token was not promoted cleanly: current=%q pending=%q", session.ResumeToken, session.PendingResumeToken)
+	}
+	if acceptSessionResumeToken(session, current) {
+		t.Fatal("old token remained valid after rollover acknowledgement")
+	}
+}
+
+func TestSessionTokenFormatForServerRestartContinuity(t *testing.T) {
+	token, err := newSessionToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validSessionTokenFormat(token) {
+		t.Fatal("fresh 256-bit session token was rejected by format validation")
+	}
+	for _, bad := range []string{"", "abcd", strings.Repeat("z", 64), strings.Repeat("0", 63)} {
+		if validSessionTokenFormat(bad) {
+			t.Fatalf("malformed token accepted: %q", bad)
+		}
 	}
 }
 
