@@ -1665,6 +1665,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			// 心跳/控制帧（frame=nil）：读超时已被 SetReadDeadline 刷新，
 			// 直接进入下一轮循环即可保持空闲连接存活
 			if frame == nil {
+				// 空闲连接也周期性归并本地统计，避免低流量时面板长期看不到增量。
+				flushRxStats()
 				continue
 			}
 
