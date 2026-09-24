@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 )
 
 // pskKey 由 PSK 派生的 32 字节密钥材料（hashPSK 的二进制形式）
@@ -146,6 +147,10 @@ func gcmAAD(wireLen, seq uint32) []byte {
 	return aad[:]
 }
 
+var gcmScratchPool = sync.Pool{
+	New: func() any { return new([gcmNonceSize + 8]byte) },
+}
+
 // gcmNonceAAD 在调用方提供的 20 字节 scratch 上一次构造 nonce 与 AAD。
 // 热路径（每帧 Seal/Open）单独调用 gcmNonce/gcmAAD 会因接口调用逃逸产生
 // 两次小堆分配；合并成单块 scratch 后每帧至多一次 20B 分配。
@@ -199,10 +204,13 @@ func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen
 	if ptLen == 0 || ic == nil {
 		return ptLen
 	}
-	// 复用明文存储：dst = region[:0]，密文+标签原地覆盖
-	var scratch [gcmNonceSize + 8]byte
-	nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
+	// cipher.AEAD 是接口调用，栈上的 [20]byte scratch 会逃逸。池中保存的是
+	// *[20]byte 指针，不会产生 slice-header 装箱分配；AEAD 返回前不会保留
+	// nonce/AAD 引用，因此调用结束即可安全归池。
+	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
+	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
 	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
+	gcmScratchPool.Put(scratch)
 	return len(out)
 }
 
@@ -212,9 +220,11 @@ func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]b
 	if len(data) == 0 || ic == nil {
 		return data, nil
 	}
-	var scratch [gcmNonceSize + 8]byte
-	nonce, aad := ic.gcmNonceAAD(seq, wireLen, &scratch)
-	return ic.aead.Open(data[:0], nonce, data, aad)
+	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
+	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
+	plain, err := ic.aead.Open(data[:0], nonce, data, aad)
+	gcmScratchPool.Put(scratch)
+	return plain, err
 }
 
 // openTo 解密 src（含标签）写入 dst（长度须等于明文长），返回明文。
@@ -227,7 +237,11 @@ func (ic *innerCipher) openTo(dst, src []byte, seq uint32, aad []byte) ([]byte, 
 	if len(src) < gcmTagSize {
 		return nil, fmt.Errorf("gcm payload too short: %d", len(src))
 	}
-	return ic.aead.Open(dst[:0], ic.gcmNonce(seq), src, aad)
+	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
+	nonce, _ := ic.gcmNonceAAD(seq, 0, scratch)
+	plain, err := ic.aead.Open(dst[:0], nonce, src, aad)
+	gcmScratchPool.Put(scratch)
+	return plain, err
 }
 
 // verifyCertHash 用服务器证书叶子证书的 SHA-256 指纹校验 -cert-sha256。
