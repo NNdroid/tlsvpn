@@ -1004,6 +1004,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 		conn.SetKeepAlivePeriod(15 * time.Second)
 		conn.SetNoDelay(true)
 		if !limiter.acquire(conn.RemoteAddr()) {
+			log.Debugf("connection limiter rejected remote %s", conn.RemoteAddr())
 			conn.Close()
 			continue
 		}
@@ -1015,6 +1016,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			n, err := c.Read(peekBuf)
 			c.SetReadDeadline(time.Time{})
 			if err != nil || n == 0 {
+				log.Debugf("pre-TLS probe failed from %s: n=%d err=%v", c.RemoteAddr(), n, err)
 				c.Close()
 				return
 			}
@@ -1048,6 +1050,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
 			if err != nil {
+				log.Debugf("TLS handshake failed from %s: %v", c.RemoteAddr(), err)
 				tlsConn.Close()
 				return
 			}
@@ -1058,6 +1061,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			n2, err2 := tlsConn.Read(peekBuf2)
 			tlsConn.SetReadDeadline(time.Time{})
 			if err2 != nil || n2 == 0 {
+				log.Debugf("post-TLS protocol probe failed from %s: n=%d err=%v", c.RemoteAddr(), n2, err2)
 				tlsConn.Close()
 				return
 			}
