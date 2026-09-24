@@ -57,6 +57,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `tap` | `tap0` | TAP device name; `"mem"` = in-memory backend (CI/e2e) |
 | `mac` | (Empty) | Pin the TAP interface MAC |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
+| `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks in self-managed mode; changing either requires restart |
 | `encrypt` | `true` when omitted in JSON | Inner AES-256-GCM with per-session salts and separate data/FEC key domains |
 | `min_enc` | (Empty) | Strength floor: `gcm` refuses peers that cannot negotiate GCM, `any`/empty sets no floor (needs `encrypt`) |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
@@ -144,6 +145,23 @@ OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
 ```
 
 The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621 and ath79/generic. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
+
+### `up` / `down` lifecycle hooks
+
+In the default self-managed mode, optional process-level hooks can run after tunnel networking is ready and during graceful cleanup:
+
+```json
+{
+  "up": "/etc/openvpn/up.sh",
+  "down": "/etc/openvpn/down.sh"
+}
+```
+
+Hooks are executed directly (never through `sh -c`), so the file needs a shebang and executable permission. Paths must be absolute. Each hook has a 30-second timeout and runs with the configuration directory as its working directory. `up` runs once after TAP addresses and built-in policy routing are ready; parallel TCP connections and short reconnects do not run it again. `down` runs once while the TAP still exists on graceful shutdown and also rolls back a partially successful `up`. The inherited environment is reduced to a safe PATH/locale and the PSK is never exported.
+
+Scripts receive OpenVPN-style variables `script_type`, `dev`, `dev_type=tap`, `config`, `ifconfig_local`, `ifconfig_ipv6_local`, `route_vpn_gateway`, and `route_ipv6_gateway`, plus the corresponding `TLSVPN_*` aliases.
+
+When `client.interface_manager=netifd`, top-level `up`/`down` hooks are rejected. OpenWrt already owns interface lifecycle through netifd and the fixed TLSVPN helpers, so allowing a second lifecycle owner would make ordering and rollback ambiguous.
 
 ## Dashboard & Metrics
 
