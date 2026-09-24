@@ -42,7 +42,8 @@ type AsyncPort struct {
 	exhausted  atomic.Bool
 	onExhaust  func()
 	dropped    uint64 // 各环节丢弃帧计数（面板/metrics）
-	paritySent atomic.Uint64
+	paritySent    atomic.Uint64
+	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 }
 
 type portEpochReset struct {
@@ -67,7 +68,11 @@ func (p *AsyncPort) dropN(n int) {
 
 func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
-	p := &AsyncPort{id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel, resetEpoch: make(chan portEpochReset)}
+	p := &AsyncPort{
+		id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel,
+		resetEpoch: make(chan portEpochReset),
+		parityScratch: make([][]byte, 0, 32),
+	}
 	go p.run()
 	return p
 }
@@ -225,7 +230,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 	}
 
 	if p.encoder != nil {
-		var parities [][]byte
+		parities := p.parityScratch[:0]
 		for _, vf := range batch {
 			if par := p.encoder.add(vf); par != nil {
 				parities = append(parities, par)
@@ -243,6 +248,8 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 			}
 			putFrame(par)
 		}
+		clear(parities) // 不让 scratch 长期持有已归池 payload
+		p.parityScratch = parities[:0]
 		return
 	}
 
