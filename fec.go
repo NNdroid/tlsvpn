@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/binary"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,22 @@ const (
 	fecDoneMask = fecDoneRing - 1
 )
 
+var fecLensPool = sync.Pool{
+	New: func() any { return make([]int, fecMaxGroup) },
+}
+
+func getFECLens(k int) []int {
+	return fecLensPool.Get().([]int)[:k]
+}
+
+func putFECLens(lens []int) {
+	if cap(lens) != fecMaxGroup {
+		return
+	}
+	clear(lens[:cap(lens)])
+	fecLensPool.Put(lens[:cap(lens)])
+}
+
 // clampFecGroup 把用户配置的组大小约束到协议允许范围
 func clampFecGroup(k int) int {
 	if k < fecMinGroup {
@@ -78,7 +95,14 @@ type fecEncoder struct {
 }
 
 func newFECEncoder(k int, ic *innerCipher) *fecEncoder {
-	return &fecEncoder{k: clampFecGroup(k), ic: ic}
+	k = clampFecGroup(k)
+	return &fecEncoder{
+		k:    k,
+		ic:   ic,
+		seqs: make([]uint32, 0, k),
+		lens: make([]int, 0, k),
+		acc:  make([]byte, 0, 2048),
+	}
 }
 
 // ParitySent 已生成的校验帧总数
@@ -94,13 +118,17 @@ func (e *fecEncoder) add(vf VPNFrame) []byte {
 	e.seqs = append(e.seqs, vf.Seq)
 	e.lens = append(e.lens, len(vf.Data))
 	if len(vf.Data) > len(e.acc) {
-		grown := make([]byte, len(vf.Data))
-		copy(grown, e.acc)
-		e.acc = grown
+		oldLen := len(e.acc)
+		if cap(e.acc) >= len(vf.Data) {
+			e.acc = e.acc[:len(vf.Data)]
+			clear(e.acc[oldLen:])
+		} else {
+			grown := make([]byte, len(vf.Data))
+			copy(grown, e.acc)
+			e.acc = grown
+		}
 	}
-	for i, b := range vf.Data {
-		e.acc[i] ^= b
-	}
+	subtle.XORBytes(e.acc[:len(vf.Data)], e.acc[:len(vf.Data)], vf.Data)
 	if len(e.seqs) < e.k {
 		return nil
 	}
@@ -177,7 +205,7 @@ func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *
 		k:      clampFecGroup(k),
 		ic:     ic,
 		out:    out,
-		groups: make(map[uint32]*fecGroupState),
+		groups: make(map[uint32]*fecGroupState, 64),
 	}
 }
 
@@ -193,7 +221,7 @@ func (d *fecDecoder) Reset() {
 	for _, g := range d.groups {
 		d.releaseLocked(g)
 	}
-	d.groups = make(map[uint32]*fecGroupState)
+	clear(d.groups)
 	for i := range d.doneRing { // 数组不能用 clear()，显式归零
 		d.doneRing[i] = 0
 	}
@@ -223,9 +251,7 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 	if len(frame) > len(g.acc) {
 		g.acc = d.growAccLocked(g.acc, len(frame))
 	}
-	for i, b := range frame {
-		g.acc[i] ^= b
-	}
+	subtle.XORBytes(g.acc[:len(frame)], g.acc[:len(frame)], frame)
 	d.tryRecoverLocked(g)
 }
 
@@ -251,11 +277,12 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	if len(payload) < descLen+tagLen {
 		return
 	}
-	lens := make([]int, k)
+	lens := getFECLens(k)
 	maxLen := 0
 	for i := 0; i < k; i++ {
 		l := int(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
 		if l+tagLen > len(payload)-descLen {
+			putFECLens(lens)
 			return // 描述符与负载长度自洽性校验失败
 		}
 		lens[i] = l
@@ -271,6 +298,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	g, ok := d.groups[start]
 	if ok && g.parity != nil {
+		putFECLens(lens)
 		return // 同组重复校验帧（多连接广播副本）
 	}
 	if !ok {
@@ -286,6 +314,8 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	aad := gcmAAD(uint32(maxLen+tagLen), start)
 	if _, err := d.ic.openTo(pb, payload[descLen:descLen+maxLen+tagLen], start, aad); err != nil {
 		putFrame(pb)
+		putFECLens(g.lens)
+		g.lens = nil
 		return
 	}
 	g.parity = pb
@@ -369,9 +399,7 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 		g.acc = d.growAccLocked(g.acc, n)
 	}
 	rec := getFrameAtLeast(n)[:n]
-	for i := 0; i < n; i++ {
-		rec[i] = g.parity[i] ^ g.acc[i]
-	}
+	subtle.XORBytes(rec, g.parity[:n], g.acc[:n])
 	// 标记已恢复成员，避免 finishGroup 把它计入丢失
 	g.gotMask |= uint64(1) << uint(missing)
 	d.finishGroupLocked(g)
@@ -414,7 +442,10 @@ func (d *fecDecoder) releaseLocked(g *fecGroupState) {
 		putFrame(g.parity)
 		g.parity = nil
 	}
-	g.lens = nil
+	if g.lens != nil {
+		putFECLens(g.lens)
+		g.lens = nil
+	}
 	if cap(g.acc) > cap(d.spareAc) {
 		d.spareAc = g.acc
 	}
