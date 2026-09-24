@@ -131,7 +131,19 @@ The protocol handler resolves every transport endpoint before starting TLSVPN, i
 
 The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
 
-The package template tracks this development branch for convenience. Before publishing it as a feed package, replace `PKG_SOURCE_VERSION` with an immutable commit SHA and provide the corresponding mirror hash. The OpenWrt Go toolchain must also satisfy the Go version declared in this repository's `go.mod`.
+For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, prepares the `packages` and `luci` feeds, builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
+
+Example for the NanoPi R5S / Rockchip ARMv8 target:
+
+```bash
+OPENWRT_VERSION=25.12.5 \
+OPENWRT_TARGET=rockchip \
+OPENWRT_SUBTARGET=armv8 \
+OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
+./scripts/build_openwrt_apk.sh
+```
+
+The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621 and ath79/generic. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
 
 ## Dashboard & Metrics
 
