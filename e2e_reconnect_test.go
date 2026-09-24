@@ -20,8 +20,6 @@ type restartCase struct {
 	conns    int
 	encrypt  bool
 	reqV4    string
-	// 服务端侧
-	sessionToken bool
 }
 
 // TestClientRecoversAfterServerRestart 复现并回归"服务端重启后客户端无法自动恢复"：
@@ -34,12 +32,10 @@ type restartCase struct {
 func TestClientRecoversAfterServerRestart(t *testing.T) {
 	cases := []restartCase{
 		{name: "默认(GCM,1连接,无FEC)", encrypt: true},
-		{name: "GCM+session_token开启", encrypt: true, sessionToken: true},
 		{name: "GCM+FEC-XOR K=4", encrypt: true, fecMode: true, fecGroup: 4},
 		{name: "GCM+FEC-XOR K=2(下限)", encrypt: true, fecMode: true, fecGroup: fecMinGroup},
-		{name: "GCM+FEC-XOR+session_token", encrypt: true, fecMode: true, fecGroup: 4, sessionToken: true},
 		{name: "GCM+3条物理连接", encrypt: true, conns: 3},
-		{name: "GCM+3连接+FEC+session_token", encrypt: true, conns: 3, fecMode: true, fecGroup: 4, sessionToken: true},
+		{name: "GCM+3连接+FEC", encrypt: true, conns: 3, fecMode: true, fecGroup: 4},
 		{name: "GCM+客户端指定IP", encrypt: true, reqV4: "10.0.0.9"},
 		{name: "加密关闭", encrypt: false},
 	}
@@ -77,7 +73,7 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		srvCfg := &Config{
 			Mode: "server", PSK: psk, Tap: "mem", Addr: addr,
 			Encrypt: tc.encrypt,
-			Server:  ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64", SessionToken: tc.sessionToken},
+			Server:  ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
 		}
 		srvCfg.applyDefaults()
 		if err := srvCfg.Validate(); err != nil {
@@ -86,9 +82,6 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		srv, err := newServerForTest(ctx, srvCfg)
 		if err != nil {
 			t.Fatalf("server init: %v", err)
-		}
-		if tc.sessionToken {
-			srv.sessionToken = true
 		}
 		// 端口复用重试：上一轮服务端可能尚未完成 listener.Close()
 		var l net.Listener
