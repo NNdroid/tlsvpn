@@ -133,12 +133,17 @@ rm -rf "$SDK_DIR"
 mkdir -p "$SDK_DIR"
 tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
 
-echo "==> Preparing OpenWrt feeds"
+echo "==> Preparing the OpenWrt Go build feed"
 (
     cd "$SDK_DIR"
-    ./scripts/feeds update packages luci
-    ./scripts/feeds install -p packages -a
-    ./scripts/feeds install -p luci -a
+    # TLSVPN only needs the Go packaging helpers at build time. The LuCI
+    # protocol package is static JavaScript, while kmod-tun, ca-bundle,
+    # resolveip and luci-base are runtime dependencies supplied by the target
+    # firmware repositories. Installing entire feeds here makes an SDK build
+    # scan thousands of unrelated packages and can drag kernel/Lua build
+    # dependencies into package/tlsvpn/compile.
+    ./scripts/feeds update packages
+    ./scripts/feeds install -p packages golang
 )
 
 echo "==> Injecting TLSVPN packages"
