@@ -1510,24 +1510,33 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
-				for _, vf := range frames {
-					sendBuffer = appendPaddedFrame(sendBuffer, vf, icTx)
+				txPackets := 0
+			drainBatches:
+				for {
+					var n int
+					sendBuffer, n = appendOwnedFrameBatch(sendBuffer, frames, icTx)
+					txPackets += n
+					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+						break
+					}
+					select {
+					case frames = <-connTxChan:
+						continue
+					default:
+						break drainBatches
+					}
 				}
-				// payload 与 batch 描述符所有权归本协程：成帧完成后立即回池。
-				freeFrames(frames)
-				putVPNFrameBatch(frames)
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				_, werr := conn.Write(sendBuffer)
-				conn.SetWriteDeadline(time.Time{})
 				if werr != nil {
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
 					conn.Close()
 					return
 				}
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&session.TxPackets, uint64(len(frames)))
+				atomic.AddUint64(&session.TxPackets, uint64(txPackets))
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&ci.txPackets, uint64(len(frames)))
+				atomic.AddUint64(&ci.txPackets, uint64(txPackets))
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
@@ -1538,12 +1547,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				// 的唯一成因。加超时后本端 10s 内自发现并断连。
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if _, err := conn.Write(sendBuffer); err != nil {
-					conn.SetWriteDeadline(time.Time{})
 					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
 					conn.Close()
 					return
 				}
-				conn.SetWriteDeadline(time.Time{})
 			}
 		}
 	}()
@@ -1551,6 +1558,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
 	var rxBytesBatch, rxPacketsBatch uint64
+	var nextReadDeadlineRefresh time.Time
 	flushRxStats := func() {
 		if rxPacketsBatch == 0 {
 			return
@@ -1563,7 +1571,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 	defer flushRxStats()
 	for {
-		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+		now := time.Now()
+		if nextReadDeadlineRefresh.IsZero() || !now.Before(nextReadDeadlineRefresh) {
+			// 1s 滚动刷新、16s deadline => 实际空闲判死约 15~16s；
+			// 活跃数据面不再每包触发 pollSetDeadline syscall。
+			conn.SetReadDeadline(now.Add(16 * time.Second))
+			nextReadDeadlineRefresh = now.Add(time.Second)
+		}
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
 			log.Debugf("[%s] connection lost: %v", clientID, err)
