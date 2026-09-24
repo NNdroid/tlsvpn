@@ -1602,6 +1602,18 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}()
 
 	go func() {
+		var rxBytesBatch, rxPacketsBatch uint64
+		flushRxStats := func() {
+			if rxPacketsBatch == 0 {
+				return
+			}
+			atomic.AddUint64(&c.RxBytes, rxBytesBatch)
+			atomic.AddUint64(&c.RxPackets, rxPacketsBatch)
+			atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
+			rxBytesBatch, rxPacketsBatch = 0, 0
+		}
+		defer flushRxStats()
+
 		for {
 			tlsConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 			frame, seq, err := scanner.ReadFrame()
@@ -1616,9 +1628,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			}
 
 			if err == nil && frame != nil {
-				atomic.AddUint64(&c.RxBytes, uint64(len(frame)))
-				atomic.AddUint64(&c.RxPackets, 1)
-				atomic.AddUint64(&ci.rxBytes, uint64(len(frame)))
+				rxBytesBatch += uint64(len(frame))
+				rxPacketsBatch++
+				if rxPacketsBatch >= 64 {
+					flushRxStats()
+				}
 				if seq != 0 && icRx != nil {
 					plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
 					if derr != nil {
