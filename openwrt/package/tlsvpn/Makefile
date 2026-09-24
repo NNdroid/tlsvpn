@@ -8,7 +8,7 @@ PKG_NAME:=tlsvpn
 # three variables from scripts/build_openwrt_apk.sh so the APK is built from
 # the exact tagged commit rather than from a moving branch.
 TLSVPN_PKG_VERSION?=0.1.0
-TLSVPN_SOURCE_VERSION?=feature/openwrt-netifd-proto
+TLSVPN_SOURCE_VERSION?=main
 TLSVPN_SOURCE_DATE?=2026-09-24
 
 PKG_VERSION:=$(TLSVPN_PKG_VERSION)
@@ -37,7 +37,11 @@ define Package/tlsvpn
   CATEGORY:=Network
   TITLE:=TLS-based Layer-2 VPN
   URL:=https://github.com/NNdroid/tlsvpn
-  DEPENDS:=$(GO_ARCH_DEPENDS) +kmod-tun +ca-bundle
+  DEPENDS:=$(GO_ARCH_DEPENDS)
+  # These are device runtime requirements, not SDK build dependencies.
+  # Keeping them out of DEPENDS prevents a standalone SDK package build from
+  # trying to rebuild the target kernel merely to satisfy kmod-tun.
+  EXTRA_DEPENDS:=kmod-tun (>=0), ca-bundle (>=0)
 endef
 
 define Package/tlsvpn/description
@@ -49,7 +53,8 @@ define Package/tlsvpn-proto
   SECTION:=net
   CATEGORY:=Network
   TITLE:=netifd protocol support for TLSVPN
-  DEPENDS:=+tlsvpn +resolveip
+  DEPENDS:=+tlsvpn
+  EXTRA_DEPENDS:=resolveip (>=0)
   PKGARCH:=all
 endef
 
@@ -57,10 +62,6 @@ define Package/tlsvpn-proto/description
  Native OpenWrt netifd protocol integration for TLSVPN client interfaces.
  TLSVPN owns the TAP/data plane; netifd owns addresses, routes and firewall
  lifecycle.
-endef
-
-define Package/tlsvpn/install
-	$(call GoPackage/Package/Install/Bin,$(PKG_INSTALL_DIR))
 endef
 
 define Package/tlsvpn-proto/install
