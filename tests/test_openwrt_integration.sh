@@ -52,8 +52,8 @@ grep -Fq 'package/luci-proto-tlsvpn/compile' "${apk_builder}"
 grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT' "${apk_builder}"
 grep -Fq 'normalize_apk_version()' "${apk_builder}"
 grep -Fq '0.0.${source_day}_git${SOURCE_EPOCH}' "${apk_builder}"
-if grep -Fq '+git.' "${apk_builder}"; then
-	echo "APK package versions must not use SemVer +git build metadata" >&2
+if grep -Ev '^[[:space:]]*#' "${apk_builder}" | grep -Fq '+git.'; then
+	echo "APK package version generation must not use SemVer +git build metadata" >&2
 	exit 1
 fi
 
