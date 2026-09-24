@@ -311,9 +311,9 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	// 恰好返回了什么长度（openTo 按 dst[:0] 追加，以这里截断后的长度为界）。
 	pb := getFrameAtLeast(maxLen)[:maxLen]
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
-	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]
-	aad := gcmAAD(uint32(maxLen+tagLen), start)
-	if _, err := d.ic.openTo(pb, payload[descLen:descLen+maxLen+tagLen], start, aad); err != nil {
+	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]。
+	wireLen := uint32(maxLen + tagLen)
+	if _, err := d.ic.openTo(pb, payload[descLen:descLen+maxLen+tagLen], start, wireLen); err != nil {
 		putFrame(pb)
 		putFECLens(g.lens)
 		g.lens = nil
