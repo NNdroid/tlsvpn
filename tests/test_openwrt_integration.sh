@@ -50,6 +50,12 @@ grep -Fq 'sha256sum -c -' "${apk_builder}"
 grep -Fq 'package/tlsvpn/compile' "${apk_builder}"
 grep -Fq 'package/luci-proto-tlsvpn/compile' "${apk_builder}"
 grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT' "${apk_builder}"
+grep -Fq 'normalize_apk_version()' "${apk_builder}"
+grep -Fq '0.0.${source_day}_git${SOURCE_EPOCH}' "${apk_builder}"
+if grep -Fq '+git.' "${apk_builder}"; then
+	echo "APK package versions must not use SemVer +git build metadata" >&2
+	exit 1
+fi
 
 grep -Fq './scripts/feeds update packages' "${apk_builder}"
 grep -Fq './scripts/feeds install -p packages golang' "${apk_builder}"
