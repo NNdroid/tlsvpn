@@ -1474,7 +1474,6 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
 	ci.rttCache = rttCache
-	go startRTTPoller(connCtx, tcpConn, rttCache)
 
 	connTxChan := make(chan []VPNFrame, 32)
 	port.RegisterBackend(connTxChan, rttCache)
@@ -1484,10 +1483,25 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
+
+		// 与客户端一致：RTT 采样合并到已有发送 goroutine，避免每个物理连接
+		// 额外持有一个 200ms ticker goroutine。代理/非 TCP 场景自动禁用。
+		var rttTicker *time.Ticker
+		var rttC <-chan time.Time
+		if tcpConn != nil {
+			rttTicker = time.NewTicker(200 * time.Millisecond)
+			rttC = rttTicker.C
+			defer rttTicker.Stop()
+		}
+
 		for {
 			select {
 			case <-connCtx.Done():
 				return
+			case <-rttC:
+				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
+					atomic.StoreUint32(rttCache, rtt)
+				}
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				for _, vf := range frames {
