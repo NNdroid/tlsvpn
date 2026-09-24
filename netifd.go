@@ -6,6 +6,11 @@ import (
 	"sync/atomic"
 )
 
+var (
+	netifdLinkUpFn   = netifdLinkUp
+	netifdLinkDownFn = netifdLinkDown
+)
+
 type netifdLinkState struct {
 	up   bool
 	v4   string
@@ -39,7 +44,7 @@ func (c *Client) notifyNetifdUp(v4, v6, gw4, gw6 string) error {
 	// Serialize helper execution across multipath handshakes. Without holding
 	// this lock two connections can both observe the old state and race two
 	// netifd updates for the same interface.
-	if err := netifdLinkUp(c.netifdInterface, c.tapName, v4, v6, gw4, gw6); err != nil {
+	if err := netifdLinkUpFn(c.netifdInterface, c.tapName, v4, v6, gw4, gw6); err != nil {
 		return err
 	}
 
@@ -66,7 +71,7 @@ func (c *Client) notifyNetifdDown() error {
 		return nil
 	}
 
-	if err := netifdLinkDown(c.netifdInterface, c.tapName); err != nil {
+	if err := netifdLinkDownFn(c.netifdInterface, c.tapName); err != nil {
 		return err
 	}
 
