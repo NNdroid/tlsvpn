@@ -54,7 +54,7 @@ return network.registerProtocol('tlsvpn', {
 		o = s.taboption('general', form.Value, 'tap', _('Tunnel device'),
 			_('Optional TAP device name. Linux interface names are limited to 15 characters.'));
 		o.placeholder = this.getIfname();
-		o.datatype = 'uciname';
+		o.datatype = 'maxlength(15)';
 
 		o = s.taboption('general', widgets.NetworkSelect, 'tunlink',
 			_('Underlying network'),
