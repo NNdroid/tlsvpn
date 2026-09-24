@@ -76,6 +76,8 @@ if grep -Fq 'define Package/tlsvpn/install' "${package_makefile}"; then
 fi
 
 grep -Fq 'EXTRA_DEPENDS:=luci-base (>=0)' "${luci_makefile}"
+grep -Fq 'define Build/Compile' "${luci_makefile}"
+grep -Fq 'endef' "${luci_makefile}"
 grep -Fq '$(INSTALL_DATA) ./htdocs/luci-static/resources/protocol/tlsvpn.js' "${luci_makefile}"
 if grep -Fq 'luci.mk' "${luci_makefile}"; then
 	echo "static LuCI protocol package must not require luci.mk/lua-host" >&2
