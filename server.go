@@ -212,17 +212,15 @@ func (vs *VSwitch) flood(excludePortID string, frame []byte) {
 		vs.floodDrops.Add(1)
 		return
 	}
+	// WriteFrame 是非阻塞入队；直接在读锁下遍历，避免每个广播/未知单播
+	// 为 targets []Port 分配临时切片。Add/RemovePort 是冷路径，可接受短暂等待。
 	vs.portsMu.RLock()
-	var targets []Port
 	for id, port := range vs.ports {
 		if id != excludePortID {
-			targets = append(targets, port)
+			_ = port.WriteFrame(frame)
 		}
 	}
 	vs.portsMu.RUnlock()
-	for _, port := range targets {
-		port.WriteFrame(frame)
-	}
 }
 
 // allowFlood 消耗一个广播令牌；令牌按时间线性回充，容量 floodBurst。
