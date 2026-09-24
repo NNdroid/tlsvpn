@@ -334,11 +334,6 @@ type Server struct {
 	fecGroupMin, fecGroupMax int
 	// bootCfg 启动时配置：NeedsRestart 的差异基准（当前 s.cfg 是热更后的值）
 	bootCfg *Config
-	// sessionToken 开启后，重连既有会话必须回带握手响应下发的会话令牌。
-	// 令牌只在原会话自己的 TLS 会话内下发一次，因此持密者知道 PSK+MAC
-	// 仍无法冒充一个在线会话（否则其隧道流量会被转发给自己）。
-	sessionToken bool
-
 	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
 	bannedMu sync.Mutex
 
@@ -750,7 +745,6 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	s.psk = cfg.PSK
 	s.encrypt = cfg.Encrypt
 	s.brutal, s.brutalUp, s.brutalDown = cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown
-	s.sessionToken = cfg.Server.SessionToken
 	s.minEnc = minEncRank(cfg.MinEnc)
 	s.maxSessions = cfg.Server.MaxSessions
 	s.fecGroupMin, s.fecGroupMax = cfg.Server.FecGroupMin, cfg.Server.FecGroupMax
@@ -836,7 +830,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		encrypt: cfg.Encrypt, startedAt: time.Now(),
 		banned:       make(map[string]int64),
 		pskFail:      make(map[string]*pskFailBucket),
-		sessionToken: cfg.Server.SessionToken, minEnc: minEncRank(cfg.MinEnc),
+		minEnc: minEncRank(cfg.MinEnc),
 		maxSessions: cfg.Server.MaxSessions,
 		fecGroupMin: cfg.Server.FecGroupMin, fecGroupMax: cfg.Server.FecGroupMax,
 	}
