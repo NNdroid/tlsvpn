@@ -1550,6 +1550,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
+	var rxBytesBatch, rxPacketsBatch uint64
+	flushRxStats := func() {
+		if rxPacketsBatch == 0 {
+			return
+		}
+		atomic.AddUint64(&session.RxBytes, rxBytesBatch)
+		atomic.AddUint64(&session.RxPackets, rxPacketsBatch)
+		atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
+		atomic.AddUint64(&ci.rxPackets, rxPacketsBatch)
+		rxBytesBatch, rxPacketsBatch = 0, 0
+	}
+	defer flushRxStats()
 	for {
 		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		frame, seq, err := scanner.ReadFrame()
@@ -1570,10 +1582,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				putFrame(frame)
 				return
 			}
-			atomic.AddUint64(&session.RxBytes, uint64(len(frame)))
-			atomic.AddUint64(&session.RxPackets, 1)
-			atomic.AddUint64(&ci.rxBytes, uint64(len(frame)))
-			atomic.AddUint64(&ci.rxPackets, 1)
+			rxBytesBatch += uint64(len(frame))
+			rxPacketsBatch++
+			if rxPacketsBatch >= 64 {
+				flushRxStats()
+			}
 			if seq != 0 && icRx != nil {
 				plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
 				if derr != nil {
