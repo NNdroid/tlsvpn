@@ -107,12 +107,14 @@ type reorderStatsJSON struct {
 	GapEvents      uint64 `json:"gap_events"`
 	TimeoutFlushes uint64 `json:"timeout_flushes"`
 	SkippedFrames  uint64 `json:"skipped_frames"`
+	DroppedFrames  uint64 `json:"dropped_frames"` // deliver 超时的丢帧（慢 TAP 兜底）
 }
 
 func addReorderStats(dst *reorderStatsJSON, src ReorderBufferStats) {
 	dst.GapEvents += src.GapEvents
 	dst.TimeoutFlushes += src.TimeoutFlushes
 	dst.SkippedFrames += src.SkippedFrames
+	dst.DroppedFrames += src.DroppedFrames
 }
 
 type memStatsJSON struct {

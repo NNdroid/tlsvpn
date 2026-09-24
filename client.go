@@ -1072,14 +1072,21 @@ const (
 	reconnectBackoffReset = 30 * time.Second
 )
 
-// reconnectBackoffDelay 第 attempt 次重试前的等待时长（含 25% 随机抖动）
+// reconnectBackoffDelay 第 attempt 次重试前的等待时长。基值 1s 起指数增长，
+// 封顶 30s；再叠 ±33% 的对称抖动把 4 条共享同一 ISP 路径的连接在时间上
+// 错开，避免 ISP 抖动时全体同步重拨。抖动带对称分布在 d 附近；封顶阶段
+// 抖动上界被 reconnectBackoffMax 裁掉（下界仍在 2d/3 处），不影响封顶。
 func reconnectBackoffDelay(attempt int) time.Duration {
 	d := reconnectBackoffBase << uint(min(attempt, 5))
 	if d > reconnectBackoffMax || d <= 0 {
 		d = reconnectBackoffMax
 	}
-	jitter := time.Duration(mathrand.Int64N(int64(d) / 4))
-	return d - d/8 + jitter/2
+	third := d / 3
+	delay := 2*third + time.Duration(mathrand.Int64N(int64(2*third)))
+	if delay > reconnectBackoffMax {
+		return reconnectBackoffMax
+	}
+	return delay
 }
 
 // connSnapshot 面板用连接明细快照
@@ -1576,7 +1583,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		for {
-			tlsConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			tlsConn.SetReadDeadline(time.Now().Add(15 * time.Second))
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
 				errChan <- err

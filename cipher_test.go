@@ -652,9 +652,12 @@ func TestLogRingSnapshot(t *testing.T) {
 }
 
 func TestReconnectBackoff(t *testing.T) {
+	// attempt 0: 基值 1s，±33% 抖动带 → [2/3s, 4/3s]
 	d0 := reconnectBackoffDelay(0)
-	if d0 < 500*time.Millisecond || d0 > reconnectBackoffBase {
-		t.Fatalf("首次重试应在 [0.5s, 1s] 区间, got %s", d0)
+	low := 2 * reconnectBackoffBase / 3
+	high := 4 * reconnectBackoffBase / 3
+	if d0 < low || d0 > high {
+		t.Fatalf("首次重试应在 [%s, %s] 区间, got %s", low, high, d0)
 	}
 	d5 := reconnectBackoffDelay(5)
 	if d5 > reconnectBackoffMax {

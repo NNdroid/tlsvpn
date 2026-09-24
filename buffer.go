@@ -12,6 +12,12 @@ const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性�
 
 const reorderWindowMask = ReorderWindowSize - 1
 
+// deliverTimeout 交付协程把一批帧送进 outChan 的最长等待时间。outChan 满
+// 意味着 outWorker 正被慢 TAP 卡在 outputBatch → c.tap.Write，Insert 也被
+// 卡住，进而卡住 conn 读循环——见 deliver 说明。5s 兜底丢批比让 conn 读
+// 循环无限停摆便宜，FEC 能盖一部分。
+const deliverTimeout = 5 * time.Second
+
 // reorderSkipDelay 从“已经收到未来序号、确认存在缺口”的时刻开始计时。
 // 旧实现用历史最大推进间隔自适应；空闲流量或 4 秒心跳会把阈值永久推到
 // 500ms，叠加 250ms 轮询后形成明显的 0/突发吞吐。数据连接采用粘性选路后，
@@ -22,6 +28,7 @@ type ReorderBufferStats struct {
 	GapEvents      uint64
 	TimeoutFlushes uint64
 	SkippedFrames  uint64
+	DroppedFrames  uint64 // deliver 超时丢帧数（TAP 慢兜底）
 }
 
 // ReorderBuffer 按序输出收到的帧。
@@ -49,6 +56,7 @@ type ReorderBuffer struct {
 	gapEvents      atomic.Uint64
 	timeoutFlushes atomic.Uint64
 	skippedFrames  atomic.Uint64
+	droppedFrames  atomic.Uint64 // deliver 超时的批次累计丢帧数（慢 TAP 兜底）
 
 	// shutting 由 Close 在锁内置位：之后的 Insert 直接释放帧而不再投递，
 	// 因此 outChan 里不会残留 outWorker 退出后无人消费的批次（无泄漏窗口）。
@@ -109,6 +117,7 @@ func (rb *ReorderBuffer) Stats() ReorderBufferStats {
 		GapEvents:      rb.gapEvents.Load(),
 		TimeoutFlushes: rb.timeoutFlushes.Load(),
 		SkippedFrames:  rb.skippedFrames.Load(),
+		DroppedFrames:  rb.droppedFrames.Load(),
 	}
 }
 
@@ -242,14 +251,27 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 	rb.buffered = 0
 }
 
-// deliver 把批次交给交付协程（锁外调用）；已关闭时直接释放
+// deliver 把批次交给交付协程（锁外调用）；已关闭时直接释放。
+//
+// 用 time.After 做有界等待：如果 outWorker 被慢 TAP 卡住（outChan 满、
+// 交付协程正阻塞在 outputBatch → c.tap.Write），Insert 也会卡在这里；而
+// Insert 又被 conn 读循环同步调用，卡住 Insert 就等于让 conn 读循环停摆，
+// 直接触发对端的读超时——"connection lost: timeout" 又一条通路。
+//
+// 给一个 5s 兜底：超过 5s 仍未交付就丢这批帧（丢帧比让整个读循环停摆更
+// 便宜，FEC 能盖一部分），Insert 立即返回让 conn 读循环继续。
 func (rb *ReorderBuffer) deliver(batch [][]byte) {
 	if len(batch) == 0 {
 		return
 	}
+	timer := time.NewTimer(deliverTimeout)
+	defer timer.Stop()
 	select {
 	case rb.outChan <- batch:
 	case <-rb.closed:
+		rb.freeBatch(batch)
+	case <-timer.C:
+		rb.droppedFrames.Add(uint64(len(batch)))
 		rb.freeBatch(batch)
 	}
 }

@@ -1530,7 +1530,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
 	for {
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
 			log.Debugf("[%s] connection lost: %v", clientID, err)
