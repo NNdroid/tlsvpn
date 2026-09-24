@@ -6,7 +6,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 
 - **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
 - **Inner encryption** — `encrypt: true` adds AES-256-GCM inside the tunnel: per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. There is exactly one inner algorithm and no weaker fallback: a peer that cannot negotiate GCM gets plaintext (TLS only).
-- **XOR FEC** — one parity frame per K data frames, broadcast to every backend, reconstructs any single lost frame. The redundancy ratio is N/K with N links, so larger K is cheaper in bandwidth.
+- **XOR FEC** — one parity frame per K data frames reconstructs any single lost frame. The parity is sent once and rotated across healthy physical links, so redundancy is ≈1/K instead of N/K on N-link sessions.
 - **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
 - **Layer-2 TAP** — ARP/DHCP/IPv6 all pass; static MAC/IP bindings; sharded MAC learning with anti-spoofing.
@@ -83,7 +83,7 @@ Session resume tokens are mandatory and always enabled. There is no `server.sess
 | `v4_cidr` / `v6_cidr` | `10.0.0.0/24` / `fd00::/64` | Address pools handed to clients |
 | `cert` / `key` | (Empty) | TLS pair; empty = self-signed, generated once and **persisted** so `cert_sha256` pinning survives restarts |
 | `max_sessions` | `1024` | Concurrent session cap; excess handshakes are tarpitted |
-| `fec_group_min` / `fec_group_max` | `2` / `64` | Range of peer FEC group sizes K the server will accept. A handshake that requests FEC with K outside the range is **refused** (not clamped) — the peer chose its own coding parameter, and silently changing K would make it pay a different redundancy ratio unknowingly. Defaults are the protocol limits, so no extra limit applies unless configured. Direction: the parity is broadcast to all N backends, so the ratio is N/K — raising `min` (floor) bounds bandwidth usage, lowering `max` (ceiling) bounds the pending-frame buffer and recovery latency |
+| `fec_group_min` / `fec_group_max` | `2` / `64` | Range of peer FEC group sizes K the server will accept. A handshake that requests FEC with K outside the range is **refused** (not clamped) — the peer chose its own coding parameter, and silently changing K would make it pay a different redundancy ratio unknowingly. Defaults are the protocol limits, so no extra limit applies unless configured. Direction: one parity copy is sent per K data frames and rotated across healthy backends, so the ratio is ≈1/K — raising `min` (floor) bounds bandwidth usage, lowering `max` (ceiling) bounds the pending-frame buffer and recovery latency |
 
 ### `client`
 
@@ -91,7 +91,7 @@ Session resume tokens are mandatory and always enabled. There is no `server.sess
 | --- | --- | --- |
 | `interface_manager` | `self` | L3 ownership: `self` keeps the normal Linux behavior; `netifd` is reserved for the OpenWrt protocol handler, where netifd owns addresses/routes/firewall lifecycle |
 | `conns` | `1` | Parallel TCP connections |
-| `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; the parity is broadcast to all N backends, so the redundancy ratio is N/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
+| `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; one parity copy is rotated across healthy backends, so redundancy is ≈1/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
 | `sni` | `www.cloudflare.com` | Camouflage SNI |
 | `insecure` | `false` | Skip TLS verification (prefer `cert_sha256`) |
 | `cert_sha256` | (Empty) | Pin the server certificate fingerprint |
