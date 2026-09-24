@@ -236,7 +236,6 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.isDoneLocked(start) {
-		putFECLens(lens)
 		return
 	}
 	g, ok := d.groups[start]
@@ -295,6 +294,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.isDoneLocked(start) {
+		putFECLens(lens)
 		return
 	}
 	g, ok := d.groups[start]
