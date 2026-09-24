@@ -12,11 +12,34 @@ const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性�
 
 const reorderWindowMask = ReorderWindowSize - 1
 
-// deliverTimeout 交付协程把一批帧送进 outChan 的最长等待时间。outChan 满
-// 意味着 outWorker 正被慢 TAP 卡在 outputBatch → c.tap.Write，Insert 也被
-// 卡住，进而卡住 conn 读循环——见 deliver 说明。5s 兜底丢批比让 conn 读
-// 循环无限停摆便宜，FEC 能盖一部分。
-const deliverTimeout = 5 * time.Second
+// 交付 channel 保持足够的短突发余量；满时直接丢 batch，而不是给每个
+// Insert 创建 time.Timer 再最多阻塞 5s。连接读循环绝不能被慢 TAP 反压住。
+const reorderOutQueue = 256
+
+// pending/outChan 的 [][]byte 只保存 slice 描述符；高 PPS 顺序流几乎每包都会
+// 生成一个小 batch。池化描述符容器可以消除这一类持续 GC 压力。
+const (
+	reorderBatchDefaultCap = 64
+	reorderBatchMaxPoolCap = 256
+)
+
+var reorderBatchPool = sync.Pool{
+	New: func() any { return make([][]byte, 0, reorderBatchDefaultCap) },
+}
+
+func getReorderBatch() [][]byte {
+	return reorderBatchPool.Get().([][]byte)[:0]
+}
+
+func putReorderBatch(batch [][]byte) {
+	if batch == nil {
+		return
+	}
+	clear(batch)
+	if cap(batch) <= reorderBatchMaxPoolCap {
+		reorderBatchPool.Put(batch[:0])
+	}
+}
 
 // reorderSkipDelay 从“已经收到未来序号、确认存在缺口”的时刻开始计时。
 // 旧实现用历史最大推进间隔自适应；空闲流量或 4 秒心跳会把阈值永久推到
@@ -28,7 +51,7 @@ type ReorderBufferStats struct {
 	GapEvents      uint64
 	TimeoutFlushes uint64
 	SkippedFrames  uint64
-	DroppedFrames  uint64 // deliver 超时丢帧数（TAP 慢兜底）
+	DroppedFrames  uint64 // deliver queue 满时丢帧数（TAP 慢兜底）
 }
 
 // ReorderBuffer 按序输出收到的帧。
@@ -56,7 +79,7 @@ type ReorderBuffer struct {
 	gapEvents      atomic.Uint64
 	timeoutFlushes atomic.Uint64
 	skippedFrames  atomic.Uint64
-	droppedFrames  atomic.Uint64 // deliver 超时的批次累计丢帧数（慢 TAP 兜底）
+	droppedFrames  atomic.Uint64 // deliver queue 满时累计丢帧数（慢 TAP 兜底）
 
 	// shutting 由 Close 在锁内置位：之后的 Insert 直接释放帧而不再投递，
 	// 因此 outChan 里不会残留 outWorker 退出后无人消费的批次（无泄漏窗口）。
@@ -70,7 +93,7 @@ func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 	rb := &ReorderBuffer{
 		ring:    make([][]byte, ReorderWindowSize),
 		outFunc: outFunc,
-		outChan: make(chan [][]byte, 64),
+		outChan: make(chan [][]byte, reorderOutQueue),
 		gapWake: make(chan struct{}, 1),
 		closed:  make(chan struct{}),
 	}
@@ -198,6 +221,9 @@ func (rb *ReorderBuffer) drainLocked() bool {
 		if frame == nil {
 			break // 依然有缺口，等待
 		}
+		if rb.pending == nil {
+			rb.pending = getReorderBatch()
+		}
 		rb.pending = append(rb.pending, frame)
 		rb.ring[idx] = nil
 		rb.buffered--
@@ -251,26 +277,19 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 	rb.buffered = 0
 }
 
-// deliver 把批次交给交付协程（锁外调用）；已关闭时直接释放。
-//
-// 用 time.After 做有界等待：如果 outWorker 被慢 TAP 卡住（outChan 满、
-// 交付协程正阻塞在 outputBatch → c.tap.Write），Insert 也会卡在这里；而
-// Insert 又被 conn 读循环同步调用，卡住 Insert 就等于让 conn 读循环停摆，
-// 直接触发对端的读超时——"connection lost: timeout" 又一条通路。
-//
-// 给一个 5s 兜底：超过 5s 仍未交付就丢这批帧（丢帧比让整个读循环停摆更
-// 便宜，FEC 能盖一部分），Insert 立即返回让 conn 读循环继续。
+// deliver 把批次交给唯一交付协程。这里绝不阻塞 conn 读循环，也不为
+// 每个 batch 创建 timer；outChan 满说明 TAP/VSwitch 已经落后，立即丢批次
+// 比把 TLS 读取停住数秒更安全，且上层 TCP/FEC 能处理这类背压损失。
 func (rb *ReorderBuffer) deliver(batch [][]byte) {
 	if len(batch) == 0 {
+		putReorderBatch(batch)
 		return
 	}
-	timer := time.NewTimer(deliverTimeout)
-	defer timer.Stop()
 	select {
 	case rb.outChan <- batch:
 	case <-rb.closed:
 		rb.freeBatch(batch)
-	case <-timer.C:
+	default:
 		rb.droppedFrames.Add(uint64(len(batch)))
 		rb.freeBatch(batch)
 	}
@@ -303,12 +322,14 @@ func (rb *ReorderBuffer) outputBatch(batch [][]byte) {
 		}
 		putFrame(frame)
 	}
+	putReorderBatch(batch)
 }
 
 func (rb *ReorderBuffer) freeBatch(batch [][]byte) {
 	for _, frame := range batch {
 		putFrame(frame)
 	}
+	putReorderBatch(batch)
 }
 
 // timeoutWorker 平时完全休眠；第一个未来帧确认缺口时由 Insert 唤醒并精确等待
