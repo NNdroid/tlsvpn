@@ -133,7 +133,7 @@ The protocol handler resolves every transport endpoint before starting TLSVPN, i
 
 The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
 
-For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, prepares the `packages` and `luci` feeds, builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
+For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
 
 Example for the NanoPi R5S / Rockchip ARMv8 target:
 
