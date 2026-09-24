@@ -54,11 +54,11 @@ func TestFramePoolAboveMaxTier(t *testing.T) {
 
 // TestFramePoolIgnoresOffTierBuffer 容量不命中任何分档的缓冲不入池，由 GC 回收。
 func TestFramePoolIgnoresOffTierBuffer(t *testing.T) {
-	pool := newFramePools([]int{512})
-	pool.putFrame(make([]byte, 66)) // 66 不在分档表内，不入池
-	got := pool.getFrameAtLeast(1)
+	putFrame(make([]byte, 66)) // 66 不在分档表内，不入池
+	got := getFrameAtLeast(1)
 	if cap(got) != 512 || len(got) != 512 {
-		t.Fatalf("偏小缓冲不应进入 512 档, got len=%d cap=%d", len(got), cap(got))
+		t.Fatalf("偏小缓冲不应污染 512 档, got len=%d cap=%d", len(got), cap(got))
 	}
-	pool.putFrame(nil) // nil 必须安全
+	putFrame(got)
+	putFrame(nil) // nil 必须安全
 }
