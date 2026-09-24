@@ -47,37 +47,31 @@ func BenchmarkFECEncode(b *testing.B) {
 }
 
 func BenchmarkFECEncodeRecover(b *testing.B) {
-	// 全链路：K 帧中丢 1 帧 → 校验帧到达 → 异或恢复
-	// 每次迭代是一个全新分组（seq 递增），避免 done 缓存把开销变成缓存查找
+	// 全链路：每个 K=4 分组故意丢最后 1 帧，parity 到达后恢复。
+	// 编码器始终看到完整 4 帧；解码器只看到前 3 帧，符合真实线路所有权。
 	d := NewFECDecoder(4, nil, func(seq uint32, frame []byte) { putFrame(frame) })
 	e := newFECEncoder(4, nil)
 	pt := benchPayload()
 	var seq uint32
 	b.SetBytes(int64(len(pt)))
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var par []byte
 		for j := 0; j < 4; j++ {
 			seq++
-			if j == 3 {
-				continue // 组尾成员“丢失”
+			if p := e.add(VPNFrame{Seq: seq, Data: pt}); p != nil {
+				par = p
 			}
-			d.OnData(seq, pt)
-		}
-		// 组尾成员不喂 OnData，由编码器产出的校验帧恢复
-		//（校验帧本身按发送侧语义生成，含该成员的异或贡献）
-		if par = e.add(VPNFrame{Seq: seq + 1 - 4, Data: pt}); par == nil {
-			// 用连续 4 个 add 的第 4 个产出校验帧：重新以该组 4 帧喂编码器
-			for j := 0; j < 4; j++ {
-				if p2 := e.add(VPNFrame{Seq: seq - 3 + uint32(j), Data: pt}); p2 != nil {
-					par = p2
-				}
+			if j != 3 {
+				d.OnData(seq, pt)
 			}
 		}
 		if par == nil {
 			b.Fatal("expected parity frame")
 		}
-		putFrame(par)
+		// OnParity 只借用 payload；处理完成后才能把 parity 归还池。
 		d.OnParity(par)
+		putFrame(par)
 	}
 }
