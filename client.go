@@ -1474,8 +1474,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	c.networkSetup.Lock()
 	var lifecycleErr error
-	if !c.usesNetifd() && netlinkTunnelSupported() {
-		// Self-managed mode owns the TAP addresses and policy routing.
+	if !c.usesNetifd() && c.tapName != "mem" && netlinkTunnelSupported() {
+		// Self-managed mode owns the real TAP addresses and policy routing.
+		// The in-memory backend is used by e2e/perf harnesses and has no netlink device.
 		if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
 			log.Errorf("[Conn %d] tunnel interface configuration failed; tunnel address not applied: %v", connIndex, err)
 			lifecycleErr = err
