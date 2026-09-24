@@ -180,6 +180,7 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 					putFrame(vf.Data)
 				}
 			}
+			putVPNFrameBatch(frames)
 		}
 	}()
 	go func() {
