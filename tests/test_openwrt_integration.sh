@@ -6,10 +6,13 @@ proto="${repo_root}/openwrt/package/tlsvpn/files/lib/netifd/proto/tlsvpn.sh"
 up="${repo_root}/openwrt/package/tlsvpn/files/lib/netifd/tlsvpn-up"
 down="${repo_root}/openwrt/package/tlsvpn/files/lib/netifd/tlsvpn-down"
 luci="${repo_root}/openwrt/luci-proto-tlsvpn/htdocs/luci-static/resources/protocol/tlsvpn.js"
+apk_builder="${repo_root}/scripts/build_openwrt_apk.sh"
+release_workflow="${repo_root}/.github/workflows/build_and_release.yml"
 
 for script in "${proto}" "${up}" "${down}"; do
 	sh -n "${script}"
 done
+bash -n "${apk_builder}"
 
 grep -Fq 'json_add_string interface_manager netifd' "${proto}"
 grep -Fq 'proto_add_host_dependency "$interface" "$ip" "$tunlink"' "${proto}"
@@ -40,3 +43,16 @@ if command -v node >/dev/null 2>&1; then
 fi
 
 echo "[PASS] OpenWrt netifd/LuCI integration static checks passed"
+
+
+grep -Fq 'OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"' "${apk_builder}"
+grep -Fq 'TLSVPN_SOURCE_VERSION' "${apk_builder}"
+grep -Fq 'sha256sum -c -' "${apk_builder}"
+grep -Fq 'package/tlsvpn/compile' "${apk_builder}"
+grep -Fq 'package/luci-proto-tlsvpn/compile' "${apk_builder}"
+grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT' "${apk_builder}"
+
+grep -Fq 'scripts/build_openwrt_apk.sh' "${release_workflow}"
+grep -Fq 'rockchip' "${release_workflow}"
+grep -Fq 'mediatek' "${release_workflow}"
+grep -Fq 'ath79' "${release_workflow}"
