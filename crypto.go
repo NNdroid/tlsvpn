@@ -228,8 +228,9 @@ func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]b
 }
 
 // openTo 解密 src（含标签）写入 dst（长度须等于明文长），返回明文。
-// aad 必须与 seal 时一致。
-func (ic *innerCipher) openTo(dst, src []byte, seq uint32, aad []byte) ([]byte, error) {
+// wireLen 与 seal 时的 AAD 长度字段一致。nonce + AAD 共用池化 scratch，
+// 避免 FEC parity 解密路径再单独生成一个逃逸的 []byte AAD。
+func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	if ic == nil {
 		copy(dst, src)
 		return dst, nil
@@ -238,7 +239,7 @@ func (ic *innerCipher) openTo(dst, src []byte, seq uint32, aad []byte) ([]byte, 
 		return nil, fmt.Errorf("gcm payload too short: %d", len(src))
 	}
 	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
-	nonce, _ := ic.gcmNonceAAD(seq, 0, scratch)
+	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
 	plain, err := ic.aead.Open(dst[:0], nonce, src, aad)
 	gcmScratchPool.Put(scratch)
 	return plain, err
