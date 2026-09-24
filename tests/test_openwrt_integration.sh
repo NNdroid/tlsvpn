@@ -16,6 +16,8 @@ grep -Fq 'proto_add_host_dependency "$interface" "$ip" "$tunlink"' "${proto}"
 grep -Fq 'proto_run_command "$interface" /usr/bin/tlsvpn -c "$config"' "${proto}"
 grep -Fq 'TLSVPN_NETIFD_INTERFACE=$interface' "${proto}"
 grep -Fq 'resolved_server="$resolved_server$resolved_endpoint"' "${proto}"
+grep -Fq 'resolved_socks5="$scheme$userinfo$resolved_endpoint"' "${proto}"
+grep -Fq 'SOCKS5_HOST_DEPENDENCY_FAILED' "${proto}"
 grep -Fq '[ -n "$min_enc" ] && json_add_string min_enc "$min_enc"' "${proto}"
 
 grep -Fq 'proto_init_update "$device" 1' "${up}"
