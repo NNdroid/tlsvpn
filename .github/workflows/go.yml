@@ -2,7 +2,7 @@ name: Go Tests and Benchmark
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "feature/openwrt-netifd-proto" ]
   pull_request:
     branches: [ "main", "master" ]
 
@@ -27,6 +27,9 @@ jobs:
     # linux-specific syscalls. Run vet under GOOS=linux to catch real issues.
     - name: Vet (linux target)
       run: GOOS=linux go vet ./...
+
+    - name: Validate OpenWrt netifd/LuCI integration
+      run: bash tests/test_openwrt_integration.sh
 
     - name: Test Core Logic (go test -v)
       # NOTE: some tests (net_linux_test.go socket-mark / proxy_test.go dial
