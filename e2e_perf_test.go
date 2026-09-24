@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -213,15 +214,24 @@ func TestPerfThroughput(t *testing.T) {
 	h.srvTap.SetOnWrite(func(b []byte) { delivered.Add(uint64(len(b))) })
 
 	payload := bytes.Repeat([]byte{0xAA}, 1400-34-4)
+	// WriteFrame 会在返回前把输入复制进自己的池缓冲，因此压测生成器可以安全
+	// 复用同一 Ethernet frame，不把 buildEthFrame 的 malloc/GC 算进隧道吞吐。
+	frame := buildEthFrame(1, payload)
 	var injectedFrames atomic.Uint64
 	deadline := time.Now().Add(duration)
 	go func() {
+		const burst = 128
 		for time.Now().Before(deadline) {
-			before := delivered.Load()
-			h.tapWriter(buildEthFrame(uint32(injectedFrames.Add(1)), payload))
-			// 简单节流：每帧等待交付推进，避免把队列瞬间打爆后全程丢帧
-			for i := 0; i < 100 && delivered.Load() == before; i++ {
-				time.Sleep(200 * time.Microsecond)
+			for i := 0; i < burst; i++ {
+				h.tapWriter(frame)
+				injectedFrames.Add(1)
+			}
+			// 只在 AsyncPort 输入队列已经明显积压时轻量退让；正常情况按 burst
+			// 连续灌流，避免旧测试逐帧等待 delivered 导致人为约 10Mbps 上限。
+			if q, capq := len(h.cli.txPort.ch), cap(h.cli.txPort.ch); q > capq*3/4 {
+				time.Sleep(50 * time.Microsecond)
+			} else {
+				runtime.Gosched()
 			}
 		}
 	}()
