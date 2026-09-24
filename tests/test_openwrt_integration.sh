@@ -42,9 +42,6 @@ if command -v node >/dev/null 2>&1; then
 	node --check "${luci}"
 fi
 
-echo "[PASS] OpenWrt netifd/LuCI integration static checks passed"
-
-
 grep -Fq 'OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"' "${apk_builder}"
 grep -Fq 'TLSVPN_SOURCE_VERSION' "${apk_builder}"
 grep -Fq 'sha256sum -c -' "${apk_builder}"
@@ -56,3 +53,5 @@ grep -Fq 'scripts/build_openwrt_apk.sh' "${release_workflow}"
 grep -Fq 'rockchip' "${release_workflow}"
 grep -Fq 'mediatek' "${release_workflow}"
 grep -Fq 'ath79' "${release_workflow}"
+
+echo "[PASS] OpenWrt netifd/LuCI/APK release integration static checks passed"
