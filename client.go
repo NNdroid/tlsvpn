@@ -10,6 +10,7 @@ import (
 	"math"
 	mathrand "math/rand/v2"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -431,6 +432,10 @@ type Client struct {
 	// live 指向当前生效配置；面板热更时整体替换该指针，
 	// dialAndServe 每轮重拨前取最新值
 	live          atomic.Pointer[liveConfig]
+	interfaceManager string
+	netifdInterface  string
+	netifdMu         sync.Mutex
+	netifdState      netifdLinkState
 	tapName       string
 	macAddr       string
 	tap           io.ReadWriteCloser
@@ -850,8 +855,20 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	clientID := uuid.NewSHA1(ns, []byte(actualMac+cfg.PSK)).String()
 	log.Infof("Assigned UUID v5 ClientID: %s", clientID)
 
+	netifdInterface := ""
+	if cl.InterfaceManager == "netifd" {
+		if cfg.Tap == "mem" {
+			log.Fatalf("client.interface_manager=netifd requires a real TAP device")
+		}
+		netifdInterface = strings.TrimSpace(os.Getenv("TLSVPN_NETIFD_INTERFACE"))
+		if netifdInterface == "" {
+			log.Fatalf("client.interface_manager=netifd requires TLSVPN_NETIFD_INTERFACE from the netifd protocol handler")
+		}
+	}
+
 	c := &Client{
 		clientID: clientID, tapName: cfg.Tap,
+		interfaceManager: cl.InterfaceManager, netifdInterface: netifdInterface,
 		tap: iface, macAddr: actualMac, connsCount: int32(cl.Conns),
 		txPort:    NewAsyncPort(ctx, "client_tx_port"),
 		stateFile: statePath, state: st,
@@ -914,6 +931,11 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 func (c *Client) Run(ctx context.Context) {
 	// 程序彻底退出时才清理系统路由表并停掉重排缓冲区的后台协程
 	defer func() {
+		if c.usesNetifd() {
+			if err := c.notifyNetifdDown(); err != nil {
+				log.Warnf("netifd final link-down notification failed: %v", err)
+			}
+		}
 		// 按已安装记录逐条清理，而不是只看当前生效配置：热更过 fwmark 时，
 		// 旧 mark 的规则还留在内核里，只按新配置清理会把它留成孤儿。
 		// 退出瞬间不再有新握手，先快照当前记录以免和清理互相覆盖。
@@ -1433,34 +1455,29 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	c.networkSetup.Lock()
 	var lifecycleErr error
-	if netlinkTunnelSupported() {
-		// 失败必须可见：静默丢弃时表现为"隧道在线但本机不通"，重启后地址没
-		// 挂上却查不到任何线索。
+	if !c.usesNetifd() && netlinkTunnelSupported() {
+		// Self-managed mode owns the TAP addresses and policy routing.
 		if err := c.setupInterface(resp.IPv4, resp.IPv6); err != nil {
 			log.Errorf("[Conn %d] tunnel interface configuration failed; tunnel address not applied: %v", connIndex, err)
 			lifecycleErr = err
 		}
-		// 面板要能区分"没配 fwmark"与"配了但装失败"：后者是最难发现的一类
-		// 故障，只能靠这里的状态位看出来。
 		if err := c.installPolicyRouting(policyRoutingSpecFor(lv, resp.GwV4, resp.GwV6)); err != nil && lifecycleErr == nil {
 			lifecycleErr = err
 		}
 	}
 
-	if c.hooks != nil {
-		if c.hooks.Configured() {
-			cfgPath := ""
-			if snap := c.cfgSnap.Load(); snap != nil {
-				cfgPath = snap.SourcePath
-			}
-			hookEnv := HookEnv{Mode: "client", Dev: c.tapName, Config: cfgPath,
-				IPv4: resp.IPv4, IPv6: resp.IPv6, GatewayV4: resp.GwV4, GatewayV6: resp.GwV6}
-			if lifecycleErr != nil {
-				c.hooks.Activate(hookEnv)
-				lifecycleErr = fmt.Errorf("cannot run lifecycle up hook before tunnel networking is ready: %w", lifecycleErr)
-			} else if err := c.hooks.Up(hookEnv); err != nil {
-				lifecycleErr = err
-			}
+	if !c.usesNetifd() && c.hooks != nil && c.hooks.Configured() {
+		cfgPath := ""
+		if snap := c.cfgSnap.Load(); snap != nil {
+			cfgPath = snap.SourcePath
+		}
+		hookEnv := HookEnv{Mode: "client", Dev: c.tapName, Config: cfgPath,
+			IPv4: resp.IPv4, IPv6: resp.IPv6, GatewayV4: resp.GwV4, GatewayV6: resp.GwV6}
+		if lifecycleErr != nil {
+			c.hooks.Activate(hookEnv)
+			lifecycleErr = fmt.Errorf("cannot run lifecycle up hook before tunnel networking is ready: %w", lifecycleErr)
+		} else if err := c.hooks.Up(hookEnv); err != nil {
+			lifecycleErr = err
 		}
 	}
 	c.networkSetup.Unlock()
@@ -1485,9 +1502,26 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	c.txPort.RegisterBackend(connTxChan, rttCache)
 	defer c.txPort.UnregisterBackend(connTxChan)
 
-	// 面板展示：活跃连接计数
-	atomic.AddInt32(&c.liveConns, 1)
-	defer atomic.AddInt32(&c.liveConns, -1)
+	// netifd represents the aggregate VPN session, not one TCP backend.
+	// The first live backend publishes UP; only the final backend loss publishes
+	// DOWN. notifyNetifdUp itself deduplicates identical address/gateway updates.
+	liveNow := atomic.AddInt32(&c.liveConns, 1)
+	if c.usesNetifd() {
+		if err := c.notifyNetifdUp(resp.IPv4, resp.IPv6, resp.GwV4, resp.GwV6); err != nil {
+			atomic.AddInt32(&c.liveConns, -1)
+			return 0, fmt.Errorf("netifd link update failed: %w", err)
+		}
+		if liveNow == 1 {
+			log.Infof("[Conn %d] netifd interface %s is up on %s", connIndex, c.netifdInterface, c.tapName)
+		}
+	}
+	defer func() {
+		if atomic.AddInt32(&c.liveConns, -1) == 0 && c.usesNetifd() {
+			if err := c.notifyNetifdDown(); err != nil {
+				log.Warnf("netifd link-down notification failed: %v", err)
+			}
+		}
+	}()
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
@@ -1685,6 +1719,9 @@ func (c *Client) NeedsRestart(cfg *Config) []string {
 		}
 		if o.Up != cfg.Up || o.Down != cfg.Down {
 			out = append(out, "up/down")
+		}
+		if o.Client.InterfaceManager != cfg.Client.InterfaceManager {
+			out = append(out, "client.interface_manager")
 		}
 	}
 	return out

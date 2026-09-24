@@ -57,7 +57,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `tap` | `tap0` | TAP device name; `"mem"` = in-memory backend (CI/e2e) |
 | `mac` | (Empty) | Pin the TAP interface MAC |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
-| `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks; changing either through the dashboard requires a restart |
+| `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks in self-managed mode; changing either requires restart |
 | `encrypt` | `true` when omitted in JSON | Inner AES-256-GCM with per-session salts and separate data/FEC key domains |
 | `min_enc` | (Empty) | Strength floor: `gcm` refuses peers that cannot negotiate GCM, `any`/empty sets no floor (needs `encrypt`) |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
@@ -87,6 +87,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 
 | Field | Default | Description |
 | --- | --- | --- |
+| `interface_manager` | `self` | L3 ownership: `self` keeps the normal Linux behavior; `netifd` is reserved for the OpenWrt protocol handler, where netifd owns addresses/routes/firewall lifecycle |
 | `conns` | `1` | Parallel TCP connections |
 | `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; the parity is broadcast to all N backends, so the redundancy ratio is N/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
 | `sni` | `www.cloudflare.com` | Camouflage SNI |
@@ -98,9 +99,56 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `extra_routes` | `[]` | Extra routes into the fwmark table, in iproute2 serialization form — one prefix plus an optional `dev`, e.g. `"fd99:10:5:8::/64 dev tap0"`. The address family is inferred from the prefix; with no `dev` the tunnel TAP is used. Validated when the config loads, not after the tunnel handshake |
 | `source_rules` | `[]` | Policy-routing rules matched on the packet's **source prefix** instead of `SO_MARK`: each entry installs `ip rule from <from> table <table>` plus that table's default routes (from the gateways the server sends) and any `routes` you list. For traffic that has no socket to mark — forwarded packets on an NPT gateway, whose return flow must be pinned to the tunnel TAP. `from` may be a bare address (completed to a host route); `table` is mandatory, in `[1, 65535]` and not the reserved `253`/`254`/`255`; `priority` uint32, `0` = kernel-assigned. Validated when the config loads |
 
-**Policy routing is owned by the process, not by systemd.** With a non-zero `fwmark` — or a non-empty `source_rules` — the client installs the `ip rule` entries and the routes itself, and removes everything it installed on exit. For the fwmark rule the table number is always equal to the fwmark value — `fwmark` `0x100` means table `256`; `source_rules` tables are whatever you configured and nothing derives them. It waits up to 30 s for the TAP to exist and be up before touching routing, so a network manager that creates the device later needs no separate ordering unit. Do **not** also keep an external drop-in doing the same work: two rules for one fwmark compete by priority, the kernel serves whichever wins, and each of them believes it owns the table.
+**Policy routing ownership depends on `client.interface_manager`.** In the default `self` mode, the process owns its `fwmark`/`source_rules` entries and route tables and removes everything it installed on exit. In `netifd` mode those fields are intentionally rejected: OpenWrt owns addresses, routes, metrics and firewall lifecycle, while TLSVPN only owns the TAP and data plane. Do not configure the same routes in both layers.
+
+## OpenWrt / netifd protocol mode
+
+The `feature/openwrt-netifd-proto` integration can expose a TLSVPN client as a native OpenWrt network interface. TLSVPN still creates the TAP and runs the TLS/FEC/multipath data plane, but it does **not** call `AddrReplace` or install policy-routing rules in this mode. Instead, fixed helpers under `/lib/netifd/` report the negotiated IPv4/IPv6 addresses and gateways to netifd.
+
+The repository contains two OpenWrt package templates:
+
+- `openwrt/package/tlsvpn`: builds the `tlsvpn` binary plus the `tlsvpn-proto` netifd handler.
+- `openwrt/luci-proto-tlsvpn`: adds **Network → Interfaces → Protocol: TLSVPN** to LuCI.
+
+A minimal UCI interface looks like:
+
+```uci
+config interface 'vpn'
+        option proto 'tlsvpn'
+        option server 'vpn.example.com:4000'
+        option psk 'REPLACE-WITH-A-HIGH-ENTROPY-SECRET'
+        option conns '4'
+        option fec '1'
+        option fec_group '4'
+        option encrypt '1'
+        option brutal '1'
+        option brutal_up '100'
+        option brutal_down '500'
+        option defaultroute '1'
+        option metric '10'
+```
+
+The protocol handler resolves every transport endpoint before starting TLSVPN, installs netifd host dependencies for exactly those resolved IPs, and passes the same fixed IP:port list to the process. If `socks5` is enabled, the proxy endpoint is resolved, pinned and rewritten to a fixed IP too, because that proxy is the actual local TCP peer. This prevents a VPN default route from recursively capturing its own TLS transport after a later DNS answer. If an underlying OpenWrt network should be forced, set `option tunlink 'wan'` (or another network name).
+
+The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
+
+For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, prepares the `packages` and `luci` feeds, builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
+
+Example for the NanoPi R5S / Rockchip ARMv8 target:
+
+```bash
+OPENWRT_VERSION=25.12.5 \
+OPENWRT_TARGET=rockchip \
+OPENWRT_SUBTARGET=armv8 \
+OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
+./scripts/build_openwrt_apk.sh
+```
+
+The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621 and ath79/generic. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
 
 ### `up` / `down` lifecycle hooks
+
+In the default self-managed mode, optional process-level hooks can run after tunnel networking is ready and during graceful cleanup:
 
 ```json
 {
@@ -109,9 +157,11 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 }
 ```
 
-Hooks are executed directly (never through `sh -c`), so the file needs a shebang and executable permission (`chmod 0755`). Paths must be absolute. Each hook has a 30-second timeout and runs with the configuration directory as its working directory. `up` runs once after the TAP addresses and built-in policy routing are ready; parallel TCP connections and short reconnects do not run it again. `down` runs once while the TAP still exists on graceful shutdown, and also rolls back a partially successful `up`. A failing `up` aborts startup; a failing `down` makes the process exit unsuccessfully. Hooks run with the same UID/capabilities as tlsvpn and are **not a sandbox**: only point them at administrator-controlled files. The inherited environment is reduced to a safe PATH/locale (plus required Windows system variables), so service credentials are not forwarded. The timeout terminates the immediate hook process, not an arbitrary descendant tree; hook scripts must supervise and clean up any children they create. `SIGKILL`, a kernel panic, or power loss cannot run cleanup code.
+Hooks are executed directly (never through `sh -c`), so the file needs a shebang and executable permission. Paths must be absolute. Each hook has a 30-second timeout and runs with the configuration directory as its working directory. `up` runs once after TAP addresses and built-in policy routing are ready; parallel TCP connections and short reconnects do not run it again. `down` runs once while the TAP still exists on graceful shutdown and also rolls back a partially successful `up`. The inherited environment is reduced to a safe PATH/locale and the PSK is never exported.
 
-Scripts receive OpenVPN-style variables `script_type`, `dev`, `dev_type=tap`, `config`, `ifconfig_local`, `ifconfig_ipv6_local`, `route_vpn_gateway`, and `route_ipv6_gateway`. The unabridged values are also available as `TLSVPN_SCRIPT_TYPE`, `TLSVPN_MODE`, `TLSVPN_DEV`, `TLSVPN_CONFIG`, `TLSVPN_IPV4`, `TLSVPN_IPV6`, `TLSVPN_GATEWAY_V4`, and `TLSVPN_GATEWAY_V6`. The PSK is deliberately never exported.
+Scripts receive OpenVPN-style variables `script_type`, `dev`, `dev_type=tap`, `config`, `ifconfig_local`, `ifconfig_ipv6_local`, `route_vpn_gateway`, and `route_ipv6_gateway`, plus the corresponding `TLSVPN_*` aliases.
+
+When `client.interface_manager=netifd`, top-level `up`/`down` hooks are rejected. OpenWrt already owns interface lifecycle through netifd and the fixed TLSVPN helpers, so allowing a second lifecycle owner would make ordering and rollback ambiguous.
 
 ## Dashboard & Metrics
 

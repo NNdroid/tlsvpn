@@ -3,40 +3,146 @@ name: Build and Release (Script Based)
 on:
   push:
     tags:
-      - 'v*' # 僅在推送 v* tag 時觸發
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build with scripts/build.sh
+  build-native:
+    name: Build native binaries
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # 允許建立 Release
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 拉取完整历史与 tags，供 build.sh 的 git describe 取版本号
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'   # go.mod 声明 go 1.26；stable 避免隐式 toolchain 下载
+          go-version: 'stable'
 
-      - name: Run Build Script
+      - name: Run native build script
         env:
-          # 發布產物只保留帶平台名的 tlsvpn_<os>_<arch>：關閉宿主平台的固定名
-          # 副本 bin/tlsvpn。runner 是 linux/amd64，而矩陣裡正好有這個目標，
-          # 多出的無平台名副本上傳後會變成 release 裡的重複檔案。
           HOST_ALIAS: "0"
+          VERSION: ${{ github.ref_name }}
         run: |
           chmod +x scripts/build.sh
           ./scripts/build.sh
 
-      - name: Create Release and Upload
+      - name: Upload native binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-binaries
+          path: bin/tlsvpn_*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-openwrt-apk:
+    name: OpenWrt APK - ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64
+            target: x86
+            subtarget: "64"
+            include_arch_independent: "1"
+          - name: armsr-armv8
+            target: armsr
+            subtarget: armv8
+            include_arch_independent: "0"
+          - name: armsr-armv7
+            target: armsr
+            subtarget: armv7
+            include_arch_independent: "0"
+          - name: rockchip-armv8
+            target: rockchip
+            subtarget: armv8
+            include_arch_independent: "0"
+          - name: mediatek-filogic
+            target: mediatek
+            subtarget: filogic
+            include_arch_independent: "0"
+          - name: ramips-mt7621
+            target: ramips
+            subtarget: mt7621
+            include_arch_independent: "0"
+          - name: ath79-generic
+            target: ath79
+            subtarget: generic
+            include_arch_independent: "0"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenWrt SDK host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex gawk gettext git libncurses-dev \
+            libssl-dev python3 rsync unzip zlib1g-dev file curl zstd
+
+      - name: Build OpenWrt APK packages
+        env:
+          OPENWRT_VERSION: "25.12.5"
+          OPENWRT_TARGET: ${{ matrix.target }}
+          OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
+          OPENWRT_INCLUDE_ARCH_INDEPENDENT: ${{ matrix.include_arch_independent }}
+          TLSVPN_SOURCE_VERSION: ${{ github.sha }}
+          TLSVPN_PKG_VERSION: ${{ github.ref_name }}
+          JOBS: "2"
+        run: |
+          chmod +x scripts/build_openwrt_apk.sh
+          ./scripts/build_openwrt_apk.sh
+
+      - name: Upload OpenWrt APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-apk-${{ matrix.name }}
+          path: |
+            bin/openwrt/${{ matrix.target }}-${{ matrix.subtarget }}/*.apk
+            bin/openwrt/${{ matrix.target }}-${{ matrix.subtarget }}/SHA256SUMS-*.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs:
+      - build-native
+      - build-openwrt-apk
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: find release-assets -maxdepth 2 -type f -print | sort
+
+      - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: bin/* # 直接上傳 bin 目錄下編譯好的所有檔案
+          files: |
+            release-assets/tlsvpn_*
+            release-assets/*.apk
+            release-assets/SHA256SUMS-*.txt
           draft: false
           prerelease: false
-          body: "Automatic build for tag ${{ github.ref_name }}"
+          body: |
+            Automatic build for tag ${{ github.ref_name }}.
+
+            Native Linux binaries and OpenWrt 25.12.5 APK packages are attached.
+            OpenWrt protocol/LuCI packages are architecture-independent and are
+            emitted once by the x86/64 SDK build; target-specific tlsvpn APKs are
+            suffixed with their OpenWrt target/subtarget.

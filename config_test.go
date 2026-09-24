@@ -145,6 +145,68 @@ func TestValidateCertSHA256Length(t *testing.T) {
 	}
 }
 
+func TestInterfaceManagerDefaultsToSelf(t *testing.T) {
+	cfg := &Config{
+		Mode: "client",
+		PSK:  "test-only-high-entropy-secret",
+		Addr: "1.2.3.4:4000",
+	}
+	cfg.applyDefaults()
+	if cfg.Client.InterfaceManager != "self" {
+		t.Fatalf("default client.interface_manager = %q, want self", cfg.Client.InterfaceManager)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default self-managed client should validate: %v", err)
+	}
+}
+
+func TestValidateNetifdInterfaceManager(t *testing.T) {
+	base := func() *Config {
+		cfg := &Config{
+			Mode: "client",
+			PSK:  "test-only-high-entropy-secret",
+			Addr: "1.2.3.4:4000",
+			Client: ClientConfig{InterfaceManager: "netifd"},
+		}
+		cfg.applyDefaults()
+		return cfg
+	}
+
+	if err := base().Validate(); err != nil {
+		t.Fatalf("netifd mode without self-managed routing should validate: %v", err)
+	}
+
+	cfg := base()
+	cfg.Client.Fwmark = 256
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "netifd") {
+		t.Fatalf("netifd mode must reject fwmark routing, got %v", err)
+	}
+
+	cfg = base()
+	cfg.Client.ExtraRoutes = []string{"10.0.0.0/8"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "netifd") {
+		t.Fatalf("netifd mode must reject extra_routes, got %v", err)
+	}
+
+	cfg = base()
+	cfg.Client.SourceRules = []SourceRule{{From: "10.0.0.0/8", Table: 100}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "netifd") {
+		t.Fatalf("netifd mode must reject source_rules, got %v", err)
+	}
+
+	cfg = base()
+	cfg.Up = "/usr/libexec/tlsvpn-custom-up"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "netifd") {
+		t.Fatalf("netifd mode must reject generic lifecycle hooks, got %v", err)
+	}
+
+	cfg = base()
+	cfg.Client.InterfaceManager = "invalid"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "interface_manager") {
+		t.Fatalf("invalid interface manager should fail, got %v", err)
+	}
+}
+
 func TestValidateBrutalBounds(t *testing.T) {
 	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
 	cfg.applyDefaults()

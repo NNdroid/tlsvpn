@@ -1,0 +1,32 @@
+#!/bin/sh
+
+. /lib/netifd/netifd-proto.sh
+
+interface="$TLSVPN_NETIFD_INTERFACE"
+device="$TLSVPN_DEVICE"
+
+[ -n "$interface" ] && [ -n "$device" ] || exit 1
+
+proto_init_update "$device" 1
+
+if [ -n "$TLSVPN_IPV4" ] && [ "$TLSVPN_IPV4" != "/" ]; then
+	addr="${TLSVPN_IPV4%/*}"
+	mask="${TLSVPN_IPV4#*/}"
+	proto_add_ipv4_address "$addr" "$mask"
+fi
+
+if [ -n "$TLSVPN_IPV6" ] && [ "$TLSVPN_IPV6" != "/" ]; then
+	addr="${TLSVPN_IPV6%/*}"
+	mask="${TLSVPN_IPV6#*/}"
+	proto_add_ipv6_address "$addr" "$mask"
+fi
+
+if [ "${TLSVPN_NETIFD_DEFAULTROUTE:-1}" != "0" ]; then
+	metric="${TLSVPN_NETIFD_METRIC:-0}"
+	[ -n "$TLSVPN_GW4" ] &&
+		proto_add_ipv4_route "0.0.0.0" 0 "$TLSVPN_GW4" "" "$metric"
+	[ -n "$TLSVPN_GW6" ] &&
+		proto_add_ipv6_route "::" 0 "$TLSVPN_GW6" "$metric"
+fi
+
+proto_send_update "$interface"

@@ -1,0 +1,287 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /lib/functions/network.sh
+. /lib/netifd/netifd-proto.sh
+
+init_proto "$@"
+
+_tlsvpn_endpoint_host() {
+	local endpoint="$1"
+	case "$endpoint" in
+		\[*\]:*)
+			endpoint="${endpoint#\[}"
+			printf '%s\n' "${endpoint%%\]*}"
+			;;
+		*:* )
+			printf '%s\n' "${endpoint%:*}"
+			;;
+		*)
+			printf '%s\n' "$endpoint"
+			;;
+	esac
+}
+
+_tlsvpn_bool_default() {
+	local value="$1"
+	local fallback="$2"
+	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$fallback"
+}
+
+_tlsvpn_write_config() {
+	local file="$1"
+	local tap="$2"
+	local server="$3"
+	local psk="$4"
+	local sni="$5"
+	local cert_sha256="$6"
+	local req_v4="$7"
+	local req_v6="$8"
+	shift 8
+
+	local conns="$1"; shift
+	local fec="$1"; shift
+	local fec_group="$1"; shift
+	local encrypt="$1"; shift
+	local min_enc="$1"; shift
+	local pad_mode="$1"; shift
+	local brutal="$1"; shift
+	local brutal_up="$1"; shift
+	local brutal_down="$1"; shift
+	local socks5="$1"; shift
+	local insecure="$1"; shift
+	local mac="$1"; shift
+	local log_level="$1"
+
+	encrypt="$(_tlsvpn_bool_default "$encrypt" 1)"
+	fec="$(_tlsvpn_bool_default "$fec" 0)"
+	brutal="$(_tlsvpn_bool_default "$brutal" 0)"
+	insecure="$(_tlsvpn_bool_default "$insecure" 0)"
+	[ -n "$conns" ] || conns=1
+	[ -n "$fec_group" ] || fec_group=4
+	if [ "$encrypt" = "1" ]; then
+		[ -n "$min_enc" ] || min_enc=gcm
+	else
+		min_enc=""
+	fi
+	[ -n "$pad_mode" ] || pad_mode=bucket
+	[ -n "$brutal_up" ] || brutal_up=100
+	[ -n "$brutal_down" ] || brutal_down=500
+	[ -n "$sni" ] || sni=www.cloudflare.com
+	[ -n "$log_level" ] || log_level=info
+
+	json_init
+	json_add_string mode client
+	json_add_string psk "$psk"
+	json_add_string addr "$server"
+	json_add_string tap "$tap"
+	[ -n "$mac" ] && json_add_string mac "$mac"
+	json_add_string log_level "$log_level"
+	json_add_boolean encrypt "$encrypt"
+	[ -n "$min_enc" ] && json_add_string min_enc "$min_enc"
+	json_add_string pad_mode "$pad_mode"
+	[ -n "$socks5" ] && json_add_string socks5 "$socks5"
+	json_add_boolean brutal "$brutal"
+	json_add_int brutal_up "$brutal_up"
+	json_add_int brutal_down "$brutal_down"
+
+	json_add_object client
+	json_add_string interface_manager netifd
+	json_add_int conns "$conns"
+	json_add_boolean fec "$fec"
+	json_add_int fec_group "$fec_group"
+	json_add_string sni "$sni"
+	json_add_boolean insecure "$insecure"
+	[ -n "$cert_sha256" ] && json_add_string cert_sha256 "$cert_sha256"
+	[ -n "$req_v4" ] && json_add_string req_v4 "$req_v4"
+	[ -n "$req_v6" ] && json_add_string req_v6 "$req_v6"
+	json_close_object
+
+	umask 077
+	json_dump > "$file"
+}
+
+proto_tlsvpn_init_config() {
+	no_device=1
+	available=1
+
+	proto_config_add_string "server"
+	proto_config_add_string "psk"
+	proto_config_add_string "tap"
+	proto_config_add_string "mac"
+	proto_config_add_string "tunlink"
+	proto_config_add_string "sni"
+	proto_config_add_string "cert_sha256"
+	proto_config_add_string "req_v4"
+	proto_config_add_string "req_v6"
+	proto_config_add_string "min_enc"
+	proto_config_add_string "pad_mode"
+	proto_config_add_string "socks5"
+	proto_config_add_string "log_level"
+	proto_config_add_int "conns"
+	proto_config_add_int "fec_group"
+	proto_config_add_int "brutal_up"
+	proto_config_add_int "brutal_down"
+	proto_config_add_boolean "fec"
+	proto_config_add_boolean "encrypt"
+	proto_config_add_boolean "insecure"
+	proto_config_add_boolean "brutal"
+	proto_config_add_defaults
+}
+
+proto_tlsvpn_setup() {
+	local interface="$1"
+	local server psk tap mac tunlink sni cert_sha256 req_v4 req_v6
+	local min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
+	local fec encrypt insecure brutal defaultroute metric
+	local config host endpoint ip dependency_count=0
+	local resolved_socks5 proxy scheme userinfo proxy_endpoint proxy_ip
+
+	json_get_vars server psk tap mac tunlink sni cert_sha256 req_v4 req_v6
+	json_get_vars min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
+	json_get_vars fec encrypt insecure brutal defaultroute metric
+
+	[ -n "$server" ] || {
+		proto_notify_error "$interface" "MISSING_SERVER"
+		proto_setup_failed "$interface"
+		return 1
+	}
+	[ -n "$psk" ] || {
+		proto_notify_error "$interface" "MISSING_PSK"
+		proto_setup_failed "$interface"
+		return 1
+	}
+
+	if [ -z "$tap" ]; then
+		tap="tvpn-$interface"
+		tap="$(printf '%s' "$tap" | cut -c1-15)"
+	fi
+	config="/var/etc/tlsvpn-$interface.json"
+	mkdir -p /var/etc
+
+	# Resolve every transport endpoint before tlsvpn starts and feed the exact
+	# same IP set to both the process and netifd host dependencies. If a
+	# hostname is allowed to be resolved again after the tunnel installs a
+	# default route, a different DNS answer could recursively route TLSVPN's
+	# own TCP transport into the tunnel.
+	local old_ifs="$IFS"
+	local resolved_server="" resolved_endpoint="" port=""
+	local endpoint_count=0 endpoint_deps=0
+	IFS=','
+	for endpoint in $server; do
+		endpoint="${endpoint# }"
+		endpoint="${endpoint% }"
+		host="$(_tlsvpn_endpoint_host "$endpoint")"
+		case "$endpoint" in
+			\[*\]:*) port="${endpoint##*:}" ;;
+			*:*) port="${endpoint##*:}" ;;
+			*) port="" ;;
+		esac
+		[ -n "$host" ] && [ -n "$port" ] || {
+			IFS="$old_ifs"
+			proto_notify_error "$interface" "INVALID_SERVER_ENDPOINT" "$endpoint"
+			proto_setup_failed "$interface"
+			return 1
+		}
+
+		endpoint_count=$((endpoint_count + 1))
+		endpoint_deps=0
+		for ip in $(resolveip -t 5 "$host" 2>/dev/null); do
+			case "$ip" in
+				*:*) resolved_endpoint="[$ip]:$port" ;;
+				*) resolved_endpoint="$ip:$port" ;;
+			esac
+			[ -n "$resolved_server" ] && resolved_server="$resolved_server,"
+			resolved_server="$resolved_server$resolved_endpoint"
+			( proto_add_host_dependency "$interface" "$ip" "$tunlink" )
+			dependency_count=$((dependency_count + 1))
+			endpoint_deps=$((endpoint_deps + 1))
+		done
+		if [ "$endpoint_deps" -eq 0 ]; then
+			IFS="$old_ifs"
+			proto_notify_error "$interface" "HOST_DEPENDENCY_FAILED" "$host"
+			proto_setup_failed "$interface"
+			return 1
+		fi
+	done
+	IFS="$old_ifs"
+
+	[ "$endpoint_count" -gt 0 ] && [ "$dependency_count" -gt 0 ] || {
+		proto_notify_error "$interface" "HOST_DEPENDENCY_FAILED"
+		proto_setup_failed "$interface"
+		return 1
+	}
+
+	# In SOCKS5 mode the real local TCP peer is the proxy, so it needs its own
+	# host dependency as well. Resolve it once and rewrite the generated JSON to
+	# the same fixed IP to avoid a reconnect resolving a new, unpinned proxy IP.
+	resolved_socks5="$socks5"
+	if [ -n "$socks5" ]; then
+		proxy="$socks5"
+		scheme=""
+		case "$proxy" in
+			socks5://*) scheme="socks5://"; proxy="${proxy#socks5://}" ;;
+			socks5h://*) scheme="socks5h://"; proxy="${proxy#socks5h://}" ;;
+		esac
+
+		userinfo=""
+		case "$proxy" in
+			*@*)
+				userinfo="${proxy%@*}@"
+				proxy_endpoint="${proxy##*@}"
+				;;
+			*) proxy_endpoint="$proxy" ;;
+		esac
+
+		host="$(_tlsvpn_endpoint_host "$proxy_endpoint")"
+		case "$proxy_endpoint" in
+			\[*\]:*) port="${proxy_endpoint##*:}" ;;
+			*:*) port="${proxy_endpoint##*:}" ;;
+			*) port="" ;;
+		esac
+		[ -n "$host" ] && [ -n "$port" ] || {
+			proto_notify_error "$interface" "INVALID_SOCKS5_ENDPOINT"
+			proto_setup_failed "$interface"
+			return 1
+		}
+
+		proxy_ip="$(resolveip -t 5 "$host" 2>/dev/null | head -n 1)"
+		[ -n "$proxy_ip" ] || {
+			proto_notify_error "$interface" "SOCKS5_HOST_DEPENDENCY_FAILED" "$host"
+			proto_setup_failed "$interface"
+			return 1
+		}
+		( proto_add_host_dependency "$interface" "$proxy_ip" "$tunlink" )
+		case "$proxy_ip" in
+			*:*) resolved_endpoint="[$proxy_ip]:$port" ;;
+			*) resolved_endpoint="$proxy_ip:$port" ;;
+		esac
+		resolved_socks5="$scheme$userinfo$resolved_endpoint"
+	fi
+
+	_tlsvpn_write_config "$config" "$tap" "$resolved_server" "$psk" "$sni" \
+		"$cert_sha256" "$req_v4" "$req_v6" "$conns" "$fec" "$fec_group" \
+		"$encrypt" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" \
+		"$brutal_down" "$resolved_socks5" "$insecure" "$mac" "$log_level" || {
+		rm -f "$config"
+		proto_notify_error "$interface" "CONFIG_GENERATION_FAILED"
+		proto_setup_failed "$interface"
+		return 1
+	}
+
+	[ -n "$defaultroute" ] || defaultroute=1
+	[ -n "$metric" ] || metric=0
+	proto_export "TLSVPN_NETIFD_INTERFACE=$interface"
+	proto_export "TLSVPN_NETIFD_DEFAULTROUTE=$defaultroute"
+	proto_export "TLSVPN_NETIFD_METRIC=$metric"
+
+	proto_run_command "$interface" /usr/bin/tlsvpn -c "$config"
+}
+
+proto_tlsvpn_teardown() {
+	local interface="$1"
+	proto_kill_command "$interface" TERM
+	rm -f "/var/etc/tlsvpn-$interface.json"
+}
+
+add_protocol tlsvpn
