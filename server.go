@@ -1493,8 +1493,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				for _, vf := range frames {
 					sendBuffer = appendPaddedFrame(sendBuffer, vf, icTx)
 				}
-				// 副本所有权归本协程：发送后无条件归还（深拷贝分发保证独立）
+				// payload 与 batch 描述符所有权归本协程：成帧完成后立即回池。
 				freeFrames(frames)
+				putVPNFrameBatch(frames)
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				_, werr := conn.Write(sendBuffer)
 				conn.SetWriteDeadline(time.Time{})
