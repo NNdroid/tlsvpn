@@ -135,6 +135,7 @@ proto_tlsvpn_setup() {
 	local min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
 	local fec encrypt insecure brutal defaultroute metric
 	local config host endpoint ip dependency_count=0
+	local resolved_socks5 proxy scheme userinfo proxy_endpoint proxy_ip
 
 	json_get_vars server psk tap mac tunlink sni cert_sha256 req_v4 req_v6
 	json_get_vars min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
@@ -211,10 +212,57 @@ proto_tlsvpn_setup() {
 		return 1
 	}
 
+	# In SOCKS5 mode the real local TCP peer is the proxy, so it needs its own
+	# host dependency as well. Resolve it once and rewrite the generated JSON to
+	# the same fixed IP to avoid a reconnect resolving a new, unpinned proxy IP.
+	resolved_socks5="$socks5"
+	if [ -n "$socks5" ]; then
+		proxy="$socks5"
+		scheme=""
+		case "$proxy" in
+			socks5://*) scheme="socks5://"; proxy="${proxy#socks5://}" ;;
+			socks5h://*) scheme="socks5h://"; proxy="${proxy#socks5h://}" ;;
+		esac
+
+		userinfo=""
+		case "$proxy" in
+			*@*)
+				userinfo="${proxy%@*}@"
+				proxy_endpoint="${proxy##*@}"
+				;;
+			*) proxy_endpoint="$proxy" ;;
+		esac
+
+		host="$(_tlsvpn_endpoint_host "$proxy_endpoint")"
+		case "$proxy_endpoint" in
+			\[*\]:*) port="${proxy_endpoint##*:}" ;;
+			*:*) port="${proxy_endpoint##*:}" ;;
+			*) port="" ;;
+		esac
+		[ -n "$host" ] && [ -n "$port" ] || {
+			proto_notify_error "$interface" "INVALID_SOCKS5_ENDPOINT"
+			proto_setup_failed "$interface"
+			return 1
+		}
+
+		proxy_ip="$(resolveip -t 5 "$host" 2>/dev/null | head -n 1)"
+		[ -n "$proxy_ip" ] || {
+			proto_notify_error "$interface" "SOCKS5_HOST_DEPENDENCY_FAILED" "$host"
+			proto_setup_failed "$interface"
+			return 1
+		}
+		( proto_add_host_dependency "$interface" "$proxy_ip" "$tunlink" )
+		case "$proxy_ip" in
+			*:*) resolved_endpoint="[$proxy_ip]:$port" ;;
+			*) resolved_endpoint="$proxy_ip:$port" ;;
+		esac
+		resolved_socks5="$scheme$userinfo$resolved_endpoint"
+	fi
+
 	_tlsvpn_write_config "$config" "$tap" "$resolved_server" "$psk" "$sni" \
 		"$cert_sha256" "$req_v4" "$req_v6" "$conns" "$fec" "$fec_group" \
 		"$encrypt" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" \
-		"$brutal_down" "$socks5" "$insecure" "$mac" "$log_level" || {
+		"$brutal_down" "$resolved_socks5" "$insecure" "$mac" "$log_level" || {
 		rm -f "$config"
 		proto_notify_error "$interface" "CONFIG_GENERATION_FAILED"
 		proto_setup_failed "$interface"
