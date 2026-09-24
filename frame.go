@@ -47,82 +47,80 @@ func putVPNFrameBatch(b []VPNFrame) {
 	}
 }
 
-// framePoolSizes 帧缓冲尺寸分档。旧实现只有单一 32KB 缓冲，对典型 1500B
-// 以太网帧利用率约 5%：整页被标脏、放大 cache 行污染，并让 GC 扫描更大的
-// 可达对象图。按尺寸分档后每档都被真正写满。
+// framePoolSizes 帧缓冲尺寸分档。保留该表供测试/文档核对；真正池对象使用
+// *[N]byte，而不是 []byte。把 slice 直接放进 sync.Pool 会在 interface 装箱时
+// 让 slice header 逃逸，高 PPS 下这本身会制造显著 GC 压力。
 var framePoolSizes = []int{512, 1024, 2048, 4096, 8192, 16384, 32768, 143360}
 
 // defaultFrameSize getFrame() 默认分档。1500 字节以太网帧（含 14B 以太头）
-// 是 cloneFrame / FrameScanner 的绝对主流量，必须落在池内分档；若默认档太小，
-// 这两条热路径会每帧走一次 cap 不足分支并直接分配，池形同虚设。
+// 是 cloneFrame / FrameScanner 的绝对主流量。
 const defaultFrameSize = 2048
 
-// framePools 每个尺寸一档的缓冲池
-type framePools struct {
-	sizes []int
-	pools []*sync.Pool
-}
-
-func newFramePools(sizes []int) *framePools {
-	p := &framePools{sizes: sizes}
-	p.pools = make([]*sync.Pool, len(sizes))
-	for i, s := range sizes {
-		s := s
-		p.pools[i] = &sync.Pool{New: func() any { return make([]byte, s) }}
-	}
-	return p
-}
+var (
+	framePool512 = sync.Pool{New: func() any { return new([512]byte) }}
+	framePool1024 = sync.Pool{New: func() any { return new([1024]byte) }}
+	framePool2048 = sync.Pool{New: func() any { return new([2048]byte) }}
+	framePool4096 = sync.Pool{New: func() any { return new([4096]byte) }}
+	framePool8192 = sync.Pool{New: func() any { return new([8192]byte) }}
+	framePool16384 = sync.Pool{New: func() any { return new([16384]byte) }}
+	framePool32768 = sync.Pool{New: func() any { return new([32768]byte) }}
+	framePool143360 = sync.Pool{New: func() any { return new([143360]byte) }}
+)
 
 // getFrameAtLeast 取一个容量 >= n 的池缓冲，并保证 len == cap == 分档尺寸。
-//
-// 长度不只是容量：调用方普遍按 len 使用池缓冲（FEC 恢复的异或循环、校验帧
-// 描述符自洽性判断），带着一任使用者留下的旧长度交出去就会越界或读到残值。
-// 所以这里和 putFrame 共同维持两条不变量——入池的缓冲 cap 恰好命中某档，
-// 且 len 已被复位到该档；无合适分档（n 超过最大档）时直接分配，不入池。
-func (p *framePools) getFrameAtLeast(n int) []byte {
-	for i, s := range p.sizes {
-		if s >= n {
-			b := p.pools[i].Get().([]byte)
-			if cap(b) == s {
-				return b[:s]
-			}
-			putFrame(b) // 理论上不可达：尺寸已被 putFrame 约束
-			return make([]byte, s)
-		}
+// 固定数组指针进入 interface 时只是一个机器指针，不会像 []byte slice header
+// 那样在每次 Pool.Put 时产生额外堆对象。
+func getFrameAtLeast(n int) []byte {
+	switch {
+	case n <= 512:
+		return framePool512.Get().(*[512]byte)[:]
+	case n <= 1024:
+		return framePool1024.Get().(*[1024]byte)[:]
+	case n <= 2048:
+		return framePool2048.Get().(*[2048]byte)[:]
+	case n <= 4096:
+		return framePool4096.Get().(*[4096]byte)[:]
+	case n <= 8192:
+		return framePool8192.Get().(*[8192]byte)[:]
+	case n <= 16384:
+		return framePool16384.Get().(*[16384]byte)[:]
+	case n <= 32768:
+		return framePool32768.Get().(*[32768]byte)[:]
+	case n <= 143360:
+		return framePool143360.Get().(*[143360]byte)[:]
+	default:
+		return make([]byte, n)
 	}
-	return make([]byte, n)
 }
 
-// putFrame 归还缓冲。只回收 cap 恰好命中某档的缓冲，保证每档内容同尺寸
-// （否则 getFrameAtLeast 可能反复 miss 同一块偏小缓冲）；其余交给 GC。
-// 归还前必须把 len 复位到 cap：调用方多半持有截断副本（frame[:66]），原样入池
-// 会让下一位使用者看到 len=66/cap=2048 的缓冲并按 len 越界。
-func (p *framePools) putFrame(b []byte) {
+// putFrame 只回收 cap 恰好命中分档的缓冲。把 slice 扩回完整容量后直接转换成
+// 固定数组指针；转换不会复制 payload，也不会分配 wrapper。
+func putFrame(b []byte) {
 	if b == nil {
 		return
 	}
-	switch c := cap(b); {
-	case c <= 0:
-		return
-	default:
-		for i, s := range p.sizes {
-			if c == s {
-				p.pools[i].Put(b[:s])
-				return
-			}
-		}
+	switch cap(b) {
+	case 512:
+		framePool512.Put((*[512]byte)(b[:512]))
+	case 1024:
+		framePool1024.Put((*[1024]byte)(b[:1024]))
+	case 2048:
+		framePool2048.Put((*[2048]byte)(b[:2048]))
+	case 4096:
+		framePool4096.Put((*[4096]byte)(b[:4096]))
+	case 8192:
+		framePool8192.Put((*[8192]byte)(b[:8192]))
+	case 16384:
+		framePool16384.Put((*[16384]byte)(b[:16384]))
+	case 32768:
+		framePool32768.Put((*[32768]byte)(b[:32768]))
+	case 143360:
+		framePool143360.Put((*[143360]byte)(b[:143360]))
 	}
 }
 
-var framePoolSet = newFramePools(framePoolSizes)
-
-// getFrame 取默认分档缓冲（调用方随后会自行检查容量）
-func getFrame() []byte { return framePoolSet.getFrameAtLeast(defaultFrameSize) }
-
-// getFrameAtLeast 取一个容量 >= n 的池缓冲（len == cap == 分档尺寸）
-func getFrameAtLeast(n int) []byte { return framePoolSet.getFrameAtLeast(n) }
-
-func putFrame(b []byte) { framePoolSet.putFrame(b) }
+// getFrame 取默认 2KB 分档。
+func getFrame() []byte { return getFrameAtLeast(defaultFrameSize) }
 
 // cloneFrame 深拷贝一帧负载（优先取池缓冲），供逐后端独立所有权使用
 func cloneFrame(data []byte) []byte {
