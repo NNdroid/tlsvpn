@@ -95,6 +95,31 @@ func TestSendBatchTransfersPayloadOwnershipWithoutCopy(t *testing.T) {
 	putVPNFrameBatch(out)
 }
 
+func TestSendBatchFallsBackWhenPreferredBackendIsFull(t *testing.T) {
+	rttA, rttB := uint32(1), uint32(2)
+	preferred := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rttA}
+	alternate := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rttB}
+	preferred.ch <- nil // force preferred full
+
+	payload := getFrameAtLeast(512)[:512]
+	payload[0] = 0x7b
+	batch := []VPNFrame{{Seq: 9, Data: payload}}
+
+	if dropped := sendBatchToAny([]*Backend{preferred, alternate}, preferred, batch); dropped != 0 {
+		t.Fatalf("fallback send dropped=%d, want 0", dropped)
+	}
+	select {
+	case out := <-alternate.ch:
+		if len(out) != 1 || out[0].Seq != 9 || out[0].Data[0] != 0x7b {
+			t.Fatalf("unexpected fallback batch: %+v", out)
+		}
+		freeFrames(out)
+		putVPNFrameBatch(out)
+	default:
+		t.Fatal("alternate backend did not receive fallback batch")
+	}
+}
+
 func TestParityQueueDropIsObservable(t *testing.T) {
 	rtt := uint32(1)
 	b := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rtt}
