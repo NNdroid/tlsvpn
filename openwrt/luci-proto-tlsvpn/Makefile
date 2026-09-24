@@ -5,11 +5,29 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=luci-proto-tlsvpn
 PKG_VERSION:=0.1.0
 PKG_RELEASE:=1
+PKGARCH:=all
 
-LUCI_TITLE:=LuCI support for the TLSVPN netifd protocol
-LUCI_DESCRIPTION:=Configure TLSVPN clients as native OpenWrt network interfaces.
-LUCI_DEPENDS:=+tlsvpn-proto
+include $(INCLUDE_DIR)/package.mk
 
-include $(TOPDIR)/feeds/luci/luci.mk
+define Package/luci-proto-tlsvpn
+  SECTION:=luci
+  CATEGORY:=LuCI
+  SUBMENU:=Protocols
+  TITLE:=LuCI support for the TLSVPN netifd protocol
+  DEPENDS:=+tlsvpn-proto
+  # Runtime-only: this package ships static JavaScript and does not need the
+  # LuCI/Lua build toolchain in a standalone OpenWrt SDK build.
+  EXTRA_DEPENDS:=luci-base (>=0)
+endef
 
-# call BuildPackage - OpenWrt buildroot signature
+define Package/luci-proto-tlsvpn/description
+ Configure TLSVPN clients as native OpenWrt network interfaces from LuCI.
+endef
+
+define Package/luci-proto-tlsvpn/install
+	$(INSTALL_DIR) $(1)/www/luci-static/resources/protocol
+	$(INSTALL_DATA) ./htdocs/luci-static/resources/protocol/tlsvpn.js \
+		$(1)/www/luci-static/resources/protocol/tlsvpn.js
+endef
+
+$(eval $(call BuildPackage,luci-proto-tlsvpn))
