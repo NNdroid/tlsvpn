@@ -18,17 +18,14 @@ const reorderOutQueue = 256
 
 // pending/outChan 的 [][]byte 只保存 slice 描述符；高 PPS 顺序流几乎每包都会
 // 生成一个小 batch。池化描述符容器可以消除这一类持续 GC 压力。
-const (
-	reorderBatchDefaultCap = 64
-	reorderBatchMaxPoolCap = 256
-)
+const reorderBatchHotCap = 64
 
 var reorderBatchPool = sync.Pool{
-	New: func() any { return make([][]byte, 0, reorderBatchDefaultCap) },
+	New: func() any { return new([reorderBatchHotCap][]byte) },
 }
 
 func getReorderBatch() [][]byte {
-	return reorderBatchPool.Get().([][]byte)[:0]
+	return reorderBatchPool.Get().(*[reorderBatchHotCap][]byte)[:0]
 }
 
 func putReorderBatch(batch [][]byte) {
@@ -36,8 +33,8 @@ func putReorderBatch(batch [][]byte) {
 		return
 	}
 	clear(batch)
-	if cap(batch) <= reorderBatchMaxPoolCap {
-		reorderBatchPool.Put(batch[:0])
+	if cap(batch) == reorderBatchHotCap {
+		reorderBatchPool.Put((*[reorderBatchHotCap][]byte)(batch[:reorderBatchHotCap]))
 	}
 }
 
