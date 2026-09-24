@@ -192,6 +192,8 @@ type fecDecoder struct {
 	ic        *innerCipher
 	out       func(seq uint32, frame []byte)
 	groups    map[uint32]*fecGroupState // 组起点 → 组状态
+	groupOrder []uint32                 // group 创建顺序；已完成项 lazy skip
+	groupHead  int                      // groupOrder 首个可能仍活跃的位置
 	doneRing  [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
 	spare     *fecGroupState
 	recovered uint64 // 异或恢复帧计数
@@ -205,7 +207,8 @@ func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *
 		k:      clampFecGroup(k),
 		ic:     ic,
 		out:    out,
-		groups: make(map[uint32]*fecGroupState, 64),
+		groups:     make(map[uint32]*fecGroupState, 64),
+		groupOrder: make([]uint32, 0, fecMaxPendingGroups+64),
 	}
 }
 
@@ -222,6 +225,8 @@ func (d *fecDecoder) Reset() {
 		d.releaseLocked(g)
 	}
 	clear(d.groups)
+	d.groupOrder = d.groupOrder[:0]
+	d.groupHead = 0
 	for i := range d.doneRing { // 数组不能用 clear()，显式归零
 		d.doneRing[i] = 0
 	}
@@ -324,21 +329,25 @@ func (d *fecDecoder) OnParity(payload []byte) {
 }
 
 func (d *fecDecoder) newGroupLocked(start uint32) *fecGroupState {
+	// 先跳过已经正常完成/恢复的 stale order 项。每个 start 最多被检查一次，
+	// 所以长期摊销 O(1)，避免旧实现 groups 满时 O(512) 遍历 map 找最小 key。
+	d.pruneGroupOrderLocked()
+
 	if len(d.groups) >= fecMaxPendingGroups {
-		// 淘汰起点最老的组。不标记 done：若其校验帧/成员后来迟到，
+		// 淘汰最早创建且仍活跃的组。不标记 done：若其校验帧/成员后来迟到，
 		// 重建的组不会满足"恰好缺 1 帧"的恢复条件，只会自然过期。
-		var oldestStart uint32
-		var oldest *fecGroupState
-		for s, g := range d.groups {
-			if oldest == nil || s < oldestStart {
-				oldestStart, oldest = s, g
+		for d.groupHead < len(d.groupOrder) {
+			oldestStart := d.groupOrder[d.groupHead]
+			d.groupHead++
+			if oldest := d.groups[oldestStart]; oldest != nil {
+				d.releaseLocked(oldest)
+				delete(d.groups, oldestStart)
+				break
 			}
 		}
-		if oldest != nil {
-			d.releaseLocked(oldest)
-			delete(d.groups, oldestStart)
-		}
+		d.pruneGroupOrderLocked()
 	}
+
 	g := d.spare
 	if g != nil {
 		d.spare = nil
@@ -352,7 +361,32 @@ func (d *fecDecoder) newGroupLocked(start uint32) *fecGroupState {
 	g.acc = nil
 	g.parity = nil
 	d.groups[start] = g
+	d.groupOrder = append(d.groupOrder, start)
 	return g
+}
+
+// pruneGroupOrderLocked 丢掉队头已不在 groups 的完成项，并周期压缩切片。
+// 完成路径只 delete(map)，不需要从队列中间删除，因此无 O(n) 搬移热路径。
+func (d *fecDecoder) pruneGroupOrderLocked() {
+	for d.groupHead < len(d.groupOrder) {
+		if _, ok := d.groups[d.groupOrder[d.groupHead]]; ok {
+			break
+		}
+		d.groupHead++
+	}
+	if d.groupHead == 0 {
+		return
+	}
+	if d.groupHead == len(d.groupOrder) {
+		d.groupOrder = d.groupOrder[:0]
+		d.groupHead = 0
+		return
+	}
+	if d.groupHead >= 1024 || d.groupHead*2 >= len(d.groupOrder) {
+		copy(d.groupOrder, d.groupOrder[d.groupHead:])
+		d.groupOrder = d.groupOrder[:len(d.groupOrder)-d.groupHead]
+		d.groupHead = 0
+	}
 }
 
 // isDoneLocked O(1) 判定：环形表槽位存的恰好等于 start 才算命中。
