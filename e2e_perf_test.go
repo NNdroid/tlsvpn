@@ -220,19 +220,32 @@ func TestPerfThroughput(t *testing.T) {
 	var injectedFrames atomic.Uint64
 	deadline := time.Now().Add(duration)
 	go func() {
-		const burst = 128
+		// 目标是让隧道持续饱和，而不是让一个本地 producer 以千万 PPS 把所有
+		// 有界队列打爆。后者会制造大量“已分配 seq 后的主动丢包”，测到的是
+		// reorder/FEC 超时而不是 TLSVPN 稳态吞吐。
+		burst := 64
+		lastDropped := h.cli.txPort.Dropped()
 		for time.Now().Before(deadline) {
 			for i := 0; i < burst; i++ {
 				h.tapWriter(frame)
 				injectedFrames.Add(1)
 			}
-			// 只在 AsyncPort 输入队列已经明显积压时轻量退让；正常情况按 burst
-			// 连续灌流，避免旧测试逐帧等待 delivered 导致人为约 10Mbps 上限。
-			if q, capq := len(h.cli.txPort.ch), cap(h.cli.txPort.ch); q > capq*3/4 {
-				time.Sleep(50 * time.Microsecond)
-			} else {
-				runtime.Gosched()
+
+			dropped := h.cli.txPort.Dropped()
+			if dropped != lastDropped {
+				// 出现背压就快速收敛，直到生产速率回到 dataplane 可承受范围。
+				burst = max(4, burst/2)
+				time.Sleep(250 * time.Microsecond)
+				lastDropped = dropped
+				continue
 			}
+
+			// 没有丢包时缓慢升压；每 burst 主动 yield，避免压测 goroutine
+			// 在单核/双核 hosted runner 上饿死 TLS reader/writer。
+			if burst < 256 {
+				burst += 4
+			}
+			runtime.Gosched()
 		}
 	}()
 
