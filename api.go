@@ -182,7 +182,6 @@ type runtimeCfgJSON struct {
 	WebHTTPS       bool         `json:"web_https"`
 	EncryptPSK     bool         `json:"encrypt_psk"`
 	SessionEnc     bool         `json:"session_encrypt"`
-	SessionTok     bool         `json:"session_token"`
 	MaxSess        int          `json:"max_sessions"`
 	V4CIDR         string       `json:"v4_cidr,omitempty"`
 	V6CIDR         string       `json:"v6_cidr,omitempty"`
@@ -439,7 +438,7 @@ const I18N={
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
 	tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',theme_tip:'主题（跟随系统）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'运行模式',encrypt:'内层加密',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',session_token:'Session Token',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
+ cfgk:{mode:'运行模式',encrypt:'内层加密',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
  stt:{title:'运行状态',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',
    restart:'以下字段已修改，需要重启进程才能生效：',norestart:'无字段需要重启生效',noneg:'尚未与对端完成握手',
    noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
@@ -461,7 +460,7 @@ const I18N={
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
 	tls_http:'HTTP (HTTPS recommended)',mode_local:'local',theme_tip:'Theme (follow system)',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'Mode',encrypt:'Inner cipher',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',session_token:'Session token',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
+ cfgk:{mode:'Mode',encrypt:'Inner cipher',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
  stt:{title:'Runtime status',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',
    restart:'These fields changed and require a process restart:',norestart:'Nothing pending restart',noneg:'Handshake with peer not completed yet',
    noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
@@ -978,6 +977,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 // mergeAndValidateConfig 解析面板提交的新配置，校验并计算需重启字段。
 // apply=false 时仅校验不落盘不生效。
 func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv *Server, cli *Client) (*Config, []string, error) {
+	posted = stripDeprecatedSessionTokenConfig(posted)
 	dec := json.NewDecoder(strings.NewReader(string(posted)))
 	dec.DisallowUnknownFields()
 	newCfg := &Config{}
@@ -1296,7 +1296,6 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.WebHTTPS = cfg.Web.Cert != "" && cfg.Web.Key != ""
 	out.EncryptPSK = true
 	out.SessionEnc = cfg.Encrypt
-	out.SessionTok = cfg.Server.SessionToken
 	out.MaxSess = cfg.Server.MaxSessions
 	out.V4CIDR = cfg.Server.V4CIDR
 	out.V6CIDR = cfg.Server.V6CIDR
@@ -1336,10 +1335,9 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 	cfg := s.cfg.Load()
 	encrypt := s.encrypt
 	minEnc := s.minEnc
-	sessionToken := s.sessionToken
 	s.mu.RUnlock()
 
-	n := runtimeNegJSON{ProtocolVersion: 2, SessionToken: sessionToken, PadMode: padModeName()}
+	n := runtimeNegJSON{ProtocolVersion: 2, SessionToken: true, PadMode: padModeName()}
 	if cfg != nil {
 		n.FEC = cfg.Client.FEC
 		n.FecGroup = cfg.Client.FecGroup
