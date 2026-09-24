@@ -903,6 +903,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 					putFrame(vf.Data)
 				}
 			}
+			putVPNFrameBatch(frames)
 		}
 	}()
 
