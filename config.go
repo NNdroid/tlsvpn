@@ -99,6 +99,13 @@ type ServerConfig struct {
 
 // ClientConfig 客户端专属
 type ClientConfig struct {
+	// InterfaceManager controls who owns L3 interface configuration.
+	// "self" keeps the existing Linux behavior: tlsvpn brings the TAP up,
+	// assigns tunnel addresses and manages policy routing itself.
+	// "netifd" is for OpenWrt protocol-handler integration: tlsvpn still
+	// creates and owns the TAP/data plane, while netifd owns addresses,
+	// routes, metrics and firewall lifecycle through fixed helper scripts.
+	InterfaceManager string `json:"interface_manager,omitempty"`
 	ReqV4      string `json:"req_v4,omitempty"`
 	ReqV6      string `json:"req_v6,omitempty"`
 	SNI        string `json:"sni,omitempty"` // 默认 www.cloudflare.com
@@ -166,6 +173,7 @@ const exampleConfigJSON = `{
     "key": ""
   },
   "client": {
+    "interface_manager": "self",
     "conns": 4,
     "fec": true,
     "fec_group": 4,
@@ -265,6 +273,9 @@ func (c *Config) applyDefaults() {
 		}
 	}
 	if c.Mode == "client" {
+		if c.Client.InterfaceManager == "" {
+			c.Client.InterfaceManager = "self"
+		}
 		if c.Client.SNI == "" {
 			c.Client.SNI = "www.cloudflare.com"
 		}
@@ -366,6 +377,20 @@ func (c *Config) Validate() error {
 	}
 
 	if c.Mode == "client" {
+		switch c.Client.InterfaceManager {
+		case "self", "netifd":
+		default:
+			return fmt.Errorf(
+				"invalid client.interface_manager %q (want self or netifd)",
+				c.Client.InterfaceManager,
+			)
+		}
+		if c.Client.InterfaceManager == "netifd" &&
+			(c.Client.Fwmark != 0 || len(c.Client.ExtraRoutes) != 0 || len(c.Client.SourceRules) != 0) {
+			return fmt.Errorf(
+				"client.interface_manager=netifd requires fwmark=0 and no extra_routes/source_rules; netifd must own OpenWrt routing",
+			)
+		}
 		if c.Client.Conns < 1 {
 			return fmt.Errorf("client.conns must be >= 1")
 		}
