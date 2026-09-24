@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -51,11 +53,12 @@ func TestSendRespRateDirections(t *testing.T) {
 	defer func() { log = oldLog }()
 
 	var buf bytes.Buffer
-	// sendResp 内部吞掉写错误，所以这里靠下面的 ReadFrame 兜底：帧没写出来就读不到。
-	(&Server{}).sendResp(&buf, true, "OK", "cid", "sid",
+	if err := (&Server{}).sendResp(&buf, true, "OK", "cid", "sid",
 		"10.8.0.0/24", "fd00::/80",
 		true, 30, 500, // group 语义：客户端上行总量, 客户端下行总量
-		false, 0, encAlgoGCM, "", "", "", true, 2, 3)
+		false, 0, encAlgoGCM, "", "", "", true, 2, 3); err != nil {
+		t.Fatalf("发送握手响应失败：%v", err)
+	}
 
 	// 走和客户端完全相同的读路径（client.go 的 handshake response 读取）
 	scanner := NewFrameScanner(bytes.NewReader(buf.Bytes()))
@@ -75,6 +78,29 @@ func TestSendRespRateDirections(t *testing.T) {
 	}
 	if !resp.BrutalGroups {
 		t.Error("brutal_groups 应为 true：总速率字段依赖 group 语义才成立")
+	}
+}
+
+type failingHandshakeWriter struct{}
+
+func (failingHandshakeWriter) Write([]byte) (int, error) {
+	return 0, errors.New("forced handshake write failure")
+}
+
+func TestSendRespPropagatesWriteFailure(t *testing.T) {
+	oldLog := log
+	log = zap.NewNop().Sugar()
+	defer func() { log = oldLog }()
+
+	err := (&Server{}).sendResp(failingHandshakeWriter{}, true, "OK", "cid", "sid",
+		"10.8.0.0/24", "fd00::/80",
+		false, 0, 0,
+		false, 0, encAlgoNone, "", "", "", false, 2, 1)
+	if err == nil {
+		t.Fatal("sendResp swallowed the handshake response write failure")
+	}
+	if !strings.Contains(err.Error(), "write handshake response") {
+		t.Fatalf("unexpected sendResp error: %v", err)
 	}
 }
 
