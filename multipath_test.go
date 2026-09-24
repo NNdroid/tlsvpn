@@ -64,6 +64,37 @@ func TestPickBackendKeepsStickyPathUntilMateriallyBetterOrBackpressured(t *testi
 	}
 }
 
+func TestSendBatchTransfersPayloadOwnershipWithoutCopy(t *testing.T) {
+	rtt := uint32(1)
+	b := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rtt}
+
+	payload := getFrameAtLeast(1400)[:1400]
+	payload[0] = 0x5a
+	ptr := &payload[0]
+	batch := []VPNFrame{{Seq: 7, Data: payload}}
+
+	if dropped := sendBatchTo(b, batch); dropped != 0 {
+		t.Fatalf("sendBatchTo dropped=%d, want 0", dropped)
+	}
+	if batch[0].Data != nil {
+		t.Fatal("caller retained payload after ownership transfer")
+	}
+
+	out := <-b.ch
+	if len(out) != 1 || out[0].Seq != 7 || len(out[0].Data) != 1400 {
+		t.Fatalf("unexpected transferred batch: %+v", out)
+	}
+	if &out[0].Data[0] != ptr {
+		t.Fatal("payload was copied instead of ownership-transferred")
+	}
+	if out[0].Data[0] != 0x5a {
+		t.Fatal("transferred payload content changed")
+	}
+
+	freeFrames(out)
+	putVPNFrameBatch(out)
+}
+
 func TestParityQueueDropIsObservable(t *testing.T) {
 	rtt := uint32(1)
 	b := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rtt}
