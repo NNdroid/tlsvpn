@@ -127,7 +127,7 @@ config interface 'vpn'
         option metric '10'
 ```
 
-The protocol handler resolves every transport endpoint before starting TLSVPN, installs netifd host dependencies for exactly those resolved IPs, and passes the same fixed IP:port list to the process. This prevents a VPN default route from recursively capturing its own TLS transport after a later DNS answer. If an underlying OpenWrt network should be forced, set `option tunlink 'wan'` (or another network name).
+The protocol handler resolves every transport endpoint before starting TLSVPN, installs netifd host dependencies for exactly those resolved IPs, and passes the same fixed IP:port list to the process. If `socks5` is enabled, the proxy endpoint is resolved, pinned and rewritten to a fixed IP too, because that proxy is the actual local TCP peer. This prevents a VPN default route from recursively capturing its own TLS transport after a later DNS answer. If an underlying OpenWrt network should be forced, set `option tunlink 'wan'` (or another network name).
 
 The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
 
