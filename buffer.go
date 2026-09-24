@@ -335,6 +335,23 @@ func (rb *ReorderBuffer) freeBatch(batch [][]byte) {
 // timeoutWorker 平时完全休眠；第一个未来帧确认缺口时由 Insert 唤醒并精确等待
 // deadline。缺口被补齐或 Reset 时同样会被唤醒重算，不再固定轮询。
 func (rb *ReorderBuffer) timeoutWorker() {
+	// 一个 ReorderBuffer 生命周期只分配一个 timer。多路径抖动时 gap 可能很频繁，
+	// 旧实现每个 gap 都 NewTimer，给 GC 制造无意义的短命对象。
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	stopTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+
 	for {
 		rb.mu.Lock()
 		if rb.shutting {
@@ -355,23 +372,13 @@ func (rb *ReorderBuffer) timeoutWorker() {
 		rb.mu.Unlock()
 
 		if wait > 0 {
-			timer := time.NewTimer(wait)
+			timer.Reset(wait)
 			select {
 			case <-rb.closed:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
+				stopTimer()
 				return
 			case <-rb.gapWake:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
+				stopTimer()
 				continue
 			case <-timer.C:
 			}
