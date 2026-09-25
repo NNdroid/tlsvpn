@@ -1690,12 +1690,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 额外持有一个 200ms ticker goroutine。代理/非 TCP 场景自动禁用。
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
-		var nextWriteDeadlineRefresh time.Time
+		writeDeadlineTicker := time.NewTicker(time.Second)
+		defer writeDeadlineTicker.Stop()
+		_ = conn.SetWriteDeadline(time.Now().Add(11 * time.Second))
 		refreshWriteDeadline := func() {
-			now := time.Now()
-			if nextWriteDeadlineRefresh.IsZero() || !now.Before(nextWriteDeadlineRefresh) {
-				_ = conn.SetWriteDeadline(now.Add(11 * time.Second))
-				nextWriteDeadlineRefresh = now.Add(time.Second)
+			select {
+			case <-writeDeadlineTicker.C:
+				_ = conn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+			default:
 			}
 		}
 		if tcpConn != nil {
@@ -1763,7 +1765,6 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
 	var rxBytesBatch, rxPacketsBatch uint64
-	var nextReadDeadlineRefresh time.Time
 	flushRxStats := func() {
 		if rxPacketsBatch == 0 {
 			return
@@ -1776,18 +1777,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		rxBytesBatch, rxPacketsBatch = 0, 0
 	}
 	defer flushRxStats()
+
+	readDeadlineTicker := time.NewTicker(time.Second)
+	defer readDeadlineTicker.Stop()
+	_ = conn.SetReadDeadline(time.Now().Add(16 * time.Second))
+
 	for {
-		now := time.Now()
-		if nextReadDeadlineRefresh.IsZero() || !now.Before(nextReadDeadlineRefresh) {
-			// 1s 滚动刷新、16s deadline => 实际空闲判死约 15~16s；
-			// 活跃数据面不再每包触发 pollSetDeadline syscall。
-			conn.SetReadDeadline(now.Add(16 * time.Second))
-			nextReadDeadlineRefresh = now.Add(time.Second)
-		}
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
 			log.Debugf("[%s] connection lost: %v", clientID, err)
 			return
+		}
+		select {
+		case <-readDeadlineTicker.C:
+			_ = conn.SetReadDeadline(time.Now().Add(16 * time.Second))
+		default:
 		}
 
 		if frame == nil {
