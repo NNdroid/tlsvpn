@@ -1220,6 +1220,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.destroySessionLocked(session, clientID)
 			exists = false
 		}
+		if exists && session.EncAlgo != req.EncAlgo {
+			log.Warnf("[%s] existing session uses inner cipher %d (%s), request wants %d (%s); rebuild/restart required",
+				clientID, session.EncAlgo, encAlgoLabel(session.EncAlgo), req.EncAlgo, encAlgoLabel(req.EncAlgo))
+			s.mu.Unlock()
+			return
+		}
 		if exists && session.InstanceID != req.ClientInstance {
 			if !acceptSessionResumeToken(session, req.SessionToken) {
 				log.Warnf("[%s] reconnect refused: invalid session token for a new client instance", clientID)
