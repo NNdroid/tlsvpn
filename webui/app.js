@@ -277,7 +277,7 @@ document.addEventListener('keydown',function(e){
   if(box){box.querySelector('.search-input').focus();e.preventDefault();}
 });
 
-let lastStats=null,lastSpeeds={};
+let lastStats=null,lastSpeeds={},lastTraffic=null;
 async function fetchStats(){
   try{
     const res=await fetch(url('/api/stats'),AUTH_HDR);
@@ -517,6 +517,7 @@ function renderBansTable(data){
 // ---------- 流量页：今日汇总 + 每日柱状图 + 日表 ----------
 function renderTraffic(data){
   const tr=data.traffic;if(!tr)return;
+  lastTraffic=tr;
   document.getElementById('tr-up').innerText=fmtBytes(tr.up||0);
   document.getElementById('tr-down').innerText=fmtBytes(tr.down||0);
   document.getElementById('tr-total').innerText=fmtBytes((tr.up||0)+(tr.down||0));
@@ -632,7 +633,8 @@ function applyTheme(){
   setSeg('theme-seg',THEME);
 }
 function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();
-  if(txHist.length||rxHist.length)drawChart();}
+  if(txHist.length||rxHist.length)drawChart();
+  if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}
 matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();if(txHist.length||rxHist.length)drawChart();}});
 
 ['clients','conns','macs'].forEach(attachSearch);

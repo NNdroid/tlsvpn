@@ -15,7 +15,7 @@
   --glow1:rgba(109,93,246,.16); --glow2:rgba(56,207,232,.10);
 }
 :root[data-theme=light]{
-  --bg:#f3f5fa; --card:#ffffff; --card2:#f7f9fd; --term:#0f1521;
+  --bg:#f3f5fa; --card:#ffffff; --card2:#f7f9fd; --term:#f8fafd;
   --border:#e4e8f1; --border2:#d5dbe8; --grid:#e8ecf4;
   --fg:#181d27; --muted:#5c6474; --sub:#8b93a5;
   --accent:#6a5cf5; --accent-soft:rgba(106,92,245,.10);
@@ -206,7 +206,7 @@ td.dim{color:var(--sub)}
 }
 .term .ln{color:var(--muted);padding:0 6px;border-radius:5px;white-space:pre-wrap;word-break:break-all}
 .term .ln:hover{background:rgba(255,255,255,.04)}
-:root[data-theme=light] .term .ln:hover{background:rgba(255,255,255,.06)}
+:root[data-theme=light] .term .ln:hover{background:rgba(0,0,0,.05)}
 .term .ts{color:var(--sub)}
 .term .lv{font-weight:700;padding:1px 7px;border-radius:5px;font-size:.92em;margin:0 5px}
 .lv-INFO .lv{background:var(--up-soft);color:var(--up)}
@@ -215,7 +215,7 @@ td.dim{color:var(--sub)}
 .lv-DEBUG .lv{background:var(--off);color:var(--offfg)}
 .term .msg{color:var(--fg)}
 .editor{
-  width:100%;height:340px;background:var(--term);color:#c9d4ea;border:1px solid var(--border);
+  width:100%;height:340px;background:var(--term);color:var(--fg);border:1px solid var(--border);
   border-radius:11px;padding:13px 15px;font:12.5px/1.7 ui-monospace,"Cascadia Mono",Consolas,monospace;
   outline:none;resize:vertical;tab-size:2;margin-top:10px;
 }
