@@ -147,6 +147,55 @@ func TestVSwitchRejectsSpoofedSrcMAC(t *testing.T) {
 	}
 }
 
+func TestVSwitchCoarseClockRefreshAndPurge(t *testing.T) {
+	vs := NewVSwitch()
+	src := macKey{0x02, 0, 0, 0, 0, 1}
+	dst := macKey{0x02, 0, 0, 0, 0, 2}
+	pa, pb := newStubPort("A"), newStubPort("B")
+	vs.AddPort(pa)
+	vs.AddPort(pb)
+
+	// 首次学习使用 coarse clock，而不是 wall clock。
+	vs.coarseSec.Store(100)
+	vs.ProcessFrame("A", macFrame(dst, src))
+	shard := vs.shards[getShardIdx(src)]
+	shard.mu.RLock()
+	entry := shard.macTable[src]
+	if entry == nil || entry.updatedTick != 100 {
+		shard.mu.RUnlock()
+		t.Fatalf("initial coarse MAC timestamp = %+v, want tick 100", entry)
+	}
+	shard.mu.RUnlock()
+
+	// 5 秒以内不刷新；超过 refresh window 后才更新。
+	vs.coarseSec.Store(104)
+	vs.ProcessFrame("A", macFrame(dst, src))
+	shard.mu.RLock()
+	got := shard.macTable[src].updatedTick
+	shard.mu.RUnlock()
+	if got != 100 {
+		t.Fatalf("MAC timestamp refreshed too early: %d", got)
+	}
+
+	vs.coarseSec.Store(106)
+	vs.ProcessFrame("A", macFrame(dst, src))
+	shard.mu.RLock()
+	got = shard.macTable[src].updatedTick
+	shard.mu.RUnlock()
+	if got != 106 {
+		t.Fatalf("MAC timestamp did not refresh from coarse clock: %d", got)
+	}
+
+	// 30 分钟老化仍按同一个单调 coarse clock 判断。
+	vs.purgeExpiredMACsAt(106 + uint64((30*time.Minute)/time.Second) + 1)
+	shard.mu.RLock()
+	_, exists := shard.macTable[src]
+	shard.mu.RUnlock()
+	if exists {
+		t.Fatal("expired MAC entry survived coarse-clock purge")
+	}
+}
+
 func TestVSwitchFloodBudget(t *testing.T) {
 	vs := NewVSwitch()
 	vs.floodBurst = 2
