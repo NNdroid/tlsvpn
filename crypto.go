@@ -279,7 +279,13 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 		cert = loadOrGenerateSelfSigned()
 	}
 
-	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
+	return &tls.Config{
+		Certificates:                []tls.Certificate{cert},
+		NextProtos:                  []string{"h2", "http/1.1"},
+		// TLSVPN 是长连接 bulk transport。固定最大 record 可减少高吞吐数据面
+		// 的 TLS record/AEAD/write 次数；不改变 TLS 协议或对端兼容性。
+		DynamicRecordSizingDisabled: true,
+	}
 }
 
 // loadOrGenerateSelfSigned 加载/生成自签名证书并持久化到磁盘：
