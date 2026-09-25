@@ -147,6 +147,50 @@ func TestVSwitchRejectsSpoofedSrcMAC(t *testing.T) {
 	}
 }
 
+func TestVSwitchOwnedUnicastTransfersBufferWithoutCopy(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	vs := NewVSwitch()
+	port := NewAsyncPort(ctx, "B")
+	rtt := uint32(1000)
+	backend := make(chan []VPNFrame, 4)
+	port.RegisterBackend(backend, &rtt)
+	defer port.UnregisterBackend(backend)
+	defer port.Close()
+	vs.AddPort(port)
+
+	macB := macKey{0xBA, 0, 0, 0, 0, 2}
+	macTap := macKey{0x02, 0, 0, 0, 0, 9}
+
+	// 先让交换机学习 macB -> B。目标 MAC 未学习也没关系；这里只关心源学习。
+	vs.ProcessFrame("B", macFrame(macTap, macB))
+
+	raw := macFrame(macB, macTap)
+	buf := getFrameAtLeast(len(raw))[:len(raw)]
+	copy(buf, raw)
+	ptr := &buf[0]
+
+	vs.ProcessOwnedFrame(tapPortID, buf)
+
+	select {
+	case batch := <-backend:
+		if len(batch) != 1 || len(batch[0].Data) != len(raw) {
+			t.Fatalf("unexpected owned batch: %+v", batch)
+		}
+		if &batch[0].Data[0] != ptr {
+			t.Fatal("owned TAP unicast payload was copied instead of transferred")
+		}
+		if !bytes.Equal(batch[0].Data, raw) {
+			t.Fatal("owned TAP unicast payload changed")
+		}
+		freeFrames(batch)
+		putVPNFrameBatch(batch)
+	case <-time.After(time.Second):
+		t.Fatal("owned TAP unicast was not delivered")
+	}
+}
+
 func TestVSwitchFloodBudget(t *testing.T) {
 	vs := NewVSwitch()
 	vs.floodBurst = 2
