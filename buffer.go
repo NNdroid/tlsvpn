@@ -31,9 +31,9 @@ type reorderBatch struct {
 	next   *reorderBatch
 }
 
-var reorderBatchPool = sync.Pool{
-	New: func() any { return new(reorderBatch) },
-}
+func newReorderBatch() any { return new(reorderBatch) }
+
+var reorderBatchPool = sync.Pool{New: newReorderBatch}
 
 func getReorderBatch() *reorderBatch {
 	b := reorderBatchPool.Get().(*reorderBatch)
