@@ -446,8 +446,8 @@ type HandshakeReq struct {
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
 	Encrypt         bool   `json:"encrypt,omitempty"`
-	// EncAlgo：本端声明的内层加密算法（encAlgoNone / encAlgoGCM）。服务端
-	// 要求完全相等才启用内层加密，不接受更弱的回退。
+	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM）。
+	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
 	// SessionToken：客户端回带上一次收到的会话令牌（hex）。
 	// 服务端开启 session_token 时，重连既有会话必须携带正确令牌，
@@ -478,7 +478,7 @@ type HandshakeResp struct {
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
 	Encrypt         bool   `json:"encrypt,omitempty"`
-	// EncAlgo：协商选定的算法（encAlgoNone=无内层加密，encAlgoGCM=GCM）。
+	// EncAlgo：协商选定的算法（0=无内层加密，2=AES-256-GCM，4=AES-128-GCM）。
 	// 为 GCM 时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
 	// EncSalt2 为 s2c 方向盐（服务端加密/客户端解密）。
 	EncAlgo  int    `json:"enc_algo,omitempty"`
