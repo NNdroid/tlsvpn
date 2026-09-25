@@ -56,9 +56,9 @@ const (
 	fecDoneMask = fecDoneRing - 1
 )
 
-var fecLensPool = sync.Pool{
-	New: func() any { return new([fecMaxGroup]int) },
-}
+func newFECLens() any { return new([fecMaxGroup]int) }
+
+var fecLensPool = sync.Pool{New: newFECLens}
 
 func getFECLens(k int) []int {
 	return fecLensPool.Get().(*[fecMaxGroup]int)[:k]
