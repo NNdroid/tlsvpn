@@ -56,7 +56,7 @@ cfg_json() {
     lit="${kv#*=}"
     [ -n "$lit" ] && v["$k"]="$lit"
   done
-  for k in mode addr psk tap socks5 log_level encrypt min_enc pad_mode \
+  for k in mode addr psk tap socks5 log_level encrypt enc_algo min_enc pad_mode \
            brutal brutal_up brutal_down mac; do
     [ -n "${v[$k]:-}" ] || continue
     [ $first -eq 0 ] && out+=","
@@ -94,14 +94,13 @@ write_config() {
 # sides of a group, so every knob is exercised symmetrically and a mismatch is
 # never blamed on asymmetric configuration.
 #
-#   HARDENED — the combination the alignment acceptance criteria call out:
-#              GCM floor negotiated as enc_algo=3, bucket padding, session
-#              token reconnection, FEC group 4.
-#   LEGACY   — the weakest encrypted path that still exists: no cipher floor
-#              (the ctr tier was removed with the AES-CTR fallback), no padding
-#              (the legacy tier was removed with it), session token off, larger
-#              FEC group 8. min_enc only accepts ""/any/gcm and pad_mode only
-#              off/bucket, so "ctr" and "legacy" no longer parse as configs.
+#   HARDENED — authenticated GCM with a required GCM floor, bucket padding,
+#              mandatory session-token resume, and FEC group 4. It intentionally
+#              omits enc_algo here so the default AES-256 path remains compatible
+#              with a peer from before the explicit key-size option existed.
+#   LEGACY   — the weakest encrypted configuration still supported: no cipher
+#              floor, padding off, mandatory session token, and FEC group 8.
+#              AES-CTR and legacy padding modes were removed with protocol v2.
 #   PLAIN    — encryption, padding and FEC all switched off: the shortest path
 #              through the protocol, where a byte-level difference between the
 #              implementations is most likely to surface.
@@ -263,10 +262,10 @@ run_group_D() {
 # encryption, padding or FEC settings stayed invisible:
 #
 #   H  go_srv <- rs_cli   hardened: encrypt + GCM floor, bucket padding,
-#                         session token on, FEC group 4
+#                         mandatory session token, FEC group 4
 #   I  rs_srv <- go_cli   hardened (reverse direction)
-#   J  go_srv <- rs_cli   legacy: encrypt + CTR floor, legacy padding,
-#                         session token off, FEC group 8
+#   J  go_srv <- rs_cli   weak encrypted profile: no cipher floor, padding off,
+#                         mandatory session token, FEC group 8
 #   K  rs_srv <- go_cli   plain: encryption, padding and FEC all off
 run_group_H() {
   start_server "$BIN_GO" 18086 "${MATRIX_HARDENED[@]}" || return 1
