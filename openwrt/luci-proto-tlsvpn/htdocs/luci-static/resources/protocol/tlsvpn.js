@@ -102,8 +102,15 @@ return network.registerProtocol('tlsvpn', {
 		o.depends('fec', '1');
 
 		o = s.taboption('advanced', form.Flag, 'encrypt',
-			_('Inner AES-256-GCM encryption'));
+			_('Inner AES-GCM encryption'));
 		o.default = o.enabled;
+
+		o = s.taboption('advanced', form.ListValue, 'enc_algo',
+			_('Inner cipher'));
+		o.value('gcm256', _('AES-256-GCM (default)'));
+		o.value('gcm128', _('AES-128-GCM (faster)'));
+		o.default = 'gcm256';
+		o.depends('encrypt', '1');
 
 		o = s.taboption('advanced', form.ListValue, 'min_enc',
 			_('Minimum inner encryption'));
