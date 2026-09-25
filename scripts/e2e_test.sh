@@ -204,7 +204,12 @@ run_client() {
   local ok=0
   for i in $(seq 1 30); do
     kill -0 "$pid" 2>/dev/null || { ok=0; break; }
-    if grep -qiE "ClientID|Starting Client Mode|tunnel (established|up)|connected|handshake complete|session (created|established)|assigned" "$log"; then ok=1; break; fi
+    # Both implementations emit this only after HandshakeResp has been parsed,
+    # the negotiated cipher/salts/FEC have been accepted, and the new session
+    # state has been installed. Startup/ClientID log lines are not sufficient:
+    # they occur before the application handshake and previously caused false
+    # green cross-language tests.
+    if grep -q "server reset the session" "$log"; then ok=1; break; fi
     sleep 1
   done
   if [[ "$ok" -eq 1 ]]; then
