@@ -76,8 +76,12 @@ func nextPerfPort() int {
 // 机器已被压过，10s 会整组卡在 deadline 上。测量阶段固定 8s，不受这里影响。
 const perfHandshakeBudget = 30 * time.Second
 
-// startPerfHarness 起一对真实进程内 server+client，等握手完成
+// startPerfHarness 起一对真实进程内 server+client，等握手完成。
 func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarness {
+	return startPerfHarnessWithAlgo(t, conns, fec, encrypt, "")
+}
+
+func startPerfHarnessWithAlgo(t *testing.T, conns int, fec bool, encrypt bool, encAlgo string) *perfHarness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &perfHarness{cancel: cancel, srvDone: make(chan struct{}), cliDone: make(chan struct{})}
@@ -87,7 +91,7 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 	h.srvAddr = srvAddr
 	srvCfg := &Config{
 		Mode: "server", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
-		Mac: "02:00:00:00:00:01", Encrypt: encrypt,
+		Mac: "02:00:00:00:00:01", Encrypt: encrypt, EncAlgo: encAlgo,
 		Server: ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
 	}
 	srvCfg.applyDefaults()
@@ -116,7 +120,7 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 	// ---- client ----
 	cliCfg := &Config{
 		Mode: "client", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
-		Mac: "02:00:00:00:00:02", Encrypt: encrypt,
+		Mac: "02:00:00:00:00:02", Encrypt: encrypt, EncAlgo: encAlgo,
 		Client: ClientConfig{Conns: conns, FEC: fec, FecGroup: 4, Insecure: true},
 	}
 	cliCfg.applyDefaults()
@@ -214,14 +218,12 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 
 func (h *perfHarness) stop() { h.cancel(); <-h.srvDone; <-h.cliDone }
 
-func TestPerfThroughput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short mode")
-	}
-	h := startPerfHarness(t, 2, true, true)
+func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) {
+	t.Helper()
+	h := startPerfHarnessWithAlgo(t, 2, true, encrypt, encAlgo)
 	defer h.stop()
 
-	// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
+// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
 	// fast path 实际交付字节。测试启动时已预学习 TAP_LOCAL MAC，避免把
 	// unknown-unicast flood limiter 的速率误当成隧道吞吐。
 	const duration = 8 * time.Second
@@ -267,8 +269,8 @@ func TestPerfThroughput(t *testing.T) {
 	time.Sleep(duration + 1*time.Second)
 	got := delivered.Load()
 	mbps := float64(got*8) / duration.Seconds() / 1e6
-	t.Logf("throughput: %.1f Mbps delivered (%d frames injected, %d bytes in %v)",
-		mbps, injectedFrames.Load(), got, duration)
+	t.Logf("throughput[%s]: %.1f Mbps delivered (%d frames injected, %d bytes in %v)",
+		mode, mbps, injectedFrames.Load(), got, duration)
 	rec, lost := h.cli.FECStats()
 	t.Logf("dataplane stats: txPortDropped=%d parity=%d fecRecovered=%d fecLost=%d reorder=%+v txBytes=%d txPackets=%d rxBytes=%d rxPackets=%d",
 		h.cli.txPort.Dropped(), h.cli.txPort.ParitySent(), rec, lost,
@@ -297,6 +299,29 @@ func TestPerfThroughput(t *testing.T) {
 	if mbps < 5 {
 		t.Fatalf("tunnel throughput below 5 Mbps: %.2f", mbps)
 	}
+}
+
+}
+
+func TestPerfThroughput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	runPerfThroughput(t, "gcm256", true, "gcm256")
+}
+
+func TestPerfThroughputGCM128(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	runPerfThroughput(t, "gcm128", true, "gcm128")
+}
+
+func TestPerfThroughputTLSOnly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	runPerfThroughput(t, "tls-only", false, "")
 }
 
 func TestPerfPingRTT(t *testing.T) {
