@@ -27,6 +27,23 @@ const ifaNoDAD = unix.IFA_F_NODAD
 // 非 Linux 上这些函数都是编译桩，调用方据此跳过而不是每次握手按失败告警。
 func netlinkTunnelSupported() bool { return true }
 
+// tapReadBufferSize 根据真实 TAP MTU 选择接收缓冲。给 L2/VLAN 头留 64B 余量，
+// 默认 MTU 1500 会落入 2KB frame pool；jumbo MTU 自动进入更大的 size class。
+func tapReadBufferSize(tapName string) (int, bool) {
+	link, err := netlink.LinkByName(tapName)
+	if err != nil || link.Attrs() == nil || link.Attrs().MTU <= 0 {
+		return 0, false
+	}
+	n := link.Attrs().MTU + 64
+	if n < defaultFrameSize {
+		n = defaultFrameSize
+	}
+	if n > maxWireDataLen {
+		n = maxWireDataLen
+	}
+	return n, true
+}
+
 // ======================= TCP Brutal & RTT 探测 =======================
 // brutalAvailableAlgos 每次读取实时列表；模块可在进程运行期间加载/卸载，面板
 // 不能把启动时的“不支持”永久缓存。读不到时返回 nil，apply 仍直接尝试 sockopt。
