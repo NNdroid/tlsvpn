@@ -473,9 +473,14 @@ func validateHookPath(name, value string) error {
 	if strings.IndexByte(value, 0) >= 0 || strings.ContainsAny(value, "\r\n") {
 		return fmt.Errorf("%s hook path contains control characters", name)
 	}
-	// filepath.IsAbs follows the host OS. Accept a leading slash as well so a
-	// Linux deployment config can be validated by Windows-side tooling/tests.
-	if !filepath.IsAbs(value) && !strings.HasPrefix(value, "/") {
+	// filepath.IsAbs follows the host OS, but config files are intentionally
+	// portable. Accept POSIX absolute paths, Windows drive-rooted paths and UNC
+	// paths regardless of which OS performs validation.
+	isWindowsAbs := len(value) >= 3 &&
+		((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) &&
+		value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+	isUNC := strings.HasPrefix(value, "\\\\") || strings.HasPrefix(value, "//")
+	if !filepath.IsAbs(value) && !strings.HasPrefix(value, "/") && !isWindowsAbs && !isUNC {
 		return fmt.Errorf("%s hook must be an absolute executable path", name)
 	}
 	return nil
