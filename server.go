@@ -30,8 +30,8 @@ type Port interface {
 type macKey [6]byte
 
 type macEntry struct {
-	portID    string
-	updatedAt time.Time
+	portID      string
+	updatedTick uint64
 }
 
 const ShardCount = 16
@@ -48,6 +48,11 @@ type VSwitch struct {
 	portsMu sync.RWMutex
 	ports   map[string]Port
 	shards  [ShardCount]*VSwitchShard
+
+	// coarseSec 是 VSwitch 自己的单调粗时钟（约 1 秒粒度）。MAC 学习热路径
+	// 每帧只 atomic.Load，不再调用 time.Now/time.Since。时钟调度延迟只会让
+	// MAC 项稍晚刷新/过期，不会提前误删。
+	coarseSec atomic.Uint64
 
 	// validateMAC 源 MAC 归属校验（可 nil = 不过滤）。共享 PSK 的多客户端
 	// 场景下，恶意客户端可以声明他人的 srcMAC 把受害者的 MAC 表项学习到
@@ -84,7 +89,8 @@ func NewVSwitch() *VSwitch {
 	for i := 0; i < ShardCount; i++ {
 		vs.shards[i] = &VSwitchShard{macTable: make(map[macKey]*macEntry)}
 	}
-	go vs.purgeExpiredMACs()
+	vs.coarseSec.Store(1)
+	go vs.runCoarseClockAndPurge()
 	return vs
 }
 
@@ -97,15 +103,22 @@ func getShardIdx(mac macKey) int {
 	}
 	return int(hash % ShardCount)
 }
-func (vs *VSwitch) purgeExpiredMACs() {
-	ticker := time.NewTicker(5 * time.Minute)
+func (vs *VSwitch) runCoarseClockAndPurge() {
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var purgeTicks uint32
 	for range ticker.C {
+		now := vs.coarseSec.Add(1)
+		purgeTicks++
+		if purgeTicks < 300 {
+			continue
+		}
+		purgeTicks = 0
 		for i := 0; i < ShardCount; i++ {
 			shard := vs.shards[i]
 			shard.mu.Lock()
 			for mac, entry := range shard.macTable {
-				if time.Since(entry.updatedAt) > 30*time.Minute {
+				if now-entry.updatedTick > uint64((30*time.Minute)/time.Second) {
 					delete(shard.macTable, mac)
 				}
 			}
@@ -171,9 +184,10 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
 	// 计算属于哪一个锁分片
 	srcShard := vs.shards[getShardIdx(srcMAC)]
 
+	nowTick := vs.coarseSec.Load()
 	srcShard.mu.RLock()
 	entry, exists := srcShard.macTable[srcMAC]
-	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
+	needUpdate := !exists || entry.portID != srcPortID || nowTick-entry.updatedTick > 5
 	srcShard.mu.RUnlock()
 
 	if needUpdate {
@@ -184,13 +198,13 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
 			return
 		}
 		srcShard.mu.Lock()
-		now := time.Now()
 		if current := srcShard.macTable[srcMAC]; current != nil {
-			// 已学习 MAC 的 5s refresh 直接原位更新，避免周期性分配 *macEntry。
+			// 已学习 MAC 的 refresh 直接原位更新；时间来自 coarse clock，
+			// 避免高速单播每包进入 runtimeNow。
 			current.portID = srcPortID
-			current.updatedAt = now
+			current.updatedTick = nowTick
 		} else {
-			srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedAt: now}
+			srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
 		}
 		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
 		srcShard.mu.Unlock()
