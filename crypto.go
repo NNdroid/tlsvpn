@@ -279,7 +279,13 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 		cert = loadOrGenerateSelfSigned()
 	}
 
-	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
+	return &tls.Config{
+		Certificates:                []tls.Certificate{cert},
+		NextProtos:                  []string{"h2", "http/1.1"},
+		// Tunnel traffic is a long-lived bulk stream. Disable latency-oriented
+		// dynamic record sizing so application batches use maximum TLS records.
+		DynamicRecordSizingDisabled: true,
+	}
 }
 
 // loadOrGenerateSelfSigned 加载/生成自签名证书并持久化到磁盘：
