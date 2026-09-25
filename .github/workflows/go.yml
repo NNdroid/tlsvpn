@@ -39,12 +39,21 @@ jobs:
       continue-on-error: true
       run: go test -v ./...
 
-    - name: "Race detector (FEC decoder, web, ban, stats)"
-      # -race requires a real toolchain on linux runners; runs the
-      # concurrency-heavy suites. Soft-fail for now: treat findings as
-      # signal, not blockers, until the suite is fully race-clean.
+    - name: Deterministic crypto/FEC core (hard gate)
+      # These tests are pure logic/in-memory and must never be softened by the
+      # hosted-runner networking exceptions in the full-suite step above.
+      run: go test -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM'
+
+    - name: "Race detector (FEC/GCM hard gate)"
+      # FEC/GCM are session-global hot paths touched concurrently by multiple
+      # physical connections; a race here is a correctness failure.
+      run: go test -race -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM'
+
+    - name: "Race detector (web, ban, stats soft signal)"
+      # These suites include hosted-runner/network-sensitive cases. Keep them
+      # visible without allowing that flakiness to hide crypto/FEC regressions.
       continue-on-error: true
-      run: go test -race ./... -run 'TestFEC|TestGCM|TestWeb|TestStats|TestBan|TestControl|TestMetrics'
+      run: go test -race ./... -run 'TestWeb|TestStats|TestBan|TestControl|TestMetrics'
 
     - name: Verify protocol golden vectors (cross-language contract)
       run: go test -v -run 'TestProtocol|TestGenerateGoldenVectors' ./...
