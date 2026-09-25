@@ -389,15 +389,18 @@ func (p *AsyncPort) pickDataBackend(backends []*Backend) *Backend {
 	bestRTT := atomic.LoadUint32(best.rttCache)
 	slack := max(uint32(backendRTTHysteresisMin), bestRTT/4)
 	maxRTT := uint64(bestRTT) + uint64(slack)
+	bestScore, _ := backendScore(best)
+	maxScore := uint64(bestScore) + uint64(slack)
 
 	start := int(p.dataNext % uint32(len(backends)))
 	p.dataNext++
 	for i := 0; i < len(backends); i++ {
 		b := backends[(start+i)%len(backends)]
-		if _, ok := backendScore(b); !ok {
+		score, ok := backendScore(b)
+		if !ok {
 			continue
 		}
-		if uint64(atomic.LoadUint32(b.rttCache)) <= maxRTT {
+		if uint64(atomic.LoadUint32(b.rttCache)) <= maxRTT && uint64(score) <= maxScore {
 			return b
 		}
 	}
