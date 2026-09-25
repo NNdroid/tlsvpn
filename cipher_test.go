@@ -671,3 +671,58 @@ func TestReconnectBackoff(t *testing.T) {
 		t.Fatalf("退避应单调递增区间: d0=%s d5=%s", d0, d5)
 	}
 }
+
+
+func TestGCM128SealOpenRoundtrip(t *testing.T) {
+	salt := randomSalt()
+	tx, err := newGCMInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rx, err := newGCMInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{1, 16, 100, 1400, 3000} {
+		pt := make([]byte, n)
+		rand.Read(pt)
+		region := make([]byte, n+gcmTagSize)
+		copy(region, pt)
+		written := tx.sealInPlace(region, n, 4242, uint32(n+gcmTagSize))
+		plain, err := rx.openInPlace(region, 4242, uint32(written))
+		if err != nil {
+			t.Fatalf("len=%d AES-128-GCM decrypt failed: %v", n, err)
+		}
+		if !bytes.Equal(plain, pt) {
+			t.Fatalf("len=%d AES-128-GCM plaintext mismatch", n)
+		}
+	}
+}
+
+func TestGCM128And256UseSeparateKeyDomains(t *testing.T) {
+	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	g128, err := newGCMInnerCipherForAlgo("same_psk", salt, encAlgoGCM128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g256, err := newGCMInnerCipherForAlgo("same_psk", salt, encAlgoGCM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt := bytes.Repeat([]byte{0x6a}, 1400)
+	wireLen := uint32(len(pt) + gcmTagSize)
+
+	a := make([]byte, wireLen)
+	copy(a, pt)
+	g128.sealInPlace(a, len(pt), 77, wireLen)
+	if _, err := g256.openInPlace(append([]byte(nil), a...), 77, wireLen); err == nil {
+		t.Fatal("AES-128-GCM ciphertext authenticated under AES-256-GCM key domain")
+	}
+
+	b := make([]byte, wireLen)
+	copy(b, pt)
+	g256.sealInPlace(b, len(pt), 78, wireLen)
+	if _, err := g128.openInPlace(append([]byte(nil), b...), 78, wireLen); err == nil {
+		t.Fatal("AES-256-GCM ciphertext authenticated under AES-128-GCM key domain")
+	}
+}
