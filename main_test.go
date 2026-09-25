@@ -400,6 +400,56 @@ func TestReorderBuffer(t *testing.T) {
 	}
 }
 
+func TestReorderBufferGrowsForLargeMultipathSkew(t *testing.T) {
+	delivered := make(chan byte, 4)
+	rb := NewReorderBuffer(func(frame []byte) {
+		if len(frame) > 0 {
+			delivered <- frame[0]
+		}
+	})
+	defer rb.Close()
+
+	rb.Insert(1, []byte{1})
+	select {
+	case got := <-delivered:
+		if got != 1 {
+			t.Fatalf("first frame=%d, want 1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first frame not delivered")
+	}
+
+	// seq=4096 相对 expected=2 的偏斜为 4094，超过初始 2048 窗口。
+	// 应按需扩容保留该帧，而不是静默丢弃。
+	rb.Insert(4096, []byte{0x5a})
+	rb.mu.Lock()
+	window := len(rb.ring)
+	rb.mu.Unlock()
+	if window < 4096 {
+		t.Fatalf("reorder window did not grow: %d", window)
+	}
+
+	select {
+	case got := <-delivered:
+		t.Fatalf("future frame delivered before gap timeout: %d", got)
+	case <-time.After(reorderSkipDelay / 2):
+	}
+
+	select {
+	case got := <-delivered:
+		if got != 0x5a {
+			t.Fatalf("post-timeout frame=%x, want 5a", got)
+		}
+	case <-time.After(reorderSkipDelay + time.Second):
+		t.Fatal("far future frame was lost instead of retained")
+	}
+
+	stats := rb.Stats()
+	if stats.SkippedFrames != 4094 {
+		t.Fatalf("skipped=%d, want 4094", stats.SkippedFrames)
+	}
+}
+
 // ==========================================
 // 成幀與流式解析測試 (Frame & Scanner)
 // ==========================================
