@@ -147,10 +147,10 @@ func freeFrames(batch []VPNFrame) {
 	}
 }
 
-// 一次 TLS write 的用户态聚合上限。TLS 自身仍会切成 record，但把多个
-// backend batch 合并到一次 Writer.Write 可显著减少 Go/uTLS 调用、deadline
-// 更新和 socket write syscall；256KiB 在 WAN 吞吐与排队延迟之间取中间值。
-const maxTLSWriteBatchBytes = 256 * 1024
+// Go crypto/tls/uTLS 在大块 Write 内部仍拆 record；过大的单次 Write 会延长
+// 单连接发送 goroutine 占用时间，反而损害多路公平性。保持 64KiB 上限，但仍
+// 会把多个较小 backend batch 顺手合并到一次 Write。
+const maxTLSWriteBatchBytes = 64 * 1024
 
 // appendOwnedFrameBatch 把一个 backend batch 成帧进 sendBuffer，并终结该
 // batch 的 payload/描述符所有权。返回帧数供统计批量累加。
