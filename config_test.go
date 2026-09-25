@@ -418,3 +418,41 @@ func TestSaveConfigFileKeepsExplicitEncryptFalse(t *testing.T) {
 		t.Fatalf("保存重载后 encrypt 字段应仍存在，实际缺失")
 	}
 }
+
+
+func TestEncAlgoDefaultsAndValidation(t *testing.T) {
+	base := Config{
+		Mode: "client",
+		PSK: "0123456789abcdef0123456789abcdef",
+		Addr: "127.0.0.1:4000",
+		Encrypt: true,
+		Client: ClientConfig{Conns: 1},
+	}
+	base.applyDefaults()
+	if base.EncAlgo != "gcm256" {
+		t.Fatalf("default enc_algo=%q, want gcm256", base.EncAlgo)
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("default gcm256 config rejected: %v", err)
+	}
+
+	fast := base
+	fast.EncAlgo = "gcm128"
+	if err := fast.Validate(); err != nil {
+		t.Fatalf("explicit gcm128 config rejected: %v", err)
+	}
+
+	bad := base
+	bad.EncAlgo = "bogus"
+	if err := bad.Validate(); err == nil {
+		t.Fatal("unknown enc_algo must be rejected")
+	}
+
+	plain := base
+	plain.Encrypt = false
+	plain.EncAlgo = "gcm128"
+	plain.MinEnc = ""
+	if err := plain.Validate(); err == nil {
+		t.Fatal("enc_algo with encrypt=false must be rejected")
+	}
+}
