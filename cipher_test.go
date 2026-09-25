@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/hex"
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
