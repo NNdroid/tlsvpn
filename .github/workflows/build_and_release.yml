@@ -30,6 +30,16 @@ jobs:
           chmod +x scripts/build.sh
           ./scripts/build.sh
 
+      - name: Build optimized ARM64 v8.2 binary
+        env:
+          HOST_ALIAS: "0"
+          CLEAN_OUTPUT: "0"
+          GOARM64_LEVEL: "v8.2"
+          ARTIFACT_SUFFIX: "v8.2"
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.run_number) }}
+        run: |
+          ./scripts/build.sh linux/arm64
+
       - name: Upload native binaries
         uses: actions/upload-artifact@v4
         with:
