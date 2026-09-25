@@ -160,8 +160,10 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 	srv := &Server{
 		psk: cfg.PSK, v4Net: v4net, v6Net: v6net, usedV4: map[string]bool{}, usedV6: map[string]bool{},
 		vswitch: NewVSwitch(), macAddr: cfg.Mac, activeClients: map[string]*ClientSession{},
-		macToIP: map[string]MacBinding{}, encrypt: cfg.Encrypt, startedAt: time.Now(),
+		macToIP: map[string]MacBinding{}, encrypt: cfg.Encrypt,
+		encAlgo: encAlgoFromConfig(cfg.EncAlgo), minEnc: minEncRank(cfg.MinEnc), startedAt: time.Now(),
 		banned:      map[string]int64{},
+		maxSessions: cfg.Server.MaxSessions,
 		fecGroupMin: cfg.Server.FecGroupMin, fecGroupMax: cfg.Server.FecGroupMax,
 	}
 	srv.cfg.Store(cfg)
