@@ -153,6 +153,53 @@ func TestAsyncPortBackpressureDoesNotConsumeSequenceBeforeBackendSlot(t *testing
 	}
 }
 
+func TestPickDataBackendStripesOnlyUnderBulkBacklog(t *testing.T) {
+	p := &AsyncPort{ch: make(chan []byte, 4096)}
+	rttA, rttB, rttC := uint32(10_000), uint32(11_000), uint32(30_000)
+	a := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttA}
+	b := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttB}
+	cSlow := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttC}
+	backends := []*Backend{a, b, cSlow}
+
+	// 轻载始终保持 MinRTT，不为“聚合带宽”牺牲交互延迟。
+	for i := 0; i < 8; i++ {
+		if got := p.pickDataBackend(backends); got != a {
+			t.Fatalf("low-load pick=%p, want min-RTT backend %p", got, a)
+		}
+	}
+
+	// 人工制造持续 backlog；此时只有 RTT 接近最优值的 A/B 可以参加 striping。
+	for i := 0; i < multipathStripeBacklog; i++ {
+		p.ch <- []byte{1}
+	}
+	seenA, seenB := false, false
+	for i := 0; i < 24; i++ {
+		switch got := p.pickDataBackend(backends); got {
+		case a:
+			seenA = true
+		case b:
+			seenB = true
+		case cSlow:
+			t.Fatal("high-RTT backend must not participate in bulk striping")
+		default:
+			t.Fatalf("unexpected backend %p", got)
+		}
+	}
+	if !seenA || !seenB {
+		t.Fatalf("bulk striping did not use both eligible paths: A=%v B=%v", seenA, seenB)
+	}
+
+	// 即使 RTT 很接近，明显积压的路径也必须退出 striping 候选集。
+	for i := 0; i < 20; i++ {
+		b.ch <- []VPNFrame{{Seq: uint32(i + 1)}}
+	}
+	for i := 0; i < 8; i++ {
+		if got := p.pickDataBackend(backends); got != a {
+			t.Fatalf("queued backend participated in striping: got=%p want=%p", got, a)
+		}
+	}
+}
+
 func TestFECParityIsSuppressedOnSingleTCPPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
