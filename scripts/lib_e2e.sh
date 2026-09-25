@@ -158,7 +158,10 @@ setup_test_env() {
 # and a non-zero return there would override the script's real exit status
 # (turning a fully passing run into a failed job).
 cleanup_test_env() {
-  if [[ -n "${TEST_DIR:-}" && -d "$TEST_DIR" ]]; then
+  # GitHub Actions uploads /tmp/tlsvpn-test.*/** after this script exits.
+  # Preserve TEST_DIR on CI so failed client/server/config logs actually reach
+  # the artifact step; hosted runners are disposable. Local runs still clean it.
+  if [[ "${GITHUB_ACTIONS:-}" != "true" && -n "${TEST_DIR:-}" && -d "$TEST_DIR" ]]; then
     rm -rf "$TEST_DIR"
   fi
   # Also drop the source clones and build dir resolve_binaries created. An
