@@ -119,11 +119,18 @@ func newProbeCipher(psk string, salt []byte, algo int) (*probeCipher, error) {
 		return nil, fmt.Errorf("bad salt length %d", len(salt))
 	}
 	label := "_enc_key"
-	if algo == 3 {
-		label = "_enc_key_gcm_v2"
+	keyLen := 32
+	switch algo {
+	case 2:
+		// existing AES-256-GCM
+	case 4:
+		label = "_enc_key128"
+		keyLen = 16
+	default:
+		return nil, fmt.Errorf("unsupported inner cipher %d", algo)
 	}
 	key := sha256.Sum256([]byte(psk + label))
-	block, err := aes.NewCipher(key[:])
+	block, err := aes.NewCipher(key[:keyLen])
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +304,7 @@ func main() {
 	if len(resp.TLS.OfferedCipherSuites) == 0 || len(resp.TLS.OfferedSignatureSchemes) == 0 || len(resp.TLS.OfferedGroups) == 0 || len(resp.TLS.OfferedALPN) == 0 {
 		fatalf("server returned incomplete ClientHello feature lists: %+v", *resp.TLS)
 	}
-	if !resp.Encrypt || (resp.EncAlgo != 2 && resp.EncAlgo != 3) {
+	if !resp.Encrypt || (resp.EncAlgo != 2 && resp.EncAlgo != 4) {
 		fatalf("unexpected encryption negotiation: enabled=%v algo=%d", resp.Encrypt, resp.EncAlgo)
 	}
 	salt, err := hex.DecodeString(resp.EncSalt)
