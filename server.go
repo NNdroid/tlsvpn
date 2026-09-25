@@ -255,7 +255,7 @@ type ClientSession struct {
 	FecDec             *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK            int               // 下行 XOR 分组大小（0 表示未启用）
 	FecMode            string            // 面板展示：xor K=d / off
-	EncAlgo            int               // 内层加密算法号（encAlgoNone / encAlgoGCM）
+	EncAlgo            int               // 内层加密算法号（none / AES-256-GCM / AES-128-GCM）
 	Encrypt            bool              // 建会话时 encrypt 的取值；仅用于面板展示，enc_algo 已足够区分
 	SaltA              [encSaltSize]byte // c2s 方向盐（客户端加密/服务端解密）
 	SaltB              [encSaltSize]byte // s2c 方向盐（服务端加密/客户端解密）
@@ -317,6 +317,7 @@ type Server struct {
 	macToIP       map[string]MacBinding
 
 	encrypt   bool
+	encAlgo   int // 服务端期望的内层算法；新会话必须与客户端声明完全一致
 	startedAt time.Time
 
 	// minEnc 内层加密强度下限（minEncRank 值，0=不限）
@@ -492,19 +493,19 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	var icTx, icRx, fecTx, fecRx *innerCipher
 	if session.Encrypt {
 		var err error
-		icTx, err = newGCMInnerCipher(psk, saltB[:])
+		icTx, err = newGCMInnerCipherForAlgo(psk, saltB[:], session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		icRx, err = newGCMInnerCipher(psk, saltA[:])
+		icRx, err = newGCMInnerCipherForAlgo(psk, saltA[:], session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		fecTx, err = newGCMInnerCipherDomain(psk, saltB[:], "fec")
+		fecTx, err = newGCMInnerCipherDomainForAlgo(psk, saltB[:], "fec", session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		fecRx, err = newGCMInnerCipherDomain(psk, saltA[:], "fec")
+		fecRx, err = newGCMInnerCipherDomainForAlgo(psk, saltA[:], "fec", session.EncAlgo)
 		if err != nil {
 			return err
 		}
@@ -740,6 +741,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	brutalChanged := s.brutal != cfg.Brutal || s.brutalUp != cfg.BrutalUp || s.brutalDown != cfg.BrutalDown
 	s.psk = cfg.PSK
 	s.encrypt = cfg.Encrypt
+	s.encAlgo = encAlgoFromConfig(cfg.EncAlgo)
 	s.brutal, s.brutalUp, s.brutalDown = cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown
 	s.minEnc = minEncRank(cfg.MinEnc)
 	s.maxSessions = cfg.Server.MaxSessions
@@ -799,6 +801,9 @@ func (s *Server) NeedsRestart(cfg *Config) []string {
 	if o.Encrypt != cfg.Encrypt {
 		out = append(out, "encrypt")
 	}
+	if o.EncAlgo != cfg.EncAlgo {
+		out = append(out, "enc_algo")
+	}
 	if o.Client.Conns != cfg.Client.Conns {
 		out = append(out, "client.conns")
 	}
@@ -823,7 +828,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		psk: cfg.PSK, v4Net: v4net, v6Net: v6net, usedV4: make(map[string]bool), usedV6: make(map[string]bool),
 		vswitch: NewVSwitch(), brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		macAddr: cfg.Mac, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
-		encrypt: cfg.Encrypt, startedAt: time.Now(),
+		encrypt: cfg.Encrypt, encAlgo: encAlgoFromConfig(cfg.EncAlgo), startedAt: time.Now(),
 		banned:       make(map[string]int64),
 		pskFail:      make(map[string]*pskFailBucket),
 		minEnc: minEncRank(cfg.MinEnc),
@@ -1108,6 +1113,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	psk := s.psk
 	pskHash := hashPSK(psk)
 	encrypt := s.encrypt
+	expectedEncAlgo := s.encAlgo
 	minEnc := s.minEnc
 	fecGroupMin, fecGroupMax := s.fecGroupMin, s.fecGroupMax
 	s.mu.RUnlock()
@@ -1134,9 +1140,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 	// 强度下限：运维强制 GCM 时拒绝能力不足的客户端。这里刻意**不**走焦油坑——
 	// 这是运维侧的期望结果（客户端未启用内层加密），需要一条明确可查的失败记录。
-	if encrypt && minEnc > 0 && req.EncAlgo != encAlgoGCM {
+	if encrypt && minEnc > 0 && !isGCMAlgo(req.EncAlgo) {
 		log.Warnf("connection refused: client inner cipher (algo=%d) is below the min_enc floor, remote %s",
 			req.EncAlgo, tcpConn.RemoteAddr().String())
+		return
+	}
+	if encrypt && req.EncAlgo != expectedEncAlgo {
+		log.Warnf("connection refused: client inner cipher %d (%s) does not match server enc_algo %d (%s)",
+			req.EncAlgo, encAlgoLabel(req.EncAlgo), expectedEncAlgo, encAlgoLabel(expectedEncAlgo))
 		return
 	}
 	clientID := req.ClientID
@@ -1276,19 +1287,17 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if req.FEC {
 			fecEncK = int(req.FecGroup)
 		}
-		// 内层加密协商：encrypt 开启且客户端声明 GCM 能力时启用。会话盐每次
-		// 建会话随机生成（c2s/s2c 各一个），服务端重启或会话重建即换盐，密钥流
-		// 不再跨会话重用。GCM 是唯一内层算法，声明不了的就按明文协商——没有
-		// 静默降级路径，面板上能直接看出这条会话到底有没有内层加密。
+		// 内层加密算法已在锁外按服务端 enc_algo 做了完全一致校验。
+		// AES-128/256 共享 wire format，但 KDF label 隔离；绝不静默回退。
 		saltA, saltB := newRandomSalt(), newRandomSalt()
 		encAlgo := encAlgoNone
 		var icTx, icRx, fecTx, fecRx *innerCipher
-		if encrypt && req.EncAlgo == encAlgoGCM {
-			encAlgo = encAlgoGCM
-			icTx, _ = newGCMInnerCipher(psk, saltB[:]) // s2c
-			icRx, _ = newGCMInnerCipher(psk, saltA[:]) // c2s
-			fecTx, _ = newGCMInnerCipherDomain(psk, saltB[:], "fec")
-			fecRx, _ = newGCMInnerCipherDomain(psk, saltA[:], "fec")
+		if encrypt {
+			encAlgo = expectedEncAlgo
+			icTx, _ = newGCMInnerCipherForAlgo(psk, saltB[:], encAlgo) // s2c
+			icRx, _ = newGCMInnerCipherForAlgo(psk, saltA[:], encAlgo) // c2s
+			fecTx, _ = newGCMInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo)
+			fecRx, _ = newGCMInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo)
 		}
 		fecMode := "off"
 		if fecEncK > 0 {
