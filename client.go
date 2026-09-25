@@ -155,6 +155,44 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 	return nil
 }
 
+// waitForBackendSlot 在分配线路 seq 之前等待至少一个物理后端拥有 batch
+// channel 空位。AsyncPort.run 是这些 backend channel 唯一的数据生产者，因此
+// 一旦观察到空位，在本 goroutine 随后的 dispatch 前不会被其它 producer 抢走。
+//
+// 这样拥塞时优先让 p.ch 在 WriteFrame 入口丢帧（尚未分配 seq），而不是
+// 先递增 txSeq、最后因后端满而丢 batch。后者会人为制造线路序号洞，触发
+// reorder/FEC timeout，严重过载时甚至把整个 reorder window 打穿。
+func (p *AsyncPort) waitForBackendSlot() bool {
+	for {
+		select {
+		case <-p.ctx.Done():
+			return false
+		default:
+		}
+
+		p.backendsMu.RLock()
+		n := len(p.backends)
+		ready := false
+		for _, b := range p.backends {
+			if cap(b.ch) > 0 && len(b.ch) < cap(b.ch) {
+				ready = true
+				break
+			}
+		}
+		p.backendsMu.RUnlock()
+
+		if n == 0 {
+			return false
+		}
+		if ready {
+			return true
+		}
+		// 只走拥塞慢路径。50us 足够让 TLS writer drain 一个 batch，同时
+		// 不用忙等抢占连接读写 goroutine。
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
 func (p *AsyncPort) run() {
 	const MaxBatchBytes = 64 * 1024
 	batch := make([]VPNFrame, 0, 128)
@@ -178,6 +216,13 @@ func (p *AsyncPort) run() {
 			if len(frame) == 0 {
 				// 零长帧不携带数据：不消耗 seq、不参与 FEC 分组
 				// （否则接收端按算术分组会把该槽位视为永久缺失，毒化整组恢复）
+				putFrame(frame)
+				continue
+			}
+			if !p.waitForBackendSlot() {
+				// 没有活动后端时在 seq 分配前丢弃；连接建立后新的 TAP
+				// 帧会重新进入队列，不给接收端留下不存在的序号洞。
+				p.dropN(1)
 				putFrame(frame)
 				continue
 			}
