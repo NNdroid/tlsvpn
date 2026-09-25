@@ -166,9 +166,9 @@ func gcmAAD(wireLen, seq uint32) []byte {
 	return aad[:]
 }
 
-var gcmScratchPool = sync.Pool{
-	New: func() any { return new([gcmNonceSize + 8]byte) },
-}
+func newGCMScratch() any { return new([gcmNonceSize + 8]byte) }
+
+var gcmScratchPool = sync.Pool{New: newGCMScratch}
 
 // gcmNonceAAD 在调用方提供的 20 字节 scratch 上一次构造 nonce 与 AAD。
 // 热路径（每帧 Seal/Open）单独调用 gcmNonce/gcmAAD 会因接口调用逃逸产生
