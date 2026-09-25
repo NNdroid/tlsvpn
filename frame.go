@@ -322,107 +322,79 @@ const (
 )
 
 type FrameScanner struct {
-	r      io.Reader
-	buf    []byte
-	offset int
+	r io.Reader
+
+	// buf 仅保留给既有安全测试/诊断读取 capacity；direct-read 路径不再把
+	// stream payload 聚合到这里，因此始终保持空，不会被畸形帧头撑大。
+	buf []byte
+
+	// 每个 scanner 一块固定 padding scratch。padding 最大 65535，但无需
+	// 按声明长度分配：循环丢弃即可。
+	discard [1024]byte
+
 	// maxDataLen 当前允许的帧负载上限：认证前的握手帧用小上限，认证通过后
 	// 恢复线路全量上限（见 SetMaxDataLen）。
 	maxDataLen int
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
-	// 初始缓冲 16KB 覆盖典型 MTU 帧的聚合；大帧按需翻倍增长。旧值 70KB 对
-	// 1.5KB 帧是 45 倍冗余，多连接下白占内存并放大 GC 扫描。
-	return &FrameScanner{r: r, buf: make([]byte, 0, maxHandshakeDataLen), maxDataLen: maxWireDataLen}
+	return &FrameScanner{r: r, maxDataLen: maxWireDataLen}
 }
 
 // SetMaxDataLen 调整帧负载上限（认证前收紧、认证后放开的配对使用）
 func (fs *FrameScanner) SetMaxDataLen(n int) { fs.maxDataLen = n }
 
-func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
-	const HeaderSize = 10
-
-	for {
-		available := len(fs.buf) - fs.offset
-
-		if available >= HeaderSize {
-			rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
-			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
-			seq := binary.BigEndian.Uint32(fs.buf[fs.offset+6 : fs.offset+10])
-
-			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
-				fs.buf = fs.buf[:0]
-				fs.offset = 0
-				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
-			}
-			dataLen := int(rawDataLen)
-			totalLen := dataLen + padLen
-
-			if available >= HeaderSize+totalLen {
-				if dataLen == 0 {
-					// 心跳/控制帧：返回给调用方（frame=nil），用于刷新读超时。
-					// 旧实现在此静默跳过，导致空闲隧道的 30 秒读超时永不刷新、
-					// 每 30 秒被误杀重连一次。
-					fs.offset += HeaderSize + totalLen
-					return nil, seq, nil
-				}
-
-				// 直接按所需长度取 size-class 缓冲。旧路径先拿 2KB，再对
-				// jumbo frame 走 make([]byte, dataLen)，绕开了现成的大档内存池。
-				frame := getFrameAtLeast(dataLen)[:dataLen]
-				copy(frame, fs.buf[fs.offset+HeaderSize:fs.offset+HeaderSize+dataLen])
-				fs.offset += HeaderSize + totalLen
-				return frame, seq, nil
-			}
+func (fs *FrameScanner) discardN(n int) error {
+	for n > 0 {
+		chunk := n
+		if chunk > len(fs.discard) {
+			chunk = len(fs.discard)
 		}
-
-		if fs.offset > 0 && (fs.offset == len(fs.buf) || fs.offset > 16384) {
-			remaining := len(fs.buf) - fs.offset
-			if remaining > 0 {
-				copy(fs.buf, fs.buf[fs.offset:])
-			}
-			fs.buf = fs.buf[:remaining]
-			fs.offset = 0
+		if _, err := io.ReadFull(fs.r, fs.discard[:chunk]); err != nil {
+			return err
 		}
-
-		tailStart := len(fs.buf)
-		requiredCap := tailStart + 2048
-
-		available = len(fs.buf) - fs.offset
-		if available >= HeaderSize {
-			rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
-			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
-			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
-				fs.buf = fs.buf[:0]
-				fs.offset = 0
-				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
-			}
-			frameCap := uint64(fs.offset) + HeaderSize + uint64(rawDataLen) + uint64(padLen)
-			if frameCap > uint64(requiredCap) {
-				requiredCap = int(frameCap)
-			}
-		}
-
-		if cap(fs.buf) < requiredCap {
-			newCap := cap(fs.buf) * 2
-			if newCap < requiredCap {
-				newCap = requiredCap
-			}
-			newBuf := make([]byte, len(fs.buf), newCap)
-			copy(newBuf, fs.buf)
-			fs.buf = newBuf
-		}
-
-		fs.buf = fs.buf[:cap(fs.buf)]
-		n, err := fs.r.Read(fs.buf[tailStart:])
-		fs.buf = fs.buf[:tailStart+n]
-
-		if err != nil {
-			if n == 0 || (err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection")) {
-				return nil, 0, err
-			}
-		}
+		n -= chunk
 	}
+	return nil
+}
+
+func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
+	const headerSize = 10
+
+	var hdr [headerSize]byte
+	if _, err := io.ReadFull(fs.r, hdr[:]); err != nil {
+		return nil, 0, err
+	}
+
+	rawDataLen := binary.BigEndian.Uint32(hdr[0:4])
+	padLen := int(binary.BigEndian.Uint16(hdr[4:6]))
+	seq := binary.BigEndian.Uint32(hdr[6:10])
+
+	if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+		return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
+	}
+	dataLen := int(rawDataLen)
+
+	if dataLen == 0 {
+		if err := fs.discardN(padLen); err != nil {
+			return nil, 0, err
+		}
+		// 心跳/控制帧：返回 nil payload，用于刷新读超时。
+		return nil, seq, nil
+	}
+
+	// TLS plaintext 直接写入最终 size-class frame buffer，省掉旧路径
+	// fs.buf -> frame 的一次 dataLen memcpy。
+	frame := getFrameAtLeast(dataLen)[:dataLen]
+	if _, err := io.ReadFull(fs.r, frame); err != nil {
+		putFrame(frame)
+		return nil, 0, err
+	}
+	if err := fs.discardN(padLen); err != nil {
+		putFrame(frame)
+		return nil, 0, err
+	}
+	return frame, seq, nil
 }
 
 // ======================= 协议结构 =======================
