@@ -1697,6 +1697,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 200ms ticker goroutine。代理模式 tcpConn=nil 时 nil channel 自动禁用。
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
+		var nextWriteDeadlineRefresh time.Time
+		refreshWriteDeadline := func() {
+			now := time.Now()
+			if nextWriteDeadlineRefresh.IsZero() || !now.Before(nextWriteDeadlineRefresh) {
+				// 活跃连接每秒最多更新一次 poll deadline；11s 绝对截止保证
+				// 任意时刻开始阻塞的 Write 仍会在约 10~11s 内失败。
+				_ = tlsConn.SetWriteDeadline(now.Add(11 * time.Second))
+				nextWriteDeadlineRefresh = now.Add(time.Second)
+			}
+		}
 		if tcpConn != nil {
 			rttTicker = time.NewTicker(200 * time.Millisecond)
 			rttC = rttTicker.C
@@ -1729,7 +1739,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						break drainBatches
 					}
 				}
-				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				refreshWriteDeadline()
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
@@ -1747,7 +1757,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				// （约 15 分钟才放弃），期间心跳停发，服务端先在自己的读超时上判死
 				// 本端连接，而本端读方向可能仍在正常收帧——面板显示 tunnel up 但
 				// 链路已单向死亡。加超时后本端 10s 内自发现并重拨。
-				tlsConn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				refreshWriteDeadline()
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
