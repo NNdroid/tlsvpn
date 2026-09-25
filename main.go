@@ -196,8 +196,8 @@ func main() {
 		}
 	case "client":
 		if cfg.Client.FEC && cfg.Client.Conns < 2 {
-			log.Warnf("FEC is enabled but conns < 2. Multipath redundancy needs conns >= 2; " +
-				"FEC will only guard against queue-overflow drops on the single link.")
+			log.Warnf("FEC is enabled but conns < 2. XOR parity is suppressed on a single TCP path " +
+				"because TCP head-of-line blocking prevents parity from overtaking missing data; parity resumes when a second path is active.")
 		}
 		if err := startClient(ctx, cfg); err != nil {
 			log.Errorf("Client stopped with an error: %v", err)
