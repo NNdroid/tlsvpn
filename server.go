@@ -1447,11 +1447,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
 	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
 	// GCM 未启用时不下发盐值（客户端也不启用加密器）。
-	encSalt, encSalt2 := "", ""
-	if encAlgo == encAlgoGCM {
-		encSalt = hex.EncodeToString(saltA[:])  // c2s
-		encSalt2 = hex.EncodeToString(saltB[:]) // s2c
-	}
+	encSalt, encSalt2 := handshakeEncSalts(encAlgo, saltA, saltB)
 	// 先完成 TLSVPN 应用层握手，再切 TCP congestion control。Brutal 是数据面
 	// 优化，不应阻塞/拖死客户端等待握手响应。给响应写入本身也加明确超时。
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -1741,6 +1737,13 @@ func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cli
 		cliTxRate = cliTx
 	}
 	return srvTx, cliTxRate
+}
+
+func handshakeEncSalts(encAlgo int, saltA, saltB [encSaltSize]byte) (string, string) {
+	if !isGCMAlgo(encAlgo) {
+		return "", ""
+	}
+	return hex.EncodeToString(saltA[:]), hex.EncodeToString(saltB[:])
 }
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
