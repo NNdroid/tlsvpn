@@ -86,8 +86,8 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 	h.srvAddr = srvAddr
 	srvCfg := &Config{
 		Mode: "server", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
-		Encrypt: encrypt,
-		Server:  ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
+		Mac: "02:00:00:00:00:01", Encrypt: encrypt,
+		Server: ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
 	}
 	srvCfg.applyDefaults()
 	if err := srvCfg.Validate(); err != nil {
@@ -114,8 +114,8 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 	// ---- client ----
 	cliCfg := &Config{
 		Mode: "client", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
-		Encrypt: encrypt,
-		Client:  ClientConfig{Conns: conns, FEC: fec, FecGroup: 4, Insecure: true},
+		Mac: "02:00:00:00:00:02", Encrypt: encrypt,
+		Client: ClientConfig{Conns: conns, FEC: fec, FecGroup: 4, Insecure: true},
 	}
 	cliCfg.applyDefaults()
 	if err := cliCfg.Validate(); err != nil {
@@ -173,6 +173,17 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 	tapPort := NewAsyncPort(ctx, tapPortID)
 	tapPort.RegisterBackend(tapBackend, new(uint32))
 	srv.vswitch.AddPort(tapPort)
+
+	// 真实系统里本机 TAP 发出的 ARP/IP 帧会让 VSwitch 学到 TAP_LOCAL 的源 MAC。
+	// memTap.Read 永远阻塞，所以测试若不主动预学习，client->server 的所有吞吐帧
+	// 都会被误当成 unknown-unicast flood，最终测到的是 flood token bucket 而非
+	// TLSVPN learned-unicast 数据面。用一帧无负载以太头只做 MAC 学习。
+	seed := make([]byte, 14)
+	copy(seed[0:6], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02})
+	copy(seed[6:12], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01})
+	binary.BigEndian.PutUint16(seed[12:14], 0x0800)
+	srv.vswitch.ProcessFrame(tapPortID, seed)
+
 	go func() {
 		for frames := range tapBackend {
 			for _, vf := range frames {
@@ -206,9 +217,9 @@ func TestPerfThroughput(t *testing.T) {
 	h := startPerfHarness(t, 2, true, true)
 	defer h.stop()
 
-	// LibreSpeed 等效：固定时长持续灌包，统计 server 侧实际交付字节。
-	// 注入速率超过隧道承载时 WriteFrame 背压丢帧是设计行为（上层 TCP 负责
-	// 重传），因此交付量才是真实吞吐。
+	// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
+	// fast path 实际交付字节。测试启动时已预学习 TAP_LOCAL MAC，避免把
+	// unknown-unicast flood limiter 的速率误当成隧道吞吐。
 	const duration = 8 * time.Second
 	var delivered atomic.Uint64
 	h.srvTap.SetOnWrite(func(b []byte) { delivered.Add(uint64(len(b))) })
