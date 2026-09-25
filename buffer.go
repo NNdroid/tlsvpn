@@ -71,9 +71,6 @@ type ReorderBuffer struct {
 
 	outChan chan [][]byte
 	outFunc func([]byte)
-	// deliverMu 在不把慢 TAP/VSwitch 写放回重排锁的前提下，保留多个 Insert
-	// 和超时协程从锁内取出批次时的先后次序。
-	deliverMu sync.Mutex
 
 	gapSince time.Time // 第一个未来序号到达、确认存在缺口的时间
 	gapWake  chan struct{}
@@ -114,12 +111,9 @@ func (rb *ReorderBuffer) Close() {
 		rb.shutting = true
 		drain := rb.takePendingLocked()
 		rb.releaseRingLocked()
-		// 与 Insert/timeoutWorker 的锁顺序一致。等待已经从重排锁取出的批次
-		// 完成入队，再关闭 closed，避免 outWorker 排空后又有批次入队。
-		rb.deliverMu.Lock()
+		// enqueue 全部发生在 rb.mu 内；置 shutting 后不会再出现新的入队。
 		rb.mu.Unlock()
 		close(rb.closed)
-		rb.deliverMu.Unlock()
 		rb.freeBatch(drain)
 	})
 }
@@ -164,17 +158,11 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 		return
 	}
 	wake := rb.insertLocked(seq, frame)
-	batch := rb.takePendingLocked()
-	if len(batch) > 0 {
-		rb.deliverMu.Lock()
-	}
+	// 大范围补齐时 drainLocked 已按固定 64 帧 chunk 入队；这里只冲刷尾块。
+	rb.flushPendingLocked()
 	rb.mu.Unlock()
 	if wake {
 		rb.signalGapWorker()
-	}
-	rb.deliver(batch)
-	if len(batch) > 0 {
-		rb.deliverMu.Unlock()
 	}
 }
 
@@ -278,6 +266,12 @@ func (rb *ReorderBuffer) drainLocked() bool {
 		rb.seqSlots[idx] = 0
 		rb.buffered--
 		rb.expectedSeq++
+
+		// adaptive window 可能一次补齐数万帧。固定 chunk 满了就立刻交给
+		// outWorker，绝不让 [] []byte 从 64 档继续扩容并制造大对象。
+		if len(rb.pending) == cap(rb.pending) {
+			rb.flushPendingLocked()
+		}
 	}
 	startedGap := rb.refreshGapLocked(time.Now())
 	return hadGap || startedGap
@@ -316,6 +310,23 @@ func (rb *ReorderBuffer) takePendingLocked() [][]byte {
 	return b
 }
 
+// flushPendingLocked 把当前固定 chunk 非阻塞排给唯一 outWorker。
+// 调用方持 rb.mu，因此所有并发 Insert/timeout flush 的 channel 入队顺序
+// 就是重排后的序号顺序，无需额外 deliverMu。
+func (rb *ReorderBuffer) flushPendingLocked() {
+	batch := rb.takePendingLocked()
+	if len(batch) == 0 {
+		putReorderBatch(batch)
+		return
+	}
+	select {
+	case rb.outChan <- batch:
+	default:
+		rb.droppedFrames.Add(uint64(len(batch)))
+		rb.freeBatch(batch)
+	}
+}
+
 // releaseRingLocked 释放全部槽位（调用方须持锁）
 func (rb *ReorderBuffer) releaseRingLocked() {
 	for i := range rb.ring {
@@ -326,24 +337,6 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 		}
 	}
 	rb.buffered = 0
-}
-
-// deliver 把批次交给唯一交付协程。这里绝不阻塞 conn 读循环，也不为
-// 每个 batch 创建 timer；outChan 满说明 TAP/VSwitch 已经落后，立即丢批次
-// 比把 TLS 读取停住数秒更安全，且上层 TCP/FEC 能处理这类背压损失。
-func (rb *ReorderBuffer) deliver(batch [][]byte) {
-	if len(batch) == 0 {
-		putReorderBatch(batch)
-		return
-	}
-	select {
-	case rb.outChan <- batch:
-	case <-rb.closed:
-		rb.freeBatch(batch)
-	default:
-		rb.droppedFrames.Add(uint64(len(batch)))
-		rb.freeBatch(batch)
-	}
 }
 
 // outWorker 唯一的交付协程：单一消费者保证跨 Insert 的严格交付顺序
@@ -456,14 +449,7 @@ func (rb *ReorderBuffer) timeoutWorker() {
 			rb.skippedFrames.Add(uint64(skipped))
 			rb.drainLocked()
 		}
-		batch := rb.takePendingLocked()
-		if len(batch) > 0 {
-			rb.deliverMu.Lock()
-		}
+		rb.flushPendingLocked()
 		rb.mu.Unlock()
-		rb.deliver(batch)
-		if len(batch) > 0 {
-			rb.deliverMu.Unlock()
-		}
 	}
 }
