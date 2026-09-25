@@ -43,6 +43,7 @@ _tlsvpn_write_config() {
 	local fec="$1"; shift
 	local fec_group="$1"; shift
 	local encrypt="$1"; shift
+	local enc_algo="$1"; shift
 	local min_enc="$1"; shift
 	local pad_mode="$1"; shift
 	local brutal="$1"; shift
@@ -60,8 +61,10 @@ _tlsvpn_write_config() {
 	[ -n "$conns" ] || conns=1
 	[ -n "$fec_group" ] || fec_group=4
 	if [ "$encrypt" = "1" ]; then
+		[ -n "$enc_algo" ] || enc_algo=gcm256
 		[ -n "$min_enc" ] || min_enc=gcm
 	else
+		enc_algo=""
 		min_enc=""
 	fi
 	[ -n "$pad_mode" ] || pad_mode=bucket
@@ -78,6 +81,7 @@ _tlsvpn_write_config() {
 	[ -n "$mac" ] && json_add_string mac "$mac"
 	json_add_string log_level "$log_level"
 	json_add_boolean encrypt "$encrypt"
+	[ -n "$enc_algo" ] && json_add_string enc_algo "$enc_algo"
 	[ -n "$min_enc" ] && json_add_string min_enc "$min_enc"
 	json_add_string pad_mode "$pad_mode"
 	[ -n "$socks5" ] && json_add_string socks5 "$socks5"
@@ -114,6 +118,7 @@ proto_tlsvpn_init_config() {
 	proto_config_add_string "cert_sha256"
 	proto_config_add_string "req_v4"
 	proto_config_add_string "req_v6"
+	proto_config_add_string "enc_algo"
 	proto_config_add_string "min_enc"
 	proto_config_add_string "pad_mode"
 	proto_config_add_string "socks5"
@@ -132,13 +137,13 @@ proto_tlsvpn_init_config() {
 proto_tlsvpn_setup() {
 	local interface="$1"
 	local server psk tap mac tunlink sni cert_sha256 req_v4 req_v6
-	local min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
+	local enc_algo min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
 	local fec encrypt insecure brutal defaultroute metric
 	local config host endpoint ip dependency_count=0
 	local resolved_socks5 proxy scheme userinfo proxy_endpoint proxy_ip
 
 	json_get_vars server psk tap mac tunlink sni cert_sha256 req_v4 req_v6
-	json_get_vars min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
+	json_get_vars enc_algo min_enc pad_mode socks5 log_level conns fec_group brutal_up brutal_down
 	json_get_vars fec encrypt insecure brutal defaultroute metric
 
 	[ -n "$server" ] || {
@@ -261,7 +266,7 @@ proto_tlsvpn_setup() {
 
 	_tlsvpn_write_config "$config" "$tap" "$resolved_server" "$psk" "$sni" \
 		"$cert_sha256" "$req_v4" "$req_v6" "$conns" "$fec" "$fec_group" \
-		"$encrypt" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" \
+		"$encrypt" "$enc_algo" "$min_enc" "$pad_mode" "$brutal" "$brutal_up" \
 		"$brutal_down" "$resolved_socks5" "$insecure" "$mac" "$log_level" || {
 		rm -f "$config"
 		proto_notify_error "$interface" "CONFIG_GENERATION_FAILED"
