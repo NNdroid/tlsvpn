@@ -9,6 +9,48 @@ import (
 	"time"
 )
 
+func TestReorderLargeDrainUsesFixedPooledChunks(t *testing.T) {
+	const frames = 4096
+	rb := &ReorderBuffer{
+		expectedSeq: 1,
+		ring:        make([][]byte, 8192),
+		seqSlots:    make([]uint32, 8192),
+		windowMask:  8191,
+		outChan:     make(chan [][]byte, 128),
+		closed:      make(chan struct{}),
+	}
+	for seq := uint32(1); seq <= frames; seq++ {
+		idx := seq & rb.windowMask
+		rb.ring[idx] = []byte{byte(seq)}
+		rb.seqSlots[idx] = seq
+		rb.buffered++
+	}
+
+	rb.mu.Lock()
+	rb.drainLocked()
+	rb.flushPendingLocked()
+	rb.mu.Unlock()
+
+	total := 0
+	for len(rb.outChan) > 0 {
+		batch := <-rb.outChan
+		if len(batch) == 0 || len(batch) > reorderBatchHotCap {
+			t.Fatalf("unexpected reorder chunk len=%d", len(batch))
+		}
+		if cap(batch) != reorderBatchHotCap {
+			t.Fatalf("chunk cap=%d, want fixed pooled cap=%d", cap(batch), reorderBatchHotCap)
+		}
+		total += len(batch)
+		rb.freeBatch(batch)
+	}
+	if total != frames {
+		t.Fatalf("delivered descriptors=%d, want %d", total, frames)
+	}
+	if rb.pending != nil {
+		t.Fatalf("pending tail leaked after flush: len=%d cap=%d", len(rb.pending), cap(rb.pending))
+	}
+}
+
 func TestReorderGapDeadlineStartsWhenFutureFrameArrives(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		delivered := make(chan byte, 4)
