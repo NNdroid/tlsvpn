@@ -1399,12 +1399,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.remote.Store(rawConn.RemoteAddr().String())
 	ci.conn.Store(connHolder{rawConn})
 
-	// 通用 socket 调优：作用于本地 socket，与是否经过代理无关，两种模式下都应生效。
-	// （KeepAlive 已由 newBaseDialer 统一设置，此处补充 NoDelay 与收发缓冲区）
+	// 通用 socket 调优：KeepAlive 已由 newBaseDialer 统一设置，这里只补
+	// TCP_NODELAY。不要显式设置 SO_RCVBUF/SO_SNDBUF：Linux TCP autotuning
+	// 会按实际 BDP 扩张，固定值反而可能限制高 RTT/高带宽链路。
 	if sock := underlyingTCPConn(rawConn); sock != nil {
 		sock.SetNoDelay(true)
-		sock.SetReadBuffer(connReadBuf)
-		sock.SetWriteBuffer(connWriteBuf)
 	}
 
 	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
