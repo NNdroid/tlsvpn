@@ -80,7 +80,7 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 /* ---------- 布局与卡片 ---------- */
 .wrap{max-width:1240px;margin:0 auto;padding:22px 24px 10px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:14px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(256px,1fr));gap:14px;margin-bottom:14px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(256px,100%),1fr));gap:14px;margin-bottom:14px}
 .kpi-card{display:flex;flex-direction:column;gap:2px;margin-bottom:0;transition:border-color .15s ease}
 .kpi-card:hover{border-color:var(--border2)}
 .kpi-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
@@ -189,11 +189,11 @@ td.dim{color:var(--sub)}
   border-radius:10px;padding:10px 14px;font-size:.86em;margin-bottom:14px;
 }
 :root[data-theme=light] .warnbar{border-color:rgba(154,109,0,.25)}
-.st-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.st-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:14px}
 .st-block{background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:14px 16px}
 .st-block h3{margin:0 0 8px;font-size:.92em;font-weight:650}
-.kv{width:100%;border-collapse:collapse}
-.kv th,.kv td{border-bottom:1px dashed var(--border);padding:6.5px 2px;font-size:.82em;font-weight:normal;text-transform:none;letter-spacing:normal;white-space:normal;background:transparent}
+.kv{width:100%;border-collapse:collapse;table-layout:fixed}
+.kv th,.kv td{border-bottom:1px dashed var(--border);padding:6.5px 2px;font-size:.82em;font-weight:normal;text-transform:none;letter-spacing:normal;white-space:normal;overflow-wrap:anywhere;background:transparent}
 .kv tr:hover{background:transparent}
 .kv tr:last-child th,.kv tr:last-child td{border-bottom:none}
 .kv th{color:var(--sub);width:44%;text-align:left}
