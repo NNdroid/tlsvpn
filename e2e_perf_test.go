@@ -54,6 +54,7 @@ type perfHarness struct {
 	cancel    context.CancelFunc
 	srvTap    *memTap
 	cliTap    *memTap
+	srv       *Server
 	cli       *Client
 	srvDone   chan struct{}
 	cliDone   chan struct{}
@@ -99,6 +100,7 @@ func startPerfHarness(t *testing.T, conns int, fec bool, encrypt bool) *perfHarn
 		cancel()
 		t.Fatalf("server init: %v", err)
 	}
+	h.srv = srv
 	h.srvTap = srv.tap.(*memTap)
 	go func() {
 		defer close(h.srvDone)
@@ -271,6 +273,25 @@ func TestPerfThroughput(t *testing.T) {
 		h.cli.rxReorder.Stats(),
 		atomic.LoadUint64(&h.cli.TxBytes), atomic.LoadUint64(&h.cli.TxPackets),
 		atomic.LoadUint64(&h.cli.RxBytes), atomic.LoadUint64(&h.cli.RxPackets))
+
+	// 分层诊断：区分 socket/scanner、session reorder、VSwitch/TAP 哪一层成为
+	// 实际吞吐瓶颈。测试同一时刻只有一个 client session。
+	h.srv.mu.RLock()
+	for cid, s := range h.srv.activeClients {
+		s.sessionMu.RLock()
+		reorder := s.RxReorder
+		s.sessionMu.RUnlock()
+		var rs ReorderStats
+		if reorder != nil {
+			rs = reorder.Stats()
+		}
+		t.Logf("server dataplane: client=%s rxBytes=%d rxPackets=%d reorder=%+v portDropped=%d floodDrops=%d tapBytes=%d tapPkts=%d",
+			cid,
+			atomic.LoadUint64(&s.RxBytes), atomic.LoadUint64(&s.RxPackets),
+			rs, s.Port.Dropped(), h.srv.vswitch.floodDrops.Load(),
+			h.srvTap.TxBytes.Load(), h.srvTap.TxPkts.Load())
+	}
+	h.srv.mu.RUnlock()
 	if mbps < 5 {
 		t.Fatalf("tunnel throughput below 5 Mbps: %.2f", mbps)
 	}
