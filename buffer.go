@@ -19,26 +19,57 @@ const (
 // Insert 创建 time.Timer 再最多阻塞 5s。连接读循环绝不能被慢 TAP 反压住。
 const reorderOutQueue = 256
 
-// pending/outChan 的 [][]byte 只保存 slice 描述符；高 PPS 顺序流几乎每包都会
-// 生成一个小 batch。池化描述符容器可以消除这一类持续 GC 压力。
+// 重排输出使用固定 64 帧 chunk 的链式池。旧实现的 [][]byte 在一次 gap
+// 被补齐、连续释放 >64 帧时会 append 扩容到 128/256/512...，扩容后的 slice
+// 无法再回到 64-cap pool，pprof 中 drainLocked 因而占据绝大多数 alloc_space。
+// 固定 chunk 链无论一次释放多少帧都不会发生描述符 slice 扩容。
 const reorderBatchHotCap = 64
 
+type reorderBatch struct {
+	frames [reorderBatchHotCap][]byte
+	n      int
+	next   *reorderBatch
+}
+
 var reorderBatchPool = sync.Pool{
-	New: func() any { return new([reorderBatchHotCap][]byte) },
+	New: func() any { return new(reorderBatch) },
 }
 
-func getReorderBatch() [][]byte {
-	return reorderBatchPool.Get().(*[reorderBatchHotCap][]byte)[:0]
+func getReorderBatch() *reorderBatch {
+	b := reorderBatchPool.Get().(*reorderBatch)
+	b.n = 0
+	b.next = nil
+	return b
 }
 
-func putReorderBatch(batch [][]byte) {
-	if batch == nil {
+func putReorderBatch(b *reorderBatch) {
+	if b == nil {
 		return
 	}
-	clear(batch)
-	if cap(batch) == reorderBatchHotCap {
-		reorderBatchPool.Put((*[reorderBatchHotCap][]byte)(batch[:reorderBatchHotCap]))
+	clear(b.frames[:b.n])
+	b.n = 0
+	b.next = nil
+	reorderBatchPool.Put(b)
+}
+
+func freeReorderBatchChain(head *reorderBatch, releaseFrames bool) uint64 {
+	var n uint64
+	for head != nil {
+		next := head.next
+		if releaseFrames {
+			for i := 0; i < head.n; i++ {
+				if head.frames[i] != nil {
+					putFrame(head.frames[i])
+				}
+				n++
+			}
+		} else {
+			n += uint64(head.n)
+		}
+		putReorderBatch(head)
+		head = next
 	}
+	return n
 }
 
 // reorderSkipDelay 从“已经收到未来序号、确认存在缺口”的时刻开始计时。
@@ -67,9 +98,10 @@ type ReorderBuffer struct {
 	seqSlots    []uint32
 	windowMask  uint32
 	buffered    int
-	pending     [][]byte // 锁内收集、出锁后交给交付协程的批次
+	pendingHead *reorderBatch // 锁内收集、出锁后交给交付协程的固定 chunk 链
+	pendingTail *reorderBatch
 
-	outChan chan [][]byte
+	outChan chan *reorderBatch
 	outFunc func([]byte)
 	// deliverMu 在不把慢 TAP/VSwitch 写放回重排锁的前提下，保留多个 Insert
 	// 和超时协程从锁内取出批次时的先后次序。
@@ -97,7 +129,7 @@ func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 		seqSlots:   make([]uint32, ReorderWindowSize),
 		windowMask: ReorderWindowSize - 1,
 		outFunc: outFunc,
-		outChan: make(chan [][]byte, reorderOutQueue),
+		outChan: make(chan *reorderBatch, reorderOutQueue),
 		gapWake: make(chan struct{}, 1),
 		closed:  make(chan struct{}),
 	}
@@ -165,7 +197,7 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	}
 	wake := rb.insertLocked(seq, frame)
 	batch := rb.takePendingLocked()
-	if len(batch) > 0 {
+	if batch != nil {
 		rb.deliverMu.Lock()
 	}
 	rb.mu.Unlock()
@@ -173,7 +205,7 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 		rb.signalGapWorker()
 	}
 	rb.deliver(batch)
-	if len(batch) > 0 {
+	if batch != nil {
 		rb.deliverMu.Unlock()
 	}
 }
@@ -260,7 +292,7 @@ func (rb *ReorderBuffer) growWindowLocked(requiredDistance uint32) bool {
 	return true
 }
 
-// drainLocked 按序提取连续的包进 pending（调用方须持锁）
+// drainLocked 按序提取连续的包进固定 chunk 链（调用方须持锁）。
 func (rb *ReorderBuffer) drainLocked() bool {
 	hadGap := !rb.gapSince.IsZero()
 	rb.gapSince = time.Time{}
@@ -270,10 +302,18 @@ func (rb *ReorderBuffer) drainLocked() bool {
 		if frame == nil {
 			break // 依然有缺口，等待
 		}
-		if rb.pending == nil {
-			rb.pending = getReorderBatch()
+		if rb.pendingTail == nil || rb.pendingTail.n == reorderBatchHotCap {
+			b := getReorderBatch()
+			if rb.pendingTail == nil {
+				rb.pendingHead = b
+				rb.pendingTail = b
+			} else {
+				rb.pendingTail.next = b
+				rb.pendingTail = b
+			}
 		}
-		rb.pending = append(rb.pending, frame)
+		rb.pendingTail.frames[rb.pendingTail.n] = frame
+		rb.pendingTail.n++
 		rb.ring[idx] = nil
 		rb.seqSlots[idx] = 0
 		rb.buffered--
@@ -309,11 +349,12 @@ func (rb *ReorderBuffer) signalGapWorker() {
 	}
 }
 
-// takePendingLocked 取走已收集的批次（调用方须持锁）
-func (rb *ReorderBuffer) takePendingLocked() [][]byte {
-	b := rb.pending
-	rb.pending = nil
-	return b
+// takePendingLocked 取走已收集的 chunk 链（调用方须持锁）
+func (rb *ReorderBuffer) takePendingLocked() *reorderBatch {
+	head := rb.pendingHead
+	rb.pendingHead = nil
+	rb.pendingTail = nil
+	return head
 }
 
 // releaseRingLocked 释放全部槽位（调用方须持锁）
@@ -328,12 +369,10 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 	rb.buffered = 0
 }
 
-// deliver 把批次交给唯一交付协程。这里绝不阻塞 conn 读循环，也不为
-// 每个 batch 创建 timer；outChan 满说明 TAP/VSwitch 已经落后，立即丢批次
-// 比把 TLS 读取停住数秒更安全，且上层 TCP/FEC 能处理这类背压损失。
-func (rb *ReorderBuffer) deliver(batch [][]byte) {
-	if len(batch) == 0 {
-		putReorderBatch(batch)
+// deliver 把 chunk 链交给唯一交付协程。这里绝不阻塞 conn 读循环。
+// outChan 满说明 TAP/VSwitch 已经落后，立即丢链比把 TLS 读取停住更安全。
+func (rb *ReorderBuffer) deliver(batch *reorderBatch) {
+	if batch == nil {
 		return
 	}
 	select {
@@ -341,8 +380,7 @@ func (rb *ReorderBuffer) deliver(batch [][]byte) {
 	case <-rb.closed:
 		rb.freeBatch(batch)
 	default:
-		rb.droppedFrames.Add(uint64(len(batch)))
-		rb.freeBatch(batch)
+		rb.droppedFrames.Add(freeReorderBatchChain(batch, true))
 	}
 }
 
@@ -366,21 +404,23 @@ func (rb *ReorderBuffer) outWorker() {
 	}
 }
 
-func (rb *ReorderBuffer) outputBatch(batch [][]byte) {
-	for _, frame := range batch {
-		if rb.outFunc != nil && len(frame) > 0 {
-			rb.outFunc(frame)
+func (rb *ReorderBuffer) outputBatch(batch *reorderBatch) {
+	for batch != nil {
+		next := batch.next
+		for i := 0; i < batch.n; i++ {
+			frame := batch.frames[i]
+			if rb.outFunc != nil && len(frame) > 0 {
+				rb.outFunc(frame)
+			}
+			putFrame(frame)
 		}
-		putFrame(frame)
+		putReorderBatch(batch)
+		batch = next
 	}
-	putReorderBatch(batch)
 }
 
-func (rb *ReorderBuffer) freeBatch(batch [][]byte) {
-	for _, frame := range batch {
-		putFrame(frame)
-	}
-	putReorderBatch(batch)
+func (rb *ReorderBuffer) freeBatch(batch *reorderBatch) {
+	freeReorderBatchChain(batch, true)
 }
 
 // timeoutWorker 平时完全休眠；第一个未来帧确认缺口时由 Insert 唤醒并精确等待
@@ -457,12 +497,12 @@ func (rb *ReorderBuffer) timeoutWorker() {
 			rb.drainLocked()
 		}
 		batch := rb.takePendingLocked()
-		if len(batch) > 0 {
+		if batch != nil {
 			rb.deliverMu.Lock()
 		}
 		rb.mu.Unlock()
 		rb.deliver(batch)
-		if len(batch) > 0 {
+		if batch != nil {
 			rb.deliverMu.Unlock()
 		}
 	}
