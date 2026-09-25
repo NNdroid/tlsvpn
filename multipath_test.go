@@ -66,6 +66,87 @@ func TestPickBackendKeepsStickyPathUntilMateriallyBetterOrBackpressured(t *testi
 	}
 }
 
+func TestWriteOwnedFramePreservesBackingBuffer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := NewAsyncPort(ctx, "owned-write")
+	rtt := uint32(1)
+	ch := make(chan []VPNFrame, 4)
+	p.RegisterBackend(ch, &rtt)
+	defer p.UnregisterBackend(ch)
+
+	buf := getFrameAtLeast(1400)[:1400]
+	buf[0] = 0x7a
+	ptr := &buf[0]
+	if err := p.WriteOwnedFrame(buf); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case batch := <-ch:
+		if len(batch) != 1 || len(batch[0].Data) != 1400 {
+			t.Fatalf("unexpected batch: %+v", batch)
+		}
+		if &batch[0].Data[0] != ptr {
+			t.Fatal("owned TAP frame was copied before backend delivery")
+		}
+		if batch[0].Data[0] != 0x7a {
+			t.Fatal("owned payload changed")
+		}
+		freeFrames(batch)
+		putVPNFrameBatch(batch)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for owned frame")
+	}
+}
+
+func TestVSwitchOwnedUnicastTransfersToAsyncPort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	vs := NewVSwitch()
+	src := NewAsyncPort(ctx, "src")
+	dst := NewAsyncPort(ctx, "dst")
+	rtt := uint32(1)
+	dstCh := make(chan []VPNFrame, 4)
+	dst.RegisterBackend(dstCh, &rtt)
+	defer dst.UnregisterBackend(dstCh)
+	vs.AddPort(src)
+	vs.AddPort(dst)
+	defer vs.RemovePort("src")
+	defer vs.RemovePort("dst")
+
+	dstMAC := []byte{0x02, 0, 0, 0, 0, 0x22}
+	srcMAC := []byte{0x02, 0, 0, 0, 0, 0x11}
+
+	// 先从 dst 学习目标 MAC；普通 ProcessFrame 保留 copy 语义。
+	learn := make([]byte, 64)
+	copy(learn[0:6], srcMAC)
+	copy(learn[6:12], dstMAC)
+	vs.ProcessFrame("dst", learn)
+
+	buf := getFrameAtLeast(1400)[:1400]
+	copy(buf[0:6], dstMAC)
+	copy(buf[6:12], srcMAC)
+	ptr := &buf[0]
+	vs.ProcessOwnedFrame("src", buf)
+
+	select {
+	case batch := <-dstCh:
+		if len(batch) != 1 {
+			t.Fatalf("unexpected batch len=%d", len(batch))
+		}
+		if &batch[0].Data[0] != ptr {
+			t.Fatal("VSwitch owned unicast copied payload instead of transferring it")
+		}
+		freeFrames(batch)
+		putVPNFrameBatch(batch)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for owned VSwitch frame")
+	}
+}
+
 func TestSendBatchTransfersPayloadOwnershipWithoutCopy(t *testing.T) {
 	rtt := uint32(1)
 	b := &Backend{ch: make(chan []VPNFrame, 1), rttCache: &rtt}
