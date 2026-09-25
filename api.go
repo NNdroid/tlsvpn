@@ -444,7 +444,7 @@ const I18N={
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
 	tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',theme_tip:'主题（跟随系统）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'运行模式',encrypt:'内层加密',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
+ cfgk:{mode:'运行模式',encrypt:'内层加密',enc_algo:'内层算法',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
  stt:{title:'运行状态',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',
    restart:'以下字段已修改，需要重启进程才能生效：',norestart:'无字段需要重启生效',noneg:'尚未与对端完成握手',
    noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
@@ -466,7 +466,7 @@ const I18N={
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
 	tls_http:'HTTP (HTTPS recommended)',mode_local:'local',theme_tip:'Theme (follow system)',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'Mode',encrypt:'Inner cipher',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
+ cfgk:{mode:'Mode',encrypt:'Inner cipher',enc_algo:'Inner algorithm',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
  stt:{title:'Runtime status',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',
    restart:'These fields changed and require a process restart:',norestart:'Nothing pending restart',noneg:'Handshake with peer not completed yet',
    noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
@@ -501,8 +501,9 @@ function fmtBytes(b,s=false){
 }
 function badge(f){if(!f||f==='off')return '<span class="badge b-off">'+t('badge.off')+'</span>';
   if(f==='dup')return '<span class="badge b-dup">'+t('badge.dup')+'</span>';return '<span class="badge b-on">'+f+'</span>';}
-function encBadge(a){if(a===2)return '<span class="badge b-on">GCM</span>';
-  if(a===1)return '<span class="badge b-dup">'+t('badge.ctr')+'</span>';return '<span class="badge b-off">'+t('badge.plain')+'</span>';}
+function encBadge(a){if(a===2)return '<span class="badge b-on">AES-256-GCM</span>';
+  if(a===4)return '<span class="badge b-on">AES-128-GCM</span>';
+  return '<span class="badge b-off">'+t('badge.plain')+'</span>';}
 function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
@@ -605,7 +606,7 @@ async function fetchStats(){
       document.getElementById('ippool-kpi').innerHTML=data.ip_pool.v4_used+'<small> / '+data.ip_pool.v4_total+'</small>';
       document.getElementById('v6used').innerText=data.ip_pool.v6_used;}
 
-    const meta=[];if(data.enc_algo===2)meta.push('GCM');else if(data.enc_algo===1)meta.push(t('badge.ctr'));
+    const meta=[];if(data.enc_algo===2)meta.push('AES-256-GCM');else if(data.enc_algo===4)meta.push('AES-128-GCM');
     if(data.fec_mode&&data.fec_mode!=='off')meta.push('FEC '+data.fec_mode);
     document.getElementById('meta').innerText=meta.join(' · ');
 
@@ -621,7 +622,7 @@ function kv(el,rows){
 function yn(v){return v?'<span class="badge b-on">'+t('stt.yes')+'</span>':'<span class="badge b-off">'+t('stt.no')+'</span>';}
 function mtxt(v){return '<span class="mono">'+esc(v)+'</span>';}
 function ntxt(){return '<span style="color:var(--muted)">-</span>';}
-function encName(a){return a===2?'AES-256-GCM':(a===0?'none (TLS only)':String(a));}
+function encName(a){return a===2?'AES-256-GCM':(a===4?'AES-128-GCM':(a===0?'none (TLS only)':String(a)));}
 function rateRange(lo,hi){if(!lo&&!hi)return '-';return (lo===hi?String(lo):lo+'~'+hi)+' Mbps';}
 function renderStatus(data){
   const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{};
@@ -1227,7 +1228,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		conns := int(atomic.LoadInt32(&cli.liveConns))
 		fec := cli.fecStatus
 		lv := cli.live.Load()
-		// encAlgoNone=0（无内层加密，只剩 TLS）/ encAlgoGCM=2（AES-256-GCM），
+		// encAlgoNone=0（TLS only）/ 2（AES-256-GCM）/ 4（AES-128-GCM）。
 		// 算法号本身已无歧义，直接下发。
 		enc := cli.encAlgo
 		stats.ActiveClients = 1
