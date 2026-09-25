@@ -6,6 +6,7 @@
   "up": "",
   "down": "",
   "encrypt": true,
+  "enc_algo": "gcm256",
   "pad_mode": "bucket",
   "brutal": true,
   "brutal_up": 100,
