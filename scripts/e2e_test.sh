@@ -180,8 +180,8 @@ stop_server() {
 }
 
 # Run a client in the background (VPN clients are long-lived). Validates the
-# tunnel came up by checking the process stays alive and emits a startup/connected
-# marker, then leaves it running so the caller stops it with stop_client.
+# tunnel came up by polling clients.local.active_conns from the loopback-only
+# test dashboard, then leaves it running so the caller stops it with stop_client.
 #   $1 = binary  $2 = port (pid-file key)  $3 = server addr
 #   $4+ = key=JSON_LITERAL config overrides; the legacy "-socks5 <addr>" /
 #        "--socks5 <addr>" form is still accepted and folded into the config,
