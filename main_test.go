@@ -147,6 +147,88 @@ func TestVSwitchRejectsSpoofedSrcMAC(t *testing.T) {
 	}
 }
 
+func TestVSwitchStaticSessionMACFastPath(t *testing.T) {
+	vs := NewVSwitch()
+	macA := macKey{0x02, 0, 0, 0, 0, 0x11}
+	pa := newStubPort("A")
+	vs.AddPort(pa)
+	vs.AddStaticMAC("A", macA)
+
+	validatorCalls := 0
+	vs.validateMAC = func(string, macKey) bool {
+		validatorCalls++
+		return false
+	}
+
+	vs.ProcessSessionFrame("A", macA, macFrame(macA, macA))
+	if validatorCalls != 0 {
+		t.Fatalf("static session hot path called validateMAC %d times", validatorCalls)
+	}
+	if got := vs.spoofDrops.Load(); got != 0 {
+		t.Fatalf("valid static session frame counted as spoof: %d", got)
+	}
+
+	shard := vs.shards[getShardIdx(macA)]
+	shard.mu.RLock()
+	entry := shard.macTable[macA]
+	shard.mu.RUnlock()
+	if entry == nil || entry.portID != "A" || !entry.static {
+		t.Fatalf("static MAC entry not installed: %+v", entry)
+	}
+
+	vs.purgeExpiredMACsAt(1 << 32)
+	shard.mu.RLock()
+	_, exists := shard.macTable[macA]
+	shard.mu.RUnlock()
+	if !exists {
+		t.Fatal("static session MAC was purged by dynamic aging")
+	}
+
+	spoof := macKey{0x02, 0, 0, 0, 0, 0x22}
+	vs.ProcessSessionFrame("A", macA, macFrame(macA, spoof))
+	if got := vs.spoofDrops.Load(); got != 1 {
+		t.Fatalf("spoofDrops=%d, want 1", got)
+	}
+	if validatorCalls != 0 {
+		t.Fatalf("spoof fast path unexpectedly called validateMAC %d times", validatorCalls)
+	}
+
+	vs.RemovePort("A")
+	shard.mu.RLock()
+	_, exists = shard.macTable[macA]
+	shard.mu.RUnlock()
+	if exists {
+		t.Fatal("RemovePort left static MAC behind")
+	}
+}
+
+func BenchmarkVSwitchSourcePath(b *testing.B) {
+	macA := macKey{0x02, 0, 0, 0, 0, 0x31}
+	frame := macFrame(macA, macA)
+
+	b.Run("dynamic", func(b *testing.B) {
+		vs := NewVSwitch()
+		vs.AddPort(newStubPort("A"))
+		vs.ProcessFrame("A", frame)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			vs.ProcessFrame("A", frame)
+		}
+	})
+
+	b.Run("static_session", func(b *testing.B) {
+		vs := NewVSwitch()
+		vs.AddPort(newStubPort("A"))
+		vs.AddStaticMAC("A", macA)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			vs.ProcessSessionFrame("A", macA, frame)
+		}
+	})
+}
+
 func TestVSwitchCoarseClockRefreshAndPurge(t *testing.T) {
 	vs := NewVSwitch()
 	src := macKey{0x02, 0, 0, 0, 0, 1}
