@@ -218,9 +218,9 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 
 func (h *perfHarness) stop() { h.cancel(); <-h.srvDone; <-h.cliDone }
 
-func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) {
+func runPerfThroughputConns(t *testing.T, conns int, mode string, encrypt bool, encAlgo string) {
 	t.Helper()
-	h := startPerfHarnessWithAlgo(t, 2, true, encrypt, encAlgo)
+	h := startPerfHarnessWithAlgo(t, conns, true, encrypt, encAlgo)
 	defer h.stop()
 
 	// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
@@ -299,6 +299,18 @@ func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) 
 	if mbps < 5 {
 		t.Fatalf("tunnel throughput below 5 Mbps: %.2f", mbps)
 	}
+}
+
+func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) {
+	t.Helper()
+	runPerfThroughputConns(t, 2, mode, encrypt, encAlgo)
+}
+
+func TestPerfThroughputSingleLinkGCM128(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	runPerfThroughputConns(t, 1, "gcm128-single", true, "gcm128")
 }
 
 func TestPerfThroughput(t *testing.T) {
