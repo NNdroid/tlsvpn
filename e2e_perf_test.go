@@ -322,6 +322,52 @@ func TestPerfThroughputTLSOnly(t *testing.T) {
 	runPerfThroughput(t, "tls-only", false, "")
 }
 
+func TestPerfMultipathStripingUsesBothDataPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+
+	// 关闭 FEC：这样第二条连接上的 txBytes 只能来自真实数据 striping，
+	// 不能被 parity 流量“冒充”成多路径利用。
+	h := startPerfHarnessWithAlgo(t, 2, false, true, "gcm256")
+	defer h.stop()
+
+	payload := bytes.Repeat([]byte{0x5a}, 1400-34-4)
+	frame := buildEthFrame(1, payload)
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		for i := 0; i < 256; i++ {
+			h.tapWriter(frame)
+		}
+		runtime.Gosched()
+	}
+	// 给 TLS writer / socket drain 一个短尾巴，再读取现成的每连接计数。
+	time.Sleep(500 * time.Millisecond)
+
+	snaps := h.cli.snapshotConns()
+	var active []uint64
+	for _, s := range snaps {
+		if s.TxBytes > 0 {
+			active = append(active, s.TxBytes)
+		}
+	}
+	t.Logf("multipath data tx bytes per active connection: %v", active)
+
+	if len(active) < 2 {
+		t.Fatalf("bulk striping used only %d data path(s), want >=2", len(active))
+	}
+	const minUsefulBytes = 1 << 20
+	used := 0
+	for _, n := range active {
+		if n >= minUsefulBytes {
+			used++
+		}
+	}
+	if used < 2 {
+		t.Fatalf("second path carried too little real data: tx=%v, want >=2 paths with >=%d bytes", active, minUsefulBytes)
+	}
+}
+
 func TestPerfPingRTT(t *testing.T) {
 	h := startPerfHarness(t, 2, true, true)
 	defer h.stop()
