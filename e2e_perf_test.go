@@ -223,7 +223,7 @@ func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) 
 	h := startPerfHarnessWithAlgo(t, 2, true, encrypt, encAlgo)
 	defer h.stop()
 
-// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
+	// LibreSpeed 等效：固定时长持续灌包，统计 server 侧 learned-unicast
 	// fast path 实际交付字节。测试启动时已预学习 TAP_LOCAL MAC，避免把
 	// unknown-unicast flood limiter 的速率误当成隧道吞吐。
 	const duration = 8 * time.Second
@@ -299,8 +299,6 @@ func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) 
 	if mbps < 5 {
 		t.Fatalf("tunnel throughput below 5 Mbps: %.2f", mbps)
 	}
-}
-
 }
 
 func TestPerfThroughput(t *testing.T) {
