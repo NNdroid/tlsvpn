@@ -1542,8 +1542,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	port.RegisterBackend(connTxChan, rttCache)
 	defer port.UnregisterBackend(connTxChan)
 
+	writeBatchLimit := tlsWriteBatchLimit(req.BrutalConns)
 	go func() {
-		sendBuffer := make([]byte, 0, 64*1024+4096)
+		sendBuffer := make([]byte, 0, writeBatchLimit+4096)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1581,7 +1582,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					var n int
 					sendBuffer, n = appendOwnedFrameBatch(sendBuffer, frames, icTx)
 					txPackets += n
-					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+					if len(sendBuffer) >= writeBatchLimit {
 						break
 					}
 					select {
