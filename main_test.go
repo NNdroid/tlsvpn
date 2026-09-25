@@ -104,6 +104,11 @@ func (p *stubPort) WriteFrame(frame []byte) error {
 	return nil
 }
 
+type noopPort struct{ name string }
+
+func (p *noopPort) ID() string                { return p.name }
+func (p *noopPort) WriteFrame([]byte) error   { return nil }
+
 func macFrame(dst, src macKey) []byte {
 	f := make([]byte, 14)
 	copy(f[0:6], dst[:])
@@ -246,6 +251,80 @@ func TestVSwitchStaticMACCannotBeOverwrittenByDynamicPort(t *testing.T) {
 	if got := vs.spoofDrops.Load(); got != 1 {
 		t.Fatalf("trusted TAP should not increment spoofDrops, got %d", got)
 	}
+}
+
+func TestVSwitchCachedDestinationPortLifecycle(t *testing.T) {
+	vs := NewVSwitch()
+	macA := macKey{0x02, 0, 0, 0, 0, 0x51}
+	macB := macKey{0x02, 0, 0, 0, 0, 0x52}
+	pa, pb := newStubPort("A"), newStubPort("B")
+	vs.AddPort(pa)
+	vs.AddPort(pb)
+	vs.AddStaticMAC("A", macA)
+	vs.AddStaticMAC("B", macB)
+
+	shard := vs.shards[getShardIdx(macB)]
+	shard.mu.RLock()
+	entry := shard.macTable[macB]
+	if entry == nil || entry.port != pb {
+		shard.mu.RUnlock()
+		t.Fatalf("destination port was not cached: %+v", entry)
+	}
+	shard.mu.RUnlock()
+
+	vs.ProcessSessionFrame("A", macA, macFrame(macB, macA))
+	select {
+	case <-pb.frames:
+	case <-time.After(time.Second):
+		t.Fatal("cached destination did not receive unicast")
+	}
+
+	vs.RemovePort("B")
+	shard.mu.RLock()
+	_, exists := shard.macTable[macB]
+	shard.mu.RUnlock()
+	if exists {
+		t.Fatal("RemovePort left cached destination MAC behind")
+	}
+}
+
+func BenchmarkVSwitchDestinationLookup(b *testing.B) {
+	macA := macKey{0x02, 0, 0, 0, 0, 0x61}
+	macB := macKey{0x02, 0, 0, 0, 0, 0x62}
+	frame := macFrame(macB, macA)
+
+	newSwitch := func(cache bool) *VSwitch {
+		vs := NewVSwitch()
+		vs.AddPort(&noopPort{name: "A"})
+		vs.AddPort(&noopPort{name: "B"})
+		vs.AddStaticMAC("A", macA)
+		vs.AddStaticMAC("B", macB)
+		if !cache {
+			shard := vs.shards[getShardIdx(macB)]
+			shard.mu.Lock()
+			shard.macTable[macB].port = nil
+			shard.mu.Unlock()
+		}
+		return vs
+	}
+
+	b.Run("ports_map_fallback", func(b *testing.B) {
+		vs := newSwitch(false)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			vs.ProcessSessionFrame("A", macA, frame)
+		}
+	})
+
+	b.Run("cached_port", func(b *testing.B) {
+		vs := newSwitch(true)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			vs.ProcessSessionFrame("A", macA, frame)
+		}
+	})
 }
 
 func BenchmarkVSwitchSourcePath(b *testing.B) {
