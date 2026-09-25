@@ -670,6 +670,7 @@ type liveConfig struct {
 	fecMode        bool
 	fecGroup       int
 	encrypt        bool
+	encAlgo        int // encAlgoGCM(AES-256) / encAlgoGCM128(AES-128)
 	minEnc         int // 内层加密强度下限（minEncRank 值，0=不限）
 }
 
@@ -683,7 +684,7 @@ func liveFromCfg(cfg *Config) *liveConfig {
 		sourceRules: cfg.Client.SourceRules,
 		brutal:      cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		connsCount: cfg.Client.Conns, fecMode: cfg.Client.FEC, fecGroup: cfg.Client.FecGroup,
-		encrypt: cfg.Encrypt, minEnc: minEncRank(cfg.MinEnc),
+		encrypt: cfg.Encrypt, encAlgo: encAlgoFromConfig(cfg.EncAlgo), minEnc: minEncRank(cfg.MinEnc),
 	}
 }
 
@@ -1458,7 +1459,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		BrutalConns:     lv.connsCount,
 		BrutalConnIndex: connIndex,
 		Encrypt:         lv.encrypt,
-		EncAlgo:         clientEncAlgoSupport,
+		EncAlgo:         func() int { if lv.encrypt { return lv.encAlgo }; return encAlgoNone }(),
 		SessionToken:    sessionToken,
 	}
 	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
@@ -1516,14 +1517,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, fmt.Errorf("server encryption mismatch")
 	}
 
-	// 内层加密：唯一算法 GCM。会话盐由服务端生成、通过响应下发，服务端重启
-	// 或会话重建即换盐，密钥流不再跨会话重用。
-	// 旧版 AES-CTR 回退路径已移除：协商不出 GCM 说明对端不再受支持，直接拒连。
+	// 内层加密：算法由配置显式选择。gcm256 是兼容默认；gcm128 是性能模式。
+	// 两者共享 nonce/AAD/tag/wire format，但使用独立 KDF label，不能跨算法复用 key。
 	encAlgo := encAlgoNone
 	var icTx, icRx, fecTx, fecRx *innerCipher
 	if lv.encrypt {
-		if resp.EncAlgo != encAlgoGCM {
-			return 0, fmt.Errorf("server negotiated inner cipher %d, GCM (%d) is required", resp.EncAlgo, encAlgoGCM)
+		if resp.EncAlgo != lv.encAlgo {
+			return 0, fmt.Errorf("server negotiated inner cipher %d (%s), want %d (%s)",
+				resp.EncAlgo, encAlgoLabel(resp.EncAlgo), lv.encAlgo, encAlgoLabel(lv.encAlgo))
 		}
 		saltTx, err1 := hex.DecodeString(resp.EncSalt)  // c2s
 		saltRx, err2 := hex.DecodeString(resp.EncSalt2) // s2c
@@ -1531,19 +1532,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			return 0, fmt.Errorf("server sent invalid enc salts")
 		}
 		var errTx, errRx error
-		icTx, errTx = newGCMInnerCipher(lv.psk, saltTx)
-		icRx, errRx = newGCMInnerCipher(lv.psk, saltRx)
+		icTx, errTx = newGCMInnerCipherForAlgo(lv.psk, saltTx, resp.EncAlgo)
+		icRx, errRx = newGCMInnerCipherForAlgo(lv.psk, saltRx, resp.EncAlgo)
 		if errTx != nil || errRx != nil {
 			return 0, fmt.Errorf("GCM cipher init failed: %v/%v", errTx, errRx)
 		}
-		fecTx, _ = newGCMInnerCipherDomain(lv.psk, saltTx, "fec")
-		fecRx, _ = newGCMInnerCipherDomain(lv.psk, saltRx, "fec")
+		fecTx, _ = newGCMInnerCipherDomainForAlgo(lv.psk, saltTx, "fec", resp.EncAlgo)
+		fecRx, _ = newGCMInnerCipherDomainForAlgo(lv.psk, saltRx, "fec", resp.EncAlgo)
 		encAlgo = resp.EncAlgo
 	}
 
-	// 强度下限：协商结果低于本地要求时拒绝这条连接（服务端可能跑的是旧版，
-	// 或中间被降级）。这是运维显式声明的硬要求，不能静默降级。
-	if lv.minEnc > 0 && encAlgo != encAlgoGCM {
+	// min_enc=gcm 要求任一种认证 GCM；算法具体强度由 enc_algo 显式固定，
+	// 所以这里不把 AES-128 悄悄升级/降级成 AES-256。
+	if lv.minEnc > 0 && !isGCMAlgo(encAlgo) {
 		return 0, fmt.Errorf("server negotiated inner cipher %d is below min_enc %q", encAlgo, "gcm")
 	}
 
