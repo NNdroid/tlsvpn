@@ -24,7 +24,7 @@
 #   Go : $E2E_BIN_DIR/tlsvpn_go
 #   Rs : $E2E_BIN_DIR/tlsvpn_rs
 #
-# Requires: git, go, cargo. Groups A-F need openssl as well (self-signed cert
+# Requires: git, go, cargo, curl. Groups A-F need openssl as well (self-signed cert
 # for the Rust server).
 #
 set -euo pipefail
@@ -110,6 +110,7 @@ resolve_binaries() {
   command -v git >/dev/null 2>&1 || fail "git is required to fetch sources"
   command -v go  >/dev/null 2>&1 || fail "go toolchain is required to build the Go binary"
   command -v cargo >/dev/null 2>&1 || fail "cargo is required to build the Rust binary"
+  command -v curl >/dev/null 2>&1 || fail "curl is required to query client runtime state"
 
   acquire_source go "$E2E_GO_SRC" "$E2E_GO_REPO" "$E2E_GO_REF"
   acquire_source rs "$E2E_RS_SRC" "$E2E_RS_REPO" "$E2E_RS_REF"
