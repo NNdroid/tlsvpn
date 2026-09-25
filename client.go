@@ -288,6 +288,13 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
 		p.dropN(sendBatchToAny(backends, best, batch))
 		for _, par := range parities {
+			if len(backends) < 2 {
+				// 单条 TCP 是严格有序流：原始数据若因 TCP 丢包/HOL 尚未到达，
+				// 同一路径后面的 parity 也不可能越过它，因此没有提前恢复价值。
+				// 仍持续喂 encoder 保持 seq/K 分组对齐，但不把 parity 发上线路。
+				putFrame(par)
+				continue
+			}
 			p.paritySent.Add(1)
 			// parity 与数据尽量走不同物理路径，并在健康后端间轮转。decoder
 			// 是会话级共享状态，只需任意一条连接收到一份即可恢复单帧丢失。
