@@ -25,6 +25,12 @@ type Port interface {
 	WriteFrame(frame []byte) error
 }
 
+// ownedFramePort 是可选快路径：调用方把 pooled frame 的所有权交给目标端口。
+// WriteOwnedFrame 返回后调用方不得再访问/回收 frame。
+type ownedFramePort interface {
+	WriteOwnedFrame(frame []byte) error
+}
+
 // macKey 是 6 字节 MAC 的定长数组形式。作为 map key 时零堆分配，
 // 旧实现每帧两次 string([]byte) 转换，每次都会分配并保留一份副本。
 type macKey [6]byte
@@ -144,32 +150,47 @@ func (vs *VSwitch) RemovePort(portID string) {
 	log.Debugf("[VSwitch] Port DOWN: %s", portID)
 }
 func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
+	vs.processFrame(srcPortID, frame, false)
+}
+
+// ProcessOwnedFrame 与 ProcessFrame 语义相同，但接管 pooled frame 的所有权。
+// 已学习单播可直接把 buffer 转交给 AsyncPort，省掉 VSwitch→Port 的逐帧 memcpy；
+// 洪泛/未知单播仍需复制到多个端口，完成后归还原始 buffer。
+func (vs *VSwitch) ProcessOwnedFrame(srcPortID string, frame []byte) {
+	vs.processFrame(srcPortID, frame, true)
+}
+
+func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
+	release := func() {
+		if owned && frame != nil {
+			putFrame(frame)
+			frame = nil
+		}
+	}
+
 	if len(frame) < 14 {
+		release()
 		return
 	}
 	var dstMAC, srcMAC macKey
 	copy(dstMAC[:], frame[0:6])
 	copy(srcMAC[:], frame[6:12])
 
-	// 计算属于哪一个锁分片
 	srcShard := vs.shards[getShardIdx(srcMAC)]
-
 	srcShard.mu.RLock()
 	entry, exists := srcShard.macTable[srcMAC]
 	needUpdate := !exists || entry.portID != srcPortID || time.Since(entry.updatedAt) > 5*time.Second
 	srcShard.mu.RUnlock()
 
 	if needUpdate {
-		// 源 MAC 归属校验：端口只能声明自己会话注册的 MAC。冒充帧整帧丢弃
-		// （既不学习也不转发——转发等于允许攻击者以受害者身份注入流量）。
 		if vs.validateMAC != nil && !vs.validateMAC(srcPortID, srcMAC) {
 			vs.spoofDrops.Add(1)
+			release()
 			return
 		}
 		srcShard.mu.Lock()
 		now := time.Now()
 		if current := srcShard.macTable[srcMAC]; current != nil {
-			// 已学习 MAC 的 5s refresh 直接原位更新，避免周期性分配 *macEntry。
 			current.portID = srcPortID
 			current.updatedAt = now
 		} else {
@@ -180,7 +201,7 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	}
 
 	var targetPortID string
-	if (dstMAC[0] & 1) != 1 { // 单播包
+	if (dstMAC[0] & 1) != 1 {
 		dstShard := vs.shards[getShardIdx(dstMAC)]
 		dstShard.mu.RLock()
 		if dEntry, dExists := dstShard.macTable[dstMAC]; dExists {
@@ -190,11 +211,36 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	}
 
 	if targetPortID != "" && targetPortID != srcPortID {
-		vs.sendToPort(targetPortID, frame)
-	} else if targetPortID == "" {
+		if owned {
+			vs.sendOwnedToPort(targetPortID, frame)
+			frame = nil // sendOwnedToPort always consumes ownership
+		} else {
+			vs.sendToPort(targetPortID, frame)
+		}
+		return
+	}
+	if targetPortID == "" {
 		vs.flood(srcPortID, frame)
 	}
+	release()
 }
+
+func (vs *VSwitch) sendOwnedToPort(targetPortID string, frame []byte) {
+	vs.portsMu.RLock()
+	port, exists := vs.ports[targetPortID]
+	vs.portsMu.RUnlock()
+	if !exists {
+		putFrame(frame)
+		return
+	}
+	if p, ok := port.(ownedFramePort); ok {
+		_ = p.WriteOwnedFrame(frame)
+		return
+	}
+	_ = port.WriteFrame(frame)
+	putFrame(frame)
+}
+
 func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
 	vs.portsMu.RLock()
 	port, exists := vs.ports[targetPortID]
@@ -909,14 +955,26 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	}()
 
 	go func() {
-		buf := make([]byte, 65536)
+		readSize := 2048
+		if cfg.Tap != "mem" {
+			if link, err := netlink.LinkByName(cfg.Tap); err == nil && link.Attrs().MTU > 0 {
+				readSize = link.Attrs().MTU + 64
+			}
+		}
 		for {
+			buf := getFrameAtLeast(readSize)
 			rn, err := srv.tap.Read(buf)
 			if err != nil {
+				putFrame(buf)
 				return
 			}
-			// ProcessFrame 内部会拷贝进独立的池缓冲，直接复用本地缓冲
-			srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
+			if rn <= 0 {
+				putFrame(buf)
+				continue
+			}
+			// 本机 TAP 已学习单播直接 ownership-transfer 到目标 AsyncPort；
+			// 洪泛路径由 VSwitch 复制并归还原始 buffer。
+			srv.vswitch.ProcessOwnedFrame(tapPortID, buf[:rn])
 		}
 	}()
 
