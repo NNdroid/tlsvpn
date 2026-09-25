@@ -71,15 +71,17 @@ const (
 	// 的帧在解密时被丢弃（重放帧被重排窗口吸收或标签校验拦截）。
 	// 唯一支持的内层算法：旧版 AES-CTR（无完整性校验、密钥流仅由 (PSK, seq)
 	// 决定，跨会话/跨客户端重用）已随旧协议兼容一并移除，不再存在回退路径。
-	encAlgoGCM   = 2
-	gcmTagSize   = 16
+	encAlgoGCM    = 2 // AES-256-GCM（兼容既有协议）
+	encAlgoGCM128 = 4 // AES-128-GCM（显式性能模式；3 曾被历史 GCM-v2 占用）
+	gcmTagSize    = 16
 	gcmNonceSize = 12
 	encSaltSize  = 8
-	// gcmKeyLabel GCM 密钥派生标签；FEC 校验帧追加 "_fec"（见 newGCMInnerCipherDomain）
-	gcmKeyLabel = "_enc_key"
+	// 不同算法使用独立 KDF label，避免 AES-128/256 在同一 PSK 下复用 key material。
+	gcmKeyLabel    = "_enc_key"
+	gcm128KeyLabel = "_enc_key128"
 )
 
-// innerCipher 封装内层载荷加密（唯一算法 AES-256-GCM）：密文后附 16B 标签
+// innerCipher 封装内层 AES-GCM（AES-256 默认，AES-128 显式性能模式）：密文后附 16B 标签
 // （线路 dataLen = 明文长 + 16，帧格式不变），AAD 覆盖 [线路 dataLen(4BE) ||
 // seq(4BE)]，防止把有效密文挪到别的 seq 位置。nil 表示本方向未启用内层加密。
 type innerCipher struct {
@@ -87,28 +89,45 @@ type innerCipher struct {
 	salt [encSaltSize]byte
 }
 
-// newGCMInnerCipher 用会话盐构造数据帧加密器。两个方向各用一个实例
-// （c2s 用 resp.enc_salt，s2c 用 resp.enc_salt2）。
+// newGCMInnerCipher 保持历史 AES-256-GCM 构造语义，供旧测试/调用继续使用。
 func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
-	return newGCMInnerCipherDomain(psk, salt, "data")
+	return newGCMInnerCipherForAlgo(psk, salt, encAlgoGCM)
 }
 
-// newGCMInnerCipherDomain 为数据帧和 FEC 校验帧派生不同 AEAD key。FEC 仍以组首
-// seq 编号；独立 key 保证它不会和同 seq 的数据帧复用 (key, nonce)，
-// 同时保留现有帧格式。
+func newGCMInnerCipherForAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
+	return newGCMInnerCipherDomainForAlgo(psk, salt, "data", algo)
+}
+
+// newGCMInnerCipherDomain 保持历史 AES-256-GCM 语义。
 func newGCMInnerCipherDomain(psk string, salt []byte, domain string) (*innerCipher, error) {
+	return newGCMInnerCipherDomainForAlgo(psk, salt, domain, encAlgoGCM)
+}
+
+// newGCMInnerCipherDomainForAlgo 为数据帧/FEC 和 AES-128/256 分别派生独立 key。
+// nonce/AAD/tag/frame wire format 完全相同，因此变化只由握手 enc_algo 显式协商。
+func newGCMInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo int) (*innerCipher, error) {
 	if domain != "data" && domain != "fec" {
 		return nil, fmt.Errorf("unknown GCM domain %q", domain)
 	}
 	if len(salt) != encSaltSize {
 		return nil, fmt.Errorf("encryption salt must be %d bytes, got %d", encSaltSize, len(salt))
 	}
-	label := gcmKeyLabel
+
+	var label string
+	var keyLen int
+	switch algo {
+	case encAlgoGCM:
+		label, keyLen = gcmKeyLabel, 32
+	case encAlgoGCM128:
+		label, keyLen = gcm128KeyLabel, 16
+	default:
+		return nil, fmt.Errorf("unsupported GCM algorithm %d", algo)
+	}
 	if domain == "fec" {
 		label += "_fec"
 	}
 	keyHash := sha256.Sum256([]byte(psk + label))
-	block, err := aes.NewCipher(keyHash[:])
+	block, err := aes.NewCipher(keyHash[:keyLen])
 	if err != nil {
 		return nil, err
 	}
@@ -163,9 +182,29 @@ func (ic *innerCipher) gcmNonceAAD(seq uint32, wireLen uint32, buf *[gcmNonceSiz
 	return buf[:gcmNonceSize], buf[gcmNonceSize:]
 }
 
-// clientEncAlgoSupport 客户端握手请求里声明的本端内层算法能力。只有一种算法，
-// 因此直接声明 encAlgoGCM；服务端要求完全相等，声明不了 GCM 的对端一律拒连。
-const clientEncAlgoSupport = encAlgoGCM
+func encAlgoFromConfig(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "gcm128":
+		return encAlgoGCM128
+	default:
+		return encAlgoGCM
+	}
+}
+
+func encAlgoLabel(algo int) string {
+	switch algo {
+	case encAlgoGCM128:
+		return "gcm128"
+	case encAlgoGCM:
+		return "gcm256"
+	default:
+		return "none"
+	}
+}
+
+func isGCMAlgo(algo int) bool {
+	return algo == encAlgoGCM || algo == encAlgoGCM128
+}
 
 func (ic *innerCipher) isGCM() bool {
 	return ic != nil
