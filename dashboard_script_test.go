@@ -2,30 +2,61 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
 )
 
-// TestDashboardInlineJSSyntax 守护面板内联 <script> 的括号配平。
+// dashboardJS 返回面板脚本正文（webui/app.js）。脚本已从 Go 字符串拆出为独立
+// 文件、经 go:embed 打进二进制；这里的行号与浏览器报错的 app.js:N 直接对齐。
+func dashboardJS(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("webui/app.js")
+	if err != nil {
+		t.Fatalf("读取 webui/app.js: %v", err)
+	}
+	return string(b)
+}
+
+// TestDashboardNoInlineScript 保证 index.html 只以 <script src="app.js"> 引用
+// 外部脚本、不出现内联代码：全部 JS 集中在 app.js，上面的词法守护测试才没有
+// 覆盖死角。
+func TestDashboardNoInlineScript(t *testing.T) {
+	b, err := os.ReadFile("webui/index.html")
+	if err != nil {
+		t.Fatalf("读取 webui/index.html: %v", err)
+	}
+	html := string(b)
+	if !strings.Contains(html, `<script src="app.js"></script>`) {
+		t.Fatal(`webui/index.html 必须以 <script src="app.js"></script> 引用外部脚本`)
+	}
+	for _, m := range regexp.MustCompile(`(?s)(<script[^>]*>)(.*?)(</script>)`).FindAllStringSubmatch(html, -1) {
+		if strings.TrimSpace(m[2]) != "" {
+			t.Fatalf("webui/index.html 出现内联 <script> 代码（不在词法测试覆盖内）: %.60s…", strings.TrimSpace(m[2]))
+		}
+	}
+}
+
+// TestDashboardInlineJSSyntax 守护面板脚本 webui/app.js 的括号配平。
 //
 // I18N 对象曾少两个闭合括号：整段脚本 SyntaxError，面板只剩静态骨架，
 // 而浏览器控制台只给一行 "(索引):165 Unexpected token ';'" —— 那行分号
 // 本身没问题，真正错的地方在上游几十行。这里做词法层面的配平检查
-// （跳过字符串与注释。本脚本不可能有模板字符串——dashboardHTML 由反引号定界，
-// 内含反引号就无法编译；仅有的两处正则字面量 /</g 与 /[:.]/g 不含花括号与引号，
-// 因此计数可靠。新增正则时请保持"不含花括号与引号"这一点），
-// 失败时报出每个未闭合左括号所在的文档行号，和浏览器的 "(索引):N" 对齐。
+// （跳过字符串与注释。脚本约定不用模板字符串——checkTernary 依赖这一点；
+// 现有的两处正则字面量 /</g 与 /[:.]/g 不含花括号与引号，因此计数可靠。
+// 新增正则时请保持"不含花括号与引号"这一点），
+// 失败时报出每个未闭合左括号所在的文件行号，和浏览器的 "app.js:N" 对齐。
 func TestDashboardInlineJSSyntax(t *testing.T) {
-	js := extractInlineScript(dashboardHTML)
+	js := dashboardJS(t)
 	if js == "" {
-		t.Fatal("dashboardHTML 里没有 <script> 块")
+		t.Fatal("webui/app.js 是空的")
 	}
 
 	openOf := map[byte]byte{'}': '{', ')': '(', ']': '['}
-	stack := map[byte][]int{} // 每类未闭合左括号打开时的文档行号，顺序即嵌套顺序
+	stack := map[byte][]int{} // 每类未闭合左括号打开时的文件行号，顺序即嵌套顺序
 	var inString byte
-	line := scriptDocLine(dashboardHTML, js)
+	line := 1
 	for i := 0; i < len(js); {
 		c := js[i]
 		if inString != 0 {
@@ -97,9 +128,9 @@ func TestDashboardInlineJSSyntax(t *testing.T) {
 //
 // 括号恰好仍然配平，TestDashboardInlineJSSyntax 抓不到，面板就是这么坏的。
 func TestDashboardNoAdjacentStrings(t *testing.T) {
-	js := extractInlineScript(dashboardHTML)
+	js := dashboardJS(t)
 	if js == "" {
-		t.Fatal("dashboardHTML 里没有 <script> 块")
+		t.Fatal("webui/app.js 是空的")
 	}
 
 	// skipInsignificant 跳过空白与注释，返回下一个有效字符的位置；到结尾返回 -1。
@@ -134,7 +165,7 @@ func TestDashboardNoAdjacentStrings(t *testing.T) {
 	}
 
 	var inString byte
-	line := scriptDocLine(dashboardHTML, js)
+	line := 1
 	for i := 0; i < len(js); {
 		c := js[i]
 		if inString != 0 {
@@ -170,43 +201,30 @@ func TestDashboardNoAdjacentStrings(t *testing.T) {
 }
 
 func TestDashboardEscapesHTMLAndAttributeDelimiters(t *testing.T) {
+	js := dashboardJS(t)
 	for _, token := range []string{`replace(/&/g,'&amp;')`, `replace(/</g,'&lt;')`, `replace(/>/g,'&gt;')`, `replace(/\x22/g,'&quot;')`, `replace(/\x27/g,'&#39;')`} {
-		if !strings.Contains(dashboardHTML, token) {
+		if !strings.Contains(js, token) {
 			t.Fatalf("dashboard esc() missing %q", token)
 		}
 	}
 }
 
 func TestDashboardRendersServerObservedTLS(t *testing.T) {
+	js := dashboardJS(t)
 	for _, token := range []string{
 		"fingerprint_sha256", "fingerprint_kind", "cipher_suite_id", "offered_cipher_suites",
 		"ClientHello fingerprint (not JA3/JA4)",
 	} {
-		if !strings.Contains(dashboardHTML, token) {
+		if !strings.Contains(js, token) {
 			t.Fatalf("dashboard does not render server-observed TLS field %q", token)
 		}
 	}
 	// 这些值来自对端 ClientHello，必须经过 mtxt/esc 后才允许进入 innerHTML。
 	for _, token := range []string{"mtxt(tls.fingerprint_kind+':'+tls.fingerprint_sha256)", "mtxt(tls.cipher_suite", "mtxt(tls.sni)"} {
-		if !strings.Contains(dashboardHTML, token) {
+		if !strings.Contains(js, token) {
 			t.Fatalf("server-observed TLS value is not HTML escaped via %q", token)
 		}
 	}
-}
-
-// extractInlineScript 取出 HTML 里第一个 <script>...</script> 的脚本正文（不含标签）。
-func extractInlineScript(html string) string {
-	m := regexp.MustCompile(`(?s)(<script[^>]*>)(.*?)(</script>)`).FindStringSubmatch(html)
-	if m == nil {
-		return ""
-	}
-	return m[2]
-}
-
-// scriptDocLine 返回脚本正文第一个字符（通常是标签后的换行）所在的文档行号，
-// 调用方从这一行开始逐行计数。
-func scriptDocLine(html, js string) int {
-	return strings.Count(html[:strings.Index(html, js)], "\n") + 1
 }
 
 // TestDashboardTernaryBalance 守护三元条件的括号深度配平。
@@ -225,12 +243,9 @@ func scriptDocLine(html, js string) int {
 // （`{a: x?y:z}` 与 `?{a:1}` 都有深度 0 的 ':'），靠"开这个字面量时同层已经
 // 有多少未配对的 ?"分开：字面量里自己开出来的 '?' 才算三元。
 func TestDashboardTernaryBalance(t *testing.T) {
-	js := extractInlineScript(dashboardHTML)
-	if js == "" {
-		t.Fatal("dashboardHTML 里没有 <script> 块")
-	}
-	if err := checkTernary(js, scriptDocLine(dashboardHTML, js)); err != "" {
-		t.Fatalf("dashboardHTML 内联 <script> 三元配对错误：%s", err)
+	js := dashboardJS(t)
+	if err := checkTernary(js, 1); err != "" {
+		t.Fatalf("webui/app.js 三元配对错误：%s", err)
 	}
 
 	cases := []struct {
@@ -272,9 +287,8 @@ func TestDashboardTernaryBalance(t *testing.T) {
 // checkTernary 返回第一个三元配对错误的描述，没有错误返回空串。docLine0 是脚本
 // 正文第一行对应的文档行号，报错行号从它开始算。
 //
-// 前提（与 TestDashboardInlineJSSyntax 一致）：脚本里没有模板字符串——
-// dashboardHTML 由反引号定界，内含反引号就无法编译；正则字面量不含花括号与引号，
-// 按普通字符处理即可。
+// 前提（与 TestDashboardInlineJSSyntax 一致）：脚本约定不用模板字符串；
+// 正则字面量不含花括号与引号，按普通字符处理即可。
 func checkTernary(js string, docLine0 int) string {
 	// qOpen[d] = 第 d 层括号里还没配上 ':' 的 '?' 所在文档行号。
 	// 新开括号必须另起一层，不能继承外层——合法 JS 里 '?' 和它的 ':' 一定在同一层。

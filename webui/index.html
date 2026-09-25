@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tlsvpn Dashboard</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+<h1>🚀 tlsvpn <span id="mode">…</span><small id="meta"></small>
+  <span style="margin-left:auto"></span>
+	  <select id="lang" class="hd" onchange="setLang(this.value)">
+    <option value="zh-CN">中文</option><option value="en">English</option>
+  </select>
+  <select id="theme" class="hd" onchange="setTheme(this.value)" data-i18n-title="theme_tip">
+    <option value="system" data-i18n="theme.sys">-</option><option value="light" data-i18n="theme.light">-</option><option value="dark" data-i18n="theme.dark">-</option>
+  </select>
+  <select id="refresh" class="hd" onchange="setRefresh(this.value)" data-i18n-title="refresh_tip">
+    <option value="2000">2s</option><option value="5000">5s</option><option value="10000">10s</option>
+  </select>
+</h1>
+<div class="grid">
+  <div class="card"><div class="sub" data-i18n="kpi.active">-</div><div class="kpi" id="active-clients">0</div><div class="sub" id="conns-sub">-</div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.tx">-</div><div class="kpi" id="total-tx">0 B</div><div class="sub" id="total-tx-speed" class="speed">-</div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.rx">-</div><div class="kpi" id="total-rx">0 B</div><div class="sub" id="total-rx-speed" class="speed">-</div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.uptime">-</div><div class="kpi" id="uptime">-</div><div class="sub"><span data-i18n="kpi.version">-</span> <span id="ver">-</span> · <a href="#" onclick="doAction('gc');return false;" style="color:var(--blue)" data-i18n="kpi.gc">-</a></div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.fec">-</div><div class="kpi" id="fec-kpi">-</div><div class="sub"><span data-i18n="kpi.parity">-</span> <span id="parity">-</span> · <span data-i18n="kpi.dropped">-</span> <span id="dropped">-</span> · <span data-i18n="kpi.reorder">-</span> <span id="reorder-skipped">-</span></div></div>
+  <div class="card"><div class="sub" data-i18n="kpi.mem">-</div><div class="kpi" id="mem">-</div><div class="sub"><span data-i18n="kpi.goroutines">-</span> <span id="goroutines">-</span></div></div>
+  <div class="card" id="ippool-card" style="display:none"><div class="sub" data-i18n="kpi.pool">-</div><div class="kpi" id="ippool-kpi">-</div><div class="sub"><span data-i18n="kpi.v6used">-</span> <span id="v6used">-</span></div></div>
+</div>
+<div class="card wide"><h2 data-i18n="chart.title">-</h2>
+  <canvas id="chart" width="1160" height="170"></canvas>
+  <div class="legend"><span><i class="dot" style="background:var(--teal)"></i><span data-i18n="legend.up">-</span></span><span><i class="dot" style="background:var(--accent)"></i><span data-i18n="legend.down">-</span></span></div></div>
+
+<div class="card wide">
+  <div class="tabs">
+    <button class="on" data-pane="clients" onclick="showPane(this)" data-i18n="tab.clients">-</button>
+    <button data-pane="conns" onclick="showPane(this)" data-i18n="tab.conns">-</button>
+    <button data-pane="macs" onclick="showPane(this)" data-i18n="tab.macs">-</button>
+	    <button data-pane="bans" onclick="showPane(this)" data-i18n="tab.bans">-</button>
+    <button data-pane="status" onclick="showPane(this)" data-i18n="tab.status">-</button>
+    <button data-pane="logs" onclick="showPane(this)" data-i18n="tab.logs">-</button>
+    <button data-pane="settings" onclick="showPane(this)" data-i18n="tab.settings">-</button>
+  </div>
+
+  <div class="pane on" id="pane-clients">
+    <div class="logbar"><input id="client-filter" data-i18n-ph="filter_ph" oninput="fetchStats()" style="width:220px"></div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th data-i18n="th.id">-</th><th data-i18n="th.v4">-</th><th class="hide-sm" data-i18n="th.v6">-</th><th class="hide-sm" data-i18n="th.mac">-</th><th data-i18n="th.tcp">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th data-i18n="th.txs">-</th><th data-i18n="th.rxs">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th data-i18n="th.ops">-</th></tr></thead>
+      <tbody id="clients-body"></tbody>
+    </table></div>
+  </div>
+
+  <div class="pane" id="pane-conns">
+    <div class="logbar"><input id="conn-filter" data-i18n-ph="filter_ph" oninput="fetchStats()" style="width:220px"></div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th data-i18n="th.owner">-</th><th data-i18n="th.target">-</th><th data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th data-i18n="th.rtt">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th class="hide-sm" data-i18n="th.retries">-</th>	<th class="hide-sm" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.epoch">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
+      <tbody id="conns-body"></tbody>
+    </table></div>
+  </div>
+
+  <div class="pane" id="pane-macs"><div style="overflow-x:auto"><table>
+    <thead><tr><th data-i18n="th.mac">-</th><th data-i18n="m.port">-</th><th data-i18n="m.seen">-</th></tr></thead>
+    <tbody id="macs-body"></tbody>
+  </table></div></div>
+
+  <div class="pane" id="pane-bans">
+    <div class="logbar"><input id="ban-id" data-i18n-ph="bans.id_ph"><input id="ban-min" data-i18n-ph="bans.min_ph" style="width:170px">
+    <button class="btn blue" onclick="addBan()" data-i18n="bans.add">-</button><button class="btn gray" onclick="fetchStats()" data-i18n="bans.refresh">-</button></div>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th data-i18n="th.id">-</th><th data-i18n="bans.left">-</th><th data-i18n="th.ops">-</th></tr></thead>
+      <tbody id="bans-body"></tbody>
+    </table></div>
+  </div>
+
+	  <div class="pane" id="pane-status">
+    <div id="status-restart" class="warnbar" style="display:none"></div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div class="card" style="margin-bottom:0">
+        <h2 style="font-size:1.05em;margin:0 0 6px" data-i18n="stt.brutal">-</h2>
+        <div style="overflow-x:auto"><table class="kv" id="st-brutal"></table></div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <h2 style="font-size:1.05em;margin:0 0 6px" data-i18n="stt.negt">-</h2>
+        <div style="overflow-x:auto"><table class="kv" id="st-neg"></table></div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <h2 style="font-size:1.05em;margin:0 0 6px" data-i18n="stt.host">-</h2>
+        <div style="overflow-x:auto"><table class="kv" id="st-sys"></table></div>
+      </div>
+      <div class="card" style="margin-bottom:0">
+        <h2 style="font-size:1.05em;margin:0 0 6px" data-i18n="stt.cfg">-</h2>
+        <div style="overflow-x:auto"><table class="kv" id="st-cfg"></table></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="pane" id="pane-logs">
+    <div id="logbox"></div>
+    <div class="logbar">
+      <label style="font-size:.85em;color:var(--sub)"><span data-i18n="logs.level">-</span>
+        <select id="loglevel" onchange="setLogLevel(this.value)">
+          <option value="debug">debug</option><option value="info">info</option>
+          <option value="warn">warn</option><option value="error">error</option>
+        </select>
+      </label>
+      <label style="font-size:.85em;color:var(--sub)"><input type="checkbox" id="autoscroll" checked> <span data-i18n="logs.autoscroll">-</span></label>
+      <button class="btn gray" onclick="clearLog()" data-i18n="logs.clear">-</button>
+      <button class="btn gray" onclick="downloadLog()" data-i18n="logs.download">-</button>
+    </div>
+  </div>
+
+  <div class="pane" id="pane-settings">
+    <div class="sub" style="margin-bottom:8px" data-i18n="set.hint">-</div>
+    <div class="logbar"><button class="btn blue" onclick="loadConfig()" data-i18n="set.load">-</button>
+      <button class="btn gray" onclick="saveConfig(false)" data-i18n="set.save">-</button>
+      <button class="btn" onclick="saveConfig(true)" data-i18n="set.apply">-</button>
+      <span id="cfg-status" style="font-size:.85em;color:var(--sub)"></span></div>
+    <div style="margin-top:10px"><textarea id="cfg-editor" spellcheck="false"
+      style="width:100%;height:340px;background:var(--logbg);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:10px;font:12px/1.5 Consolas,monospace"></textarea></div>
+  </div>
+</div>
+<footer><span id="footer-text"></span> · <span id="tls-flag"></span></footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

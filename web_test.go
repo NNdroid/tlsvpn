@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,5 +164,70 @@ func TestWebOnceWarnDedups(t *testing.T) {
 	}
 	if !mgr.onceWarn("listen|10.5.8.1:8000: err") {
 		t.Fatal("a different failing set must pass through")
+	}
+}
+
+// 面板静态资源（webui/ 经 go:embed 嵌入）：/、/app.js、/style.css 必须可访问
+// 且带 no-store（资产随二进制升级但 URL 不变）；目录列表与未知文件不得暴露。
+func TestWebUIServesEmbeddedAssets(t *testing.T) {
+	port := freePort(t)
+	base := fmt.Sprintf("127.0.0.1:%d", port)
+	startWebServer(base, nil, nil, "", "", "", &Config{Web: WebConfig{Addr: base}})
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	root := fmt.Sprintf("http://%s/", base)
+
+	// 监听由 mgr.Run 首轮建立，startWebServer 返回时未必已就绪
+	deadline := time.Now().Add(5 * time.Second)
+	var indexBody []byte
+	for {
+		resp, err := client.Get(root)
+		if err == nil {
+			indexBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dashboard not reachable on %s: %v", root, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !strings.Contains(string(indexBody), `<script src="app.js"></script>`) ||
+		!strings.Contains(string(indexBody), `style.css`) {
+		t.Fatal("index page must reference the external webui assets")
+	}
+
+	resp, err := client.Get(root + "app.js")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /app.js: status=%v err=%v", resp, err)
+	}
+	jsBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(jsBody), "const I18N={") {
+		t.Fatal("/app.js must serve the dashboard script")
+	}
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("/app.js Cache-Control = %q, want no-store", cc)
+	}
+
+	resp, err = client.Get(root + "style.css")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /style.css: status=%v err=%v", resp, err)
+	}
+	resp.Body.Close()
+
+	// 目录列表与未知路径不允许暴露
+	for _, path := range []string{"webui/", "nonexistent.js", "../web.go"} {
+		resp, err := client.Get(root + path)
+		if err != nil {
+			t.Fatalf("GET /%s: %v", path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET /%s must be 404, got %d", path, resp.StatusCode)
+		}
 	}
 }
