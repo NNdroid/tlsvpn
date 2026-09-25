@@ -5,7 +5,7 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
- filter_ph:'输入关键字过滤…',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
+ filter_ph:'输入关键字过滤…',filter_none:'无匹配结果',filter_clear:'清除过滤',filter_tip:'按 / 快速聚焦',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
  perm:'永久',confirm_kick:'确定要强制断开该客户端吗？',confirm_ban:'确定封禁该客户端吗？',need_id:'请输入 ClientID',
  st:{up:'up',connecting:'connecting',skip:'未生效'},
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
@@ -27,7 +27,7 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
- filter_ph:'Type to filter…',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
+ filter_ph:'Type to filter…',filter_none:'No matches',filter_clear:'Clear filter',filter_tip:'Press / to focus',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
  perm:'Permanent',confirm_kick:'Force-disconnect this client?',confirm_ban:'Ban this client?',need_id:'Please enter a ClientID',
  st:{up:'up',connecting:'connecting',skip:'Skipped'},
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
@@ -44,17 +44,20 @@ const I18N={
  set:{hint:'Edit the JSON config. Save: write back to the config file. Save & apply: write back and hot-apply runtime parameters (listed fields require a restart).',
    load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}}};
 	let LANG=localStorage.getItem('tlsvpn_lang')||((navigator.language||'zh-CN').toLowerCase().startsWith('zh')?'zh-CN':'en');
-	function t(path){const dig=d=>{let o=d;for(const k of path.split('.'))o=o?o[k]:undefined;return o;};
+function t(path){const dig=d=>{let o=d;for(const k of path.split('.'))o=o?o[k]:undefined;return o;};
   const cur=dig(I18N[LANG]);if(cur!==undefined)return cur;
   const en=dig(I18N['en']);if(en!==undefined)return en;return path;}
+function setSeg(id,val){
+  const seg=document.getElementById(id);if(!seg)return;
+  seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===val));
+}
 function applyI18n(){
   document.documentElement.lang=LANG;
   document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(el=>el.placeholder=t(el.dataset.i18nPh));
-	  document.getElementById('lang').value=LANG;
-  document.getElementById('refresh').value=String(REFRESH);
-  const th=document.getElementById('theme');
-  if(th)th.value=THEME;
+  document.querySelectorAll('[data-i18n-title]').forEach(el=>el.title=t(el.dataset.i18nTitle));
+  setSeg('lang-seg',LANG);
+  setSeg('refresh-seg',String(REFRESH_S));
   applyTheme();
 }
 function setLang(v){localStorage.setItem('tlsvpn_lang',v);location.reload();}
@@ -76,28 +79,62 @@ function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'<
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
 function shortId(id,n){return id.length>n?id.slice(0,n)+'…':id;}
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\x22/g,'&quot;').replace(/\x27/g,'&#39;');}
-function showPane(btn){document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));
+// hi 在已转义的文本上高亮首个命中（查询词为小写）；无命中原样返回
+function hi(s,q){
+  if(!q)return s;
+  const i=s.toLowerCase().indexOf(q);
+  return i<0?s:s.slice(0,i)+'<mark>'+s.slice(i,i+q.length)+'</mark>'+s.slice(i+q.length);
+}
+function showPane(id){
+  document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.pane===id));
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
-  btn.classList.add('on');document.getElementById('pane-'+btn.dataset.pane).classList.add('on');
-  if(btn.dataset.pane==='logs')startLogPoll();else stopLogPoll();
-  if(btn.dataset.pane==='settings')loadConfig();}
+  document.getElementById('pane-'+id).classList.add('on');
+  if(id==='logs')startLogPoll();else stopLogPoll();
+  if(id==='settings')loadConfig();
+}
+document.getElementById('tabs').addEventListener('click',function(ev){
+  const btn=ev.target.closest('button');if(!btn)return;
+  showPane(btn.dataset.pane);
+});
 
 function drawChart(){
-	  const c=document.getElementById('chart'),ctx=c.getContext('2d'),W=c.width,H=c.height;
-  ctx.clearRect(0,0,W,H);ctx.strokeStyle=cssv('--grid');
-  for(let i=1;i<4;i++){ctx.beginPath();ctx.moveTo(0,H*i/4);ctx.lineTo(W,H*i/4);ctx.stroke();}
+  const c=document.getElementById('chart'),ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const W=c.clientWidth||1100,H=c.clientHeight||216;
+  if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
+  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
   if(txHist.length<2)return;
   const max=Math.max(...txHist,...rxHist,1);
-  const plot=(h,col)=>{ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();
-    h.forEach((v,i)=>{const x=i/(MAXPTS-1)*W,y=H-6-(v/max)*(H-20);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();};
-	  plot(txHist,cssv('--teal'));plot(rxHist,cssv('--accent'));
-  ctx.fillStyle=cssv('--muted');ctx.font='11px sans-serif';ctx.fillText(fmtBytes(max),4,12);
+  const series=(h,col)=>{
+    const pts=h.map((v,i)=>({x:i/(MAXPTS-1)*W,y:H-10-(v/max)*(H-30)}));
+    const grad=ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0,col+'3d');grad.addColorStop(1,col+'00');
+    ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+    for(let i=1;i<pts.length-1;i++){const xc=(pts[i].x+pts[i+1].x)/2,yc=(pts[i].y+pts[i+1].y)/2;ctx.quadraticCurveTo(pts[i].x,pts[i].y,xc,yc);}
+    ctx.lineTo(pts[pts.length-1].x,pts[pts.length-1].y);
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+    ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  };
+  series(rxHist,cssv('--down'));
+  series(txHist,cssv('--up'));
+  ctx.fillStyle=cssv('--sub');ctx.font='11px sans-serif';
+  ctx.fillText(fmtBytes(max,true),6,14);
 }
 
-let REFRESH=parseInt(localStorage.getItem('tlsvpn_refresh')||'2000',10);
+// 刷新间隔以秒存储（兼容旧版存毫秒的值）；面板顶栏为分段按钮
+let REFRESH_S=parseInt(localStorage.getItem('tlsvpn_refresh')||'2',10);
+if(REFRESH_S!==2&&REFRESH_S!==5&&REFRESH_S!==10){
+  const ms=REFRESH_S;
+  REFRESH_S=(ms===2000||ms===5000||ms===10000)?ms/1000:2;
+}
+let REFRESH=REFRESH_S*1000;
 let statsTimer=null;
-function setRefresh(v){REFRESH=parseInt(v,10);localStorage.setItem('tlsvpn_refresh',v);
-  document.getElementById('footer-text').textContent=t('footer').replace('{n}',REFRESH/1000);
+function setRefresh(sec){REFRESH_S=sec;REFRESH=sec*1000;localStorage.setItem('tlsvpn_refresh',String(sec));
+  setSeg('refresh-seg',String(sec));
+  document.getElementById('footer-text').textContent=t('footer').replace('{n}',sec);
   restartLoop();}
 function restartLoop(){if(statsTimer)clearInterval(statsTimer);statsTimer=setInterval(fetchStats,REFRESH);}
 
@@ -116,38 +153,82 @@ async function api(path,opts){opts=opts||{};opts.headers=Object.assign({'X-Reque
 
 function passFilter(obj,f){return !f||JSON.stringify(obj).toLowerCase().includes(f);}
 
+const NO_TXT={clients:'no_clients',conns:'no_conns',macs:'no_macs',bans:'no_bans'};
+function emptyRow(key,cols,total){
+  if(!total)return '<tr><td class="empty" colspan="'+cols+'">'+t(NO_TXT[key])+'</td></tr>';
+  return '<tr><td class="empty" colspan="'+cols+'">'+t('filter_none')+
+    ' <button class="btn ghost sm" onclick="clearFilter(\''+key+'\')">'+t('filter_clear')+'</button></td></tr>';
+}
+function setCount(id,f,shown,total){
+  const el=document.getElementById(id);if(!el)return;
+  el.textContent=f?(shown+' / '+total):'';
+}
+// 过滤框：纯本地过滤——基于最近一次 /api/stats 的缓存重渲染表格，不打 API；
+// 140ms 防抖，×/Esc 一键清空，命中片段 <mark> 高亮，计数徽章显示 命中/总数。
+const Q={clients:'',conns:'',macs:''};
+function attachSearch(key){
+  const box=document.getElementById('search-'+key);if(!box)return;
+  const input=box.querySelector('.search-input');
+  const clear=box.querySelector('.search-clear');
+  let timer=null;
+  input.addEventListener('input',function(){
+    clear.classList.toggle('show',!!input.value);
+    clearTimeout(timer);
+    timer=setTimeout(function(){Q[key]=input.value.trim().toLowerCase();rerenderTables();},140);
+  });
+  clear.addEventListener('click',function(){input.value='';Q[key]='';clear.classList.remove('show');rerenderTables();input.focus();});
+  input.addEventListener('keydown',function(e){if(e.key==='Escape')clear.click();});
+}
+function clearFilter(key){
+  const box=document.getElementById('search-'+key);if(!box)return;
+  box.querySelector('.search-input').value='';
+  box.querySelector('.search-clear').classList.remove('show');
+  Q[key]='';
+  rerenderTables();
+}
+// "/" 聚焦当前页签的过滤框（输入控件已聚焦时不拦截）
+document.addEventListener('keydown',function(e){
+  if(e.key!=='/')return;
+  const tag=(document.activeElement&&document.activeElement.tagName)||'';
+  if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+  const pane=document.querySelector('.pane.on');if(!pane)return;
+  const key=pane.id.replace('pane-','');
+  if(key!=='clients'&&key!=='conns'&&key!=='macs')return;
+  const box=document.getElementById('search-'+key);
+  if(box){box.querySelector('.search-input').focus();e.preventDefault();}
+});
+
+let lastStats=null,lastSpeeds={};
 async function fetchStats(){
   try{
     const res=await fetch(url('/api/stats'),AUTH_HDR);
     if(res.status===401){document.body.innerHTML='<div class="card"><h2>401</h2><p>'+t('logs.level')+': -web-auth user:pass</p></div>';return;}
     const data=await res.json();
+    lastStats=data;
     const now=performance.now();const dt=lastT?(now-lastT)/1000:2;lastT=now;
 
     document.getElementById('mode').innerText=data.mode.toUpperCase();
+    const chip=document.getElementById('mode-chip');
+    if(chip)chip.classList.toggle('client',data.mode!=='server');
     document.getElementById('ver').innerText=data.version||'-';
     document.getElementById('uptime').innerText=fmtDur(data.uptime_sec||0);
     document.getElementById('loglevel').value=data.log_level||'info';
     document.getElementById('tls-flag').innerText=location.protocol==='https:'?'HTTPS':t('tls_http');
 
-    const cf=(document.getElementById('client-filter').value||'').toLowerCase();
-    let tbody='',tTx=0,tRx=0,tTxS=0,tRxS=0,cur={},tConns=0;
+    // 速率/总量统计覆盖全部客户端；过滤只作用于表格行
+    const speeds={};let tTx=0,tRx=0,tTxS=0,tRxS=0,cur={},tConns=0;
     const proc=(id,c)=>{
       tTx+=c.tx_bytes;tRx+=c.rx_bytes;tConns+=c.active_conns||0;
       let sx=0,sr=0;
       if(prev[id]){sx=Math.max(0,(c.tx_bytes-prev[id].tx_bytes)/dt);sr=Math.max(0,(c.rx_bytes-prev[id].rx_bytes)/dt);}
-      cur[id]={tx_bytes:c.tx_bytes,rx_bytes:c.rx_bytes};tTxS+=sx;tRxS+=sr;
-      tbody+='<tr><td title="'+esc(id)+'">'+esc(shortId(id,10))+'</td><td>'+esc(c.ipv4||'-')+'</td>'+
-        '<td class="hide-sm">'+esc(c.ipv6||'-')+'</td>'+
-        '<td class="hide-sm">'+esc(c.mac||'-')+'</td><td>'+c.active_conns+'</td>'+
-        '<td>'+fmtBytes(c.tx_bytes)+'</td><td>'+fmtBytes(c.rx_bytes)+'</td>'+
-        '<td class="speed">'+fmtBytes(sx,true)+'</td><td class="speed">'+fmtBytes(sr,true)+'</td>'+
-        '<td class="hide-sm">'+badge(c.fec)+'</td><td class="hide-sm">'+encBadge(c.enc_algo)+'</td>'+
-        '<td>'+(data.mode==='server'?'<button class="btn" onclick="kickClient(\''+id+'\')">'+t('th.kick')+'</button>'+
-          '<button class="btn blue" onclick="banClient(\''+id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
+      cur[id]={tx_bytes:c.tx_bytes,rx_bytes:c.rx_bytes};
+      speeds[id]={sx:sx,sr:sr};
+      tTxS+=sx;tRxS+=sr;
     };
-    if(data.mode==='server'){for(const [id,c] of Object.entries(data.clients||{}))if(passFilter(Object.assign({id:id},c),cf))proc(id,c);}
+    if(data.mode==='server'){for(const [id,c] of Object.entries(data.clients||{}))proc(id,c);}
     else if(data.clients&&data.clients.local)proc('local',data.clients.local);
-    prev=cur;txHist.push(tTxS);rxHist.push(tRxS);
+    prev=cur;lastSpeeds=speeds;
+    txHist.push(tTxS);rxHist.push(tRxS);
     if(txHist.length>MAXPTS){txHist.shift();rxHist.shift();}
     drawChart();
 
@@ -157,7 +238,9 @@ async function fetchStats(){
     document.getElementById('total-rx').innerText=fmtBytes(tRx);
     document.getElementById('total-tx-speed').innerText=fmtBytes(tTxS,true);
     document.getElementById('total-rx-speed').innerText=fmtBytes(tRxS,true);
-    document.getElementById('clients-body').innerHTML=tbody||'<tr><td colspan="12" style="color:var(--muted)">'+t('no_clients')+'</td></tr>';
+    document.getElementById('live-up').innerText=fmtBytes(tTxS,true);
+    document.getElementById('live-down').innerText=fmtBytes(tRxS,true);
+    renderClientsTable(data);
 
     const f=data.fec||{};
     document.getElementById('fec-kpi').innerHTML=(f.recovered||0)+' <small>/</small> '+(f.lost||0);
@@ -177,20 +260,52 @@ async function fetchStats(){
     if(data.fec_mode&&data.fec_mode!=='off')meta.push('FEC '+data.fec_mode);
     document.getElementById('meta').innerText=meta.join(' · ');
 
-	    renderConns(data);renderMacs(data);renderBans(data);renderStatus(data);
+	renderConnsTable(data);renderMacsTable(data);renderBansTable(data);renderStatus(data);
   }catch(e){console.error('stats fetch failed',e);}
 }
 
-	// ---------- "运行状态" 页：宿主/协商/brutal/配置 四块明细 ----------
+// 过滤输入时不重新拉取：对最近一次快照重渲染各表格
+function rerenderTables(){
+  if(!lastStats)return;
+  renderClientsTable(lastStats);
+  renderConnsTable(lastStats);
+  renderMacsTable(lastStats);
+  renderBansTable(lastStats);
+}
+
+function renderClientsTable(data){
+  const f=Q.clients;
+  const entries=data.mode==='server'?Object.entries(data.clients||{}):(data.clients&&data.clients.local?[['local',data.clients.local]]:[]);
+  let rows='',shown=0;
+  for(const [id,c] of entries){
+    if(!passFilter(Object.assign({id:id},c),f))continue;
+    shown++;
+    const sp=lastSpeeds[id]||{sx:0,sr:0};
+    rows+='<tr><td class="num dim" title="'+esc(id)+'">'+hi(esc(shortId(id,10)),f)+'</td>'+
+      '<td class="num">'+hi(esc(c.ipv4||'-'),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(c.ipv6||'-'),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(c.mac||'-'),f)+'</td>'+
+      '<td class="num">'+c.active_conns+'</td>'+
+      '<td class="num">'+fmtBytes(c.tx_bytes)+'</td><td class="num">'+fmtBytes(c.rx_bytes)+'</td>'+
+      '<td class="num speed">'+fmtBytes(sp.sx,true)+'</td><td class="num speed dn">'+fmtBytes(sp.sr,true)+'</td>'+
+      '<td class="hide-sm">'+badge(c.fec)+'</td><td class="hide-sm">'+encBadge(c.enc_algo)+'</td>'+
+      '<td>'+(data.mode==='server'?'<button class="btn danger sm" onclick="kickClient(\''+id+'\')">'+t('th.kick')+'</button>'+
+        '<button class="btn ghost sm" onclick="banClient(\''+id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
+  }
+  document.getElementById('clients-body').innerHTML=rows||emptyRow('clients',12,entries.length);
+  setCount('client-count',f,shown,entries.length);
+}
+
+// ---------- "运行状态" 页：宿主/协商/brutal/配置 四块明细 ----------
 // 空值不占行：面板上留一堆空行只会让人误以为字段缺失是故障
 function kv(el,rows){
   el.innerHTML=rows.length?rows.map(r=>'<tr><th>'+esc(r[0])+'</th><td>'+r[1]+'</td></tr>').join(''):'';
 }
 function yn(v){return v?'<span class="badge b-on">'+t('stt.yes')+'</span>':'<span class="badge b-off">'+t('stt.no')+'</span>';}
 function mtxt(v){return '<span class="mono">'+esc(v)+'</span>';}
-function ntxt(){return '<span style="color:var(--muted)">-</span>';}
+function ntxt(){return '<span style="color:var(--sub)">-</span>';}
 function encName(a){return a===2?'AES-256-GCM':(a===4?'AES-128-GCM':(a===0?'none (TLS only)':String(a)));}
-function rateRange(lo,hi){if(!lo&&!hi)return '-';return (lo===hi?String(lo):lo+'~'+hi)+' Mbps';}
+function rateRange(lo,hi2){if(!lo&&!hi2)return '-';return (lo===hi2?String(lo):lo+'~'+hi2)+' Mbps';}
 function renderStatus(data){
   const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{};
   const rw=document.getElementById('status-restart');
@@ -259,7 +374,7 @@ function renderStatus(data){
   }));
 }
 
-function renderConns(data){
+function renderConnsTable(data){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
@@ -267,8 +382,10 @@ function renderConns(data){
   }else{
     (data.conns||[]).forEach(c=>rows.push({owner:'local',fullId:null,target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:data.session_epoch||0,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
   }
-  const f=(document.getElementById('conn-filter').value||'').toLowerCase();
+  const f=Q.conns;
+  const all=rows.length;
   if(f)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(f));
+  const total=rows.length;
   tb.innerHTML=rows.map(r=>{
     const st=r.state==='up'?'<span class="badge b-on">'+t('st.up')+'</span>':
       r.state==='connecting'?'<span class="badge b-dup">'+t('st.connecting')+'</span>':
@@ -280,31 +397,42 @@ function renderConns(data){
     if(r.brutErr){brutTxt=t('st.skip');brutCls='b-dup';brutTip='brutal skipped: '+r.brutErr;}
     else if(r.brut===true){brutTxt=r.up+'↑/'+r.down+'↓';brutCls='b-on';brutTip='brutal shaping '+r.up+' Mbps upstream / '+r.down+' Mbps downstream';}
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
-    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
-    return '<tr><td>'+esc(r.owner)+'</td><td>'+esc(r.target||'-')+'</td><td>'+esc(r.remote||'-')+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
-      '<td>'+rtt+'</td><td>'+fmtBytes(r.tx)+'</td><td>'+fmtBytes(r.rx)+'</td>'+
-      '<td class="hide-sm">'+(r.retries===''?'-':r.retries)+'</td><td class="hide-sm">'+(r.age?fmtDur(r.age):'-')+'</td>'+
-      '<td class="hide-sm" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
+    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn danger sm" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
+    return '<tr><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+      '<td class="num">'+rtt+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
+      '<td class="hide-sm num">'+(r.retries===''?'-':r.retries)+'</td><td class="hide-sm num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
+      '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm" style="color:var(--err)" title="'+esc(r.err||r.brutErr)+'">'+esc(String(r.err||r.brutErr).slice(0,40))+'</td><td>'+ops+'</td></tr>';
-  }).join('')||'<tr><td colspan="15" style="color:var(--muted)">'+t('no_conns')+'</td></tr>';
+  }).join('')||emptyRow('conns',15,all);
+  setCount('conn-count',f,rows.length,all);
 }
-function renderMacs(data){
+function renderMacsTable(data){
   const tb=document.getElementById('macs-body');
-  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" style="color:var(--muted)">'+t('srv_only')+'</td></tr>';return;}
+  if(data.mode!=='server'){
+    tb.innerHTML='<tr><td colspan="3" class="empty">'+t('srv_only')+'</td></tr>';
+    setCount('mac-count','',0,0);return;
+  }
+  const f=Q.macs;
   const list=data.mac_table||[];
-  tb.innerHTML=list.map(e=>'<tr><td>'+esc(e.mac)+'</td><td>'+esc(e.port)+'</td><td>'+e.age_sec+'s</td></tr>').join('')||
-    '<tr><td colspan="3" style="color:var(--muted)">'+t('no_macs')+'</td></tr>';
+  let rows='',shown=0;
+  list.forEach(e=>{
+    if(!passFilter(e,f))return;
+    shown++;
+    rows+='<tr><td class="num">'+hi(esc(e.mac),f)+'</td><td class="num dim">'+hi(esc(e.port),f)+'</td><td class="num dim">'+e.age_sec+'s</td></tr>';
+  });
+  tb.innerHTML=rows||emptyRow('macs',3,list.length);
+  setCount('mac-count',f,shown,list.length);
 }
-function renderBans(data){
+function renderBansTable(data){
   const tb=document.getElementById('bans-body');
-  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" style="color:var(--muted)">'+t('srv_only')+'</td></tr>';return;}
+  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" class="empty">'+t('srv_only')+'</td></tr>';return;}
   const bans=data.banned||{};
-  tb.innerHTML=Object.entries(bans).map(([id,left])=>'<tr><td title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
-    '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':fmtDur(left))+'</td>'+
-    '<td><button class="btn gray" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>').join('')||
-    '<tr><td colspan="3" style="color:var(--muted)">'+t('no_bans')+'</td></tr>';
+  tb.innerHTML=Object.entries(bans).map(([id,left])=>'<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
+    '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
+    '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>').join('')||
+    '<tr><td colspan="3" class="empty">'+t('no_bans')+'</td></tr>';
 }
 
 async function kickClient(id){if(!confirm(t('confirm_kick')))return;
@@ -358,7 +486,7 @@ async function pollLogs(){
     const lines=await res.json();
     if(!lines.length)return;
     const box=document.getElementById('logbox');
-    box.innerHTML+=lines.map(l=>'<div class="lv-'+l.level+'">['+l.time+'] '+l.level+' '+esc(l.msg)+'</div>').join('');
+    box.innerHTML+=lines.map(l=>'<div class="ln lv-'+l.level+'"><span class="ts">['+l.time+']</span><span class="lv">'+l.level+'</span><span class="msg">'+esc(l.msg)+'</span></div>').join('');
     logSeq=lines[lines.length-1].seq;
     if(document.getElementById('autoscroll').checked)box.scrollTop=box.scrollHeight;
   }catch(e){}
@@ -375,12 +503,13 @@ function cssv(n){return getComputedStyle(document.documentElement).getPropertyVa
 function isDark(){return THEME==='dark'||(THEME==='system'&&matchMedia('prefers-color-scheme: dark').matches);}
 function applyTheme(){
   document.documentElement.dataset.theme=isDark()?'dark':'light';
-  const el=document.getElementById('theme');
-  if(el)el.value=THEME;
+  setSeg('theme-seg',THEME);
 }
 function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();
   if(txHist.length||rxHist.length)drawChart();}
 matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();if(txHist.length||rxHist.length)drawChart();}});
 
+['clients','conns','macs'].forEach(attachSearch);
 let prev={},lastT=0;const txHist=[],rxHist=[];const MAXPTS=60;
-applyI18n();setRefresh(String(REFRESH));fetchStats();
+applyI18n();setRefresh(REFRESH_S);fetchStats();
+window.addEventListener('resize',drawChart);
