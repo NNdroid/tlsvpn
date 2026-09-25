@@ -45,6 +45,7 @@ type AsyncPort struct {
 	paritySent    atomic.Uint64
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
+	dataNext      uint32   // run goroutine 独占：高负载时在相近 RTT 后端间轮转
 }
 
 type portEpochReset struct {
@@ -205,6 +206,7 @@ func (p *AsyncPort) run() {
 		case reset := <-p.resetEpoch:
 			p.txSeq = 0
 			p.parityNext = 0
+			p.dataNext = 0
 			p.exhausted.Store(false)
 			if reset.k >= fecMinGroup {
 				p.encoder = newFECEncoder(reset.k, reset.ic)
@@ -283,8 +285,9 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 				parities = append(parities, par)
 			}
 		}
-		best := p.pickBackend(backends)
-		// 数据 batch 优先走 MinRTT，若该连接瞬时满则尝试其它后端；全部满时
+		best := p.pickDataBackend(backends)
+		// 低负载仍走 MinRTT；持续 backlog 时会在 RTT 接近的健康路径间主动 striping。
+		// 若目标连接瞬时满则继续尝试其它后端；全部满时
 		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
 		p.dropN(sendBatchToAny(backends, best, batch))
 		for _, par := range parities {
@@ -306,7 +309,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		return
 	}
 
-	p.dropN(sendBatchToAny(backends, p.pickBackend(backends), batch))
+	p.dropN(sendBatchToAny(backends, p.pickDataBackend(backends), batch))
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -369,6 +372,36 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	}
 	p.preferred.Store(bestBackend)
 	return bestBackend
+}
+
+
+const multipathStripeBacklog = 64
+
+// pickDataBackend 保留低负载 MinRTT 行为；只有 AsyncPort 输入出现持续 backlog 时，
+// 才在 RTT 接近最佳路径的健康后端中轮转。这样 bulk 流量可以真正并行使用多条
+// TCP 连接，而交互式小流量仍保持最低延迟并避免不必要的跨流乱序。
+func (p *AsyncPort) pickDataBackend(backends []*Backend) *Backend {
+	best := p.pickBackend(backends)
+	if len(backends) < 2 || len(p.ch) < multipathStripeBacklog || best == nil {
+		return best
+	}
+
+	bestRTT := atomic.LoadUint32(best.rttCache)
+	slack := max(uint32(backendRTTHysteresisMin), bestRTT/4)
+	maxRTT := uint64(bestRTT) + uint64(slack)
+
+	start := int(p.dataNext % uint32(len(backends)))
+	p.dataNext++
+	for i := 0; i < len(backends); i++ {
+		b := backends[(start+i)%len(backends)]
+		if _, ok := backendScore(b); !ok {
+			continue
+		}
+		if uint64(atomic.LoadUint32(b.rttCache)) <= maxRTT {
+			return b
+		}
+	}
+	return best
 }
 
 
