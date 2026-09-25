@@ -189,34 +189,43 @@ stop_server() {
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
-  local log socks="" psk
+  local log socks="" psk web_port web_auth stats
   log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
   if [[ "${1:-}" == "-socks5" || "${1:-}" == "--socks5" ]]; then
     socks="\"${2:-}\""; shift 2
   fi
   local cfg="$TEST_DIR/cli_$(basename "$bin")_$port.json"
   psk="$(e2e_psk)" || return 1
+  web_port=$((port + 2000))
+  web_auth="e2e:$psk"
   write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' psk="\"$psk\"" \
-    socks5="$socks" "$@"
+    socks5="$socks" web.addr="\"127.0.0.1:$web_port\"" web.auth="\"$web_auth\"" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
-  local ok=0
+  local ready=0
   for i in $(seq 1 30); do
-    kill -0 "$pid" 2>/dev/null || { ok=0; break; }
-    # Both implementations emit this only after HandshakeResp has been parsed,
-    # the negotiated cipher/salts/FEC have been accepted, and the new session
-    # state has been installed. Startup/ClientID log lines are not sufficient:
-    # they occur before the application handshake and previously caused false
-    # green cross-language tests.
-    if grep -q "server reset the session" "$log"; then ok=1; break; fi
+    kill -0 "$pid" 2>/dev/null || { ready=0; break; }
+    # Query runtime state instead of grepping startup logs. Both implementations
+    # publish clients.local.active_conns only after the application handshake,
+    # negotiated cipher/FEC validation and backend registration have completed.
+    stats="$(curl -fsS --max-time 1 -u "$web_auth" "http://127.0.0.1:$web_port/api/stats" 2>/dev/null || true)"
+    if printf '%s' "$stats" | grep -Eq '"active_conns"[[:space:]]*:[[:space:]]*[1-9][0-9]*'; then
+      ready=1
+      break
+    fi
     sleep 1
   done
-  if [[ "$ok" -eq 1 ]]; then
+  if [[ "$ready" -eq 1 ]]; then
     ok "client tunnel up: $bin -> $addr (pid $pid)"
     return 0
   fi
-  err "client FAILED: $bin -> $addr"; tail -n 30 "$log" >&2; kill "$pid" 2>/dev/null; rm -f "$TEST_DIR/cli_$port.pid"; return 1
+  err "client FAILED: $bin -> $addr"
+  [[ -n "${stats:-}" ]] && echo "----- last /api/stats -----" >&2 && printf '%s\n' "$stats" >&2
+  tail -n 30 "$log" >&2
+  kill "$pid" 2>/dev/null || true
+  rm -f "$TEST_DIR/cli_$port.pid"
+  return 1
 }
 
 stop_client() {
