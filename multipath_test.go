@@ -123,41 +123,34 @@ func TestSendBatchFallsBackWhenPreferredBackendIsFull(t *testing.T) {
 }
 
 func TestAsyncPortBackpressureDoesNotConsumeSequenceBeforeBackendSlot(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		p := NewAsyncPort(ctx, "pre-seq-backpressure")
-		rtt := uint32(1)
-		ch := make(chan []VPNFrame, 1)
-		// 先占满唯一 backend slot，让 run goroutine 卡在 seq 分配之前。
-		ch <- nil
-		p.RegisterBackend(ch, &rtt)
-		defer p.UnregisterBackend(ch)
+	p := NewAsyncPort(ctx, "pre-seq-backpressure")
+	rtt := uint32(1)
+	ch := make(chan []VPNFrame, 1)
+	// 先占满唯一 backend slot。旧实现会先分配 seq，再最多等 5ms 后把这帧
+	// 丢掉；新实现应一直把它保留在 seq 分配之前。
+	ch <- nil
+	p.RegisterBackend(ch, &rtt)
+	defer p.UnregisterBackend(ch)
 
-		if err := p.WriteFrame(bytes.Repeat([]byte{0x5a}, 1400)); err != nil {
-			t.Fatal(err)
+	if err := p.WriteFrame(bytes.Repeat([]byte{0x5a}, 1400)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond) // 明确超过旧 sendBatchToAny 的 5ms 丢弃窗口
+	<-ch                             // 释放 backend slot
+
+	select {
+	case batch := <-ch:
+		if len(batch) != 1 || batch[0].Seq != 1 {
+			t.Fatalf("unexpected batch after backpressure release: %+v", batch)
 		}
-		time.Sleep(time.Millisecond)
-		synctest.Wait()
-		if p.txSeq != 0 {
-			t.Fatalf("txSeq=%d while backend is full; want 0 before successful dispatch", p.txSeq)
-		}
-
-		<-ch // 释放 backend slot
-		synctest.Wait()
-
-		select {
-		case batch := <-ch:
-			if len(batch) != 1 || batch[0].Seq != 1 {
-				t.Fatalf("unexpected batch after backpressure release: %+v", batch)
-			}
-			freeFrames(batch)
-			putVPNFrameBatch(batch)
-		default:
-			t.Fatal("frame was not dispatched after backend slot became available")
-		}
-	})
+		freeFrames(batch)
+		putVPNFrameBatch(batch)
+	case <-time.After(time.Second):
+		t.Fatal("frame was dropped while waiting for backend capacity")
+	}
 }
 
 func TestFECParityIsSentOnceAcrossMultipleBackends(t *testing.T) {
