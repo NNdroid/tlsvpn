@@ -132,27 +132,39 @@ func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 		}
 	}
 }
-func (p *AsyncPort) WriteFrame(frame []byte) error {
+// WriteOwnedFrame 接管一个由 frame pool（或等价独占来源）提供的帧。
+//
+// 调用返回后，无论成功入队、背压丢弃还是端口已关闭，调用方都不得再访问 frame；
+// AsyncPort 会在最终发送/丢弃路径统一 putFrame。真实 TAP 可直接读进 pooled buffer
+// 后调用本函数，省掉 WriteFrame 的逐包 memcpy。
+func (p *AsyncPort) WriteOwnedFrame(frame []byte) error {
 	select {
 	case <-p.ctx.Done():
+		if frame != nil {
+			putFrame(frame)
+		}
 		return fmt.Errorf("port closed")
 	default:
 	}
+	select {
+	case p.ch <- frame:
+	default:
+		log.Debugf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
+		p.dropN(1)
+		if frame != nil {
+			putFrame(frame)
+		}
+	}
+	return nil
+}
+
+func (p *AsyncPort) WriteFrame(frame []byte) error {
 	var buf []byte
 	if frame != nil {
 		buf = getFrameAtLeast(len(frame))[:len(frame)]
 		copy(buf, frame)
 	}
-	select {
-	case p.ch <- buf:
-	default:
-		log.Debugf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
-		p.dropN(1)
-		if buf != nil {
-			putFrame(buf)
-		}
-	}
-	return nil
+	return p.WriteOwnedFrame(buf)
 }
 
 // waitForBackendSlot 在分配线路 seq 之前等待至少一个物理后端拥有 batch
@@ -1115,18 +1127,25 @@ func (c *Client) Run(ctx context.Context) {
 	}()
 
 	go func() {
-		// 读缓冲只分配一次；旧实现在循环体里每帧 make([]byte, 65536)
-		buf := make([]byte, 65536)
+		// TAP 的 MTU 不含 L2 头，预留 64B 覆盖 Ethernet/VLAN 等头部。
+		// 默认 1500 MTU 会落在 2KB 热帧池；jumbo 则自动取更大 size class。
+		readSize := 2048
+		if c.tapName != "mem" {
+			if link, err := netlink.LinkByName(c.tapName); err == nil && link.Attrs().MTU > 0 {
+				readSize = link.Attrs().MTU + 64
+			}
+		}
 		consecutiveErr := 0
 		for {
+			buf := getFrameAtLeast(readSize)
 			rn, err := c.tap.Read(buf)
 			if err != nil {
+				putFrame(buf)
 				if ctx.Err() != nil {
 					return
 				}
 				// TAP 设备被系统休眠/驱动重置/网络管理器重启后可能持续报错。
-				// 短暂错误退避重试；连续失败升级为 5s 间隔并告警，
-				// 让用户意识到接口可能需要手动重建（recreateTAP 未实现时）。
+				// 短暂错误退避重试；连续失败升级为 5s 间隔并告警。
 				consecutiveErr++
 				if consecutiveErr == 1 {
 					log.Warnf("TAP read error: %v (retrying; the interface may have been reset)", err)
@@ -1143,9 +1162,12 @@ func (c *Client) Run(ctx context.Context) {
 				continue
 			}
 			consecutiveErr = 0
-			// WriteFrame 内部会拷贝进独立的池缓冲，这里直接复用本地缓冲，
-			// 不再额外取池（旧实现取池后从未归还，造成每帧 32KB 泄漏）
-			c.txPort.WriteFrame(buf[:rn])
+			if rn <= 0 {
+				putFrame(buf)
+				continue
+			}
+			// 所有权直接交给 AsyncPort，不再做 temp-buffer -> pool 的逐帧 memcpy。
+			_ = c.txPort.WriteOwnedFrame(buf[:rn])
 		}
 	}()
 
