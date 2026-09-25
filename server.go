@@ -220,8 +220,20 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 		nowTick := vs.coarseSec.Load()
 		srcShard.mu.RLock()
 		entry, exists := srcShard.macTable[srcMAC]
-		needUpdate := !exists || entry.portID != srcPortID || nowTick-entry.updatedTick > 5
+		staticElsewhere := exists && entry.static && entry.portID != srcPortID
+		needUpdate := !exists || (!entry.static && (entry.portID != srcPortID || nowTick-entry.updatedTick > 5))
 		srcShard.mu.RUnlock()
+
+		// 已认证 session 的 MAC 映射不可被其它动态学习端口覆盖。
+		// legacy/no-MAC session 仍可学习自己的 MAC，但不能借此劫持已固定映射。
+		// 本机 TAP 是可信端口：允许它携带该源 MAC 继续转发，但不修改 static entry。
+		if staticElsewhere {
+			if srcPortID != vs.trustedPort {
+				vs.spoofDrops.Add(1)
+				return
+			}
+			needUpdate = false
+		}
 
 		if needUpdate {
 			if vs.validateMAC != nil && !vs.validateMAC(srcPortID, srcMAC) {
@@ -230,13 +242,23 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 			}
 			srcShard.mu.Lock()
 			if current := srcShard.macTable[srcMAC]; current != nil {
-				current.portID = srcPortID
-				current.updatedTick = nowTick
+				// 锁外检查到锁内之间可能新建了 static entry；再次保护，避免竞态覆盖。
+				if current.static && current.portID != srcPortID {
+					srcShard.mu.Unlock()
+					if srcPortID != vs.trustedPort {
+						vs.spoofDrops.Add(1)
+						return
+					}
+				} else {
+					current.portID = srcPortID
+					current.updatedTick = nowTick
+					srcShard.mu.Unlock()
+				}
 			} else {
 				srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
+				srcShard.mu.Unlock()
 			}
 			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
-			srcShard.mu.Unlock()
 		}
 	}
 
