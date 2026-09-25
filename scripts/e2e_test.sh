@@ -58,7 +58,7 @@ cfg_json() {
     lit="${kv#*=}"
     [ -n "$lit" ] && v["$k"]="$lit"
   done
-  for k in mode addr psk tap socks5 log_level encrypt enc_algo min_enc pad_mode \
+  for k in mode addr psk tap socks5 log_level insecure encrypt enc_algo min_enc pad_mode \
            brutal brutal_up brutal_down mac; do
     [ -n "${v[$k]:-}" ] || continue
     [ $first -eq 0 ] && out+=","
@@ -198,8 +198,11 @@ run_client() {
   psk="$(e2e_psk)" || return 1
   web_port=$((port + 2000))
   web_auth="e2e:$psk"
+  # E2E uses an ephemeral self-signed certificate. Certificate validation is not
+  # under test here; explicitly disable it so readiness measures the TLSVPN
+  # application handshake rather than local PKI/SNI setup.
   write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' psk="\"$psk\"" \
-    socks5="$socks" web.addr="\"127.0.0.1:$web_port\"" web.auth="\"$web_auth\"" "$@"
+    insecure=true socks5="$socks" web.addr="\"127.0.0.1:$web_port\"" web.auth="\"$web_auth\"" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"
