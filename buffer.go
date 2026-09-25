@@ -8,9 +8,12 @@ import (
 
 // ======================= 乱序重排缓冲区 (Reorder Buffer) =======================
 
-const ReorderWindowSize = 2048 // 必须是 2 的幂，方便位运算优化性能
-
-const reorderWindowMask = ReorderWindowSize - 1
+const (
+	// 初始窗口保持小内存；多 TCP 路径在高吞吐时可能出现数万帧路径偏斜，
+	// 再按需倍增到 65536。两者都必须是 2 的幂。
+	ReorderWindowSize    = 2048
+	ReorderMaxWindowSize = 65536
+)
 
 // 交付 channel 保持足够的短突发余量；满时直接丢 batch，而不是给每个
 // Insert 创建 time.Timer 再最多阻塞 5s。连接读循环绝不能被慢 TAP 反压住。
@@ -61,6 +64,8 @@ type ReorderBuffer struct {
 	mu          sync.Mutex
 	expectedSeq uint32
 	ring        [][]byte
+	seqSlots    []uint32
+	windowMask  uint32
 	buffered    int
 	pending     [][]byte // 锁内收集、出锁后交给交付协程的批次
 
@@ -88,7 +93,9 @@ type ReorderBuffer struct {
 // NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
 func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
 	rb := &ReorderBuffer{
-		ring:    make([][]byte, ReorderWindowSize),
+		ring:       make([][]byte, ReorderWindowSize),
+		seqSlots:   make([]uint32, ReorderWindowSize),
+		windowMask: ReorderWindowSize - 1,
 		outFunc: outFunc,
 		outChan: make(chan [][]byte, reorderOutQueue),
 		gapWake: make(chan struct{}, 1),
@@ -185,20 +192,29 @@ func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) bool {
 		return false
 	}
 
-	// 乱序窗口超出限制，防极端情况内存溢出
-	if diff >= ReorderWindowSize {
-		putFrame(frame)
-		return false
+	// 多路径高速场景可能出现远大于 2048 帧的合法路径偏斜。只在真实需要
+	// 时倍增窗口；最大 65536 防止异常序号造成无界内存增长。
+	if uint32(diff) >= uint32(len(rb.ring)) {
+		if uint32(diff) >= ReorderMaxWindowSize || !rb.growWindowLocked(uint32(diff)+1) {
+			putFrame(frame)
+			return false
+		}
 	}
 
-	// 去重：如果坑里已经有包了，说明是 FEC 冗余包
-	idx := seq & reorderWindowMask
+	// 去重：窗口内每个槽位同时记录真实 seq，动态扩容后也能安全重散列。
+	idx := seq & rb.windowMask
 	if rb.ring[idx] != nil {
+		if rb.seqSlots[idx] == seq {
+			putFrame(frame)
+			return false
+		}
+		// 正常窗口数学上不应发生不同 seq 冲突；保守丢弃避免覆盖在途帧。
 		putFrame(frame)
 		return false
 	}
 
 	rb.ring[idx] = frame
+	rb.seqSlots[idx] = seq
 	rb.buffered++
 
 	// 刚好匹配，批量按序输出
@@ -208,12 +224,48 @@ func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) bool {
 	return rb.refreshGapLocked(time.Now())
 }
 
+// growWindowLocked 把 ring 扩到足以容纳 requiredDistance 的 2 次幂。
+// 仅多路径偏斜真正超过当前窗口时触发，因此正常 2K 窗口没有额外热路径成本。
+func (rb *ReorderBuffer) growWindowLocked(requiredDistance uint32) bool {
+	oldSize := len(rb.ring)
+	if oldSize >= ReorderMaxWindowSize {
+		return false
+	}
+	newSize := oldSize
+	for uint32(newSize) <= requiredDistance && newSize < ReorderMaxWindowSize {
+		newSize <<= 1
+	}
+	if newSize > ReorderMaxWindowSize {
+		newSize = ReorderMaxWindowSize
+	}
+	if uint32(newSize) <= requiredDistance {
+		return false
+	}
+
+	newRing := make([][]byte, newSize)
+	newSeqs := make([]uint32, newSize)
+	newMask := uint32(newSize - 1)
+	for i, frame := range rb.ring {
+		if frame == nil {
+			continue
+		}
+		seq := rb.seqSlots[i]
+		idx := seq & newMask
+		newRing[idx] = frame
+		newSeqs[idx] = seq
+	}
+	rb.ring = newRing
+	rb.seqSlots = newSeqs
+	rb.windowMask = newMask
+	return true
+}
+
 // drainLocked 按序提取连续的包进 pending（调用方须持锁）
 func (rb *ReorderBuffer) drainLocked() bool {
 	hadGap := !rb.gapSince.IsZero()
 	rb.gapSince = time.Time{}
 	for {
-		idx := rb.expectedSeq & reorderWindowMask
+		idx := rb.expectedSeq & rb.windowMask
 		frame := rb.ring[idx]
 		if frame == nil {
 			break // 依然有缺口，等待
@@ -223,6 +275,7 @@ func (rb *ReorderBuffer) drainLocked() bool {
 		}
 		rb.pending = append(rb.pending, frame)
 		rb.ring[idx] = nil
+		rb.seqSlots[idx] = 0
 		rb.buffered--
 		rb.expectedSeq++
 	}
@@ -233,7 +286,7 @@ func (rb *ReorderBuffer) drainLocked() bool {
 // refreshGapLocked 只在缓冲区里确实存在未来帧时建立缺口计时。单纯空闲不算
 // 缺口，否则心跳间隔会污染超时状态。返回值表示应唤醒定时协程重算 deadline。
 func (rb *ReorderBuffer) refreshGapLocked(now time.Time) bool {
-	hasGap := rb.buffered > 0 && rb.expectedSeq != 0 && rb.ring[rb.expectedSeq&reorderWindowMask] == nil
+	hasGap := rb.buffered > 0 && rb.expectedSeq != 0 && rb.ring[rb.expectedSeq&rb.windowMask] == nil
 	if hasGap {
 		if rb.gapSince.IsZero() {
 			rb.gapSince = now
@@ -269,6 +322,7 @@ func (rb *ReorderBuffer) releaseRingLocked() {
 		if rb.ring[i] != nil {
 			putFrame(rb.ring[i])
 			rb.ring[i] = nil
+			rb.seqSlots[i] = 0
 		}
 	}
 	rb.buffered = 0
@@ -383,14 +437,14 @@ func (rb *ReorderBuffer) timeoutWorker() {
 
 		rb.mu.Lock()
 		if rb.gapSince.IsZero() || time.Now().Before(rb.gapSince.Add(reorderSkipDelay)) ||
-			rb.buffered == 0 || rb.expectedSeq == 0 || rb.ring[rb.expectedSeq&reorderWindowMask] != nil {
+			rb.buffered == 0 || rb.expectedSeq == 0 || rb.ring[rb.expectedSeq&rb.windowMask] != nil {
 			rb.mu.Unlock()
 			continue
 		}
 		// 预期的坑为空且已超时：确认丢包，往后找第一个有包的坑
 		skipped := uint32(0)
-		for i := uint32(1); i < ReorderWindowSize; i++ {
-			if rb.ring[(rb.expectedSeq+i)&reorderWindowMask] != nil {
+		for i := uint32(1); i < uint32(len(rb.ring)); i++ {
+			if rb.ring[(rb.expectedSeq+i)&rb.windowMask] != nil {
 				rb.expectedSeq += i
 				skipped = i
 				break
