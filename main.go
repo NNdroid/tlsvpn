@@ -152,6 +152,8 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
+	// 按日流量统计：恢复历史并启动采样协程（无配置文件来源时仅内存统计）
+	dailyTraffic.OnConfig(cfg)
 	// 填充策略全局生效（发送路径读取），支持面板热更
 	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
 		log.Warnf("Invalid pad_mode %q, using %s", cfg.PadMode, actual)

@@ -68,6 +68,8 @@ type WebStats struct {
 	// client 模式会话级密钥代际。服务端逐连接有 session_epoch，客户端只有一条
 	// 逻辑会话，故放在顶层；连接表按列展示它，代际漂移一眼可见。
 	SessionEpoch uint64 `json:"session_epoch,omitempty"`
+	// 按日流量统计（上行=client→server，下行=server→client，线路字节口径）
+	Traffic *trafficSnapshotJSON `json:"traffic,omitempty"`
 	// 面板"状态"页数据源：生效配置、运行时协商、宿主系统
 	Cfg       runtimeCfgJSON `json:"cfg"`
 	Negotiate runtimeNegJSON `json:"negotiate"`
@@ -388,6 +390,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 			if apply {
 				setRuntimeLogLevel(newCfg.LogLevel)
 				mgr.SetConfig(newCfg)
+				dailyTraffic.OnConfig(newCfg) // traffic_days/traffic_file 热更生效
 				if srv != nil {
 					srv.ApplyConfig(newCfg)
 				}
@@ -687,6 +690,9 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		}
 		stats.System = sysInfo(cfgPath, cli.PendingRestart())
 	}
+
+	ts := dailyTraffic.Snapshot()
+	stats.Traffic = &ts
 
 	json.NewEncoder(w).Encode(stats)
 }

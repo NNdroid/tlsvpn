@@ -1626,6 +1626,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				atomic.AddUint64(&session.TxPackets, uint64(txPackets))
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&ci.txPackets, uint64(txPackets))
+				dailyTraffic.Add(0, uint64(len(sendBuffer))) // 下行 = server→client
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
@@ -1656,6 +1657,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		atomic.AddUint64(&session.RxPackets, rxPacketsBatch)
 		atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
 		atomic.AddUint64(&ci.rxPackets, rxPacketsBatch)
+		dailyTraffic.Add(rxBytesBatch, 0) // 上行 = client→server
 		rxBytesBatch, rxPacketsBatch = 0, 0
 	}
 	defer flushRxStats()

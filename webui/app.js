@@ -1,7 +1,8 @@
 const I18N={
 'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',dropped:'丢帧(队列)',reorder:'重排跳过',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
  chart:{title:'吞吐趋势',win:'(近 120 秒)'},legend:{up:'上行',down:'下行'},
-	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',status:'运行状态',logs:'日志',settings:'设置'},
+	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',traffic:'流量',status:'运行状态',logs:'日志',settings:'设置'},
+ tr:{today_up:'今日上行',today_down:'今日下行',today_total:'今日合计',daily:'每日流量',up:'上行',down:'下行',total:'合计',date:'日期',caption:'近 {n} 天',empty:'暂无按日统计数据'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
@@ -11,7 +12,7 @@ const I18N={
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
 	tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',theme_tip:'主题（跟随系统）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'运行模式',encrypt:'内层加密',enc_algo:'内层算法',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
+ cfgk:{traffic_days:'流量统计保留天数',traffic_file:'流量统计文件',mode:'运行模式',encrypt:'内层加密',enc_algo:'内层算法',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
  stt:{title:'运行状态',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',
    restart:'以下字段已修改，需要重启进程才能生效：',norestart:'无字段需要重启生效',noneg:'尚未与对端完成握手',
    noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
@@ -23,7 +24,8 @@ const I18N={
    load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'}},
 'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',reorder:'Reorder skipped',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
  chart:{title:'Throughput',win:'(last 120s)'},legend:{up:'Up',down:'Down'},
-	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',status:'Runtime status',logs:'Logs',settings:'Settings'},
+	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',traffic:'Traffic',status:'Runtime status',logs:'Logs',settings:'Settings'},
+ tr:{today_up:'Up today',today_down:'Down today',today_total:'Total today',daily:'Daily traffic',up:'Up',down:'Down',total:'Total',date:'Date',caption:'Last {n} days',empty:'No daily traffic data yet'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
@@ -33,7 +35,7 @@ const I18N={
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
 	tls_http:'HTTP (HTTPS recommended)',mode_local:'local',theme_tip:'Theme (follow system)',theme:{sys:'Auto',light:'Light',dark:'Dark'},
- cfgk:{mode:'Mode',encrypt:'Inner cipher',enc_algo:'Inner algorithm',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
+ cfgk:{traffic_days:'Traffic retention days',traffic_file:'Traffic stats file',mode:'Mode',encrypt:'Inner cipher',enc_algo:'Inner algorithm',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
  stt:{title:'Runtime status',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',
    restart:'These fields changed and require a process restart:',norestart:'Nothing pending restart',noneg:'Handshake with peer not completed yet',
    noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
@@ -260,7 +262,7 @@ async function fetchStats(){
     if(data.fec_mode&&data.fec_mode!=='off')meta.push('FEC '+data.fec_mode);
     document.getElementById('meta').innerText=meta.join(' · ');
 
-	renderConnsTable(data);renderMacsTable(data);renderBansTable(data);renderStatus(data);
+	renderConnsTable(data);renderMacsTable(data);renderBansTable(data);renderTraffic(data);renderStatus(data);
   }catch(e){console.error('stats fetch failed',e);}
 }
 
@@ -433,6 +435,53 @@ function renderBansTable(data){
     '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
     '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>').join('')||
     '<tr><td colspan="3" class="empty">'+t('no_bans')+'</td></tr>';
+}
+
+// ---------- 流量页：今日汇总 + 每日柱状图 + 日表 ----------
+function renderTraffic(data){
+  const tr=data.traffic;if(!tr)return;
+  document.getElementById('tr-up').innerText=fmtBytes(tr.up||0);
+  document.getElementById('tr-down').innerText=fmtBytes(tr.down||0);
+  document.getElementById('tr-total').innerText=fmtBytes((tr.up||0)+(tr.down||0));
+  document.getElementById('tr-caption').innerText=t('tr.caption').replace('{n}',tr.days);
+  drawTrafficChart(tr.daily||[]);
+  const tb=document.getElementById('traffic-body');
+  const days=(tr.daily||[]).slice().reverse();
+  const rows=days.map(d=>'<tr><td class="num dim">'+esc(d.date)+'</td><td class="num speed">'+fmtBytes(d.up)+'</td>'+
+    '<td class="num speed dn">'+fmtBytes(d.down)+'</td><td class="num">'+fmtBytes(d.up+d.down)+'</td></tr>').join('');
+  tb.innerHTML=rows||'<tr><td colspan="4" class="empty">'+t('tr.empty')+'</td></tr>';
+}
+function drawTrafficChart(daily){
+  const c=document.getElementById('traffic-chart'),ctx=c.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const W=c.clientWidth||1100,H=c.clientHeight||220;
+  if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  const days=daily.slice(-60); // 柱宽可读性：最多渲染最近 60 天
+  ctx.fillStyle=cssv('--sub');ctx.font='12px sans-serif';
+  if(!days.length){ctx.fillText(t('tr.empty'),10,22);return;}
+  const max=Math.max(1,...days.map(d=>d.up+d.down));
+  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
+  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
+  const bw=W/days.length;
+  const barW=Math.max(2,Math.min(26,bw*0.36));
+  days.forEach((d,i)=>{
+    const cx=(i+0.5)*bw;
+    const hu=(d.up/max)*(H-34),hd=(d.down/max)*(H-34);
+    ctx.fillStyle=cssv('--up');
+    if(hu>0)ctx.fillRect(cx-barW-1,H-24-hu,barW,hu);
+    ctx.fillStyle=cssv('--down');
+    if(hd>0)ctx.fillRect(cx+1,H-24-hd,barW,hd);
+  });
+  // 日期刻度按柱数稀疏标注（MM-DD），避免拥挤
+  ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';
+  const step=Math.ceil(days.length/10);
+  days.forEach((d,i)=>{
+    if(i%step===0)ctx.fillText(d.date.slice(5),Math.max(2,(i+0.5)*bw-14),H-8);
+  });
+  ctx.fillStyle=cssv('--sub');ctx.font='11px sans-serif';
+  ctx.fillText(fmtBytes(max),6,12);
 }
 
 async function kickClient(id){if(!confirm(t('confirm_kick')))return;

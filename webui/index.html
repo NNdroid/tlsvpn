@@ -105,6 +105,7 @@
       <button data-pane="conns" data-i18n="tab.conns">-</button>
       <button data-pane="macs" data-i18n="tab.macs">-</button>
       <button data-pane="bans" data-i18n="tab.bans">-</button>
+      <button data-pane="traffic" data-i18n="tab.traffic">-</button>
       <button data-pane="status" data-i18n="tab.status">-</button>
       <button data-pane="logs" data-i18n="tab.logs">-</button>
       <button data-pane="settings" data-i18n="tab.settings">-</button>
@@ -165,6 +166,36 @@
       <div class="twrap"><table>
         <thead><tr><th data-i18n="th.id">-</th><th data-i18n="bans.left">-</th><th data-i18n="th.ops">-</th></tr></thead>
         <tbody id="bans-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="pane" id="pane-traffic">
+      <div class="st-grid" style="margin-bottom:14px">
+        <div class="st-block">
+          <div class="kpi-top"><span class="kpi-ico green"><svg viewBox="0 0 24 24"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg></span><span class="kpi-label" data-i18n="tr.today_up">-</span></div>
+          <div class="kpi-val" id="tr-up">0 B</div>
+        </div>
+        <div class="st-block">
+          <div class="kpi-top"><span class="kpi-ico cyan"><svg viewBox="0 0 24 24"><line x1="17" y1="7" x2="7" y2="17"/><polyline points="17 17 7 17 7 7"/></svg></span><span class="kpi-label" data-i18n="tr.today_down">-</span></div>
+          <div class="kpi-val" id="tr-down">0 B</div>
+        </div>
+        <div class="st-block">
+          <div class="kpi-top"><span class="kpi-ico amber"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span><span class="kpi-label" data-i18n="tr.today_total">-</span></div>
+          <div class="kpi-val" id="tr-total">0 B</div>
+        </div>
+      </div>
+      <div class="chart-head">
+        <h3 class="card-title" data-i18n="tr.daily">-</h3>
+        <span class="dim" style="font-size:.82em" id="tr-caption"></span>
+        <div class="legend" style="margin-left:auto;margin-top:0">
+          <span><i class="dot" style="background:var(--up)"></i><span data-i18n="tr.up">-</span></span>
+          <span><i class="dot" style="background:var(--down)"></i><span data-i18n="tr.down">-</span></span>
+        </div>
+      </div>
+      <canvas id="traffic-chart" height="220"></canvas>
+      <div class="twrap" style="margin-top:12px"><table>
+        <thead><tr><th data-i18n="tr.date">-</th><th data-i18n="tr.up">-</th><th data-i18n="tr.down">-</th><th data-i18n="tr.total">-</th></tr></thead>
+        <tbody id="traffic-body"></tbody>
       </table></div>
     </div>
 

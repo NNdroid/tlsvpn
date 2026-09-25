@@ -48,9 +48,14 @@ type Config struct {
 	Brutal     bool         `json:"brutal,omitempty"`
 	BrutalUp   uint64       `json:"brutal_up,omitempty"`   // Mbps
 	BrutalDown uint64       `json:"brutal_down,omitempty"` // Mbps
-	Web        WebConfig    `json:"web,omitempty"`
-	Server     ServerConfig `json:"server,omitempty"`
-	Client     ClientConfig `json:"client,omitempty"`
+	// 按日流量统计：traffic_days 为保留天数（默认 30，最大 3650，面板热更生效）；
+	// traffic_file 为持久化文件，留空时默认放在配置文件同目录的
+	// tlsvpn-traffic.json（经命令行标志启动、无配置文件来源时仅内存统计）。
+	TrafficDays int          `json:"traffic_days,omitempty"`
+	TrafficFile string       `json:"traffic_file,omitempty"`
+	Web         WebConfig    `json:"web,omitempty"`
+	Server      ServerConfig `json:"server,omitempty"`
+	Client      ClientConfig `json:"client,omitempty"`
 
 	// SourcePath 配置文件来源路径（-c 指定）；面板"保存配置"写回此文件。
 	// 经命令行标志启动时为空，此时面板保存返回错误提示。
@@ -267,6 +272,9 @@ func (c *Config) applyDefaults() {
 	if c.Tap == "" {
 		c.Tap = "tap0"
 	}
+	if c.TrafficDays <= 0 {
+		c.TrafficDays = defaultTrafficDays
+	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"
 	}
@@ -337,6 +345,9 @@ func (c *Config) Validate() error {
 	}
 	if c.BrutalUp > maxBrutalRateMbps || c.BrutalDown > maxBrutalRateMbps {
 		return fmt.Errorf("brutal_up/brutal_down must not exceed %d Mbps", maxBrutalRateMbps)
+	}
+	if c.TrafficDays < 1 || c.TrafficDays > maxTrafficDays {
+		return fmt.Errorf("traffic_days must be between 1 and %d", maxTrafficDays)
 	}
 	if c.Mode == "client" && c.Client.Conns > 1<<16 {
 		return fmt.Errorf("client.conns must not exceed 65536")

@@ -1826,6 +1826,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&c.TxPackets, uint64(txPackets))
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
+				dailyTraffic.Add(uint64(len(sendBuffer)), 0) // 上行 = client→server
 			case <-keepAliveTicker.C:
 				sendBuffer = sendBuffer[:0]
 				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
@@ -1853,6 +1854,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			atomic.AddUint64(&c.RxBytes, rxBytesBatch)
 			atomic.AddUint64(&c.RxPackets, rxPacketsBatch)
 			atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
+			dailyTraffic.Add(0, rxBytesBatch) // 下行 = server→client
 			rxBytesBatch, rxPacketsBatch = 0, 0
 		}
 		defer flushRxStats()
