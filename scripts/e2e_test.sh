@@ -9,10 +9,12 @@
 #   H  go_srv  <- rs_cli      (cross-language, hardened: GCM, bucket pad,
 #                              session token, FEC group 4)
 #   I  rs_srv  <- go_cli      (cross-language, hardened — reverse direction)
-#   J  go_srv  <- rs_cli      (cross-language, legacy: CTR, legacy pad,
-#                              session token off, FEC group 8)
+#   J  go_srv  <- rs_cli      (cross-language, weak encrypted profile:
+#                              no cipher floor, padding off, FEC group 8)
 #   K  rs_srv  <- go_cli      (cross-language, plain: encryption, padding and
 #                              FEC all off)
+#   M  go_srv  <- rs_cli      (cross-language, explicit AES-128-GCM)
+#   N  rs_srv  <- go_cli      (cross-language, explicit AES-128-GCM reverse)
 #   L  go/rs servers <- independent Go TLS probe (server-observed ClientHello
 #                      summary, negotiated fields and cross-server fingerprint)
 #   E  go_srv  <- go_cli via SOCKS5 proxy   (proxy group, client-only feature)
@@ -115,6 +117,10 @@ MATRIX_LEGACY=(
 MATRIX_PLAIN=(
   encrypt=false 'min_enc=""' 'pad_mode="off"'
   'client.fec=false' client.fec_group=4
+)
+MATRIX_GCM128=(
+  encrypt=true 'enc_algo="gcm128"' 'min_enc="gcm"' 'pad_mode="bucket"'
+  'client.fec=true' client.fec_group=4
 )
 
 # e2e_psk returns the shared PSK for this env, generating it once on first use.
@@ -267,6 +273,8 @@ run_group_D() {
 #   J  go_srv <- rs_cli   weak encrypted profile: no cipher floor, padding off,
 #                         mandatory session token, FEC group 8
 #   K  rs_srv <- go_cli   plain: encryption, padding and FEC all off
+#   M  go_srv <- rs_cli   explicit AES-128-GCM, GCM floor, bucket, FEC K=4
+#   N  rs_srv <- go_cli   same AES-128-GCM profile, reverse direction
 run_group_H() {
   start_server "$BIN_GO" 18086 "${MATRIX_HARDENED[@]}" || return 1
   run_client "$BIN_RS" 18086 "127.0.0.1:18086" "${MATRIX_HARDENED[@]}" \
@@ -290,6 +298,19 @@ run_group_K() {
   run_client "$BIN_GO" 18089 "127.0.0.1:18089" "${MATRIX_PLAIN[@]}" \
     || { stop_server 18089; return 1; }
   stop_client 18089; stop_server 18089
+}
+
+run_group_M() {
+  start_server "$BIN_GO" 18092 "${MATRIX_GCM128[@]}" || return 1
+  run_client "$BIN_RS" 18092 "127.0.0.1:18092" "${MATRIX_GCM128[@]}" \
+    || { stop_server 18092; return 1; }
+  stop_client 18092; stop_server 18092
+}
+run_group_N() {
+  start_server "$BIN_RS" 18093 "${MATRIX_GCM128[@]}" || return 1
+  run_client "$BIN_GO" 18093 "127.0.0.1:18093" "${MATRIX_GCM128[@]}" \
+    || { stop_server 18093; return 1; }
+  stop_client 18093; stop_server 18093
 }
 
 # Group L validates the optional TLS diagnostics with an independent protocol
@@ -365,10 +386,11 @@ main() {
   setup_test_env
   resolve_binaries
   # Interop groups first (A-D on the default configuration, H-K on varied
-  # configurations), then the TLS-observation group, proxy-only groups and perf.
+  # compatibility profiles, M-N on explicit AES-128-GCM), then TLS diagnostics,
+  # proxy-only groups and perf.
   # E2E_GROUPS="L" (or a space-separated subset) makes focused regression runs
   # cheap without weakening the default complete matrix.
-  local groups="${E2E_GROUPS:-A B C D H I J K L E F G}"
+  local groups="${E2E_GROUPS:-A B C D H I J K M N L E F G}"
   for g in $groups; do
     if run_group "$g"; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi
   done
