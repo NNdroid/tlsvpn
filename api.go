@@ -166,6 +166,7 @@ type brutalInfoJSON struct {
 type runtimeCfgJSON struct {
 	Mode           string       `json:"mode"`
 	Encrypt        bool         `json:"encrypt"`
+	EncAlgo        string       `json:"enc_algo"`
 	MinEnc         string       `json:"min_enc"`
 	PadMode        string       `json:"pad_mode"`
 	Brutal         bool         `json:"brutal"`
@@ -1287,6 +1288,7 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 		return out
 	}
 	out.Encrypt = cfg.Encrypt
+	out.EncAlgo = cfg.EncAlgo
 	out.MinEnc = cfg.MinEnc
 	out.PadMode = padModeName()
 	out.Brutal = cfg.Brutal
@@ -1342,6 +1344,7 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 	s.mu.RLock()
 	cfg := s.cfg.Load()
 	encrypt := s.encrypt
+	encAlgo := s.encAlgo
 	minEnc := s.minEnc
 	s.mu.RUnlock()
 
@@ -1354,8 +1357,7 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 		n.Brutal = brutalSummary(cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown, 0)
 	}
 	if encrypt {
-		// 服务端 encrypt 开启时对所有会话给出 GCM：无内层加密的回退路径已移除。
-		n.EncAlgo = encAlgoGCM
+		n.EncAlgo = encAlgo
 	}
 	if minEnc > 0 {
 		n.MinEnc = "gcm"
