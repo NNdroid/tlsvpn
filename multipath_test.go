@@ -153,6 +153,88 @@ func TestAsyncPortBackpressureDoesNotConsumeSequenceBeforeBackendSlot(t *testing
 	}
 }
 
+func TestFECParityIsSuppressedOnSingleTCPPath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p := NewAsyncPort(ctx, "fec-single-path")
+	p.AttachFEC(2, nil)
+
+	rtt0 := uint32(1000)
+	ch0 := make(chan []VPNFrame, 8)
+	p.RegisterBackend(ch0, &rtt0)
+	defer p.UnregisterBackend(ch0)
+
+	for _, b := range []byte{0x11, 0x22} {
+		if err := p.WriteFrame(bytes.Repeat([]byte{b}, 1400)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deadline := time.Now().Add(time.Second)
+	dataFrames, parityFrames := 0, 0
+	for time.Now().Before(deadline) && dataFrames < 2 {
+		select {
+		case batch := <-ch0:
+			for _, vf := range batch {
+				if vf.Seq == 0 {
+					parityFrames++
+				} else {
+					dataFrames++
+				}
+			}
+			freeFrames(batch)
+			putVPNFrameBatch(batch)
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if dataFrames != 2 {
+		t.Fatalf("data frames=%d, want 2", dataFrames)
+	}
+	if parityFrames != 0 || p.ParitySent() != 0 {
+		t.Fatalf("single TCP path transmitted parity: copies=%d counter=%d", parityFrames, p.ParitySent())
+	}
+
+	rtt1 := uint32(2000)
+	ch1 := make(chan []VPNFrame, 8)
+	p.RegisterBackend(ch1, &rtt1)
+	defer p.UnregisterBackend(ch1)
+	for _, b := range []byte{0x33, 0x44} {
+		if err := p.WriteFrame(bytes.Repeat([]byte{b}, 1400)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	deadline = time.Now().Add(time.Second)
+	parityFrames = 0
+	for time.Now().Before(deadline) && parityFrames < 1 {
+		for _, ch := range []chan []VPNFrame{ch0, ch1} {
+			for {
+				select {
+				case batch := <-ch:
+					for _, vf := range batch {
+						if vf.Seq == 0 {
+							parityFrames++
+						}
+					}
+					freeFrames(batch)
+					putVPNFrameBatch(batch)
+				default:
+					goto nextCh
+				}
+			}
+		nextCh:
+		}
+		if parityFrames < 1 {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if parityFrames != 1 || p.ParitySent() != 1 {
+		t.Fatalf("two-path FEC parity copies=%d counter=%d, want 1/1", parityFrames, p.ParitySent())
+	}
+}
+
 func TestFECParityIsSentOnceAcrossMultipleBackends(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
