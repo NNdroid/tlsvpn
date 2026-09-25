@@ -14,6 +14,12 @@
 #   HOST_ALIAS=0    不生成宿主平台的固定名副本 bin/tlsvpn[.exe]。发布 workflow
 #                   需要设为 0：runner 是 linux/amd64，而矩阵里正好有这个目标，
 #                   多出的无平台名副本上传后会成为 release 里的重复件。
+#   GOARM64_LEVEL=... 仅作用于 GOARCH=arm64 的可选最低 ISA，例如 v8.2 或
+#                   v8.2,crypto。默认留空，Go 使用通用 v8.0。只有确认目标
+#                   CPU 支持对应扩展时才设置；例如：
+#                   GOARM64_LEVEL=v8.2 ./scripts/build.sh linux/arm64
+#   ARTIFACT_SUFFIX=s  输出文件追加 "_s"，用于同一目录并存优化变体。
+#   CLEAN_OUTPUT=0     不清理已有 bin/tlsvpn_*；默认 1。
 #
 # 说明：本项目依赖 Linux 的 TAP 与 netlink，非 Linux 平台的编译仅用于代码
 # 检查 / 本地 e2e（-tap mem），无法实际建隧道。
@@ -27,6 +33,8 @@ OUTPUT_DIR="bin"
 VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || date +%Y%m%d_%H%M%S)}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 HOST_ALIAS="${HOST_ALIAS:-1}"
+ARTIFACT_SUFFIX="${ARTIFACT_SUFFIX:-}"
+CLEAN_OUTPUT="${CLEAN_OUTPUT:-1}"
 
 # 默认目标：Linux 发布矩阵
 LINUX_MATRIX=(
@@ -54,8 +62,10 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR"
-# 清理旧产物（仅本脚本命名的文件，避免误删）
-rm -f "$OUTPUT_DIR/${APP_NAME}_"* "$OUTPUT_DIR/${APP_NAME}" "$OUTPUT_DIR/${APP_NAME}.exe" 2>/dev/null || true
+# 清理旧产物（仅本脚本命名的文件，避免误删）。多变体构建可设 CLEAN_OUTPUT=0。
+if [ "$CLEAN_OUTPUT" = "1" ]; then
+    rm -f "$OUTPUT_DIR/${APP_NAME}_"* "$OUTPUT_DIR/${APP_NAME}" "$OUTPUT_DIR/${APP_NAME}.exe" 2>/dev/null || true
+fi
 
 echo "Building $APP_NAME (version $VERSION, jobs $JOBS) for: ${TARGETS[*]}"
 
@@ -70,12 +80,21 @@ build_one() {
     local goarch="${platform##*/}"
     local goext=""
     [ "$goos" = "windows" ] && goext=".exe"
-    local built="$OUTPUT_DIR/${APP_NAME}_${goos}_${goarch}${goext}"
+    local suffix=""
+    [ -n "$ARTIFACT_SUFFIX" ] && suffix="_$ARTIFACT_SUFFIX"
+    local built="$OUTPUT_DIR/${APP_NAME}_${goos}_${goarch}${suffix}${goext}"
     # 用变量前缀而非 `env ...`：MSYS/Git Bash 下 `env GOOS=… go build -o` 会
     # 把产物静默写到别处（exit 0 但当前目录无文件），前缀形式跨平台一致。
-    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
-        -ldflags "-s -w -X main.appVersion=$VERSION" -trimpath \
-        -o "$built" .
+    if [ "$goarch" = "arm64" ] && [ -n "${GOARM64_LEVEL:-}" ]; then
+        echo "  arm64 ISA: GOARM64=$GOARM64_LEVEL"
+        CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM64="$GOARM64_LEVEL" go build \
+            -ldflags "-s -w -X main.appVersion=$VERSION" -trimpath \
+            -o "$built" .
+    else
+        CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+            -ldflags "-s -w -X main.appVersion=$VERSION" -trimpath \
+            -o "$built" .
+    fi
     if [ "$HOST_ALIAS" = "1" ] \
         && [ "$goos" = "$(go env GOOS)" ] && [ "$goarch" = "$(go env GOARCH)" ]; then
         cp "$built" "$OUTPUT_DIR/${APP_NAME}${goext}"
