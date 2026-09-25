@@ -20,6 +20,9 @@ jobs:
     - name: Build
       run: go build -v ./...
 
+    - name: Cross-build ARM64 v8.2
+      run: GOOS=linux GOARCH=arm64 GOARM64=v8.2 CGO_ENABLED=0 go build ./...
+
     - name: Vet
       run: go vet -v ./...
 
