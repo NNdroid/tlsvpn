@@ -19,15 +19,6 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// 隧道连接的 socket 缓冲。旧值读写各 4MB（合计 8MB/连接）是为对抗内核默认
-// 16KB 而取的粗值，实际单帧上限 65535*2≈128KB、发送批上界 64KB，留 8 倍余量
-// 已足够；同时把缓冲调小必须在确认是对端 TLS 握手**之后**做，否则扫描器
-// 和回退 HTTP 连接也会各自占用巨量内核内存。
-const (
-	connReadBuf  = 1 * 1024 * 1024
-	connWriteBuf = 512 * 1024
-)
-
 // ======================= VSwitch =======================
 type Port interface {
 	ID() string
@@ -1034,10 +1025,9 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 				return
 			}
 
-			// 确认是 TLS 握手后才放大 socket 缓冲：扫描与回退连接不占内存。
-			// 必须在 tls.Server 开始读取之前设置（内核要求首次 I/O 前）。
-			c.SetReadBuffer(connReadBuf)
-			c.SetWriteBuffer(connWriteBuf)
+			// 不手动设置 SO_RCVBUF/SO_SNDBUF。显式 setsockopt 会锁定
+			// TCP socket buffer，关闭 Linux 的 receive/send autotuning；
+			// 对高 BDP 隧道让内核按 tcp_rmem/tcp_wmem 自适应更合适。
 
 			// 每条连接使用独立配置副本捕获服务端实际收到的 ClientHello。
 			// GetConfigForClient 在证书选择阶段执行；保留已有回调的返回语义。
