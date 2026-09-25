@@ -240,6 +240,7 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 				vs.spoofDrops.Add(1)
 				return
 			}
+			updated := false
 			srcShard.mu.Lock()
 			if current := srcShard.macTable[srcMAC]; current != nil {
 				// 锁外检查到锁内之间可能新建了 static entry；再次保护，避免竞态覆盖。
@@ -252,13 +253,17 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 				} else {
 					current.portID = srcPortID
 					current.updatedTick = nowTick
+					updated = true
 					srcShard.mu.Unlock()
 				}
 			} else {
 				srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
+				updated = true
 				srcShard.mu.Unlock()
 			}
-			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
+			if updated {
+				log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
+			}
 		}
 	}
 
