@@ -44,8 +44,85 @@ const I18N={
    brut:{en:'Enabled',up:'Upstream total',down:'Downstream total',kern:'Kernel support',cur:'Current CC',avail:'Available CC',applied:'Applied / total',perconn:'Per-conn rate',errs:'Failure reasons',off:'Not enabled'},
    yes:'yes',no:'no'},
  set:{hint:'Edit the JSON config. Save: write back to the config file. Save & apply: write back and hot-apply runtime parameters (listed fields require a restart).',
-   load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}}};
-	let LANG=localStorage.getItem('tlsvpn_lang')||((navigator.language||'zh-CN').toLowerCase().startsWith('zh')?'zh-CN':'en');
+   load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}},
+'de':{kpi:{active:'Aktive Clients',tcp:'TCP-Verbindungen',tx:'Gesendet',rx:'Empfangen',uptime:'Laufzeit',version:'Version',gc:'GC ausführen',fec:'FEC wiederhergestellt / verloren',parity:'Paritätsframes',dropped:'Verworfen (Queue)',reorder:'Reorder übersprungen',mem:'Speicher',goroutines:'Goroutines:',pool:'IPv4-Pool',v6used:'IPv6 zugewiesen:'},
+ chart:{title:'Durchsatz',win:'(letzte 120 s)'},legend:{up:'Uplink',down:'Downlink'},
+ tab:{clients:'Clients',conns:'Verbindungen',macs:'MAC-Tabelle',bans:'Sperren',traffic:'Traffic',status:'Laufzeitstatus',logs:'Protokolle',settings:'Einstellungen'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (S)',rx:'RX (E)',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Verschlüsselung',brutal:'Brutal',ops:'Aktionen',kick:'Trennen',ban:'Sperren',unban:'Entsperren',owner:'Client',target:'Ziel',remote:'Gegenstelle',state:'Status',rtt:'RTT',retries:'Wiederholungen',age:'Online',epoch:'Schlüssel-Epoche',err:'Letzter Fehler'},
+ m:{port:'Port',seen:'Zuletzt aktiv'},bans:{id_ph:'ClientID (Präfix ok)',min_ph:'Minuten (leer = dauerhaft)',add:'Sperren',refresh:'Aktualisieren',left:'Restlaufzeit'},
+ logs:{level:'Level',autoscroll:'Auto-Scroll',clear:'Leeren',download:'Download'},
+ filter_ph:'Zum Filtern eingeben…',filter_none:'Keine Treffer',filter_clear:'Filter löschen',filter_tip:'/ zum Fokussieren',no_clients:'Keine Clients',no_conns:'Keine Verbindungen',no_macs:'Noch keine MACs gelernt',no_bans:'Keine Sperren',srv_only:'Nur im Server-Modus',
+ perm:'Dauerhaft',confirm_kick:'Diesen Client wirklich trennen?',confirm_ban:'Diesen Client sperren?',need_id:'Bitte ClientID eingeben',
+ st:{up:'aktiv',connecting:'verbinde',skip:'Übergangen'},
+ badge:{dup:'Dup',off:'Aus',ctr:'CTR',plain:'Klartext'},
+ u:{day:'T',hour:'Std',min:'Min',sec:'Sek'},footer:'Aktualisierung alle {n}s',refresh_tip:'Aktualisierungsintervall',
+ tls_http:'HTTP (HTTPS empfohlen)',mode_local:'lokal',theme_tip:'Design (System folgen)',theme:{sys:'Auto',light:'Hell',dark:'Dunkel'},
+ cfgk:{traffic_days:'Traffic-Aufbewahrung (Tage)',traffic_file:'Traffic-Statistikdatei',mode:'Modus',encrypt:'Innere Verschlüsselung',enc_algo:'Innerer Algorithmus',min_enc:'Minimale Verschlüsselung',pad_mode:'Padding-Modus',brutal:'TCP Brutal',brutal_up:'Uplink gesamt (Mbps)',brutal_down:'Downlink gesamt (Mbps)',socks5:'SOCKS5-Proxy',fec:'FEC',fec_group:'FEC-Gruppe',fec_group_min:'FEC-Gruppe Minimum',fec_group_max:'FEC-Gruppe Maximum',log_level:'Log-Level',conns:'Parallele Verbindungen',tap:'TAP-Gerät',mac:'MAC-Adresse',addr:'Serveradresse',web_addr:'Panel-Adresse',web_auth:'Panel-Auth',web_bind:'Panel-Bindung',web_https:'Panel-HTTPS',encrypt_psk:'PSK konfiguriert',session_encrypt:'Sitzungsverschlüsselung',max_sessions:'Max. Sitzungen',v4_cidr:'IPv4-CIDR',v6_cidr:'IPv6-CIDR',gw_v4:'IPv4-Gateway',gw_v6:'IPv6-Gateway',fwmark:'Policy-Routing fwmark',fwmark_priority:'Regel-Priorität',fwmark_table:'Routentabelle',extra_routes:'Zusatzrouten',source_rules:'Quellregeln'},
+ stt:{title:'Laufzeitstatus',host:'Host & Prozess',negt:'Ausgehandelte Parameter',brutal:'TCP Brutal Details',cfg:'Aktive Konfiguration',
+   restart:'Diese Felder wurden geändert und erfordern einen Neustart des Prozesses:',norestart:'Kein Feld erfordert einen Neustart',noneg:'Handshake mit der Gegenstelle noch nicht abgeschlossen',
+   noerr:'Alle angewendet',kern_yes:'Kernel unterstützt',kern_no:'Kernel nicht unterstützt',
+   sys:{os:'Betriebssystem',arch:'CPU-Architektur',go:'Go-Version',cpu:'CPU-Kerne',host:'Hostname',cfgpath:'Konfigurationsdatei',ver:'Programmversion'},
+   neg:{proto:'Protokollversion',fec:'FEC',grp:'FEC-Gruppe',enc:'Innere Verschlüsselung',pad:'Padding-Modus',minenc:'Minimale Verschlüsselung',stoken:'Session-Token',epoch:'Schlüssel-Epoche',tx:'Client → Server (Uplink)',rx:'Server → Client (Downlink)',prroute:'Policy-Routing aktiv',tlsfp:'ClientHello-Fingerprint der letzten Verbindung (nicht JA3/JA4)',tlsver:'Ausgehandelte TLS-Version',tlscipher:'Ausgehandelte TLS-Cipher',tlsalpn:'TLS ALPN',tlssni:'TLS SNI',tlsoffer:'ClientHello-Merkmale'},
+   brut:{en:'Schalter',up:'Uplink gesamt',down:'Downlink gesamt',kern:'Kernel-Unterstützung',cur:'Aktive CC',avail:'Verfügbare CC',applied:'Angewendet / gesamt',perconn:'Rate pro Verbindung',errs:'Fehlerursachen',off:'Nicht aktiviert'},
+   yes:'ja',no:'nein'},
+ set:{hint:'JSON-Konfiguration bearbeiten. Speichern: in die Datei zurückschreiben. Speichern & anwenden: zurückschreiben und Laufzeitparameter heiß anwenden (genannte Felder erfordern einen Neustart).',
+   load:'Neu laden',save:'Speichern',apply:'Speichern & anwenden',saved:'Gespeichert',applied:'Gespeichert & angewendet',restart_nr:'Neustart nötig:',loaded_err:'Ladefehler:'},
+ tr:{today_up:'Uplink heute',today_down:'Downlink heute',today_total:'Gesamt heute',daily:'Täglicher Traffic',up:'Uplink',down:'Downlink',total:'Gesamt',date:'Datum',caption:'Letzte {n} Tage',empty:'Noch keine täglichen Traffic-Daten'}},
+'fr':{kpi:{active:'Clients actifs',tcp:'Connexions TCP',tx:'Total envoyé',rx:'Total reçu',uptime:'Disponibilité',version:'Version',gc:'GC maintenant',fec:'FEC récupérés / perdus',parity:'Trames de parité',dropped:'Abandons (file)',reorder:'Réordonnancement ignoré',mem:'Mémoire',goroutines:'Goroutines :',pool:'Pool IPv4',v6used:'IPv6 allouées :'},
+ chart:{title:'Débit',win:'(120 dernières s)'},legend:{up:'Montant',down:'Descendant'},
+ tab:{clients:'Clients',conns:'Connexions',macs:'Table MAC',bans:'Bannissements',traffic:'Trafic',status:'État runtime',logs:'Journaux',settings:'Paramètres'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (env.)',rx:'RX (rec.)',txs:'↑ Débit',rxs:'↓ Débit',fec:'FEC',enc:'Chiffrement',brutal:'Brutal',ops:'Actions',kick:'Éjecter',ban:'Bannir',unban:'Débannir',owner:'Client',target:'Cible',remote:'Distant',state:'État',rtt:'RTT',retries:'Réessais',age:'En ligne',epoch:'Époque de clé',err:'Dernière erreur'},
+ m:{port:'Port',seen:'Dernière activité'},bans:{id_ph:'ClientID (préfixe accepté)',min_ph:'Minutes (vide = permanent)',add:'Bannir',refresh:'Rafraîchir',left:'Restant'},
+ logs:{level:'Niveau',autoscroll:'Défilement auto',clear:'Effacer',download:'Télécharger'},
+ filter_ph:'Taper pour filtrer…',filter_none:'Aucun résultat',filter_clear:'Effacer le filtre',filter_tip:'/ pour le focus',no_clients:'Aucun client',no_conns:'Aucune connexion',no_macs:'Aucune MAC apprise',no_bans:'Aucun bannissement',srv_only:'Mode serveur uniquement',
+ perm:'Permanent',confirm_kick:'Déconnecter ce client de force ?',confirm_ban:'Bannir ce client ?',need_id:'Veuillez saisir un ClientID',
+ st:{up:'actif',connecting:'connexion',skip:'Ignoré'},
+ badge:{dup:'Dup',off:'Désactivé',ctr:'CTR',plain:'Clair'},
+ u:{day:'j',hour:'h',min:'min',sec:'s'},footer:"Actualisation toutes les {n}s",refresh_tip:"Intervalle d'actualisation",
+ tls_http:'HTTP (HTTPS recommandé)',mode_local:'local',theme_tip:"Thème (suivre le système)",theme:{sys:'Auto',light:'Clair',dark:'Sombre'},
+ cfgk:{traffic_days:'Rétention du trafic (jours)',traffic_file:'Fichier de statistiques de trafic',mode:'Mode',encrypt:'Chiffrement interne',enc_algo:'Algorithme interne',min_enc:'Chiffrement minimum',pad_mode:'Mode de remplissage',brutal:'TCP Brutal',brutal_up:'Montant total (Mbps)',brutal_down:'Descendant total (Mbps)',socks5:'Proxy SOCKS5',fec:'FEC',fec_group:'Groupe FEC',fec_group_min:'Groupe FEC min',fec_group_max:'Groupe FEC max',log_level:'Niveau de log',conns:'Connexions simultanées',tap:'Périphérique TAP',mac:'Adresse MAC',addr:'Adresse du serveur',web_addr:'Écoute du panneau',web_auth:'Auth du panneau',web_bind:'Liaison du panneau',web_https:'HTTPS du panneau',encrypt_psk:'PSK configurée',session_encrypt:'Chiffrement de session',max_sessions:'Sessions max',v4_cidr:'CIDR IPv4',v6_cidr:'CIDR IPv6',gw_v4:'Passerelle IPv4',gw_v6:'Passerelle IPv6',fwmark:'fwmark routage par stratégie',fwmark_priority:'Priorité de règle',fwmark_table:'Table de routage',extra_routes:'Routes supplémentaires',source_rules:'Règles par source'},
+ stt:{title:'État runtime',host:'Hôte & processus',negt:'Paramètres négociés',brutal:'Détails TCP Brutal',cfg:'Instantané de la config effective',
+   restart:'Ces champs ont été modifiés et exigent un redémarrage du processus :',norestart:'Aucun champ ne requiert de redémarrage',noneg:'Handshake avec le pair pas encore terminé',
+   noerr:'Tout appliqué',kern_yes:'Noyau compatible',kern_no:'Noyau non compatible',
+   sys:{os:'Système',arch:'Arch. CPU',go:'Version Go',cpu:'Cœurs CPU',host:"Nom d'hôte",cfgpath:'Fichier de configuration',ver:'Version du programme'},
+   neg:{proto:'Version du protocole',fec:'FEC',grp:'Groupe FEC',enc:'Chiffrement interne',pad:'Mode de remplissage',minenc:'Chiffrement minimum',stoken:'Jeton de session',epoch:'Époque de clé',tx:'Client → serveur (montant)',rx:'Serveur → client (descendant)',prroute:'Routage par stratégie actif',tlsfp:"Empreinte ClientHello de la dernière connexion (pas JA3/JA4)",tlsver:'Version TLS négociée',tlscipher:'Suite TLS négociée',tlsalpn:'TLS ALPN',tlssni:'TLS SNI',tlsoffer:'Caractéristiques ClientHello'},
+   brut:{en:'Activé',up:'Montant total',down:'Descendant total',kern:'Support noyau',cur:'CC actuel',avail:'CC disponibles',applied:'Appliqué / total',perconn:'Débit par connexion',errs:"Causes d'échec",off:'Non activé'},
+   yes:'oui',no:'non'},
+ set:{hint:'Éditer la config JSON. Enregistrer : réécrire le fichier. Enregistrer & appliquer : réécrire et appliquer à chaud les paramètres runtime (certains champs exigent un redémarrage).',
+   load:'Recharger',save:'Enregistrer',apply:'Enregistrer & appliquer',saved:'Enregistré',applied:'Enregistré & appliqué',restart_nr:'Redémarrage requis :',loaded_err:'Échec du chargement :'},
+ tr:{today_up:'Montant du jour',today_down:'Descendant du jour',today_total:'Total du jour',daily:'Trafic quotidien',up:'Montant',down:'Descendant',total:'Total',date:'Date',caption:'{n} derniers jours',empty:'Pas encore de données de trafic quotidien'}},
+'ja':{kpi:{active:'アクティブクライアント',tcp:'TCP 接続',tx:'送信合計',rx:'受信合計',uptime:'稼働時間',version:'バージョン',gc:'即時 GC',fec:'FEC 復元 / 確定ロスト',parity:'パリティフレーム',dropped:'廃棄（キュー）',reorder:'並べ替えスキップ',mem:'メモリ',goroutines:'Goroutines:',pool:'IPv4 プール',v6used:'IPv6 割り当て:'},
+ chart:{title:'スループット',win:'（過去 120 秒）'},legend:{up:'上り',down:'下り'},
+ tab:{clients:'クライアント',conns:'接続明細',macs:'MAC テーブル',bans:'禁止',traffic:'トラフィック',status:'稼働状態',logs:'ログ',settings:'設定'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX（送）',rx:'RX（受）',txs:'↑ 速度',rxs:'↓ 速度',fec:'FEC',enc:'暗号化',brutal:'Brutal',ops:'操作',kick:'切断',ban:'禁止',unban:'解除',owner:'クライアント',target:'接続先',remote:'対向',state:'状態',rtt:'RTT',retries:'再試行',age:'経過時間',epoch:'鍵世代',err:'最新エラー'},
+ m:{port:'ポート',seen:'最終アクティブ'},bans:{id_ph:'ClientID（前方一致可）',min_ph:'分数（空欄=永久）',add:'禁止',refresh:'更新',left:'残り'},
+ logs:{level:'レベル',autoscroll:'自動スクロール',clear:'クリア',download:'ダウンロード'},
+ filter_ph:'入力して絞り込み…',filter_none:'該当なし',filter_clear:'フィルタ解除',filter_tip:'/ でフォーカス',no_clients:'クライアントなし',no_conns:'接続なし',no_macs:'学習済み MAC なし',no_bans:'禁止レコードなし',srv_only:'サーバーモードのみ',
+ perm:'永久',confirm_kick:'このクライアントを強制切断しますか？',confirm_ban:'このクライアントを禁止しますか？',need_id:'ClientID を入力してください',
+ st:{up:'up',connecting:'connecting',skip:'未適用'},
+ badge:{dup:'複製',off:'オフ',ctr:'CTR',plain:'平文'},
+ u:{day:'日',hour:'時間',min:'分',sec:'秒'},footer:'{n} 秒ごとに更新',refresh_tip:'更新間隔',
+ tls_http:'HTTP（HTTPS 推奨）',mode_local:'ローカル',theme_tip:'テーマ（システムに従う）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
+ cfgk:{traffic_days:'トラフィック保持日数',traffic_file:'トラフィック統計ファイル',mode:'動作モード',encrypt:'内層暗号化',enc_algo:'内層アルゴリズム',min_enc:'最低暗号化要件',pad_mode:'パディングモード',brutal:'TCP Brutal',brutal_up:'上り合計 (Mbps)',brutal_down:'下り合計 (Mbps)',socks5:'SOCKS5 プロキシ',fec:'FEC',fec_group:'FEC グループ',fec_group_min:'FEC グループ下限',fec_group_max:'FEC グループ上限',log_level:'ログレベル',conns:'同時接続数',tap:'TAP デバイス',mac:'MAC アドレス',addr:'サーバーアドレス',web_addr:'パネル待受',web_auth:'パネル認証',web_bind:'パネルバインド',web_https:'パネル HTTPS',encrypt_psk:'PSK 設定済み',session_encrypt:'セッション暗号化',max_sessions:'最大セッション数',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 ゲートウェイ',gw_v6:'IPv6 ゲートウェイ',fwmark:'ポリシールーティング fwmark',fwmark_priority:'ルール優先度',fwmark_table:'ルートテーブル',extra_routes:'追加ルート',source_rules:'送信元ルール'},
+ stt:{title:'稼働状態',host:'ホストとプロセス',negt:'ネゴシエーション結果',brutal:'TCP Brutal 明細',cfg:'有効な設定スナップショット',
+   restart:'以下のフィールドは変更済み、プロセスの再起動が必要です：',norestart:'再起動が必要なフィールドはありません',noneg:'対向とのハンドシェイク未完了',
+   noerr:'すべて有効',kern_yes:'カーネル対応',kern_no:'カーネル未対応',
+   sys:{os:'OS',arch:'CPU アーキ',go:'Go バージョン',cpu:'CPU コア数',host:'ホスト名',cfgpath:'設定ファイル',ver:'プログラムバージョン'},
+   neg:{proto:'プロトコルバージョン',fec:'FEC',grp:'FEC グループ',enc:'内層暗号化',pad:'パディングモード',minenc:'最低暗号化要件',stoken:'セッショントークン',epoch:'鍵世代',tx:'クライアント → サーバー（上り）',rx:'サーバー → クライアント（下り）',prroute:'ポリシールーティング有効',tlsfp:'最新接続の ClientHello フィンガープリント（JA3/JA4 ではなく）',tlsver:'TLS バージョン',tlscipher:'TLS 暗号スイート',tlsalpn:'TLS ALPN',tlssni:'TLS SNI',tlsoffer:'ClientHello 特徴数'},
+   brut:{en:'スイッチ',up:'上り合計',down:'下り合計',kern:'カーネル対応',cur:'現在の輻輳制御',avail:'利用可能な輻輳制御',applied:'適用 / 合計',perconn:'接続ごとの速度',errs:'失敗理由',off:'未有効'},
+   yes:'はい',no:'いいえ'},
+ set:{hint:'JSON 設定を編集。保存：設定ファイルへ書き戻し。保存して適用：書き戻した上で実行パラメータをホット適用（一部フィールドは再起動が必要）。',load:'再読み込み',save:'保存',apply:'保存して適用',saved:'保存済み',applied:'保存して適用済み',restart_nr:'再起動が必要：',loaded_err:'読み込み失敗：'},
+ tr:{today_up:'本日の上り',today_down:'本日の下り',today_total:'本日合計',daily:'日別トラフィック',up:'上り',down:'下り',total:'合計',date:'日付',caption:'過去 {n} 日',empty:'日別トラフィックデータはまだありません'}}};
+// 浏览器语言 → 面板语言：前缀匹配，zh 系一律落到 zh-CN（简体）
+function detectLang(){
+  const l=(navigator.language||'en').toLowerCase();
+  if(l.startsWith('zh'))return 'zh-CN';
+  if(l.startsWith('de'))return 'de';
+  if(l.startsWith('fr'))return 'fr';
+  if(l.startsWith('ja'))return 'ja';
+  return 'en';
+}
+	let LANG=localStorage.getItem('tlsvpn_lang')||detectLang();
 function t(path){const dig=d=>{let o=d;for(const k of path.split('.'))o=o?o[k]:undefined;return o;};
   const cur=dig(I18N[LANG]);if(cur!==undefined)return cur;
   const en=dig(I18N['en']);if(en!==undefined)return en;return path;}
