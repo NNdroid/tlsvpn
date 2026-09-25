@@ -23,6 +23,7 @@ grep -Fq 'TLSVPN_NETIFD_INTERFACE=$interface' "${proto}"
 grep -Fq 'resolved_server="$resolved_server$resolved_endpoint"' "${proto}"
 grep -Fq 'resolved_socks5="$scheme$userinfo$resolved_endpoint"' "${proto}"
 grep -Fq 'SOCKS5_HOST_DEPENDENCY_FAILED' "${proto}"
+grep -Fq '[ -n "$enc_algo" ] && json_add_string enc_algo "$enc_algo"' "${proto}"
 grep -Fq '[ -n "$min_enc" ] && json_add_string min_enc "$min_enc"' "${proto}"
 
 grep -Fq 'proto_init_update "$device" 1' "${up}"
@@ -39,6 +40,9 @@ grep -Fq 'proto_init_update "$device" 0' "${down}"
 grep -Fq "network.registerProtocol('tlsvpn'" "${luci}"
 grep -Fq "getPackageName" "${luci}"
 grep -Fq "'tlsvpn-proto'" "${luci}"
+grep -Fq "form.ListValue, 'enc_algo'" "${luci}"
+grep -Fq "o.value('gcm256'" "${luci}"
+grep -Fq "o.value('gcm128'" "${luci}"
 
 if command -v node >/dev/null 2>&1; then
 	node --check "${luci}"
