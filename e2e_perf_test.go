@@ -281,7 +281,7 @@ func TestPerfThroughput(t *testing.T) {
 		s.sessionMu.RLock()
 		reorder := s.RxReorder
 		s.sessionMu.RUnlock()
-		var rs ReorderStats
+		var rs ReorderBufferStats
 		if reorder != nil {
 			rs = reorder.Stats()
 		}
