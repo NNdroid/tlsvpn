@@ -24,9 +24,9 @@ type VPNFrame struct {
 // 池里存 *[128]VPNFrame 而不是 []VPNFrame，避免 slice header 装箱逃逸。
 const hotVPNBatchCap = 128
 
-var vpnFrameBatchPool = sync.Pool{
-	New: func() any { return new([hotVPNBatchCap]VPNFrame) },
-}
+func newVPNFrameBatch() any { return new([hotVPNBatchCap]VPNFrame) }
+
+var vpnFrameBatchPool = sync.Pool{New: newVPNFrameBatch}
 
 func getVPNFrameBatch(n int) []VPNFrame {
 	if n <= hotVPNBatchCap {
@@ -54,15 +54,24 @@ var framePoolSizes = []int{512, 1024, 2048, 4096, 8192, 16384, 32768, 143360}
 // 是 cloneFrame / FrameScanner 的绝对主流量。
 const defaultFrameSize = 2048
 
+func newFrame512() any    { return new([512]byte) }
+func newFrame1024() any   { return new([1024]byte) }
+func newFrame2048() any   { return new([2048]byte) }
+func newFrame4096() any   { return new([4096]byte) }
+func newFrame8192() any   { return new([8192]byte) }
+func newFrame16384() any  { return new([16384]byte) }
+func newFrame32768() any  { return new([32768]byte) }
+func newFrame143360() any { return new([143360]byte) }
+
 var (
-	framePool512 = sync.Pool{New: func() any { return new([512]byte) }}
-	framePool1024 = sync.Pool{New: func() any { return new([1024]byte) }}
-	framePool2048 = sync.Pool{New: func() any { return new([2048]byte) }}
-	framePool4096 = sync.Pool{New: func() any { return new([4096]byte) }}
-	framePool8192 = sync.Pool{New: func() any { return new([8192]byte) }}
-	framePool16384 = sync.Pool{New: func() any { return new([16384]byte) }}
-	framePool32768 = sync.Pool{New: func() any { return new([32768]byte) }}
-	framePool143360 = sync.Pool{New: func() any { return new([143360]byte) }}
+	framePool512    = sync.Pool{New: newFrame512}
+	framePool1024   = sync.Pool{New: newFrame1024}
+	framePool2048   = sync.Pool{New: newFrame2048}
+	framePool4096   = sync.Pool{New: newFrame4096}
+	framePool8192   = sync.Pool{New: newFrame8192}
+	framePool16384  = sync.Pool{New: newFrame16384}
+	framePool32768  = sync.Pool{New: newFrame32768}
+	framePool143360 = sync.Pool{New: newFrame143360}
 )
 
 // getFrameAtLeast 取一个容量 >= n 的池缓冲，并保证 len == cap == 分档尺寸。
