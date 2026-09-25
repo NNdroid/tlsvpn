@@ -62,3 +62,24 @@ func TestFramePoolIgnoresOffTierBuffer(t *testing.T) {
 	putFrame(got)
 	putFrame(nil) // nil 必须安全
 }
+
+
+func TestTLSWriteBatchLimitByConnectionCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		conns int
+		want  int
+	}{
+		{name: "legacy_unknown", conns: 0, want: maxTLSWriteBatchBytesMulti},
+		{name: "single_path", conns: 1, want: maxTLSWriteBatchBytesSingle},
+		{name: "two_paths", conns: 2, want: maxTLSWriteBatchBytesMulti},
+		{name: "four_paths", conns: 4, want: maxTLSWriteBatchBytesMulti},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tlsWriteBatchLimit(tt.conns); got != tt.want {
+				t.Fatalf("tlsWriteBatchLimit(%d)=%d, want %d", tt.conns, got, tt.want)
+			}
+		})
+	}
+}
