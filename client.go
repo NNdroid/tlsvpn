@@ -1319,9 +1319,12 @@ func (c *Client) snapshotConns() []connSnapshot {
 // negotiateUTLS 负责配置 uTLS、选择指纹并执行 TLS 握手（参数取自热更快照）
 func (c *Client) negotiateUTLS(ctx context.Context, rawConn net.Conn, lv *liveConfig) (*utls.UConn, error) {
 	utlsConf := &utls.Config{
-		ServerName:         lv.sni,
-		InsecureSkipVerify: lv.insecure,
-		NextProtos:         []string{"h2", "http/1.1"},
+		ServerName:                  lv.sni,
+		InsecureSkipVerify:          lv.insecure,
+		NextProtos:                  []string{"h2", "http/1.1"},
+		// VPN 是持续大流量而不是交互式短响应；关闭动态 record sizing 后
+		// 从一开始就使用满尺寸 TLS record，减少 record/AEAD/write 调用。
+		DynamicRecordSizingDisabled: true,
 	}
 
 	// 自定义证书哈希校验
