@@ -202,6 +202,52 @@ func TestVSwitchStaticSessionMACFastPath(t *testing.T) {
 	}
 }
 
+func TestVSwitchStaticMACCannotBeOverwrittenByDynamicPort(t *testing.T) {
+	vs := NewVSwitch()
+	macA := macKey{0x02, 0, 0, 0, 0, 0x41}
+	pa := newStubPort("A")
+	legacy := newStubPort("LEGACY")
+	tap := newStubPort("TAP")
+	vs.AddPort(pa)
+	vs.AddPort(legacy)
+	vs.AddPort(tap)
+	vs.trustedPort = "TAP"
+	vs.AddStaticMAC("A", macA)
+
+	// 模拟未上报 MAC 的 legacy session：validateMAC 对它放行，但 static 映射仍不可被覆盖。
+	vs.validateMAC = func(srcPortID string, _ macKey) bool {
+		return srcPortID == "LEGACY" || srcPortID == "TAP"
+	}
+	vs.ProcessFrame("LEGACY", macFrame(macA, macA))
+	if got := vs.spoofDrops.Load(); got != 1 {
+		t.Fatalf("legacy static-MAC overwrite spoofDrops=%d, want 1", got)
+	}
+	select {
+	case <-pa.frames:
+		t.Fatal("legacy spoof frame reached pinned session port")
+	default:
+	}
+	shard := vs.shards[getShardIdx(macA)]
+	shard.mu.RLock()
+	entry := shard.macTable[macA]
+	shard.mu.RUnlock()
+	if entry == nil || entry.portID != "A" || !entry.static {
+		t.Fatalf("legacy port overwrote static MAC entry: %+v", entry)
+	}
+
+	// 可信 TAP 可以携带该源 MAC 转发，但也不能改写 pinned destination mapping。
+	vs.ProcessFrame("TAP", macFrame(macA, macA))
+	shard.mu.RLock()
+	entry = shard.macTable[macA]
+	shard.mu.RUnlock()
+	if entry == nil || entry.portID != "A" || !entry.static {
+		t.Fatalf("trusted TAP rewrote static MAC entry: %+v", entry)
+	}
+	if got := vs.spoofDrops.Load(); got != 1 {
+		t.Fatalf("trusted TAP should not increment spoofDrops, got %d", got)
+	}
+}
+
 func BenchmarkVSwitchSourcePath(b *testing.B) {
 	macA := macKey{0x02, 0, 0, 0, 0, 0x31}
 	frame := macFrame(macA, macA)
