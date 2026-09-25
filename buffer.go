@@ -209,7 +209,7 @@ func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) bool {
 	if seq == rb.expectedSeq {
 		return rb.drainLocked()
 	}
-	return rb.refreshGapLocked(time.Now())
+	return rb.refreshGapLocked()
 }
 
 // growWindowLocked 把 ring 扩到足以容纳 requiredDistance 的 2 次幂。
@@ -273,17 +273,19 @@ func (rb *ReorderBuffer) drainLocked() bool {
 			rb.flushPendingLocked()
 		}
 	}
-	startedGap := rb.refreshGapLocked(time.Now())
+	startedGap := rb.refreshGapLocked()
 	return hadGap || startedGap
 }
 
 // refreshGapLocked 只在缓冲区里确实存在未来帧时建立缺口计时。单纯空闲不算
 // 缺口，否则心跳间隔会污染超时状态。返回值表示应唤醒定时协程重算 deadline。
-func (rb *ReorderBuffer) refreshGapLocked(now time.Time) bool {
+func (rb *ReorderBuffer) refreshGapLocked() bool {
 	hasGap := rb.buffered > 0 && rb.expectedSeq != 0 && rb.ring[rb.expectedSeq&rb.windowMask] == nil
 	if hasGap {
 		if rb.gapSince.IsZero() {
-			rb.gapSince = now
+			// time.Now() 只在真实新 gap 出现时调用。正常顺序流 buffered==0，
+			// 不再每帧支付一次 runtimeNow。
+			rb.gapSince = time.Now()
 			rb.gapEvents.Add(1)
 			return true
 		}
