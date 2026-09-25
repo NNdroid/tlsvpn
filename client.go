@@ -144,13 +144,28 @@ func (p *AsyncPort) WriteFrame(frame []byte) error {
 		buf = getFrameAtLeast(len(frame))[:len(frame)]
 		copy(buf, frame)
 	}
+	return p.WriteOwnedFrame(buf)
+}
+
+// WriteOwnedFrame 接管 frame 的所有权。调用后无论成功入队、端口关闭还是背压
+// 丢弃，调用方都不得再访问 frame。真实 TAP 热路径直接把池缓冲交进 AsyncPort，
+// 消除一次 payload memcpy；普通 WriteFrame 仍保留 copy 语义供共享/外部调用使用。
+func (p *AsyncPort) WriteOwnedFrame(frame []byte) error {
 	select {
-	case p.ch <- buf:
+	case <-p.ctx.Done():
+		if frame != nil {
+			putFrame(frame)
+		}
+		return fmt.Errorf("port closed")
+	default:
+	}
+	select {
+	case p.ch <- frame:
 	default:
 		log.Debugf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
 		p.dropN(1)
-		if buf != nil {
-			putFrame(buf)
+		if frame != nil {
+			putFrame(frame)
 		}
 	}
 	return nil
@@ -1151,18 +1166,31 @@ func (c *Client) Run(ctx context.Context) {
 	}()
 
 	go func() {
-		// 读缓冲只分配一次；旧实现在循环体里每帧 make([]byte, 65536)
-		buf := make([]byte, 65536)
+		readSize, pooledRead := tapReadBufferSize(c.tapName)
+		if pooledRead {
+			log.Debugf("[Client] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
+		}
+		// 非 Linux / 无法查询 MTU 时保留旧的单缓冲 + WriteFrame(copy) 路径。
+		var fallback []byte
+		if !pooledRead {
+			fallback = make([]byte, 65536)
+		}
 		consecutiveErr := 0
 		for {
+			var buf []byte
+			if pooledRead {
+				buf = getFrameAtLeast(readSize)[:readSize]
+			} else {
+				buf = fallback
+			}
 			rn, err := c.tap.Read(buf)
 			if err != nil {
+				if pooledRead {
+					putFrame(buf)
+				}
 				if ctx.Err() != nil {
 					return
 				}
-				// TAP 设备被系统休眠/驱动重置/网络管理器重启后可能持续报错。
-				// 短暂错误退避重试；连续失败升级为 5s 间隔并告警，
-				// 让用户意识到接口可能需要手动重建（recreateTAP 未实现时）。
 				consecutiveErr++
 				if consecutiveErr == 1 {
 					log.Warnf("TAP read error: %v (retrying; the interface may have been reset)", err)
@@ -1179,9 +1207,12 @@ func (c *Client) Run(ctx context.Context) {
 				continue
 			}
 			consecutiveErr = 0
-			// WriteFrame 内部会拷贝进独立的池缓冲，这里直接复用本地缓冲，
-			// 不再额外取池（旧实现取池后从未归还，造成每帧 32KB 泄漏）
-			c.txPort.WriteFrame(buf[:rn])
+			if pooledRead {
+				// 所有权转移给 AsyncPort；下一轮从 pool 取下一块 buffer。
+				_ = c.txPort.WriteOwnedFrame(buf[:rn])
+			} else {
+				_ = c.txPort.WriteFrame(buf[:rn])
+			}
 		}
 	}()
 
