@@ -41,6 +41,7 @@ type Config struct {
 	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
 	// 显式的 false，下次重载又被默认值翻回 true。
 	Encrypt    bool         `json:"encrypt"`
+	EncAlgo    string       `json:"enc_algo,omitempty"` // gcm256（默认）| gcm128（显式性能模式）
 	MinEnc     string       `json:"min_enc,omitempty"`  // 最低内层加密强度：gcm（空/any=不设下限）
 	PadMode    string       `json:"pad_mode,omitempty"` // 混淆填充：bucket | off（默认 bucket）
 	Socks5     string       `json:"socks5,omitempty"`   // 全局 SOCKS5 出口（client）
@@ -88,7 +89,7 @@ type ServerConfig struct {
 	// FecGroupMin/Max 是服务端接受的对端 FEC 分组大小 K 的区间。请求 FEC 而
 	// K 越界的握手按请求形态错误拒连（不夹取、不降级，见 server.go 的拒连闸）。
 	// 默认 [2, 64] = 协议允许范围，即默认不额外限制。
-	// 方向注意：奇偶帧广播到全部 N 个后端，冗余开销是 N/K —— K 越大开销越小，
+	// 方向注意：每个 FEC 组只发送一份 parity，冗余开销约 1/K —— K 越大开销越小，
 	// 所以限带宽要调高 min（地板），调低 max 限的是待收帧缓冲与恢复时延上限。
 	FecGroupMin int `json:"fec_group_min,omitempty"`
 	FecGroupMax int `json:"fec_group_max,omitempty"`
@@ -156,6 +157,7 @@ const exampleConfigJSON = `{
   "up": "",
   "down": "",
   "encrypt": true,
+  "enc_algo": "gcm256",
   "min_enc": "gcm",
   "pad_mode": "bucket",
   "brutal": true,
@@ -280,8 +282,13 @@ func (c *Config) applyDefaults() {
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
 	}
-	if c.Encrypt && c.MinEnc == "" {
-		c.MinEnc = "gcm"
+	if c.Encrypt {
+		if c.EncAlgo == "" {
+			c.EncAlgo = "gcm256"
+		}
+		if c.MinEnc == "" {
+			c.MinEnc = "gcm"
+		}
 	}
 	if c.Mode == "server" {
 		if c.Addr == "" {
@@ -378,6 +385,14 @@ func (c *Config) Validate() error {
 		if c.Web.Cert == "" || c.Web.Key == "" {
 			return fmt.Errorf("web.cert and web.key are required for a non-loopback dashboard listener")
 		}
+	}
+	switch c.EncAlgo {
+	case "", "gcm256", "gcm128":
+	default:
+		return fmt.Errorf("invalid enc_algo %q (want gcm256 or gcm128)", c.EncAlgo)
+	}
+	if c.EncAlgo != "" && !c.Encrypt {
+		return fmt.Errorf("enc_algo %q requires encrypt=true", c.EncAlgo)
 	}
 	switch c.MinEnc {
 	case "", "any", "gcm":
