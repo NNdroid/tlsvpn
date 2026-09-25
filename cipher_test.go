@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
@@ -724,5 +725,20 @@ func TestGCM128And256UseSeparateKeyDomains(t *testing.T) {
 	g256.sealInPlace(b, len(pt), 78, wireLen)
 	if _, err := g128.openInPlace(append([]byte(nil), b...), 78, wireLen); err == nil {
 		t.Fatal("AES-256-GCM ciphertext authenticated under AES-128-GCM key domain")
+	}
+}
+
+func TestHandshakeEncSaltsForBothGCMKeySizes(t *testing.T) {
+	saltA := [encSaltSize]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	saltB := [encSaltSize]byte{8, 7, 6, 5, 4, 3, 2, 1}
+
+	for _, algo := range []int{encAlgoGCM, encAlgoGCM128} {
+		gotA, gotB := handshakeEncSalts(algo, saltA, saltB)
+		if gotA != hex.EncodeToString(saltA[:]) || gotB != hex.EncodeToString(saltB[:]) {
+			t.Fatalf("algo %d must carry both GCM salts, got %q/%q", algo, gotA, gotB)
+		}
+	}
+	if gotA, gotB := handshakeEncSalts(encAlgoNone, saltA, saltB); gotA != "" || gotB != "" {
+		t.Fatalf("plaintext handshake must not carry GCM salts, got %q/%q", gotA, gotB)
 	}
 }
