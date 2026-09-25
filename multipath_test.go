@@ -188,6 +188,16 @@ func TestPickDataBackendStripesOnlyUnderBulkBacklog(t *testing.T) {
 	if !seenA || !seenB {
 		t.Fatalf("bulk striping did not use both eligible paths: A=%v B=%v", seenA, seenB)
 	}
+
+	// 即使 RTT 很接近，明显积压的路径也必须退出 striping 候选集。
+	for i := 0; i < 20; i++ {
+		b.ch <- []VPNFrame{{Seq: uint32(i + 1)}}
+	}
+	for i := 0; i < 8; i++ {
+		if got := p.pickDataBackend(backends); got != a {
+			t.Fatalf("queued backend participated in striping: got=%p want=%p", got, a)
+		}
+	}
 }
 
 func TestFECParityIsSuppressedOnSingleTCPPath(t *testing.T) {
