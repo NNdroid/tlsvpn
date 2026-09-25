@@ -1787,14 +1787,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 200ms ticker goroutine。代理模式 tcpConn=nil 时 nil channel 自动禁用。
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
-		var nextWriteDeadlineRefresh time.Time
+		// 全进程共享 1Hz 粗时钟；热路径只做 atomic Load + 整数比较。
+		// epoch 变化时才真正读取时钟并更新 poll deadline。
+		writeDeadlineEpoch := currentDeadlineEpoch()
+		_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
 		refreshWriteDeadline := func() {
-			now := time.Now()
-			if nextWriteDeadlineRefresh.IsZero() || !now.Before(nextWriteDeadlineRefresh) {
-				// 活跃连接每秒最多更新一次 poll deadline；11s 绝对截止保证
-				// 任意时刻开始阻塞的 Write 仍会在约 10~11s 内失败。
-				_ = tlsConn.SetWriteDeadline(now.Add(11 * time.Second))
-				nextWriteDeadlineRefresh = now.Add(time.Second)
+			epoch := currentDeadlineEpoch()
+			if epoch != writeDeadlineEpoch {
+				// 11s 绝对截止保证任意时刻开始阻塞的 Write 仍会在约
+				// 10~11s 内失败。
+				_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+				writeDeadlineEpoch = epoch
 			}
 		}
 		if tcpConn != nil {
@@ -1859,7 +1862,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
-		var nextReadDeadlineRefresh time.Time
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -1872,18 +1874,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 		defer flushRxStats()
 
+		readDeadlineEpoch := currentDeadlineEpoch()
+		_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
 		for {
-			now := time.Now()
-			if nextReadDeadlineRefresh.IsZero() || !now.Before(nextReadDeadlineRefresh) {
-				// 1s 滚动刷新、16s deadline => 实际空闲判死约 15~16s，
-				// 不再为每个数据帧执行 runtime_pollSetDeadline syscall。
-				tlsConn.SetReadDeadline(now.Add(16 * time.Second))
-				nextReadDeadlineRefresh = now.Add(time.Second)
-			}
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
 				errChan <- err
 				return
+			}
+			epoch := currentDeadlineEpoch()
+			if epoch != readDeadlineEpoch {
+				// 1s 粗粒度刷新、16s deadline => 实际空闲判死约 15~16s。
+				_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
+				readDeadlineEpoch = epoch
 			}
 			// 心跳/控制帧（frame=nil）：读超时已被 SetReadDeadline 刷新，
 			// 直接进入下一轮循环即可保持空闲连接存活
