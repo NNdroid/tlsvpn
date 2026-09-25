@@ -1339,6 +1339,19 @@ type connSnapshot struct {
 }
 
 // snapshotConns 汇总所有物理连接明细
+// avgRTT 当前所有物理连接 RTT 的均值（毫秒）；无连接时 0。供趋势采样使用。
+func (c *Client) avgRTT() float64 {
+	conns := c.snapshotConns()
+	if len(conns) == 0 {
+		return 0
+	}
+	var sum uint64
+	for _, ci := range conns {
+		sum += uint64(ci.RttMs)
+	}
+	return float64(sum) / float64(len(conns))
+}
+
 func (c *Client) snapshotConns() []connSnapshot {
 	// negInfo 归 sessionMu，连接表归 connsMu。这里用两段不重叠的临界区各取各的，
 	// 而不是持着一把再拿另一把：现有代码里没有确定的锁序，嵌套一把就制造出

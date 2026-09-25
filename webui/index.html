@@ -75,7 +75,17 @@
     <div class="card kpi-card">
       <div class="kpi-top"><span class="kpi-ico violet"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span><span class="kpi-label" data-i18n="kpi.fec">-</span></div>
       <div class="kpi-val" id="fec-kpi">-</div>
-      <div class="kpi-sub"><span data-i18n="kpi.parity">-</span> <span class="num" id="parity">-</span> · <span data-i18n="kpi.dropped">-</span> <span class="num" id="dropped">-</span> · <span data-i18n="kpi.reorder">-</span> <span class="num" id="reorder-skipped">-</span></div>
+      <div class="kpi-sub"><span data-i18n="kpi.parity">-</span> <span class="num" id="parity">-</span> · <span data-i18n="kpi.overhead">-</span> <span class="num" id="fec-overhead">-</span></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico violet"><svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="kpi-label" data-i18n="kpi.pps">-</span></div>
+      <div class="kpi-val" id="k-pps">0</div>
+      <div class="kpi-sub"><span class="arr-up">↑</span> <span class="num" id="pps-up">0</span> <span class="arr-down">↓</span> <span class="num" id="pps-down">0</span> <span class="dim">pps</span></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico amber"><svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span><span class="kpi-label" data-i18n="kpi.dropped">-</span></div>
+      <div class="kpi-val" id="k-dropped">0</div>
+      <div class="kpi-sub"><span data-i18n="kpi.reorder">-</span> <span class="num" id="reorder-skipped">-</span> · TAP <span class="num" id="tap-errors">-</span></div>
     </div>
     <div class="card kpi-card">
       <div class="kpi-top"><span class="kpi-ico cyan"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span><span class="kpi-label" data-i18n="kpi.mem">-</span></div>
@@ -93,12 +103,18 @@
     <div class="chart-head">
       <h2 class="card-title" data-i18n="chart.title">-</h2>
       <span class="dim" style="font-size:.82em" data-i18n="chart.win">-</span>
+      <div class="seg" id="range-seg">
+        <button data-v="2m" class="on" onclick="setRange('2m')" data-i18n="chart.r2m">-</button>
+        <button data-v="1h" onclick="setRange('1h')" data-i18n="chart.r1h">-</button>
+        <button data-v="24h" onclick="setRange('24h')" data-i18n="chart.r24h">-</button>
+      </div>
       <div class="chart-live mono"><span class="arr-up">↑ <span id="live-up">-</span></span><span class="arr-down">↓ <span id="live-down">-</span></span></div>
     </div>
     <canvas id="chart" width="1160" height="216"></canvas>
     <div class="legend">
       <span><i class="dot" style="background:var(--up)"></i><span data-i18n="legend.up">-</span></span>
       <span><i class="dot" style="background:var(--down)"></i><span data-i18n="legend.down">-</span></span>
+      <span id="legend-rtt" style="display:none"><i class="dot" style="background:var(--warn)"></i><span data-i18n="legend.rtt">-</span></span>
     </div>
   </section>
 
@@ -139,7 +155,7 @@
         </div>
       </div>
       <div class="twrap"><table>
-        <thead><tr><th data-i18n="th.owner">-</th><th data-i18n="th.target">-</th><th data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th data-i18n="th.rtt">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th class="hide-sm" data-i18n="th.retries">-</th><th class="hide-sm" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.epoch">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
+        <thead><tr><th data-i18n="th.owner">-</th><th data-i18n="th.target">-</th><th data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th data-i18n="th.rtt">-</th><th data-i18n="th.tx">-</th><th data-i18n="th.rx">-</th><th class="hide-sm" data-i18n="th.txs">-</th><th class="hide-sm" data-i18n="th.rxs">-</th><th class="hide-sm" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.epoch">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
         <tbody id="conns-body"></tbody>
       </table></div>
     </div>
@@ -173,6 +189,13 @@
     </div>
 
     <div class="pane" id="pane-traffic">
+      <div class="toolbar">
+        <label class="lbl"><span data-i18n="tr.client">-</span>
+          <select id="tr-client" class="sel" onchange="renderTrafficView()" style="max-width:260px">
+            <option value="" data-i18n="tr.all">-</option>
+          </select>
+        </label>
+      </div>
       <div class="st-grid" style="margin-bottom:14px">
         <div class="st-block">
           <div class="kpi-top"><span class="kpi-ico green"><svg viewBox="0 0 24 24"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg></span><span class="kpi-label" data-i18n="tr.today_up">-</span></div>

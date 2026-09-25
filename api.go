@@ -70,6 +70,8 @@ type WebStats struct {
 	SessionEpoch uint64 `json:"session_epoch,omitempty"`
 	// 按日流量统计（上行=client→server，下行=server→client，线路字节口径）
 	Traffic *trafficSnapshotJSON `json:"traffic,omitempty"`
+	// 服务端模式下各客户端的按日流量历史（客户端模式缺位）
+	ClientTraffic []clientTrafficJSON `json:"client_traffic,omitempty"`
 	// 面板"状态"页数据源：生效配置、运行时协商、宿主系统
 	Cfg       runtimeCfgJSON `json:"cfg"`
 	Negotiate runtimeNegJSON `json:"negotiate"`
@@ -142,6 +144,12 @@ type sysInfoJSON struct {
 	Host      string   `json:"host,omitempty"`
 	CfgPath   string   `json:"cfg_path,omitempty"`
 	RestartNR []string `json:"needs_restart,omitempty"`
+	// 尽力而为的系统指标：Linux 缺文件或非 Linux 时缺位，面板不渲染对应行
+	Load      *loadJSON `json:"load,omitempty"`
+	Mem       *memJSON  `json:"mem,omitempty"`
+	FdOpen    int       `json:"fd_open,omitempty"`
+	NumGC     uint32    `json:"num_gc,omitempty"`
+	GCPauseMs float64   `json:"gc_pause_ms,omitempty"`
 }
 
 // brutalInfoJSON 服务端 TCP Brutal 的协商与生效结果。
@@ -261,6 +269,14 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 	mgr.mux = mux
 	auth := mgr.auth // 认证串可热更：经 mgr 读取当前配置
 
+	// 趋势 RTT 采样与每客户端流量差分都依赖 mode 侧回调，在这里挂上
+	if srv != nil {
+		dailyTraffic.SetRTTSampler(srv.avgRTT)
+		dailyTraffic.SetClientSampler(srv.sampleClientTraffic)
+	} else if cli != nil {
+		dailyTraffic.SetRTTSampler(cli.avgRTT)
+	}
+
 	// 仪表盘静态资源（与 API 一致地受认证保护）；no-store 语义见 webuiHandler
 	mux.Handle("/", auth(webuiHandler().ServeHTTP))
 
@@ -286,6 +302,16 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		fmt.Sscanf(r.URL.Query().Get("after"), "%d", &after)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(logRing.snapshot(after))
+	}))
+
+	// 长周期吞吐/RTT 趋势（range=1h|24h，默认 1h）
+	mux.HandleFunc("/api/trend", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		minutes := 60
+		if r.URL.Query().Get("range") == "24h" {
+			minutes = 1440
+		}
+		json.NewEncoder(w).Encode(dailyTraffic.TrendSnapshot(minutes))
 	}))
 
 	// Prometheus 文本格式指标
@@ -691,6 +717,14 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.System = sysInfo(cfgPath, cli.PendingRestart())
 	}
 
+	stats.System.Load = readLoadAvg()
+	stats.System.Mem = readMemInfo()
+	stats.System.FdOpen = countFDs()
+	stats.System.NumGC = ms.NumGC
+	stats.System.GCPauseMs = float64(ms.PauseTotalNs) / 1e6
+	if ct := dailyTraffic.ClientSnapshot(); len(ct) > 0 {
+		stats.ClientTraffic = ct
+	}
 	ts := dailyTraffic.Snapshot()
 	stats.Traffic = &ts
 

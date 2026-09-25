@@ -80,7 +80,7 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 /* ---------- 布局与卡片 ---------- */
 .wrap{max-width:1240px;margin:0 auto;padding:22px 24px 10px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:14px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(256px,100%),1fr));gap:14px;margin-bottom:14px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:14px;margin-bottom:14px}
 .kpi-card{display:flex;flex-direction:column;gap:2px;margin-bottom:0;transition:border-color .15s ease}
 .kpi-card:hover{border-color:var(--border2)}
 .kpi-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}

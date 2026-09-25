@@ -733,8 +733,35 @@ func (s *Server) MACSnapshot() []MACEntry {
 
 // snapshotServerConns 汇总所有会话的物理连接明细（面板"连接明细"页签）。
 // 注意：此方法自行加读锁，不得在已持有 s.mu 时调用。
-func (s *Server) snapshotServerConns() []serverConnSnapshot {
-	now := time.Now().Unix()
+// avgRTT 当前所有物理连接 RTT 的均值（毫秒）；无连接时 0。供趋势采样使用。
+func (s *Server) avgRTT() float64 {
+	conns := s.snapshotServerConns()
+	if len(conns) == 0 {
+		return 0
+	}
+	var sum uint64
+	for _, c := range conns {
+		sum += uint64(c.RttMs)
+	}
+	return float64(sum) / float64(len(conns))
+}
+
+// sampleClientTraffic 各客户端会话累计字节的快照：上行=Rx（client→server）、
+// 下行=Tx（server→client）。趋势/每客户端流量统计按 60 秒差分取增量。
+func (s *Server) sampleClientTraffic() map[string][2]uint64 {
+	out := make(map[string][2]uint64, len(s.activeClients))
+	s.mu.RLock()
+	for id, session := range s.activeClients {
+		out[id] = [2]uint64{
+			atomic.LoadUint64(&session.RxBytes),
+			atomic.LoadUint64(&session.TxBytes),
+		}
+	}
+	s.mu.RUnlock()
+	return out
+}
+
+func (s *Server) snapshotServerConns() []serverConnSnapshot {	now := time.Now().Unix()
 	out := []serverConnSnapshot{}
 	s.mu.RLock()
 	for id, session := range s.activeClients {
