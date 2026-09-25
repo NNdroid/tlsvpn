@@ -1765,8 +1765,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 	}()
 
+	writeBatchLimit := tlsWriteBatchLimit(lv.connsCount)
 	go func() {
-		sendBuffer := make([]byte, 0, 64*1024+4096)
+		sendBuffer := make([]byte, 0, writeBatchLimit+4096)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1806,7 +1807,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					var n int
 					sendBuffer, n = appendOwnedFrameBatch(sendBuffer, frames, icTx)
 					txPackets += n
-					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+					if len(sendBuffer) >= writeBatchLimit {
 						break
 					}
 					select {
