@@ -190,6 +190,10 @@ td.dim{color:var(--sub)}
 }
 :root[data-theme=light] .warnbar{border-color:rgba(154,109,0,.25)}
 .st-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:14px;align-items:start}
+/* 状态页瀑布流：卡片沿列紧密堆叠，后一张自动补到前列空位（无行级空洞）；
+   流量页的三张汇总卡仍用 .st-grid 保持横排等高 */
+.st-cols{display:block;column-width:20rem;column-gap:14px}
+.st-cols .st-block{break-inside:avoid;-webkit-column-break-inside:avoid;margin-bottom:14px}
 .st-block{background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:14px 16px}
 .st-block h3{margin:0 0 8px;font-size:.92em;font-weight:650}
 .kv{width:100%;border-collapse:collapse;table-layout:fixed}
