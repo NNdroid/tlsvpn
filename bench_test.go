@@ -32,6 +32,25 @@ func BenchmarkGCMSealOpen(b *testing.B) {
 	}
 }
 
+func BenchmarkGCM128SealOpen(b *testing.B) {
+	salt := randomSalt()
+	tx, _ := newGCMInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
+	rx, _ := newGCMInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
+	pt := benchPayload()
+	region := make([]byte, len(pt)+gcmTagSize)
+
+	b.SetBytes(int64(len(pt)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		copy(region, pt)
+		tx.sealInPlace(region, len(pt), uint32(i)+1, uint32(len(region)))
+		if _, err := rx.openInPlace(region, uint32(i)+1, uint32(len(region))); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkFECEncode(b *testing.B) {
 	// K=4、1400B 帧：覆盖异或累加 + 校验帧构建
 	e := newFECEncoder(4, nil)
