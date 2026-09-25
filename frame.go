@@ -156,10 +156,21 @@ func freeFrames(batch []VPNFrame) {
 	}
 }
 
-// Go crypto/tls/uTLS 在大块 Write 内部仍拆 record；过大的单次 Write 会延长
-// 单连接发送 goroutine 占用时间，反而损害多路公平性。保持 64KiB 上限，但仍
-// 会把多个较小 backend batch 顺手合并到一次 Write。
-const maxTLSWriteBatchBytes = 64 * 1024
+// TLS 聚合上限按物理连接数自适应：单连接没有 multipath 公平性问题，
+// 可以扩大到 256KiB 以减少 TLS/uTLS Write、record 调度和 socket syscall；
+// 多连接仍保持 64KiB，避免单个 sender 长时间占用 CPU/写锁损害 striping。
+// conns<=0 代表旧客户端/未知值，保守回退 64KiB。
+const (
+	maxTLSWriteBatchBytesMulti  = 64 * 1024
+	maxTLSWriteBatchBytesSingle = 256 * 1024
+)
+
+func tlsWriteBatchLimit(conns int) int {
+	if conns == 1 {
+		return maxTLSWriteBatchBytesSingle
+	}
+	return maxTLSWriteBatchBytesMulti
+}
 
 // appendOwnedFrameBatch 把一个 backend batch 成帧进 sendBuffer，并终结该
 // batch 的 payload/描述符所有权。返回帧数供统计批量累加。
