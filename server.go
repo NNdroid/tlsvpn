@@ -715,11 +715,16 @@ type MACEntry struct {
 // MACSnapshot 交换机学习到的 MAC→端口 快照（面板展示）
 func (s *Server) MACSnapshot() []MACEntry {
 	out := []MACEntry{}
+	nowTick := s.vswitch.coarseSec.Load()
 	for i := 0; i < ShardCount; i++ {
 		shard := s.vswitch.shards[i]
 		shard.mu.RLock()
 		for mac, entry := range shard.macTable {
-			out = append(out, MACEntry{MAC: fmtMAC(mac), Port: entry.portID, AgeSec: uint64(time.Since(entry.updatedAt) / time.Second)})
+			var age uint64
+			if nowTick >= entry.updatedTick {
+				age = nowTick - entry.updatedTick
+			}
+			out = append(out, MACEntry{MAC: fmtMAC(mac), Port: entry.portID, AgeSec: age})
 		}
 		shard.mu.RUnlock()
 	}
