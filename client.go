@@ -1787,14 +1787,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 200ms ticker goroutine。代理模式 tcpConn=nil 时 nil channel 自动禁用。
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
-		var nextWriteDeadlineRefresh time.Time
+		// deadline ticker 只在每秒 tick 到达时进入 time.Now；数据热路径只做
+		// 一次非阻塞 channel 探测，避免每个 batch 调 runtimeNow。
+		writeDeadlineTicker := time.NewTicker(time.Second)
+		defer writeDeadlineTicker.Stop()
+		_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
 		refreshWriteDeadline := func() {
-			now := time.Now()
-			if nextWriteDeadlineRefresh.IsZero() || !now.Before(nextWriteDeadlineRefresh) {
-				// 活跃连接每秒最多更新一次 poll deadline；11s 绝对截止保证
-				// 任意时刻开始阻塞的 Write 仍会在约 10~11s 内失败。
-				_ = tlsConn.SetWriteDeadline(now.Add(11 * time.Second))
-				nextWriteDeadlineRefresh = now.Add(time.Second)
+			select {
+			case <-writeDeadlineTicker.C:
+				// 11s 绝对截止保证任意时刻开始阻塞的 Write 仍会在约
+				// 10~11s 内失败；用当前时间而不是 ticker 携带的旧时间，
+				// 避免 goroutine 短暂忙碌后消费陈旧 tick 缩短下一次窗口。
+				_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+			default:
 			}
 		}
 		if tcpConn != nil {
@@ -1859,7 +1864,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
-		var nextReadDeadlineRefresh time.Time
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -1872,18 +1876,22 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 		defer flushRxStats()
 
+		// 初始 deadline 立即生效；之后只在 1s ticker 可读时滚动刷新。
+		// 这样保持约 15~16s 的空闲判死窗口，同时从每帧热路径移除 time.Now。
+		readDeadlineTicker := time.NewTicker(time.Second)
+		defer readDeadlineTicker.Stop()
+		_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
+
 		for {
-			now := time.Now()
-			if nextReadDeadlineRefresh.IsZero() || !now.Before(nextReadDeadlineRefresh) {
-				// 1s 滚动刷新、16s deadline => 实际空闲判死约 15~16s，
-				// 不再为每个数据帧执行 runtime_pollSetDeadline syscall。
-				tlsConn.SetReadDeadline(now.Add(16 * time.Second))
-				nextReadDeadlineRefresh = now.Add(time.Second)
-			}
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
 				errChan <- err
 				return
+			}
+			select {
+			case <-readDeadlineTicker.C:
+				_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
+			default:
 			}
 			// 心跳/控制帧（frame=nil）：读超时已被 SetReadDeadline 刷新，
 			// 直接进入下一轮循环即可保持空闲连接存活
