@@ -437,12 +437,18 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 	}
 	rec := getFrameAtLeast(n)[:n]
 	subtle.XORBytes(rec, g.parity[:n], g.acc[:n])
+
+	// finishGroupLocked 会把 group state 放回复用池，并把 g.start 清零。
+	// 必须在回收前保存恢复帧序号，否则回调会收到纯 missing 下标（0..K-1），
+	// 表现为所有恢复 seq 都比正确值少 groupStart。
+	recoveredSeq := g.start + uint32(missing)
+
 	// 标记已恢复成员，避免 finishGroup 把它计入丢失
 	g.gotMask |= uint64(1) << uint(missing)
 	d.finishGroupLocked(g)
 	atomic.AddUint64(&d.recovered, 1)
 	if d.out != nil {
-		d.out(g.start+uint32(missing), rec)
+		d.out(recoveredSeq, rec)
 	} else {
 		putFrame(rec)
 	}
