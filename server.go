@@ -32,6 +32,7 @@ type macKey [6]byte
 type macEntry struct {
 	portID      string
 	updatedTick uint64
+	static      bool // session 注册 MAC：随端口生命周期存在，不做动态 refresh/老化
 }
 
 const ShardCount = 16
@@ -124,7 +125,7 @@ func (vs *VSwitch) purgeExpiredMACsAt(now uint64) {
 		shard := vs.shards[i]
 		shard.mu.Lock()
 		for mac, entry := range shard.macTable {
-			if now-entry.updatedTick > maxAgeSec {
+			if !entry.static && now-entry.updatedTick > maxAgeSec {
 				delete(shard.macTable, mac)
 			}
 		}
@@ -136,6 +137,19 @@ func (vs *VSwitch) AddPort(p Port) {
 	vs.ports[p.ID()] = p
 	vs.portsMu.Unlock()
 	log.Debugf("[VSwitch] Port UP: %s", p.ID())
+}
+
+// AddStaticMAC 把已认证 session 的注册 MAC 一次性固定到端口。该映射的
+// 生命周期与 Port 一致，因此数据热路径无需每帧重新学习/刷新，也无需调用
+// Server.validateSrcMAC 获取 activeClients 读锁。
+func (vs *VSwitch) AddStaticMAC(portID string, mac macKey) {
+	if mac == (macKey{}) {
+		return
+	}
+	shard := vs.shards[getShardIdx(mac)]
+	shard.mu.Lock()
+	shard.macTable[mac] = &macEntry{portID: portID, static: true}
+	shard.mu.Unlock()
 }
 
 func (vs *VSwitch) RemovePort(portID string) {
@@ -162,16 +176,23 @@ func (vs *VSwitch) RemovePort(portID string) {
 	log.Debugf("[VSwitch] Port DOWN: %s", portID)
 }
 func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
-	vs.processFrame(srcPortID, frame, false)
+	vs.processFrame(srcPortID, frame, false, nil)
+}
+
+// ProcessSessionFrame 是已认证 session 的热路径。registeredMAC 在握手期已经
+// 固定并通过 AddStaticMAC 写入交换表，因此这里只做定长比较；不再每包获取
+// src shard 与 Server.activeClients 的读锁。
+func (vs *VSwitch) ProcessSessionFrame(srcPortID string, registeredMAC macKey, frame []byte) {
+	vs.processFrame(srcPortID, frame, false, &registeredMAC)
 }
 
 // ProcessOwnedFrame 接管 frame 所有权。单播命中 AsyncPort 时直接把池缓冲转交
 // 给目标端口；广播/未知单播仍按现有 copy-to-many 语义发送，最后归还原 buffer。
 func (vs *VSwitch) ProcessOwnedFrame(srcPortID string, frame []byte) {
-	vs.processFrame(srcPortID, frame, true)
+	vs.processFrame(srcPortID, frame, true, nil)
 }
 
-func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
+func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, registeredMAC *macKey) {
 	if owned {
 		defer func() {
 			if owned {
@@ -186,33 +207,37 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
 	copy(dstMAC[:], frame[0:6])
 	copy(srcMAC[:], frame[6:12])
 
-	// 计算属于哪一个锁分片
-	srcShard := vs.shards[getShardIdx(srcMAC)]
-
-	nowTick := vs.coarseSec.Load()
-	srcShard.mu.RLock()
-	entry, exists := srcShard.macTable[srcMAC]
-	needUpdate := !exists || entry.portID != srcPortID || nowTick-entry.updatedTick > 5
-	srcShard.mu.RUnlock()
-
-	if needUpdate {
-		// 源 MAC 归属校验：端口只能声明自己会话注册的 MAC。冒充帧整帧丢弃
-		// （既不学习也不转发——转发等于允许攻击者以受害者身份注入流量）。
-		if vs.validateMAC != nil && !vs.validateMAC(srcPortID, srcMAC) {
+	if registeredMAC != nil && *registeredMAC != (macKey{}) {
+		// 已认证 session：注册 MAC 是握手状态的一部分，映射已由 AddStaticMAC
+		// 固定。热路径只比较 6 字节，冒充帧直接丢弃。
+		if srcMAC != *registeredMAC {
 			vs.spoofDrops.Add(1)
 			return
 		}
-		srcShard.mu.Lock()
-		if current := srcShard.macTable[srcMAC]; current != nil {
-			// 已学习 MAC 的 refresh 直接原位更新；时间来自 coarse clock，
-			// 避免高速单播每包进入 runtimeNow。
-			current.portID = srcPortID
-			current.updatedTick = nowTick
-		} else {
-			srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
+	} else {
+		// TAP / 未上报 MAC 的兼容客户端继续动态学习。
+		srcShard := vs.shards[getShardIdx(srcMAC)]
+		nowTick := vs.coarseSec.Load()
+		srcShard.mu.RLock()
+		entry, exists := srcShard.macTable[srcMAC]
+		needUpdate := !exists || entry.portID != srcPortID || nowTick-entry.updatedTick > 5
+		srcShard.mu.RUnlock()
+
+		if needUpdate {
+			if vs.validateMAC != nil && !vs.validateMAC(srcPortID, srcMAC) {
+				vs.spoofDrops.Add(1)
+				return
+			}
+			srcShard.mu.Lock()
+			if current := srcShard.macTable[srcMAC]; current != nil {
+				current.portID = srcPortID
+				current.updatedTick = nowTick
+			} else {
+				srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
+			}
+			log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
+			srcShard.mu.Unlock()
 		}
-		log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
-		srcShard.mu.Unlock()
 	}
 
 	var targetPortID string
@@ -721,7 +746,7 @@ func (s *Server) MACSnapshot() []MACEntry {
 		shard.mu.RLock()
 		for mac, entry := range shard.macTable {
 			var age uint64
-			if nowTick >= entry.updatedTick {
+			if !entry.static && nowTick >= entry.updatedTick {
 				age = nowTick - entry.updatedTick
 			}
 			out = append(out, MACEntry{MAC: fmtMAC(mac), Port: entry.portID, AgeSec: age})
@@ -1458,7 +1483,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		// 初始化服务端重排缓冲区，理顺后交由交换机转发
 		session.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
-			s.vswitch.ProcessFrame(clientID, orderedFrame)
+			if session.macBin != (macKey{}) {
+				s.vswitch.ProcessSessionFrame(clientID, session.macBin, orderedFrame)
+			} else {
+				s.vswitch.ProcessFrame(clientID, orderedFrame)
+			}
 		})
 		if fecEncK > 0 {
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
@@ -1468,6 +1497,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.macToIP[mac] = MacBinding{IPv4: v4ip, IPv6: v6ip}
 		}
 		s.vswitch.AddPort(port)
+		s.vswitch.AddStaticMAC(clientID, session.macBin)
 		log.Infof("[%s] new logical client online (FEC=%s EncAlgo=%d), Assigned IPs: %s, %s", clientID, fecMode, encAlgo, v4ip, v6ip)
 	}
 
