@@ -1494,6 +1494,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 额外持有一个 200ms ticker goroutine。代理/非 TCP 场景自动禁用。
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
+		var nextWriteDeadlineRefresh time.Time
+		refreshWriteDeadline := func() {
+			now := time.Now()
+			if nextWriteDeadlineRefresh.IsZero() || !now.Before(nextWriteDeadlineRefresh) {
+				_ = conn.SetWriteDeadline(now.Add(11 * time.Second))
+				nextWriteDeadlineRefresh = now.Add(time.Second)
+			}
+		}
 		if tcpConn != nil {
 			rttTicker = time.NewTicker(200 * time.Millisecond)
 			rttC = rttTicker.C
@@ -1526,7 +1534,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						break drainBatches
 					}
 				}
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				refreshWriteDeadline()
 				_, werr := conn.Write(sendBuffer)
 				if werr != nil {
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
@@ -1545,7 +1553,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				// （约 15 分钟才放弃），期间心跳停发，客户端先在自己的读超时上判死
 				// 本端连接，而服务端仍自认为在线——"connection lost: i/o timeout"
 				// 的唯一成因。加超时后本端 10s 内自发现并断连。
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				refreshWriteDeadline()
 				if _, err := conn.Write(sendBuffer); err != nil {
 					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
 					conn.Close()
