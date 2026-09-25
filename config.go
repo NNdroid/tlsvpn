@@ -22,7 +22,7 @@ import (
 //	  "psk": "change-me",
 //	  "addr": "1.2.3.4:4000,[::1]:4000",
 //	  "conns": 4, "fec": true, "fec_group": 4,
-//	  "encrypt": true,
+//	  "encrypt": true, "enc_algo": "gcm256",
 //	  "web": { "addr": ":8080", "auth": "admin:secret" }
 //	}
 //
