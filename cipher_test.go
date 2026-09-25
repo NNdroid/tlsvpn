@@ -728,6 +728,28 @@ func TestGCM128And256UseSeparateKeyDomains(t *testing.T) {
 	}
 }
 
+func TestGCM128CrossLanguageGoldenVector(t *testing.T) {
+	const psk = "interop-gcm128-psk"
+	salt, _ := hex.DecodeString("0102030405060708")
+	plain, _ := hex.DecodeString("746c7376706e2d67636d3132382d63726f73732d6c616e67756167652d766563746f72")
+	want, _ := hex.DecodeString("fad2a4db0a2a0d73db601949351e36d354bb4698df7c2f27040f8229960d93d67066fe116d875cb38daa0877f281a3d5fbab9e")
+	const seq uint32 = 0x01020304
+	wireLen := uint32(len(plain) + gcmTagSize)
+
+	ic, err := newGCMInnerCipherForAlgo(psk, salt, encAlgoGCM128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := make([]byte, wireLen)
+	copy(wire, plain)
+	if got := ic.sealInPlace(wire, len(plain), seq, wireLen); got != len(want) {
+		t.Fatalf("wire length=%d want=%d", got, len(want))
+	}
+	if !bytes.Equal(wire, want) {
+		t.Fatalf("AES-128-GCM cross-language vector mismatch\n got %x\nwant %x", wire, want)
+	}
+}
+
 func TestHandshakeEncSaltsForBothGCMKeySizes(t *testing.T) {
 	saltA := [encSaltSize]byte{1, 2, 3, 4, 5, 6, 7, 8}
 	saltB := [encSaltSize]byte{8, 7, 6, 5, 4, 3, 2, 1}
