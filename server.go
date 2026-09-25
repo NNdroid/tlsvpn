@@ -144,6 +144,23 @@ func (vs *VSwitch) RemovePort(portID string) {
 	log.Debugf("[VSwitch] Port DOWN: %s", portID)
 }
 func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
+	vs.processFrame(srcPortID, frame, false)
+}
+
+// ProcessOwnedFrame 接管 frame 所有权。单播命中 AsyncPort 时直接把池缓冲转交
+// 给目标端口；广播/未知单播仍按现有 copy-to-many 语义发送，最后归还原 buffer。
+func (vs *VSwitch) ProcessOwnedFrame(srcPortID string, frame []byte) {
+	vs.processFrame(srcPortID, frame, true)
+}
+
+func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool) {
+	if owned {
+		defer func() {
+			if owned {
+				putFrame(frame)
+			}
+		}()
+	}
 	if len(frame) < 14 {
 		return
 	}
@@ -190,11 +207,31 @@ func (vs *VSwitch) ProcessFrame(srcPortID string, frame []byte) {
 	}
 
 	if targetPortID != "" && targetPortID != srcPortID {
+		if owned && vs.sendOwnedToPort(targetPortID, frame) {
+			// WriteOwnedFrame 无论成功入队还是背压丢弃都会消费所有权。
+			owned = false
+			return
+		}
 		vs.sendToPort(targetPortID, frame)
 	} else if targetPortID == "" {
 		vs.flood(srcPortID, frame)
 	}
 }
+
+func (vs *VSwitch) sendOwnedToPort(targetPortID string, frame []byte) bool {
+	vs.portsMu.RLock()
+	port, exists := vs.ports[targetPortID]
+	vs.portsMu.RUnlock()
+	if !exists {
+		return false
+	}
+	if owned, ok := port.(interface{ WriteOwnedFrame([]byte) error }); ok {
+		_ = owned.WriteOwnedFrame(frame)
+		return true
+	}
+	return false
+}
+
 func (vs *VSwitch) sendToPort(targetPortID string, frame []byte) {
 	vs.portsMu.RLock()
 	port, exists := vs.ports[targetPortID]
@@ -909,14 +946,33 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	}()
 
 	go func() {
-		buf := make([]byte, 65536)
+		readSize, pooledRead := tapReadBufferSize(cfg.Tap)
+		if pooledRead {
+			log.Debugf("[Server] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
+		}
+		var fallback []byte
+		if !pooledRead {
+			fallback = make([]byte, 65536)
+		}
 		for {
+			var buf []byte
+			if pooledRead {
+				buf = getFrameAtLeast(readSize)[:readSize]
+			} else {
+				buf = fallback
+			}
 			rn, err := srv.tap.Read(buf)
 			if err != nil {
+				if pooledRead {
+					putFrame(buf)
+				}
 				return
 			}
-			// ProcessFrame 内部会拷贝进独立的池缓冲，直接复用本地缓冲
-			srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
+			if pooledRead {
+				srv.vswitch.ProcessOwnedFrame(tapPortID, buf[:rn])
+			} else {
+				srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
+			}
 		}
 	}()
 
