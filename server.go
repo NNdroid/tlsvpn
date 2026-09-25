@@ -114,16 +114,21 @@ func (vs *VSwitch) runCoarseClockAndPurge() {
 			continue
 		}
 		purgeTicks = 0
-		for i := 0; i < ShardCount; i++ {
-			shard := vs.shards[i]
-			shard.mu.Lock()
-			for mac, entry := range shard.macTable {
-				if now-entry.updatedTick > uint64((30*time.Minute)/time.Second) {
-					delete(shard.macTable, mac)
-				}
+		vs.purgeExpiredMACsAt(now)
+	}
+}
+
+func (vs *VSwitch) purgeExpiredMACsAt(now uint64) {
+	const maxAgeSec = uint64((30 * time.Minute) / time.Second)
+	for i := 0; i < ShardCount; i++ {
+		shard := vs.shards[i]
+		shard.mu.Lock()
+		for mac, entry := range shard.macTable {
+			if now-entry.updatedTick > maxAgeSec {
+				delete(shard.macTable, mac)
 			}
-			shard.mu.Unlock()
 		}
+		shard.mu.Unlock()
 	}
 }
 func (vs *VSwitch) AddPort(p Port) {
