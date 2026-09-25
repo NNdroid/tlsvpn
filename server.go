@@ -31,6 +31,7 @@ type macKey [6]byte
 
 type macEntry struct {
 	portID      string
+	port        Port // 已学习目标端口；命中单播时省掉第二次 ports map/RWMutex 查找
 	updatedTick uint64
 	static      bool // session 注册 MAC：随端口生命周期存在，不做动态 refresh/老化
 }
@@ -146,10 +147,15 @@ func (vs *VSwitch) AddStaticMAC(portID string, mac macKey) {
 	if mac == (macKey{}) {
 		return
 	}
+	// 与 RemovePort 保持 portsMu -> shard 的统一锁顺序。持 portsMu.RLock
+	// 到 entry 安装完成，保证缓存的 Port 不会在安装过程中被摘除/关闭。
+	vs.portsMu.RLock()
+	port := vs.ports[portID]
 	shard := vs.shards[getShardIdx(mac)]
 	shard.mu.Lock()
-	shard.macTable[mac] = &macEntry{portID: portID, static: true}
+	shard.macTable[mac] = &macEntry{portID: portID, port: port, static: true}
 	shard.mu.Unlock()
+	vs.portsMu.RUnlock()
 }
 
 func (vs *VSwitch) RemovePort(portID string) {
@@ -240,26 +246,35 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 				vs.spoofDrops.Add(1)
 				return
 			}
+
+			// 统一 portsMu -> shard 锁顺序，避免学习到一个正被 RemovePort 摘除的
+			// stale Port。未注册的测试/兼容端口允许 port=nil，转发时回退旧 lookup。
+			vs.portsMu.RLock()
+			learnedPort := vs.ports[srcPortID]
 			updated := false
 			srcShard.mu.Lock()
 			if current := srcShard.macTable[srcMAC]; current != nil {
 				// 锁外检查到锁内之间可能新建了 static entry；再次保护，避免竞态覆盖。
 				if current.static && current.portID != srcPortID {
 					srcShard.mu.Unlock()
+					vs.portsMu.RUnlock()
 					if srcPortID != vs.trustedPort {
 						vs.spoofDrops.Add(1)
 						return
 					}
 				} else {
 					current.portID = srcPortID
+					current.port = learnedPort
 					current.updatedTick = nowTick
 					updated = true
 					srcShard.mu.Unlock()
+					vs.portsMu.RUnlock()
 				}
 			} else {
-				srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, updatedTick: nowTick}
+				srcShard.macTable[srcMAC] = &macEntry{portID: srcPortID, port: learnedPort, updatedTick: nowTick}
 				updated = true
 				srcShard.mu.Unlock()
+				vs.portsMu.RUnlock()
 			}
 			if updated {
 				log.Debugf("[VSwitch] Learned NEW MAC %s on port %s", fmtMAC(srcMAC), srcPortID)
@@ -273,13 +288,29 @@ func (vs *VSwitch) processFrame(srcPortID string, frame []byte, owned bool, regi
 		dstShard.mu.RLock()
 		if dEntry, dExists := dstShard.macTable[dstMAC]; dExists {
 			targetPortID = dEntry.portID
+			if targetPortID != "" && targetPortID != srcPortID && dEntry.port != nil {
+				// WriteFrame/WriteOwnedFrame 对 AsyncPort 都是有界非阻塞入队。
+				// 在 shard RLock 内完成发送，RemovePort 必须等本次发送结束才能
+				// 删除 entry，随后才会关闭 session.Port，因此不会命中 stale Port。
+				if owned {
+					if op, ok := dEntry.port.(interface{ WriteOwnedFrame([]byte) error }); ok {
+						_ = op.WriteOwnedFrame(frame)
+						owned = false
+						dstShard.mu.RUnlock()
+						return
+					}
+				}
+				_ = dEntry.port.WriteFrame(frame)
+				dstShard.mu.RUnlock()
+				return
+			}
 		}
 		dstShard.mu.RUnlock()
 	}
 
+	// 只有历史/测试 entry 没缓存 Port 时才回退旧的 ports map 查找。
 	if targetPortID != "" && targetPortID != srcPortID {
 		if owned && vs.sendOwnedToPort(targetPortID, frame) {
-			// WriteOwnedFrame 无论成功入队还是背压丢弃都会消费所有权。
 			owned = false
 			return
 		}
