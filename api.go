@@ -98,6 +98,11 @@ type serverConnSnapshot struct {
 	BrutalErr     string `json:"brutal_error,omitempty"`
 	BrutalSrvTx   uint64 `json:"brutal_srv_tx_mbps"` // 服务端下发方向整形速率
 	BrutalCliTx   uint64 `json:"brutal_cli_tx_mbps"` // 客户端上行方向整形速率
+	// 本连接 TLS 握手观测摘要（来自该客户端的 ClientHello）
+	SNI        string `json:"sni,omitempty"`
+	TLSVersion string `json:"tls_version,omitempty"`
+	TLSCipher  string `json:"tls_cipher,omitempty"`
+	TLSALPN    string `json:"tls_alpn,omitempty"`
 }
 
 type fecStatsJSON struct {

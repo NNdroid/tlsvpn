@@ -1336,6 +1336,12 @@ type connSnapshot struct {
 	// 不是聚合错误。0 = 服务端没给（brutal 关或预算为 0）。
 	BrutalTxMbps uint64 `json:"brutal_tx_mbps"`
 	BrutalRxMbps uint64 `json:"brutal_rx_mbps"`
+	// 本会话 TLS 握手摘要（客户端自己的 ClientHello/协商结果）。会话级：
+	// 同一会话的所有连接共享同一组值。
+	SNI        string `json:"sni,omitempty"`
+	TLSVersion string `json:"tls_version,omitempty"`
+	TLSCipher  string `json:"tls_cipher,omitempty"`
+	TLSALPN    string `json:"tls_alpn,omitempty"`
 }
 
 // snapshotConns 汇总所有物理连接明细
@@ -1368,6 +1374,10 @@ func (c *Client) snapshotConns() []connSnapshot {
 	defer c.connsMu.Unlock()
 	out := make([]connSnapshot, 0, len(c.conns))
 	now := time.Now().Unix()
+	var sni, tlsVer, tlsCipher, tlsAlpn string
+	if neg != nil && neg.TLS != nil {
+		sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
+	}
 	for i := 0; i < int(c.connsCount); i++ {
 		ci, ok := c.conns[i]
 		if !ok {
@@ -1382,6 +1392,10 @@ func (c *Client) snapshotConns() []connSnapshot {
 			Retries:      atomic.LoadUint64(&ci.retries),
 			BrutalTxMbps: txRate,
 			BrutalRxMbps: rxRate,
+			SNI:          sni,
+			TLSVersion:   tlsVer,
+			TLSCipher:    tlsCipher,
+			TLSALPN:      tlsAlpn,
 		}
 		if v, okv := ci.remote.Load().(string); okv {
 			snap.Remote = v

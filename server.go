@@ -433,6 +433,7 @@ type connInfo struct {
 	brutalTx  uint64
 	brutalRx  uint64
 	epoch     uint64
+	tls       *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
 }
 
 type Server struct {
@@ -855,6 +856,10 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {	now := time.Now().
 		}
 		session.sessionMu.Unlock()
 		for _, ci := range cis {
+			var sni, tlsVer, tlsCipher, tlsAlpn string
+			if ci.tls != nil {
+				sni, tlsVer, tlsCipher, tlsAlpn = ci.tls.SNI, ci.tls.Version, ci.tls.CipherSuite, ci.tls.ALPN
+			}
 			out = append(out, serverConnSnapshot{
 				ClientID:  id,
 				Remote:    ci.remote,
@@ -875,6 +880,10 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {	now := time.Now().
 				BrutalSrvTx: atomic.LoadUint64(&ci.brutalTx),
 				BrutalCliTx: atomic.LoadUint64(&ci.brutalRx),
 				Epoch:       ci.epoch,
+				SNI:         sni,
+				TLSVersion:  tlsVer,
+				TLSCipher:   tlsCipher,
+				TLSALPN:     tlsAlpn,
 			})
 		}
 	}
@@ -1573,6 +1582,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		tcpConn:  tcpConn,
 		linkedAt: time.Now().Unix(),
 		epoch:    sessionEpoch,
+		tls:      tlsInfo,
 	}
 	// 注册本物理连接到会话，供 Web 面板踢出/展示明细。清理 defer 必须在
 	// 发送握手响应之前安装：响应写失败会直接 return，不能把 ActiveConns 或
