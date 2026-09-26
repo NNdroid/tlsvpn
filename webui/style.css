@@ -461,3 +461,105 @@ body.unauth{display:flex;align-items:center;justify-content:center;min-height:10
 .statchip.warn b{color:var(--warn)}
 .statchip.bad b{color:var(--err)}
 .statchip .lbl{color:var(--sub)}
+
+/* ---------- 客户端详情抽屉：点客户端表任意行从右侧展开 ---------- */
+/* 遮罩与抽屉同 z 轴相邻；抽屉开着时表格行的 hover 仍然有效，点别行直接切换内容 */
+.drawer-mask{
+  position:fixed;inset:0;z-index:250;
+  background:rgba(6,9,16,.42);
+  backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  opacity:0;visibility:hidden;
+  transition:opacity .22s ease,visibility 0s linear .22s;
+}
+:root[data-theme=light] .drawer-mask{background:rgba(24,29,39,.22)}
+.drawer-mask.on{opacity:1;visibility:visible;transition:opacity .22s ease}
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;z-index:260;
+  width:min(600px,100vw);
+  display:flex;flex-direction:column;
+  background:var(--card);border-left:1px solid var(--border2);
+  box-shadow:-18px 0 44px -18px rgba(0,0,0,.5);
+  transform:translateX(103%);visibility:hidden;
+  transition:transform .26s cubic-bezier(.2,.75,.25,1),visibility 0s linear .26s;
+}
+:root[data-theme=light] .drawer{box-shadow:-18px 0 44px -20px rgba(16,24,40,.25)}
+.drawer.on{transform:none;visibility:visible;transition:transform .26s cubic-bezier(.2,.75,.25,1)}
+.drawer-head{
+  flex:none;display:flex;align-items:flex-start;gap:10px;
+  padding:18px 20px 14px;border-bottom:1px solid var(--border);
+}
+.dc-head-top{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px}
+.dc-head-top h2{
+  flex:0 1 auto;min-width:0;margin:0;
+  font-size:1.04em;font-weight:650;line-height:1.3;
+  word-break:break-all;overflow-wrap:anywhere;
+  font-family:ui-monospace,"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;
+}
+.dc-head-top .btn{flex:none}
+.drawer-x{
+  flex:none;width:30px;height:30px;border-radius:9px;padding:0;
+  border:1px solid var(--border);background:var(--card2);color:var(--sub);
+  font-size:1.25em;line-height:1;cursor:pointer;
+}
+.drawer-x:hover{color:var(--fg);border-color:var(--border2)}
+.dc-badges{display:flex;flex-wrap:wrap;align-items:center;gap:7px;flex-basis:100%;margin-top:2px}
+.drawer-acts{
+  flex:none;display:flex;flex-wrap:wrap;gap:8px;
+  padding:12px 20px;border-bottom:1px solid var(--border);
+}
+.drawer-body{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:16px 20px 26px}
+/* 客户端表整行可点开，给个明确的手型提示 */
+tbody tr[data-open]{cursor:pointer}
+
+.dc-sec{margin-bottom:20px}
+.dc-sec:last-child{margin-bottom:0}
+.dc-sec-h{
+  display:flex;align-items:baseline;gap:9px;margin-bottom:9px;
+  font-size:.76em;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--sub);
+}
+.dc-sec-h small{font-size:.9em;font-weight:400;letter-spacing:0;text-transform:none;opacity:.85}
+/* dc-rows 与状态页的 .kv 同款式：左标签右取值，纵向长值可折行 */
+.dc-rows{width:100%;border-collapse:collapse;table-layout:fixed}
+.dc-rows th,.dc-rows td{
+  border-bottom:1px dashed var(--border);padding:7px 2px;
+  font-size:.84em;font-weight:normal;text-transform:none;letter-spacing:normal;
+  white-space:normal;overflow-wrap:anywhere;background:transparent;vertical-align:top;
+}
+.dc-rows th{color:var(--sub);width:42%;text-align:left}
+.dc-rows td{color:var(--fg);text-align:right}
+.dc-rows tr:last-child th,.dc-rows tr:last-child td{border-bottom:none}
+.dc-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px 10px}
+.dc-cell{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;min-width:0}
+.dc-cell-l{
+  display:block;color:var(--sub);font-size:.7em;font-weight:600;
+  letter-spacing:.07em;text-transform:uppercase;margin-bottom:3px;
+}
+.dc-cell-v{display:block;font-size:.92em;font-weight:650;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+/* 每日明细条：按该窗口内最大值归一，日期标签保持等宽对齐 */
+.dc-days{margin-top:10px;display:flex;flex-direction:column;gap:3px}
+.dc-day{display:grid;grid-template-columns:52px 1fr auto;align-items:center;gap:9px;font-size:.76em}
+.dc-day-d{color:var(--sub);font-family:ui-monospace,"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace}
+.dc-bar{display:block;height:8px;border-radius:4px;background:var(--card2);border:1px solid var(--border);overflow:hidden}
+.dc-bar i{display:block;height:100%;border-radius:4px 0 0 4px;background:linear-gradient(90deg,var(--down),var(--up))}
+.dc-day-v{color:var(--muted);font-family:ui-monospace,"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace}
+.dc-conn{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:8px}
+.dc-conn:last-child{margin-bottom:0}
+.dc-conn-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.dc-conn-top .mono{font-size:.86em;word-break:break-all;overflow-wrap:anywhere}
+.dc-conn-rtt{font-size:.8em;color:var(--muted);font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+.dc-conn-rate{
+  margin-left:auto;font-size:.8em;color:var(--sub);
+  font-variant-numeric:tabular-nums;white-space:nowrap;
+}
+.dc-conn-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 9px;margin-top:7px}
+.dc-conn-k{font-size:.78em;color:var(--sub);white-space:nowrap}
+.dc-conn-sni{margin-top:7px;font-size:.8em;color:var(--sub);overflow-wrap:anywhere}
+.dc-conn-err{margin-top:7px;font-size:.8em;color:var(--err);overflow-wrap:anywhere}
+.dc-empty{color:var(--sub);font-size:.84em;text-align:center;padding:14px 0}
+
+@media (max-width:720px){
+  .drawer{width:100vw}
+  .drawer-head,.drawer-acts,.drawer-body{padding-left:14px;padding-right:14px}
+  .dc-grid{grid-template-columns:1fr}
+  .dc-conn-rate{margin-left:0;flex-basis:100%}
+}

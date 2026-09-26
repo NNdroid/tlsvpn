@@ -314,6 +314,20 @@
     </div>
   </section>
 </main>
+
+  <!-- 客户端详情抽屉：点客户端表任意行从右侧展开身份 / 流量 / 连接 / 安全四块。
+       内容全部来自同一次 /api/stats 快照（clients、server_conns、client_traffic）
+       加本地算的速率差，不额外发请求；抽屉开着时每个轮询周期跟着刷新 -->
+  <div class="drawer-mask" id="drawer-mask"></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+    <div class="drawer-head">
+      <div class="dc-head-top" id="drawer-head"></div>
+      <button class="drawer-x" data-act="close" aria-label="close">×</button>
+    </div>
+    <div class="drawer-acts" id="drawer-acts"></div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
 <footer><span id="footer-text"></span><span class="sep">·</span><span id="updated-at"></span><span class="sep">·</span><span id="tls-flag"></span></footer>
 <script src="app.js"></script>
 </body>
