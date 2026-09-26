@@ -1,6 +1,6 @@
 :root{
-  --bg:#0a0e16; --card:#111726; --card2:#0d1320; --term:#0a0f1a;
-  --border:#1f2739; --border2:#2a3550; --grid:#1b2334;
+  --bg:#0a0e16; --card:#151c2e; --card2:#101727; --term:#0a0f1a;
+  --border:#25304a; --border2:#33415f; --grid:#1e2739;
   --fg:#e8ecf4; --muted:#9aa2b5; --sub:#6c7488;
   --accent:#8b7bff; --accent-soft:rgba(139,123,255,.14);
   --up:#3ddba4; --up-soft:rgba(61,219,164,.13);
@@ -67,6 +67,15 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 .chip.mode{background:var(--up-soft);color:var(--up)}
 .chip.mode.client{background:var(--cyan-soft);color:var(--cyan)}
 .topctl{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+/* 窄屏收纳：三段控件折进右上角可展开菜单，不再把顶栏撑成三行 */
+.menu-btn{
+  margin-left:auto;display:none;align-items:center;justify-content:center;
+  width:34px;height:34px;border-radius:9px;flex:none;cursor:pointer;
+  background:var(--card2);border:1px solid var(--border);color:var(--muted);
+  transition:all .15s ease;
+}
+.menu-btn:hover{color:var(--fg);border-color:var(--border2)}
+.menu-btn svg{width:16px;height:16px;fill:currentColor;stroke:none}
 .seg{display:inline-flex;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px}
 .seg button{
   border:none;background:transparent;color:var(--muted);font:inherit;font-size:.8em;
@@ -79,10 +88,16 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 
 /* ---------- 布局与卡片 ---------- */
 .wrap{max-width:1240px;margin:0 auto;padding:22px 24px 10px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.03);padding:18px 20px;margin-bottom:14px}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(340px,100%),1fr));gap:14px;margin-bottom:14px}
 .kpi-card{display:flex;flex-direction:column;gap:2px;margin-bottom:0;transition:border-color .15s ease}
 .kpi-card:hover{border-color:var(--border2)}
+/* 可点击 KPI 卡：流量卡直达流量页，丢帧卡直达日志页 */
+.kpi-link{cursor:pointer}
+.kpi-link:hover{border-color:var(--accent);box-shadow:var(--shadow),0 0 0 1px var(--accent-soft)}
+.kpi-link .kpi-go{margin-left:auto;color:var(--sub);opacity:0;transform:translateX(-4px);transition:opacity .15s ease,transform .15s ease;flex:none}
+.kpi-link:hover .kpi-go{opacity:1;transform:none;color:var(--accent)}
+.kpi-go svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:block}
 .kpi-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
 .kpi-ico{width:30px;height:30px;border-radius:9px;flex:none;display:flex;align-items:center;justify-content:center}
 .kpi-ico svg{width:16px;height:16px;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
@@ -109,7 +124,7 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
 #chart{width:100%;height:216px;display:block}
 #traffic-chart{width:100%;height:220px;display:block}
-#chart,#traffic-chart{cursor:crosshair}
+#chart,#traffic-chart{cursor:crosshair;touch-action:pan-y}
 
 /* ---------- 标签页 ---------- */
 .tabs{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:4px;width:fit-content;max-width:100%;overflow-x:auto;scrollbar-width:none;margin-bottom:14px}
@@ -191,6 +206,14 @@ th{
   color:var(--sub);font-weight:600;font-size:.72em;letter-spacing:.07em;text-transform:uppercase;
   border-bottom:1px solid var(--border2);
 }
+/* 可排序表头：点击循环 降序 → 升序 → 取消，箭头由 data-arrow 属性承载 */
+th.num{text-align:right}
+th[data-sort]{cursor:pointer;user-select:none;transition:color .12s ease}
+th[data-sort]:hover{color:var(--fg)}
+th.sorted{color:var(--accent)}
+th.sorted::after{content:attr(data-arrow);margin-left:4px;letter-spacing:0}
+/* 服务端模式的连接表"目标"列恒为占位符，按模式整列隐藏，别白白占宽度 */
+.twrap.srv-mode .hide-srv{display:none}
 tbody tr{transition:background .12s ease}
 tbody tr:hover{background:var(--card2)}
 tbody tr:last-child td{border-bottom:none}
@@ -216,7 +239,19 @@ td.dim{color:var(--sub)}
 .btn.danger{background:var(--err-soft);color:var(--err)}
 .btn.danger:hover{filter:brightness(1.15)}
 .btn.sm{padding:3.5px 10px;font-size:.74em;border-radius:7px}
-.empty{color:var(--sub);text-align:center;padding:26px 0 !important;font-size:.9em;white-space:normal}
+/* 忙碌态：控制类请求发出后短暂禁用，避免连点重复触发 */
+.btn.busy{opacity:.55;pointer-events:none;filter:saturate(.5)}
+.empty{color:var(--sub);text-align:center;padding:38px 14px !important;font-size:.9em;white-space:normal}
+.empty-ico{display:block;width:34px;height:34px;margin:0 auto 11px;fill:none;stroke:var(--offfg);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;opacity:.7}
+.empty-txt{margin-bottom:12px}
+
+/* ---------- 表格分页：底部工具条，单页时整条不渲染 ---------- */
+.pager{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:11px 2px 0;flex-wrap:wrap;font-size:.78em;color:var(--sub)}
+.pager-right{display:flex;gap:7px;align-items:center}
+.pg-of{font-size:.78em;letter-spacing:.02em;white-space:nowrap}
+.pg-sel{padding:3px 8px;font-size:.82em;border-radius:7px}
+.pg-btn{padding:2.5px 10px;line-height:1.2;font-size:.8em}
+.pg-btn:disabled{opacity:.35;pointer-events:none}
 
 /* ---------- 运行状态 ---------- */
 .warnbar{
@@ -264,10 +299,83 @@ td.dim{color:var(--sub)}
 footer{text-align:center;color:var(--sub);font-size:.78em;padding:18px 0 26px}
 footer .sep{margin:0 8px;opacity:.5}
 
+/* ---------- Toast 通知 ---------- */
+#toasts{
+  position:fixed;top:16px;right:16px;z-index:200;display:flex;flex-direction:column;gap:8px;
+  pointer-events:none;max-width:min(340px,calc(100vw - 32px));
+}
+.toast{
+  pointer-events:auto;display:flex;align-items:flex-start;gap:9px;
+  background:var(--card);border:1px solid var(--border2);border-left:3px solid var(--up);
+  border-radius:11px;padding:10px 14px;font-size:.85em;line-height:1.45;color:var(--fg);
+  box-shadow:var(--shadow);animation:toast-in .22s ease;
+  transition:opacity .3s ease,transform .3s ease;
+}
+.toast.err{border-left-color:var(--err)}
+.toast.out{opacity:0;transform:translateX(14px)}
+@keyframes toast-in{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+.toast-ico{
+  flex:none;width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:700;background:var(--up-soft);color:var(--up);
+}
+.toast.err .toast-ico{background:var(--err-soft);color:var(--err)}
+.toast-msg{min-width:0;overflow-wrap:anywhere}
+
+/* ---------- 美化确认框：替代原生 confirm() ---------- */
+.modal-mask{
+  position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:20px;
+  background:rgba(6,9,16,.55);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+  animation:fadein .16s ease;
+}
+:root[data-theme=light] .modal-mask{background:rgba(24,29,39,.3)}
+.modal{
+  background:var(--card);border:1px solid var(--border2);border-radius:14px;box-shadow:var(--shadow);
+  padding:20px 22px;max-width:420px;width:100%;display:flex;flex-direction:column;gap:18px;
+}
+.modal-msg{font-size:.92em;line-height:1.55}
+.modal-btns{display:flex;justify-content:flex-end;gap:8px}
+
+/* ---------- 401 认证页 ---------- */
+body.unauth{display:flex;align-items:center;justify-content:center;min-height:100vh}
+.auth-401{max-width:440px;margin:0 auto;padding:0 20px;text-align:center}
+.auth-401-logo{
+  width:52px;height:52px;border-radius:15px;background:var(--grad);margin:0 auto 18px;
+  display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px -4px rgba(109,93,246,.55);
+}
+.auth-401-logo svg{width:25px;height:25px;fill:none;stroke:#fff;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.auth-401 h2{font-size:2.1em;font-weight:700;margin:0 0 6px;letter-spacing:-.02em}
+.auth-401-title{font-size:1.02em;font-weight:650;margin:0 0 8px}
+.auth-401-hint{color:var(--muted);font-size:.88em;line-height:1.6;margin:0 0 16px}
+.auth-401-cmd{
+  display:inline-block;background:var(--term);border:1px solid var(--border2);border-radius:9px;
+  padding:7px 12px;font-size:.82em;color:var(--cyan);
+}
+
+/* ---------- 日志空状态 ---------- */
+.empty-box{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:44px 12px;color:var(--sub);font-size:.88em}
+.empty-box svg{width:34px;height:34px;fill:none;stroke:var(--offfg);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;opacity:.7;margin-bottom:8px}
+
 @media (max-width:720px){
   .topbar-inner,.wrap{padding-left:14px;padding-right:14px}
   .hide-sm{display:none}
   .kpi-val{font-size:1.45em}
   .chart-live{margin-left:0}
   th,td{padding:6px 8px}
+  /* 顶栏三段控件折进右上角可展开菜单，不再把顶栏撑成三行 */
+  .menu-btn{display:flex}
+  .topctl{
+    display:none;position:fixed;top:64px;right:14px;z-index:60;
+    flex-direction:column;align-items:stretch;gap:8px;margin:0;
+    background:var(--card);border:1px solid var(--border2);border-radius:12px;
+    padding:10px;box-shadow:var(--shadow);
+  }
+  .topctl.open{display:flex;animation:fadein .16s ease}
+  .topctl .seg{width:100%}
+  .topctl .seg button{flex:1;justify-content:center}
+  #toasts{top:auto;bottom:14px;right:14px;left:14px;max-width:none}
+  .toast{font-size:.82em}
+  /* 分页工具条折成两行：左边计数掉到下一行，页大小下拉和翻页按钮不再挤成一团 */
+  .pager{gap:8px;margin-top:9px}
+  .pg-sel{padding:3px 6px;font-size:.78em}
+  .pg-btn{padding:2.5px 9px}
 }

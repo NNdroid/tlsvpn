@@ -6,11 +6,14 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',sni:'SNI',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
+ ui:{cancel:'取消',confirm:'确认'},goto:{traffic:'查看流量明细',logs:'查看错误日志'},menu_tip:'更多选项',no_logs:'暂无日志',page:{showing:'显示 {a}–{b} / 共 {n} 条',of:'第 {x} / {y} 页',prev:'上一页',next:'下一页',size:'{n} 条 / 页',all:'全部'},
+ unauth:{title:'需要访问凭据',hint:'面板启用了访问控制（-web-auth user:pass）。请用 http://user:pass@host:port/ 形式的地址打开，或在浏览器弹出的认证框中输入凭据。'},
+ toast:{kick:'已强制断开客户端',ban:'已封禁客户端',unban:'已解除封禁',gc:'已触发 GC',reconnect:'已触发重连',loglevel:'日志级别已更新',saved:'配置已保存',applied:'配置已保存并应用',fail:'操作失败',need_id:'请输入 ClientID',clear:'日志已清空',download:'日志已导出'},
  filter_ph:'输入关键字过滤…',filter_none:'无匹配结果',filter_clear:'清除过滤',filter_tip:'按 / 快速聚焦',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
  perm:'永久',confirm_kick:'确定要强制断开该客户端吗？',confirm_ban:'确定封禁该客户端吗？',need_id:'请输入 ClientID',
  st:{up:'up',connecting:'connecting',skip:'未生效'},
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
- u:{day:'天',hour:'时',min:'分',sec:'秒'},footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
+ u:{day:'天',hour:'时',min:'分',sec:'秒'},updated:'更新于 {n}',footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
 	tls_http:'HTTP（建议启用 HTTPS）',mode_local:'本机',theme_tip:'主题（跟随系统）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
  cfgk:{traffic_days:'流量统计保留天数',traffic_file:'流量统计文件',mode:'运行模式',encrypt:'内层加密',enc_algo:'内层算法',min_enc:'最低加密要求',pad_mode:'填充模式',brutal:'TCP Brutal',brutal_up:'上行总量 (Mbps)',brutal_down:'下行总量 (Mbps)',socks5:'SOCKS5 代理',fec:'FEC',fec_group:'FEC 分组',fec_group_min:'FEC 分组下限',fec_group_max:'FEC 分组上限',log_level:'日志级别',conns:'并发连接数',tap:'TAP 设备',mac:'MAC 地址',addr:'服务端地址',web_addr:'面板监听',web_auth:'面板认证',web_bind:'面板绑定地址',web_https:'面板 HTTPS',encrypt_psk:'PSK 已配置',session_encrypt:'会话加密',max_sessions:'最大会话数',v4_cidr:'IPv4 网段',v6_cidr:'IPv6 网段',gw_v4:'IPv4 网关',gw_v6:'IPv6 网关',fwmark:'策略路由 fwmark',fwmark_priority:'规则优先级',fwmark_table:'路由表号',extra_routes:'额外路由',source_rules:'按源前缀路由'},
  stt:{title:'运行状态',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',
@@ -29,11 +32,14 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',sni:'SNI',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
+ ui:{cancel:'Cancel',confirm:'Confirm'},goto:{traffic:'Open traffic detail',logs:'Open error logs'},menu_tip:'More options',no_logs:'No log lines yet',page:{showing:'Showing {a}–{b} of {n}',of:'Page {x} of {y}',prev:'Previous',next:'Next',size:'{n} per page',all:'All'},
+ unauth:{title:'Authentication required',hint:'Dashboard authentication is enabled (-web-auth user:pass). Open the panel with credentials in the address, e.g. http://user:pass@host:port/, or answer the browser prompt.'},
+ toast:{kick:'Client force-disconnected',ban:'Client banned',unban:'Ban lifted',gc:'GC triggered',reconnect:'Reconnect triggered',loglevel:'Log level updated',saved:'Config saved',applied:'Config saved & applied',fail:'Action failed',need_id:'Please enter a ClientID',clear:'Logs cleared',download:'Logs exported'},
  filter_ph:'Type to filter…',filter_none:'No matches',filter_clear:'Clear filter',filter_tip:'Press / to focus',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
  perm:'Permanent',confirm_kick:'Force-disconnect this client?',confirm_ban:'Ban this client?',need_id:'Please enter a ClientID',
  st:{up:'up',connecting:'connecting',skip:'Skipped'},
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
- u:{day:'d',hour:'h',min:'m',sec:'s'},footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
+ u:{day:'d',hour:'h',min:'m',sec:'s'},updated:'Updated at {n}',footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
 	tls_http:'HTTP (HTTPS recommended)',mode_local:'local',theme_tip:'Theme (follow system)',theme:{sys:'Auto',light:'Light',dark:'Dark'},
  cfgk:{traffic_days:'Traffic retention days',traffic_file:'Traffic stats file',mode:'Mode',encrypt:'Inner cipher',enc_algo:'Inner algorithm',min_enc:'Minimum cipher',pad_mode:'Padding mode',brutal:'TCP Brutal',brutal_up:'Upstream total (Mbps)',brutal_down:'Downstream total (Mbps)',socks5:'SOCKS5 proxy',fec:'FEC',fec_group:'FEC group',fec_group_min:'FEC group floor',fec_group_max:'FEC group ceiling',log_level:'Log level',conns:'Concurrent conns',tap:'TAP device',mac:'MAC address',addr:'Server address',web_addr:'Dashboard listen',web_auth:'Dashboard auth',web_bind:'Dashboard bind',web_https:'Dashboard HTTPS',encrypt_psk:'PSK configured',session_encrypt:'Session encryption',max_sessions:'Max sessions',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 gateway',gw_v6:'IPv6 gateway',fwmark:'Policy routing fwmark',fwmark_priority:'Rule priority',fwmark_table:'Route table',extra_routes:'Extra routes',source_rules:'Source rules'},
  stt:{title:'Runtime status',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',
@@ -51,11 +57,14 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (S)',rx:'RX (E)',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Verschlüsselung',brutal:'Brutal',ops:'Aktionen',kick:'Trennen',ban:'Sperren',unban:'Entsperren',owner:'Client',target:'Ziel',remote:'Gegenstelle',state:'Status',rtt:'RTT',retries:'Wiederholungen',age:'Online',epoch:'Schlüssel-Epoche',sni:'SNI',err:'Letzter Fehler'},
  m:{port:'Port',seen:'Zuletzt aktiv'},bans:{id_ph:'ClientID (Präfix ok)',min_ph:'Minuten (leer = dauerhaft)',add:'Sperren',refresh:'Aktualisieren',left:'Restlaufzeit'},
  logs:{level:'Level',autoscroll:'Auto-Scroll',clear:'Leeren',download:'Download'},
+ ui:{cancel:'Abbrechen',confirm:'Bestätigen'},goto:{traffic:'Traffic-Details öffnen',logs:'Fehlerprotokoll öffnen'},menu_tip:'Weitere Optionen',no_logs:'Keine Protokolleinträge',page:{showing:'{a}–{b} von {n} Einträgen',of:'Seite {x} von {y}',prev:'Zurück',next:'Weiter',size:'{n} pro Seite',all:'Alle'},
+ unauth:{title:'Anmeldedaten erforderlich',hint:'Der Panelzugriff ist geschützt (-web-auth user:pass). Öffne das Panel mit Anmeldedaten in der Adresse, z. B. http://user:pass@host:port/, oder gib sie im Browserhinweis ein.'},
+ toast:{kick:'Client getrennt',ban:'Client gesperrt',unban:'Sperre aufgehoben',gc:'GC ausgelöst',reconnect:'Neuverbindung ausgelöst',loglevel:'Log-Level aktualisiert',saved:'Konfiguration gespeichert',applied:'Gespeichert & angewendet',fail:'Aktion fehlgeschlagen',need_id:'Bitte ClientID eingeben',clear:'Protokolle geleert',download:'Protokoll exportiert'},
  filter_ph:'Zum Filtern eingeben…',filter_none:'Keine Treffer',filter_clear:'Filter löschen',filter_tip:'/ zum Fokussieren',no_clients:'Keine Clients',no_conns:'Keine Verbindungen',no_macs:'Noch keine MACs gelernt',no_bans:'Keine Sperren',srv_only:'Nur im Server-Modus',
  perm:'Dauerhaft',confirm_kick:'Diesen Client wirklich trennen?',confirm_ban:'Diesen Client sperren?',need_id:'Bitte ClientID eingeben',
  st:{up:'aktiv',connecting:'verbinde',skip:'Übergangen'},
  badge:{dup:'Dup',off:'Aus',ctr:'CTR',plain:'Klartext'},
- u:{day:'T',hour:'Std',min:'Min',sec:'Sek'},footer:'Aktualisierung alle {n}s',refresh_tip:'Aktualisierungsintervall',
+ u:{day:'T',hour:'Std',min:'Min',sec:'Sek'},updated:'Aktualisiert um {n}',footer:'Aktualisierung alle {n}s',refresh_tip:'Aktualisierungsintervall',
  tls_http:'HTTP (HTTPS empfohlen)',mode_local:'lokal',theme_tip:'Design (System folgen)',theme:{sys:'Auto',light:'Hell',dark:'Dunkel'},
  cfgk:{traffic_days:'Traffic-Aufbewahrung (Tage)',traffic_file:'Traffic-Statistikdatei',mode:'Modus',encrypt:'Innere Verschlüsselung',enc_algo:'Innerer Algorithmus',min_enc:'Minimale Verschlüsselung',pad_mode:'Padding-Modus',brutal:'TCP Brutal',brutal_up:'Uplink gesamt (Mbps)',brutal_down:'Downlink gesamt (Mbps)',socks5:'SOCKS5-Proxy',fec:'FEC',fec_group:'FEC-Gruppe',fec_group_min:'FEC-Gruppe Minimum',fec_group_max:'FEC-Gruppe Maximum',log_level:'Log-Level',conns:'Parallele Verbindungen',tap:'TAP-Gerät',mac:'MAC-Adresse',addr:'Serveradresse',web_addr:'Panel-Adresse',web_auth:'Panel-Auth',web_bind:'Panel-Bindung',web_https:'Panel-HTTPS',encrypt_psk:'PSK konfiguriert',session_encrypt:'Sitzungsverschlüsselung',max_sessions:'Max. Sitzungen',v4_cidr:'IPv4-CIDR',v6_cidr:'IPv6-CIDR',gw_v4:'IPv4-Gateway',gw_v6:'IPv6-Gateway',fwmark:'Policy-Routing fwmark',fwmark_priority:'Regel-Priorität',fwmark_table:'Routentabelle',extra_routes:'Zusatzrouten',source_rules:'Quellregeln'},
  stt:{title:'Laufzeitstatus',host:'Host & Prozess',negt:'Ausgehandelte Parameter',brutal:'TCP Brutal Details',cfg:'Aktive Konfiguration',
@@ -74,11 +83,14 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (env.)',rx:'RX (rec.)',txs:'↑ Débit',rxs:'↓ Débit',fec:'FEC',enc:'Chiffrement',brutal:'Brutal',ops:'Actions',kick:'Éjecter',ban:'Bannir',unban:'Débannir',owner:'Client',target:'Cible',remote:'Distant',state:'État',rtt:'RTT',retries:'Réessais',age:'En ligne',epoch:'Époque de clé',sni:'SNI',err:'Dernière erreur'},
  m:{port:'Port',seen:'Dernière activité'},bans:{id_ph:'ClientID (préfixe accepté)',min_ph:'Minutes (vide = permanent)',add:'Bannir',refresh:'Rafraîchir',left:'Restant'},
  logs:{level:'Niveau',autoscroll:'Défilement auto',clear:'Effacer',download:'Télécharger'},
+ ui:{cancel:'Annuler',confirm:'Confirmer'},goto:{traffic:'Ouvrir les détails de trafic',logs:'Ouvrir les journaux d’erreur'},menu_tip:'Plus d’options',no_logs:'Aucune entrée de journal',page:{showing:'{a}–{b} sur {n}',of:'Page {x} sur {y}',prev:'Précédent',next:'Suivant',size:'{n} par page',all:'Tout'},
+ unauth:{title:'Identifiants requis',hint:'L’authentification du panneau est activée (-web-auth user:pass). Ouvrez le panneau avec les identifiants dans l’adresse, p. ex. http://user:pass@host:port/, ou répondez à la boîte de dialogue du navigateur.'},
+ toast:{kick:'Client déconnecté',ban:'Client banni',unban:'Bannissement levé',gc:'GC déclenché',reconnect:'Reconnexion déclenchée',loglevel:'Niveau de log mis à jour',saved:'Config enregistrée',applied:'Enregistré & appliqué',fail:'Échec de l’action',need_id:'Veuillez saisir un ClientID',clear:'Journaux effacés',download:'Journal téléchargé'},
  filter_ph:'Taper pour filtrer…',filter_none:'Aucun résultat',filter_clear:'Effacer le filtre',filter_tip:'/ pour le focus',no_clients:'Aucun client',no_conns:'Aucune connexion',no_macs:'Aucune MAC apprise',no_bans:'Aucun bannissement',srv_only:'Mode serveur uniquement',
  perm:'Permanent',confirm_kick:'Déconnecter ce client de force ?',confirm_ban:'Bannir ce client ?',need_id:'Veuillez saisir un ClientID',
  st:{up:'actif',connecting:'connexion',skip:'Ignoré'},
  badge:{dup:'Dup',off:'Désactivé',ctr:'CTR',plain:'Clair'},
- u:{day:'j',hour:'h',min:'min',sec:'s'},footer:"Actualisation toutes les {n}s",refresh_tip:"Intervalle d'actualisation",
+ u:{day:'j',hour:'h',min:'min',sec:'s'},updated:'Actualisé à {n}',footer:"Actualisation toutes les {n}s",refresh_tip:"Intervalle d'actualisation",
  tls_http:'HTTP (HTTPS recommandé)',mode_local:'local',theme_tip:"Thème (suivre le système)",theme:{sys:'Auto',light:'Clair',dark:'Sombre'},
  cfgk:{traffic_days:'Rétention du trafic (jours)',traffic_file:'Fichier de statistiques de trafic',mode:'Mode',encrypt:'Chiffrement interne',enc_algo:'Algorithme interne',min_enc:'Chiffrement minimum',pad_mode:'Mode de remplissage',brutal:'TCP Brutal',brutal_up:'Montant total (Mbps)',brutal_down:'Descendant total (Mbps)',socks5:'Proxy SOCKS5',fec:'FEC',fec_group:'Groupe FEC',fec_group_min:'Groupe FEC min',fec_group_max:'Groupe FEC max',log_level:'Niveau de log',conns:'Connexions simultanées',tap:'Périphérique TAP',mac:'Adresse MAC',addr:'Adresse du serveur',web_addr:'Écoute du panneau',web_auth:'Auth du panneau',web_bind:'Liaison du panneau',web_https:'HTTPS du panneau',encrypt_psk:'PSK configurée',session_encrypt:'Chiffrement de session',max_sessions:'Sessions max',v4_cidr:'CIDR IPv4',v6_cidr:'CIDR IPv6',gw_v4:'Passerelle IPv4',gw_v6:'Passerelle IPv6',fwmark:'fwmark routage par stratégie',fwmark_priority:'Priorité de règle',fwmark_table:'Table de routage',extra_routes:'Routes supplémentaires',source_rules:'Règles par source'},
  stt:{title:'État runtime',host:'Hôte & processus',negt:'Paramètres négociés',brutal:'Détails TCP Brutal',cfg:'Instantané de la config effective',
@@ -97,11 +109,14 @@ const I18N={
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX（送）',rx:'RX（受）',txs:'↑ 速度',rxs:'↓ 速度',fec:'FEC',enc:'暗号化',brutal:'Brutal',ops:'操作',kick:'切断',ban:'禁止',unban:'解除',owner:'クライアント',target:'接続先',remote:'対向',state:'状態',rtt:'RTT',retries:'再試行',age:'経過時間',epoch:'鍵世代',sni:'SNI',err:'最新エラー'},
  m:{port:'ポート',seen:'最終アクティブ'},bans:{id_ph:'ClientID（前方一致可）',min_ph:'分数（空欄=永久）',add:'禁止',refresh:'更新',left:'残り'},
  logs:{level:'レベル',autoscroll:'自動スクロール',clear:'クリア',download:'ダウンロード'},
+ ui:{cancel:'キャンセル',confirm:'確認'},goto:{traffic:'トラフィック詳細を表示',logs:'エラーログを表示'},menu_tip:'その他のオプション',no_logs:'ログはまだありません',page:{showing:'{n} 件中 {a}–{b}',of:'ページ {x} / {y}',prev:'前へ',next:'次へ',size:'{n} 件 / ページ',all:'すべて'},
+ unauth:{title:'認証が必要です',hint:'パネルにアクセス制御が有効です（-web-auth user:pass）。http://user:pass@host:port/ のように認証情報を URL に含めたアドレスで開くか、ブラウザのプロンプトに入力してください。'},
+ toast:{kick:'クライアントを強制切断しました',ban:'クライアントを禁止しました',unban:'禁止を解除しました',gc:'GC を実行しました',reconnect:'再接続を依頼しました',loglevel:'ログレベルを更新しました',saved:'設定を保存しました',applied:'設定を保存・適用しました',fail:'操作に失敗しました',need_id:'ClientID を入力してください',clear:'ログをクリアしました',download:'ログをエクスポートしました'},
  filter_ph:'入力して絞り込み…',filter_none:'該当なし',filter_clear:'フィルタ解除',filter_tip:'/ でフォーカス',no_clients:'クライアントなし',no_conns:'接続なし',no_macs:'学習済み MAC なし',no_bans:'禁止レコードなし',srv_only:'サーバーモードのみ',
  perm:'永久',confirm_kick:'このクライアントを強制切断しますか？',confirm_ban:'このクライアントを禁止しますか？',need_id:'ClientID を入力してください',
  st:{up:'up',connecting:'connecting',skip:'未適用'},
  badge:{dup:'複製',off:'オフ',ctr:'CTR',plain:'平文'},
- u:{day:'日',hour:'時間',min:'分',sec:'秒'},footer:'{n} 秒ごとに更新',refresh_tip:'更新間隔',
+ u:{day:'日',hour:'時間',min:'分',sec:'秒'},updated:'更新時刻 {n}',footer:'{n} 秒ごとに更新',refresh_tip:'更新間隔',
  tls_http:'HTTP（HTTPS 推奨）',mode_local:'ローカル',theme_tip:'テーマ（システムに従う）',theme:{sys:'Auto',light:'Light',dark:'Dark'},
  cfgk:{traffic_days:'トラフィック保持日数',traffic_file:'トラフィック統計ファイル',mode:'動作モード',encrypt:'内層暗号化',enc_algo:'内層アルゴリズム',min_enc:'最低暗号化要件',pad_mode:'パディングモード',brutal:'TCP Brutal',brutal_up:'上り合計 (Mbps)',brutal_down:'下り合計 (Mbps)',socks5:'SOCKS5 プロキシ',fec:'FEC',fec_group:'FEC グループ',fec_group_min:'FEC グループ下限',fec_group_max:'FEC グループ上限',log_level:'ログレベル',conns:'同時接続数',tap:'TAP デバイス',mac:'MAC アドレス',addr:'サーバーアドレス',web_addr:'パネル待受',web_auth:'パネル認証',web_bind:'パネルバインド',web_https:'パネル HTTPS',encrypt_psk:'PSK 設定済み',session_encrypt:'セッション暗号化',max_sessions:'最大セッション数',v4_cidr:'IPv4 CIDR',v6_cidr:'IPv6 CIDR',gw_v4:'IPv4 ゲートウェイ',gw_v6:'IPv6 ゲートウェイ',fwmark:'ポリシールーティング fwmark',fwmark_priority:'ルール優先度',fwmark_table:'ルートテーブル',extra_routes:'追加ルート',source_rules:'送信元ルール'},
  stt:{title:'稼働状態',host:'ホストとプロセス',negt:'ネゴシエーション結果',brutal:'TCP Brutal 明細',cfg:'有効な設定スナップショット',
@@ -285,17 +300,26 @@ function renderLineChart(canvasId,pts,opts){
   }
   chartState[canvasId]={pts:pts,plot:{l:L,r:W-R,t:T,b:H-B},hover:opts.hover};
 }
-// 鼠标悬停：定位最近数据点后重绘（几何信息存于 chartState）
+// 把横坐标换算成最近数据点的下标（几何信息存于 chartState）
+function chartIdxAt(canvasId,cx){
+  const st=chartState[canvasId];
+  if(!st||st.pts.length<2)return -1;
+  const rect=document.getElementById(canvasId).getBoundingClientRect();
+  const idx=Math.round((cx-rect.left-st.plot.l)/(st.plot.r-st.plot.l)*(st.pts.length-1));
+  return Math.max(0,Math.min(st.pts.length-1,idx));
+}
+// 悬停/点按提示：用 Pointer 事件同时覆盖鼠标悬停、触屏点按与横滑选点，
+// 触屏上没有 hover，点按后提示保持停留直到移到画布外。
 function bindChartHover(canvasId,redraw){
   const c=document.getElementById(canvasId);if(!c)return;
-  c.addEventListener('mousemove',function(ev){
-    const st=chartState[canvasId];if(!st||st.pts.length<2)return;
-    const rect=c.getBoundingClientRect();
-    let idx=Math.round((ev.clientX-rect.left-st.plot.l)/(st.plot.r-st.plot.l)*(st.pts.length-1));
-    idx=Math.max(0,Math.min(st.pts.length-1,idx));
-    if(st.hover!==idx){st.hover=idx;redraw();}
-  });
-  c.addEventListener('mouseleave',function(){
+  const pick=function(ev){
+    const st=chartState[canvasId];
+    const idx=chartIdxAt(canvasId,ev.clientX);
+    if(idx>=0&&st&&st.hover!==idx){st.hover=idx;redraw();}
+  };
+  c.addEventListener('pointermove',pick);
+  c.addEventListener('pointerdown',pick);
+  c.addEventListener('pointerleave',function(){
     const st=chartState[canvasId];
     if(st&&st.hover!==-1){st.hover=-1;redraw();}
   });
@@ -338,15 +362,269 @@ const AUTH_HDR=(location.username||location.password)
 function url(path){return location.origin+path;}
 
 async function api(path,opts){opts=opts||{};opts.headers=Object.assign({'X-Requested-With':'tlsvpn'},AUTH_HDR,opts.headers||{});return fetch(url(path),opts);}
+// 控制类请求统一入口：成功与失败都给出 Toast，不再静默。成功返回解析后的响应体，
+// 失败返回 null（调用方一般不依赖返回值，动作后统一 fetchStats 刷新可见状态）。
+async function control(body,okMsg){
+  try{
+    const res=await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!res.ok){
+      const err=await res.text().catch(function(){return String(res.status);});
+      toast(t('toast.fail')+' '+err.slice(0,120),'err');
+      return null;
+    }
+    toast(okMsg,'ok');
+    return await res.json().catch(function(){return {};});
+  }catch(e){
+    toast(String(e),'err');
+    return null;
+  }
+}
+// 401：面板启用了 -web-auth 时用统一风格的认证提示页，而不是换进一张裸卡片
+function showUnauthorized(){
+  document.body.className='unauth';
+  document.body.innerHTML=
+    '<div class="auth-401">'+
+      '<div class="auth-401-logo"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>'+
+      '<h2>401</h2>'+
+      '<div class="auth-401-title">'+esc(t('unauth.title'))+'</div>'+
+      '<p class="auth-401-hint">'+esc(t('unauth.hint'))+'</p>'+
+      '<code class="mono auth-401-cmd">-web-auth user:pass</code>'+
+    '</div>';
+}
+
+// ---------- 交互反馈：Toast 通知 / 美化确认框 / 按钮忙碌态 ----------
+const TOAST_MAX=4;
+function toast(msg,kind){
+  const box=document.getElementById('toasts');if(!box)return;
+  while(box.childElementCount>=TOAST_MAX)box.firstChild.remove();
+  const el=document.createElement('div');
+  el.className='toast '+(kind||'ok');
+  el.innerHTML='<span class="toast-ico">'+(kind==='err'?'✕':'✓')+'</span>'+
+    '<span class="toast-msg">'+esc(msg)+'</span>';
+  box.appendChild(el);
+  setTimeout(function(){el.classList.add('out');setTimeout(function(){el.remove();},350);},2600);
+}
+// uiConfirm 替代原生 confirm()：统一风格的美化模态框，Promise 语义；Esc 与点遮罩都等于取消
+function uiConfirm(msg){
+  return new Promise(function(resolve){
+    const wrap=document.createElement('div');
+    wrap.className='modal-mask';
+    wrap.innerHTML='<div class="modal"><div class="modal-msg">'+esc(msg)+'</div>'+
+      '<div class="modal-btns"><button class="btn ghost" data-r="0">'+t('ui.cancel')+'</button>'+
+      '<button class="btn danger" data-r="1">'+t('ui.confirm')+'</button></div></div>';
+    document.body.appendChild(wrap);
+    function settle(ok){
+      document.removeEventListener('keydown',onKey,true);
+      wrap.remove();
+      resolve(ok);
+    }
+    function onKey(ev){
+      if(ev.key==='Escape'){ev.stopPropagation();settle(false);}
+    }
+    wrap.addEventListener('click',function(ev){
+      const b=ev.target.closest('button');
+      if(b){settle(b.getAttribute('data-r')==='1');return;}
+      if(ev.target===wrap)settle(false);
+    });
+    document.addEventListener('keydown',onKey,true);
+  });
+}
+// 动作按钮点击后短暂禁用，防止连点重复触发（控制类请求都伴随一次 fetchStats）
+document.addEventListener('click',function(ev){
+  const b=ev.target.closest('button.btn');
+  if(!b||b.classList.contains('busy'))return;
+  b.classList.add('busy');
+  setTimeout(function(){b.classList.remove('busy');},900);
+},true);
+// 可点击 KPI 卡：流量卡直达流量页，丢帧卡直达日志页并预置错误过滤
+document.addEventListener('click',function(ev){
+  const card=ev.target.closest('.kpi-card[data-goto]');
+  if(!card)return;
+  const pane=card.getAttribute('data-goto');
+  if(!document.getElementById('pane-'+pane))return;
+  showPane(pane);
+  const f=card.getAttribute('data-log-filter');
+  const inp=document.getElementById('log-filter');
+  if(f&&inp){
+    logFilter=f.toLowerCase();
+    inp.value=f;
+    const clr=document.getElementById('log-filter-clear');
+    if(clr)clr.classList.add('show');
+  }
+  applyLogFilter();
+});
+// 窄屏收纳：顶栏三段控件折进右上角可展开菜单，点菜单外或 Esc 收起
+(function(){
+  const btn=document.getElementById('menu-btn'),ctl=document.getElementById('topctl');
+  if(!btn||!ctl)return;
+  btn.addEventListener('click',function(ev){ev.stopPropagation();ctl.classList.toggle('open');});
+  document.addEventListener('click',function(ev){if(!ctl.contains(ev.target))ctl.classList.remove('open');});
+  document.addEventListener('keydown',function(ev){if(ev.key==='Escape')ctl.classList.remove('open');});
+})();
 
 function passFilter(obj,f){return !f||JSON.stringify(obj).toLowerCase().includes(f);}
 
-const NO_TXT={clients:'no_clients',conns:'no_conns',macs:'no_macs',bans:'no_bans'};
-function emptyRow(key,cols,total){
-  if(!total)return '<tr><td class="empty" colspan="'+cols+'">'+t(NO_TXT[key])+'</td></tr>';
-  return '<tr><td class="empty" colspan="'+cols+'">'+t('filter_none')+
-    ' <button class="btn ghost sm" onclick="clearFilter(\''+key+'\')">'+t('filter_clear')+'</button></td></tr>';
+const NO_TXT={clients:'no_clients',conns:'no_conns',macs:'no_macs',bans:'no_bans',srv:'srv_only',traffic:'tr.empty',logs:'no_logs'};
+// 空状态配一个淡色图标：一整块纯空白读起来像渲染失败
+const EMPTY_ICON={
+  clients:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
+  conns:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  macs:'<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/>',
+  bans:'<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/>',
+  srv:'<circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>',
+  traffic:'<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  logs:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/>'
+};
+function emptyIcon(kind){return '<svg class="empty-ico" viewBox="0 0 24 24">'+(EMPTY_ICON[kind]||EMPTY_ICON.srv)+'</svg>';}
+// msg 为可信 i18n 文案（允许内嵌 <br>），extra 放"清除过滤"按钮
+function emptyRow(key,cols,msg,extra){
+  return '<tr><td class="empty" colspan="'+cols+'">'+emptyIcon(key)+'<div class="empty-txt">'+msg+'</div>'+
+    (extra||'')+'</td></tr>';
 }
+// 表格空状态：完全没有数据 vs 有数据但被过滤掉，两种提示要能区分
+function emptyTableRow(key,cols,total){
+  if(!total)return emptyRow(key,cols,t(NO_TXT[key]));
+  return emptyRow(key,cols,t('filter_none')+'<br>','<button class="btn ghost sm" onclick="clearFilter(\''+key+'\')">'+t('filter_clear')+'</button>');
+}
+// ---------- 表格分页：默认 25 行/页，可切 50/100/全部；每页只重画工具条内容有变化时，
+// 否则 2 秒一次的轮询会重建 DOM、打断已展开的页大小下拉框 ----------
+const PAGE_SIZES=[25,50,100,0];
+let pageState={};
+function pageConf(key){
+  if(!pageState[key])pageState[key]={page:1,size:PAGE_SIZES[0]};
+  return pageState[key];
+}
+// size=0 表示不分页；行数变少时页码越界，收敛到最后一页而不是停在空白页
+function settlePage(key,total){
+  const c=pageConf(key);
+  let pages=1;
+  if(c.size>0)pages=Math.max(1,Math.ceil(total/c.size));
+  if(c.page<1||c.page>pages)c.page=pages;
+  c.pages=pages;
+  return c;
+}
+function pageView(key,arr){
+  const c=settlePage(key,arr.length);
+  let rows=arr;
+  if(c.size>0)rows=arr.slice((c.page-1)*c.size,(c.page-1)*c.size+c.size);
+  const out={rows:rows,c:c};
+  return out;
+}
+function renderPager(key,total){
+  const el=document.getElementById('pager-'+key);
+  if(!el)return;
+  const c=settlePage(key,total);
+  // 单页（或选"全部"后只剩一页）不占位置；空表同样不占位置
+  if(c.size>0&&total<=c.size){if(el.innerHTML)el.innerHTML='';return;}
+  let from=0,to=total;
+  if(c.size>0){from=(c.page-1)*c.size;to=Math.min(total,from+c.size);}
+  let opts='';
+  PAGE_SIZES.forEach(function(n){
+    let sel='';
+    if(n===c.size)sel=' selected';
+    // n=0 是"不分页"，显示全部而不是"0 条 / 页"
+    let label=t('page.size');
+    if(n>0)label=tpl(label,{n:n});
+    else label=t('page.all');
+    opts+='<option value="'+n+'"'+sel+'>'+label+'</option>';
+  });
+  // 上一页 / 下一页：chevron 图标 + i18n 悬停文案，到边界时禁用
+  let prevBtn='<button class="btn ghost sm pg-btn"';
+  let nextBtn='<button class="btn ghost sm pg-btn"';
+  if(c.page<=1)prevBtn+=' disabled';
+  if(c.page>=c.pages)nextBtn+=' disabled';
+  prevBtn+=' title="'+esc(t('page.prev'))+'" onclick="goPage(\''+key+'\','+(c.page-1)+')">‹</button>';
+  nextBtn+=' title="'+esc(t('page.next'))+'" onclick="goPage(\''+key+'\','+(c.page+1)+')">›</button>';
+  const html='<span class="dim">'+tpl(t('page.showing'),{a:from+1,b:to,n:total})+'</span>'+
+    '<span class="pager-right">'+
+      '<select class="sel pg-sel" onchange="setPageSize(\''+key+'\',this.value)">'+opts+'</select>'+
+      prevBtn+
+      '<span class="pg-of">'+tpl(t('page.of'),{x:c.page,y:c.pages})+'</span>'+
+      nextBtn+
+    '</span>';
+  if(el.innerHTML!==html)el.innerHTML=html;
+}
+function goPage(key,p){
+  pageConf(key).page=p;
+  if(key==='traffic')renderTrafficView();else rerenderTables();
+}
+function setPageSize(key,n){
+  const c=pageConf(key);
+  // 0 是"不分页"的哨兵值，不能用 || 兜底，否则"全部"会被悄悄改成默认 25
+  const v=parseInt(n,10);
+  if(!isNaN(v))c.size=v;
+  else c.size=PAGE_SIZES[0];
+  c.page=1;
+  if(key==='traffic')renderTrafficView();else rerenderTables();
+}
+// 多占位符替换：词条里可能同时出现 {a}{b}{n}
+function tpl(s,o){
+  let out=String(s);
+  for(const k in o)out=out.split('{'+k+'}').join(o[k]);
+  return out;
+}
+// ---------- 表头排序：点击 <th data-sort> 循环 降序 → 升序 → 取消 ----------
+// 数值列按数值比较、其余按字符串；速率列用最近一次快照算出的差分
+const SORTCOLS={
+  clients:{
+    id:function(r){return r.id;},v4:function(r){return r.c.ipv4||'';},tcp:function(r){return r.c.active_conns;},
+    tx:function(r){return r.c.tx_bytes;},rx:function(r){return r.c.rx_bytes;},txs:function(r){return r.sx;},rxs:function(r){return r.sr;}
+  },
+  conns:{
+    owner:function(r){return r.owner;},target:function(r){return r.target||'';},remote:function(r){return r.remote||'';},
+    rtt:function(r){return r.rtt;},tx:function(r){return r.tx;},rx:function(r){return r.rx;},
+    txs:function(r){return r.sx;},rxs:function(r){return r.sr;},age:function(r){return r.age;}
+  },
+  traffic:{
+    date:function(r){return r.date;},up:function(r){return r.up;},down:function(r){return r.down;},
+    total:function(r){return r.up+r.down;}
+  }
+};
+let sortState={};
+function sortRows(key,rows){
+  const s=sortState[key];
+  if(!s)return rows;
+  const col=SORTCOLS[key][s.f];
+  if(!col)return rows;
+  const d=s.d;
+  return rows.slice().sort(function(a,b){
+    const x=col(a),y=col(b);
+    if(typeof x==='number'&&typeof y==='number')return (x-y)*d;
+    return String(x).localeCompare(String(y))*d;
+  });
+}
+// 箭头由 data-arrow 属性承载，当前排序列表头高亮
+function syncSortUI(key){
+  const pane=document.getElementById('pane-'+key);
+  if(!pane)return;
+  const s=sortState[key];
+  pane.querySelectorAll('th[data-sort]').forEach(function(th){
+    if(s&&th.getAttribute('data-sort')===s.f){
+      th.classList.add('sorted');
+      th.setAttribute('data-arrow',s.d<0?'↓':'↑');
+    }else{
+      th.classList.remove('sorted');
+      th.removeAttribute('data-arrow');
+    }
+  });
+}
+document.addEventListener('click',function(ev){
+  const th=ev.target.closest('th[data-sort]');
+  if(!th)return;
+  const pane=th.closest('.pane');
+  if(!pane)return;
+  const key=pane.id.replace('pane-','');
+  const f=th.getAttribute('data-sort');
+  const cur=sortState[key];
+  if(cur&&cur.f===f){
+    if(cur.d<0)sortState[key]={f:f,d:1};
+    else delete sortState[key];
+  }else{
+    sortState[key]={f:f,d:-1};
+  }
+  syncSortUI(key);
+  if(key==='traffic')renderTrafficView();else rerenderTables();
+});
 function setCount(id,f,shown,total){
   const el=document.getElementById(id);if(!el)return;
   el.textContent=f?(shown+' / '+total):'';
@@ -362,7 +640,7 @@ function attachSearch(key){
   input.addEventListener('input',function(){
     clear.classList.toggle('show',!!input.value);
     clearTimeout(timer);
-    timer=setTimeout(function(){Q[key]=input.value.trim().toLowerCase();rerenderTables();},140);
+    timer=setTimeout(function(){Q[key]=input.value.trim().toLowerCase();pageConf(key).page=1;rerenderTables();},140);
   });
   clear.addEventListener('click',function(){input.value='';Q[key]='';clear.classList.remove('show');rerenderTables();input.focus();});
   input.addEventListener('keydown',function(e){if(e.key==='Escape')clear.click();});
@@ -372,6 +650,7 @@ function clearFilter(key){
   box.querySelector('.search-input').value='';
   box.querySelector('.search-clear').classList.remove('show');
   Q[key]='';
+  pageConf(key).page=1;
   rerenderTables();
 }
 // "/" 聚焦当前页签的过滤框（输入控件已聚焦时不拦截）
@@ -391,9 +670,11 @@ let prevPps={tx:0,rx:0,ok:false},prevConns={},lastConnsT=0,lastConnSpeeds={};
 async function fetchStats(){
   try{
     const res=await fetch(url('/api/stats'),AUTH_HDR);
-    if(res.status===401){document.body.innerHTML='<div class="card"><h2>401</h2><p>'+t('logs.level')+': -web-auth user:pass</p></div>';return;}
+    if(res.status===401){showUnauthorized();return;}
     const data=await res.json();
     lastStats=data;
+    const upd=document.getElementById('updated-at');
+    if(upd)upd.textContent=t('updated').replace('{n}',new Date().toLocaleTimeString());
     const now=performance.now();const dt=lastT?(now-lastT)/1000:2;lastT=now;
 
     document.getElementById('mode').innerText=data.mode.toUpperCase();
@@ -483,24 +764,31 @@ function rerenderTables(){
 function renderClientsTable(data){
   const f=Q.clients;
   const entries=data.mode==='server'?Object.entries(data.clients||{}):(data.clients&&data.clients.local?[['local',data.clients.local]]:[]);
-  let rows='',shown=0;
-  for(const [id,c] of entries){
-    if(!passFilter(Object.assign({id:id},c),f))continue;
-    shown++;
-    const sp=lastSpeeds[id]||{sx:0,sr:0};
-    rows+='<tr><td class="num dim" title="'+esc(id)+'">'+hi(esc(shortId(id,10)),f)+'</td>'+
-      '<td class="num">'+hi(esc(c.ipv4||'-'),f)+'</td>'+
-      '<td class="hide-sm num dim">'+hi(esc(c.ipv6||'-'),f)+'</td>'+
-      '<td class="hide-sm num dim">'+hi(esc(c.mac||'-'),f)+'</td>'+
-      '<td class="num">'+c.active_conns+'</td>'+
-      '<td class="num">'+fmtBytes(c.tx_bytes)+'</td><td class="num">'+fmtBytes(c.rx_bytes)+'</td>'+
-      '<td class="num speed">'+fmtBytes(sp.sx,true)+'</td><td class="num speed dn">'+fmtBytes(sp.sr,true)+'</td>'+
-      '<td class="hide-sm">'+badge(c.fec)+'</td><td class="hide-sm">'+encBadge(c.enc_algo)+'</td>'+
-      '<td>'+(data.mode==='server'?'<button class="btn danger sm" onclick="kickClient(\''+id+'\')">'+t('th.kick')+'</button>'+
-        '<button class="btn ghost sm" onclick="banClient(\''+id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
-  }
-  document.getElementById('clients-body').innerHTML=rows||emptyRow('clients',12,entries.length);
-  setCount('client-count',f,shown,entries.length);
+  let rows=[];
+  entries.forEach(function(pair){
+    const sp=lastSpeeds[pair[0]]||{sx:0,sr:0};
+    rows.push({id:pair[0],c:pair[1],sx:sp.sx,sr:sp.sr});
+  });
+  rows=sortRows('clients',rows);
+  syncSortUI('clients');
+  const all=entries.length;
+  rows=rows.filter(function(r){return passFilter(Object.assign({id:r.id},r.c),f);});
+  const total=rows.length;
+  const pv=pageView('clients',rows);
+  document.getElementById('clients-body').innerHTML=pv.rows.map(function(r){
+    return '<tr><td class="num dim" title="'+esc(r.id)+'">'+hi(esc(shortId(r.id,10)),f)+'</td>'+
+      '<td class="num">'+hi(esc(r.c.ipv4||'-'),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(r.c.ipv6||'-'),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(r.c.mac||'-'),f)+'</td>'+
+      '<td class="num">'+r.c.active_conns+'</td>'+
+      '<td class="num">'+fmtBytes(r.c.tx_bytes)+'</td><td class="num">'+fmtBytes(r.c.rx_bytes)+'</td>'+
+      '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
+      '<td class="hide-sm">'+badge(r.c.fec)+'</td><td class="hide-sm">'+encBadge(r.c.enc_algo)+'</td>'+
+      '<td>'+(data.mode==='server'?'<button class="btn danger sm" onclick="kickClient(\''+r.id+'\')">'+t('th.kick')+'</button>'+
+        '<button class="btn ghost sm" onclick="banClient(\''+r.id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
+  }).join('')||emptyTableRow('clients',12,all);
+  setCount('client-count',f,total,all);
+  renderPager('clients',total);
 }
 
 // ---------- "运行状态" 页：宿主/协商/brutal/配置 四块明细 ----------
@@ -616,9 +904,15 @@ function renderConnsTable(data,fresh){
   }
   const f=Q.conns;
   const all=rows.length;
+  rows=sortRows('conns',rows);
+  syncSortUI('conns');
+  // 服务端模式的"目标"列恒为占位符，整列隐藏；客户端模式有真实目标地址，保持可见
+  const wrap=tb.closest('.twrap');
+  if(wrap)wrap.classList.toggle('srv-mode',data.mode==='server');
   if(f)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(f));
   const total=rows.length;
-  tb.innerHTML=rows.map(r=>{
+  const pv=pageView('conns',rows);
+  tb.innerHTML=pv.rows.map(r=>{
     const st=r.state==='up'?'<span class="badge b-on">'+t('st.up')+'</span>':
       r.state==='connecting'?'<span class="badge b-dup">'+t('st.connecting')+'</span>':
       '<span class="badge b-off">'+esc(r.state||'-')+'</span>';
@@ -631,7 +925,7 @@ function renderConnsTable(data,fresh){
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
     const ops=(data.mode==='server'&&r.fullId)?'<button class="btn danger sm" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
     const sniMeta=[r.tlsVer,r.tlsCipher,r.tlsAlpn].filter(Boolean).join(' · ');
-    return '<tr><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+    return '<tr><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num">'+rtt+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="hide-sm num speed">'+fmtBytes(r.sx,true)+'</td><td class="hide-sm num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
       '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
@@ -640,34 +934,38 @@ function renderConnsTable(data,fresh){
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm" style="color:var(--err)" title="'+esc(r.err||r.brutErr)+'">'+esc(String(r.err||r.brutErr).slice(0,40))+'</td><td>'+ops+'</td></tr>';
-  }).join('')||emptyRow('conns',17,all);
-  setCount('conn-count',f,rows.length,all);
+  }).join('')||emptyTableRow('conns',17,all);
+  setCount('conn-count',f,total,all);
+  renderPager('conns',total);
 }
 function renderMacsTable(data){
   const tb=document.getElementById('macs-body');
   if(data.mode!=='server'){
-    tb.innerHTML='<tr><td colspan="3" class="empty">'+t('srv_only')+'</td></tr>';
-    setCount('mac-count','',0,0);return;
+    tb.innerHTML=emptyRow('srv',3,t('srv_only'));
+    setCount('mac-count','',0,0);renderPager('macs',0);return;
   }
+  const all=data.mac_table||[];
   const f=Q.macs;
-  const list=data.mac_table||[];
-  let rows='',shown=0;
-  list.forEach(e=>{
-    if(!passFilter(e,f))return;
-    shown++;
-    rows+='<tr><td class="num">'+hi(esc(e.mac),f)+'</td><td class="num dim">'+hi(esc(e.port),f)+'</td><td class="num dim">'+e.age_sec+'s</td></tr>';
-  });
-  tb.innerHTML=rows||emptyRow('macs',3,list.length);
-  setCount('mac-count',f,shown,list.length);
+  const list=all.filter(function(e){return passFilter(e,f);});
+  const pv=pageView('macs',list);
+  tb.innerHTML=pv.rows.map(function(e){
+    return '<tr><td class="num">'+hi(esc(e.mac),f)+'</td><td class="num dim">'+hi(esc(e.port),f)+'</td><td class="num dim">'+e.age_sec+'s</td></tr>';
+  }).join('')||emptyTableRow('macs',3,all.length);
+  setCount('mac-count',f,list.length,all.length);
+  renderPager('macs',list.length);
 }
 function renderBansTable(data){
   const tb=document.getElementById('bans-body');
-  if(data.mode!=='server'){tb.innerHTML='<tr><td colspan="3" class="empty">'+t('srv_only')+'</td></tr>';return;}
-  const bans=data.banned||{};
-  tb.innerHTML=Object.entries(bans).map(([id,left])=>'<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
-    '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
-    '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>').join('')||
-    '<tr><td colspan="3" class="empty">'+t('no_bans')+'</td></tr>';
+  if(data.mode!=='server'){tb.innerHTML=emptyRow('srv',3,t('srv_only'));renderPager('bans',0);return;}
+  const bans=Object.entries(data.banned||{});
+  const pv=pageView('bans',bans);
+  tb.innerHTML=pv.rows.map(function(p){
+    const id=p[0],left=p[1];
+    return '<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
+      '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
+      '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>';
+  }).join('')||emptyRow('bans',3,t('no_bans'));
+  renderPager('bans',bans.length);
 }
 
 // ---------- 流量页：今日汇总 + 每日柱状图 + 日表 ----------
@@ -706,10 +1004,16 @@ function renderTrafficView(){
   document.getElementById('tr-caption').innerText=prefix+t('tr.caption').replace('{n}',lastTraffic.days);
   drawTrafficChart(daily);
   const tb=document.getElementById('traffic-body');
-  const days=(daily||[]).slice().reverse();
-  const rows=days.map(d=>'<tr><td class="num dim">'+esc(d.date)+'</td><td class="num speed">'+fmtBytes(d.up)+'</td>'+
-    '<td class="num speed dn">'+fmtBytes(d.down)+'</td><td class="num">'+fmtBytes(d.up+d.down)+'</td></tr>').join('');
-  tb.innerHTML=rows||'<tr><td colspan="4" class="empty">'+t('tr.empty')+'</td></tr>';
+  let days=(daily||[]).slice();
+  days=sortRows('traffic',days);
+  syncSortUI('traffic');
+  if(!sortState.traffic)days.reverse();
+  const pv=pageView('traffic',days);
+  tb.innerHTML=pv.rows.map(function(d){
+    return '<tr><td class="num dim">'+esc(d.date)+'</td><td class="num speed">'+fmtBytes(d.up)+'</td>'+
+      '<td class="num speed dn">'+fmtBytes(d.down)+'</td><td class="num">'+fmtBytes(d.up+d.down)+'</td></tr>';
+  }).join('')||emptyRow('traffic',4,t('tr.empty'));
+  renderPager('traffic',days.length);
 }
 function drawTrafficChart(daily){
   const days=(daily||[]).slice(-60); // 点数上限：日期标签保持可读
@@ -721,17 +1025,32 @@ function drawTrafficChart(daily){
   renderLineChart('traffic-chart',pts,{max:max,perSec:false,hover:hover});
 }
 
-async function kickClient(id){if(!confirm(t('confirm_kick')))return;
-  await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'kick',client_id:id})});fetchStats();}
-async function banClient(id,minutes){if(!confirm(t('confirm_ban')))return;
-  await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'ban',client_id:id,ttl_minutes:minutes})});fetchStats();}
-async function addBan(){const id=document.getElementById('ban-id').value.trim();if(!id)return alert(t('need_id'));
+async function kickClient(id){
+  if(!(await uiConfirm(t('confirm_kick'))))return;
+  await control({action:'kick',client_id:id},t('toast.kick'));fetchStats();
+}
+async function banClient(id,minutes){
+  if(!(await uiConfirm(t('confirm_ban'))))return;
+  await control({action:'ban',client_id:id,ttl_minutes:minutes},t('toast.ban'));fetchStats();
+}
+async function addBan(){
+  const id=document.getElementById('ban-id').value.trim();
+  if(!id){toast(t('toast.need_id'),'err');return;}
   const m=parseInt(document.getElementById('ban-min').value,10);
-  await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'ban',client_id:id,ttl_minutes:isNaN(m)?0:m})});
-  document.getElementById('ban-id').value='';document.getElementById('ban-min').value='';fetchStats();}
-async function unban(id){await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'unban',client_id:id})});fetchStats();}
-async function doAction(action){await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})});fetchStats();}
-async function setLogLevel(v){await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'loglevel',level:v})});}
+  await control({action:'ban',client_id:id,ttl_minutes:isNaN(m)?0:m},t('toast.ban'));
+  document.getElementById('ban-id').value='';document.getElementById('ban-min').value='';fetchStats();
+}
+async function unban(id){
+  await control({action:'unban',client_id:id},t('toast.unban'));fetchStats();
+}
+// gc / reconnect 不改变连接表，只在成功时刷一次内存读数
+async function doAction(action){
+  const msg=action==='gc'?t('toast.gc'):t('toast.reconnect');
+  if(await control({action:action},msg))fetchStats();
+}
+async function setLogLevel(v){
+  await control({action:'loglevel',level:v},t('toast.loglevel'));
+}
 
 // ---------- 设置页：配置查看/保存/热应用 ----------
 async function loadConfig(){
@@ -747,22 +1066,24 @@ async function saveConfig(apply){
   const st=document.getElementById('cfg-status');
   let cfg;
   try{cfg=JSON.parse(document.getElementById('cfg-editor').value);}
-  catch(e){st.textContent='JSON: '+e.message;return;}
+  catch(e){st.textContent='JSON: '+e.message;toast(t('toast.fail')+' JSON','err');return;}
   try{
     const res=await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:apply?'save_apply':'save',config:cfg})});
     const data=await res.json().catch(()=>({}));
-    if(!res.ok){st.textContent=(data.error||('HTTP '+res.status));return;}
+    if(!res.ok){st.textContent=(data.error||('HTTP '+res.status));toast(t('toast.fail')+' '+st.textContent.slice(0,120),'err');return;}
     if(apply){
       st.textContent=t('set.applied')+(data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.join(', ')):'');
+      toast(t('toast.applied'),'ok');
       setTimeout(fetchStats,500);
     }else{
       st.textContent=t('set.saved');
+      toast(t('toast.saved'),'ok');
     }
-  }catch(e){st.textContent=String(e);}
+  }catch(e){st.textContent=String(e);toast(String(e),'err');}
 }
 
-let logSeq=0,logTimer=null;
+let logSeq=0,logTimer=null,logFilter='';
 function startLogPoll(){stopLogPoll();pollLogs();logTimer=setInterval(pollLogs,2000);}
 function stopLogPoll(){if(logTimer){clearInterval(logTimer);logTimer=null;}}
 async function pollLogs(){
@@ -772,17 +1093,63 @@ async function pollLogs(){
     const lines=await res.json();
     if(!lines.length)return;
     const box=document.getElementById('logbox');
+    if(box.querySelector('.empty-box'))box.innerHTML='';
     box.innerHTML+=lines.map(l=>'<div class="ln lv-'+l.level+'"><span class="ts">['+l.time+']</span><span class="lv">'+l.level+'</span><span class="msg">'+esc(l.msg)+'</span></div>').join('');
     logSeq=lines[lines.length-1].seq;
+    applyLogFilter();
     if(document.getElementById('autoscroll').checked)box.scrollTop=box.scrollHeight;
   }catch(e){}
 }
-function clearLog(){logSeq=0;document.getElementById('logbox').innerHTML='';}
+// 日志过滤：本地隐藏不匹配的行，缓冲不丢，计数显示 命中/总数
+function applyLogFilter(){
+  const box=document.getElementById('logbox');
+  if(!box)return;
+  const f=logFilter.toLowerCase();
+  const all=box.querySelectorAll('.ln');
+  let shown=0;
+  all.forEach(function(l){
+    const hit=!f||l.textContent.toLowerCase().indexOf(f)>=0;
+    l.style.display=hit?'':'none';
+    if(hit)shown++;
+  });
+  const cnt=document.getElementById('log-count');
+  if(cnt)cnt.textContent=f?(shown+' / '+all.length):'';
+}
+function logEmptyBox(){
+  return '<div class="empty-box"><svg viewBox="0 0 24 24">'+EMPTY_ICON.logs+'</svg>'+
+    '<div>'+esc(t('no_logs'))+'</div></div>';
+}
+function clearLog(){
+  logSeq=0;logFilter='';
+  const inp=document.getElementById('log-filter');
+  const clr=document.getElementById('log-filter-clear');
+  if(inp)inp.value='';
+  if(clr)clr.classList.remove('show');
+  document.getElementById('logbox').innerHTML=logEmptyBox();
+  applyLogFilter();
+  toast(t('toast.clear'),'ok');
+}
 function downloadLog(){
+  // innerText 跳过 display:none 的行，所以导出内容自然跟随当前过滤条件
   const blob=new Blob([document.getElementById('logbox').innerText],{type:'text/plain;charset=utf-8'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);
   a.download='tlsvpn-dashboard-'+new Date().toISOString().replace(/[:.]/g,'-')+'.log';a.click();
+  toast(t('toast.download'),'ok');
 }
+// 日志过滤框：与其他表格搜索框同样的防抖/清空/Esc 交互
+(function(){
+  const inp=document.getElementById('log-filter');
+  const clr=document.getElementById('log-filter-clear');
+  if(!inp)return;
+  let timer=null;
+  inp.addEventListener('input',function(){
+    if(clr)clr.classList.toggle('show',!!inp.value);
+    clearTimeout(timer);
+    timer=setTimeout(function(){logFilter=inp.value.trim();applyLogFilter();},140);
+  });
+  if(clr)clr.addEventListener('click',function(){inp.value='';logFilter='';clr.classList.remove('show');applyLogFilter();inp.focus();});
+  inp.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&clr)clr.click();});
+})();
 
 	let THEME=localStorage.getItem('tlsvpn_theme')||'system';
 function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';}
@@ -833,5 +1200,7 @@ function drawTrendChart(points){
 }
 
 let prev={},lastT=0;const txHist=[],rxHist=[],txTimes=[];const MAXPTS=60;
-applyI18n();setRefresh(REFRESH_S);fetchStats();
+applyI18n();
+document.getElementById('logbox').innerHTML=logEmptyBox();
+setRefresh(REFRESH_S);fetchStats();
 window.addEventListener('resize',function(){if(chartRange==='2m'){drawChart();}else if(trendData){drawTrendChart(trendData.points||[]);}});
