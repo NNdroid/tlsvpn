@@ -7,6 +7,17 @@ device="$TLSVPN_DEVICE"
 
 [ -n "$interface" ] && [ -n "$device" ] || exit 1
 
+# A TLSVPN default route is an overlay route, not a replacement for the
+# underlying uplink. Keep a snapshot of the defaults that made the transport
+# reachable before publishing the tunnel's 0/0 routes. Some netifd/OpenWrt
+# combinations can otherwise leave the main table without a default after the
+# protocol interface is stopped.
+state_dir="/var/run/tlsvpn"
+state_base="$state_dir/$interface"
+mkdir -p "$state_dir"
+ip -4 route show default > "$state_base.default4" 2>/dev/null || :
+ip -6 route show default > "$state_base.default6" 2>/dev/null || :
+
 proto_init_update "$device" 1
 
 if [ -n "$TLSVPN_IPV4" ] && [ "$TLSVPN_IPV4" != "/" ]; then
