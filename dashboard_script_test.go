@@ -227,6 +227,45 @@ func TestDashboardRendersServerObservedTLS(t *testing.T) {
 	}
 }
 
+// TestDashboardThemeSyncRedrawsBothCharts 守护主题切换时两张画布都会被重画。
+//
+// 画布颜色是烘焙进像素的：cssv 把 CSS 变量读出来写死进 canvas，主题一变不重画
+// 就继续顶着旧配色。系统偏好变更这条分支只调过 redrawChart()——它只画趋势图，
+// 流量图会一直显示旧主题，直到下一轮轮询或用户手动操作。手动点亮/暗不受影响
+// （setTheme 两张都画），所以这个错只藏在 Auto 跟随系统的路径里，只有操作系统
+// 自己切深浅色时才现形。
+//
+// 修法是把 dataset.theme 的赋值收进 applyTheme 一处，并让它同时重画两张；手动
+// 切换、系统偏好变更、applyI18n 三条入口都收敛到 applyTheme，没有第四处能改主题。
+func TestDashboardThemeSyncRedrawsBothCharts(t *testing.T) {
+	js := dashboardJS(t)
+
+	// 唯一赋值点：任何绕过 applyTheme 直接改主题的写法都会被这里挡住
+	if n := strings.Count(js, "dataset.theme="); n != 1 {
+		t.Fatalf("dataset.theme 应只在 applyTheme 里赋值一次，实际 %d 处", n)
+	}
+
+	// 重画必须覆盖两张画布：趋势图在 #chart，流量图在 #traffic-chart
+	if !strings.Contains(js, "function redrawCharts(){redrawChart();if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}") {
+		t.Fatal("redrawCharts 必须同时重画趋势图与流量图")
+	}
+	// 系统偏好变更要经过 applyTheme，而不是自己挑一张图画
+	if !strings.Contains(js, "if(THEME==='system')applyTheme();") {
+		t.Fatal("prefers-color-scheme 变更必须走 applyTheme，否则只重画一张画布")
+	}
+
+	start := strings.Index(js, "function applyTheme(){")
+	if start < 0 {
+		t.Fatal("app.js 缺少 applyTheme")
+	}
+	block := js[start : strings.Index(js[start:], "\nfunction ")+start]
+	for _, token := range []string{"dataset.theme=", "setSeg('theme-seg',THEME);", "redrawCharts();"} {
+		if !strings.Contains(block, token) {
+			t.Fatalf("applyTheme 必须同时完成 %q", token)
+		}
+	}
+}
+
 // TestDashboardTernaryBalance 守护三元条件的括号深度配平。
 //
 // 这类错配平检查完全放过：`((a||0)>0?((b).toFixed(1)+' MB':'-')` 里 `?` 留在外层

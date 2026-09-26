@@ -2967,14 +2967,17 @@ function downloadLog(){
 	let THEME=localStorage.getItem('tlsvpn_theme')||'system';
 function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';}
 function isDark(){return THEME==='dark'||(THEME==='system'&&matchMedia('prefers-color-scheme: dark').matches);}
+// 两张画布的颜色都取自 CSS 变量、烘焙进像素，主题一变必须各自重画；漏掉一张
+// 就会有一张图继续顶着旧主题配色。收进这一处，主题同步才不会各改一处各漏一处。
+function redrawCharts(){redrawChart();if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}
 function applyTheme(){
   document.documentElement.dataset.theme=isDark()?'dark':'light';
   setSeg('theme-seg',THEME);
+  redrawCharts();
 }
-function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();
-  redrawChart();
-  if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}
-matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();redrawChart();}});
+function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();}
+// Auto 跟随系统：操作系统自己切深浅色时，面板得跟着重画，而不等下一轮轮询
+matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system')applyTheme();});
 
 ['clients','conns','macs'].forEach(attachSearch);
 bindChartHover('chart',redrawChart);
