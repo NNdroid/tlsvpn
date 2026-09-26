@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -532,4 +533,129 @@ func cleanPolicyRouting(tapName string, spec policyRoutingSpec) {
 	}
 	log.Infof("🧹 Policy routing cleaned up (fwmark: %d table %d; source rules: %d)",
 		spec.mark, spec.mark, len(spec.sourceRules))
+}
+
+// ======================= 面板观测：内核真实状态 =======================
+//
+// 面板显示的配置值不等于内核里实际装上的东西：手工改过、其他进程、hook 脚本
+// 都可能让它漂移。下面两个函数按 netlink 实时读。规则/路由结果带 5 秒缓存——
+// 面板 2 秒轮一次，没必要每次轮询都查内核。
+
+const (
+	kernelSnapTTL      = 5 * time.Second
+	kernelSnapMaxLines = 100
+)
+
+type routeSnapCache struct {
+	sync.Mutex
+	at   time.Time
+	mark int
+	snap *routeStateJSON
+}
+
+var routeSnap routeSnapCache
+
+// routeStateSnapshot 策略路由的**实际生效内容**：fwmark 表的 ip rule，以及该表
+// 内的路由。fwmark=0（未启用策略路由）时返回 nil，面板按"未配置"渲染。
+func routeStateSnapshot(fwmark int) *routeStateJSON {
+	if fwmark <= 0 {
+		return nil
+	}
+	routeSnap.Lock()
+	defer routeSnap.Unlock()
+	if routeSnap.snap != nil && routeSnap.mark == fwmark && time.Since(routeSnap.at) < kernelSnapTTL {
+		out := *routeSnap.snap
+		out.AgeSec = int64(time.Since(routeSnap.at) / time.Second)
+		return &out
+	}
+	fresh := readRouteState(fwmark)
+	routeSnap.at = time.Now()
+	routeSnap.mark = fwmark
+	routeSnap.snap = fresh
+	return fresh
+}
+
+func readRouteState(fwmark int) *routeStateJSON {
+	out := &routeStateJSON{}
+	rules, err := netlink.RuleList(netlink.FAMILY_ALL)
+	if err != nil {
+		out.Err = err.Error()
+	} else {
+		for _, r := range rules {
+			if r.Table != fwmark {
+				continue
+			}
+			fam := "ip4"
+			if r.Family == netlink.FAMILY_V6 {
+				fam = "ip6"
+			}
+			line := fmt.Sprintf("%s lookup %d pref %d", fam, r.Table, r.Priority)
+			if r.Src != nil {
+				line += " from " + r.Src.String()
+			}
+			if r.IifName != "" {
+				line += " iif " + r.IifName
+			}
+			if r.OifName != "" {
+				line += " oif " + r.OifName
+			}
+			out.Rules = append(out.Rules, line)
+			if len(out.Rules) >= kernelSnapMaxLines {
+				break
+			}
+		}
+	}
+	routes, rerr := netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: fwmark}, netlink.RT_FILTER_TABLE)
+	if rerr != nil {
+		if out.Err == "" {
+			out.Err = rerr.Error()
+		}
+		return out
+	}
+	for _, r := range routes {
+		if r.Dst == nil {
+			continue
+		}
+		line := r.Dst.String()
+		if r.Gw != nil {
+			line += " via " + r.Gw.String()
+		}
+		if name := linkNameByIndex(r.LinkIndex); name != "" {
+			line += " dev " + name
+		}
+		out.Routes = append(out.Routes, line)
+		if len(out.Routes) >= kernelSnapMaxLines {
+			break
+		}
+	}
+	return out
+}
+
+func linkNameByIndex(idx int) string {
+	if ifi, err := net.InterfaceByIndex(idx); err == nil {
+		return ifi.Name
+	}
+	return ""
+}
+
+// tapLinkStats 隧道网卡的**内核**计数。它与隧道层计数是两回事：内核在这里
+// 记的是接口级别的收发与错误/丢弃，TAP 写失败之前内核先记一笔。
+// "mem" 模式没有真实网卡，返回 nil（面板按缺位渲染）。
+func tapLinkStats(tapName string) *tapLinkJSON {
+	if tapName == "" || tapName == "mem" {
+		return nil
+	}
+	link, err := netlink.LinkByName(tapName)
+	if err != nil || link.Attrs() == nil {
+		return nil
+	}
+	a := link.Attrs()
+	out := &tapLinkJSON{Up: a.Flags&net.FlagUp != 0, MTU: a.MTU}
+	if st := a.Statistics; st != nil {
+		out.RxBytes, out.TxBytes = st.RxBytes, st.TxBytes
+		out.RxPkts, out.TxPkts = st.RxPackets, st.TxPackets
+		out.RxErrs, out.TxErrs = st.RxErrors, st.TxErrors
+		out.RxDrops, out.TxDrops = st.RxDropped, st.TxDropped
+	}
+	return out
 }

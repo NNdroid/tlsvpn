@@ -470,7 +470,7 @@ type Server struct {
 	// 静默改成别的 K 会让它在不知道的情况下多付 N/K 冗余开销。
 	fecGroupMin, fecGroupMax int
 	// bootCfg 启动时配置：NeedsRestart 的差异基准（当前 s.cfg 是热更后的值）
-	bootCfg *Config
+	bootCfg  *Config
 	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
 	bannedMu sync.Mutex
 
@@ -479,8 +479,22 @@ type Server struct {
 	pskFailMu sync.Mutex
 	pskFail   map[string]*pskFailBucket
 
+	// 防护路径计数：这些拒绝过去只进日志，面板和 /metrics 都看不到，
+	// 于是"伪装站点到底挡住了多少扫描"无法量化。
+	protectConnsRejected    atomic.Uint64 // 单地址并发上限拒绝
+	protectTLSHandshakeFail atomic.Uint64 // TLS 握手失败
+	protectFallbackHTTP     atomic.Uint64 // 非隧道流量落到伪装站点
+	protectFECGroupRejected atomic.Uint64 // 请求的 FEC K 超出策略区间
+
+	hooks *LifecycleHooks
+
 	tapWriteErrs atomic.Uint64 // TAP 交付失败帧数（旧实现被静默吞掉）
 }
+
+// protectTarpit 进入焦油坑（camouflageProbe）的连接数。进程内只有一个 Server
+// 实例，而 camouflageProbe 在多个拒连路径共用，所以用包级计数，不给每个调用点
+// 传指针。
+var protectTarpit atomic.Uint64
 
 // pskFailBucket 单个远端地址的 PSK 失败计数窗口
 type pskFailBucket struct {
@@ -845,7 +859,8 @@ func (s *Server) sampleClientTraffic() map[string][2]uint64 {
 	return out
 }
 
-func (s *Server) snapshotServerConns() []serverConnSnapshot {	now := time.Now().Unix()
+func (s *Server) snapshotServerConns() []serverConnSnapshot {
+	now := time.Now().Unix()
 	out := []serverConnSnapshot{}
 	s.mu.RLock()
 	for id, session := range s.activeClients {
@@ -1009,11 +1024,12 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		vswitch: NewVSwitch(), brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		macAddr: cfg.Mac, activeClients: make(map[string]*ClientSession), macToIP: make(map[string]MacBinding),
 		encrypt: cfg.Encrypt, encAlgo: encAlgoFromConfig(cfg.EncAlgo), startedAt: time.Now(),
-		banned:       make(map[string]int64),
-		pskFail:      make(map[string]*pskFailBucket),
-		minEnc: minEncRank(cfg.MinEnc),
+		banned:      make(map[string]int64),
+		pskFail:     make(map[string]*pskFailBucket),
+		minEnc:      minEncRank(cfg.MinEnc),
 		maxSessions: cfg.Server.MaxSessions,
 		fecGroupMin: cfg.Server.FecGroupMin, fecGroupMax: cfg.Server.FecGroupMax,
+		hooks: hooks,
 	}
 	srv.cfg.Store(cfg)
 	srv.bootCfg = cfg
@@ -1205,6 +1221,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 		conn.SetKeepAlivePeriod(15 * time.Second)
 		conn.SetNoDelay(true)
 		if !limiter.acquire(conn.RemoteAddr()) {
+			srv.protectConnsRejected.Add(1)
 			log.Debugf("connection limiter rejected remote %s", conn.RemoteAddr())
 			conn.Close()
 			continue
@@ -1225,6 +1242,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			prefixConn := &PrefixConn{Conn: c, prefix: peekBuf[:n]}
 			if peekBuf[0] != 0x16 {
 				// 非 TLS 流量（回退 HTTP / 扫描器）走默认小缓冲
+				srv.protectFallbackHTTP.Add(1)
 				serveFallbackHTTP(prefixConn, "http/1.1")
 				return
 			}
@@ -1250,6 +1268,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
 			if err != nil {
+				srv.protectTLSHandshakeFail.Add(1)
 				log.Debugf("TLS handshake failed from %s: %v", c.RemoteAddr(), err)
 				tlsConn.Close()
 				return
@@ -1268,6 +1287,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 
 			prefixConn2 := &PrefixConn{Conn: tlsConn, prefix: peekBuf2[:n2]}
 			if peekBuf2[0] >= 0x20 {
+				srv.protectFallbackHTTP.Add(1)
 				serveFallbackHTTP(prefixConn2, alpn)
 				return
 			}
@@ -1373,6 +1393,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 发送前已夹到协议范围，因此这条只拦畸形/第三方 peer；fec_group=0 在
 	// fec=false 时合法，必须按 req.FEC 门控，否则所有非 FEC 握手都会被拒。
 	if req.FEC && (req.FecGroup < fecGroupMin || req.FecGroup > fecGroupMax) {
+		s.protectFECGroupRejected.Add(1)
 		log.Warnf("[%s] connection refused: fec_group=%d outside server policy [%d, %d]",
 			clientID, req.FecGroup, fecGroupMin, fecGroupMax)
 		return

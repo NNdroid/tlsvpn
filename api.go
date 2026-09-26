@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -52,19 +54,38 @@ type WebStats struct {
 	GlobalTxBytes uint64                 `json:"global_tx_bytes"`
 	GlobalRxBytes uint64                 `json:"global_rx_bytes"`
 	// 扩展观测
-	LogLevel    string               `json:"log_level"`
-	Dropped     uint64               `json:"dropped_frames"`
-	TapErrors   uint64               `json:"tap_write_errors"`
-	Fec         fecStatsJSON         `json:"fec"`
-	Reorder     reorderStatsJSON     `json:"reorder"`
-	Mem         memStatsJSON         `json:"mem"`
-	IPPool      *ipPoolJSON          `json:"ip_pool,omitempty"`
-	Banned      map[string]int64     `json:"banned,omitempty"`
-	MACs        []MACEntry           `json:"mac_table,omitempty"`
-	Conns       []connSnapshot       `json:"conns,omitempty"`        // client 模式连接明细
-	ServerConns []serverConnSnapshot `json:"server_conns,omitempty"` // server 模式物理连接明细
-	FecMode     string               `json:"fec_mode,omitempty"`     // client 模式 FEC 状态
-	EncAlgo     int                  `json:"enc_algo,omitempty"`
+	LogLevel  string `json:"log_level"`
+	Dropped   uint64 `json:"dropped_frames"`
+	TapErrors uint64 `json:"tap_write_errors"`
+	// 丢帧原因分解与防护路径计数：总量在 dropped_frames，这里给出为什么丢，
+	// 以及伪装站点到底挡了多少扫描流量
+	DropBreakdown dropBreakdownJSON `json:"drop_breakdown"`
+	Protect       *protectStatsJSON `json:"protect,omitempty"`
+	// 混淆填充的线路开销（off 模式没有已填充记录时不下发）
+	Pad      *padStatsJSON   `json:"pad,omitempty"`
+	Sessions *sessionsJSON   `json:"sessions,omitempty"`
+	Cert     *certInfoJSON   `json:"cert,omitempty"`
+	Hooks    *hookStatusJSON `json:"hooks,omitempty"`
+	// 内核态观测：策略路由的实际内容、TAP 链路层统计、进程 CPU 占用
+	// （非 Linux 或缺少条件时缺位，面板不渲染对应卡片）
+	Routes  *routeStateJSON `json:"routes,omitempty"`
+	TapLink *tapLinkJSON    `json:"tap_link,omitempty"`
+	CPU     *cpuJSON        `json:"cpu,omitempty"`
+	// 全局包计数与客户端重连次数：此前只出现在 /metrics，面板拿不到
+	GlobalTxPackets   uint64               `json:"global_tx_packets"`
+	GlobalRxPackets   uint64               `json:"global_rx_packets"`
+	ReconnectAttempts uint64               `json:"reconnect_attempts"`
+	LiveConns         int                  `json:"live_conns"`
+	Fec               fecStatsJSON         `json:"fec"`
+	Reorder           reorderStatsJSON     `json:"reorder"`
+	Mem               memStatsJSON         `json:"mem"`
+	IPPool            *ipPoolJSON          `json:"ip_pool,omitempty"`
+	Banned            map[string]int64     `json:"banned,omitempty"`
+	MACs              []MACEntry           `json:"mac_table,omitempty"`
+	Conns             []connSnapshot       `json:"conns,omitempty"`        // client 模式连接明细
+	ServerConns       []serverConnSnapshot `json:"server_conns,omitempty"` // server 模式物理连接明细
+	FecMode           string               `json:"fec_mode,omitempty"`     // client 模式 FEC 状态
+	EncAlgo           int                  `json:"enc_algo,omitempty"`
 	// client 模式会话级密钥代际。服务端逐连接有 session_epoch，客户端只有一条
 	// 逻辑会话，故放在顶层；连接表按列展示它，代际漂移一眼可见。
 	SessionEpoch uint64 `json:"session_epoch,omitempty"`
@@ -138,6 +159,99 @@ type ipPoolJSON struct {
 	V6Used  int `json:"v6_used"`
 }
 
+// dropBreakdownJSON 丢帧按原因分解。总量在 dropped_frames 里，这里给出为什么丢：
+// 限速口溢出是拥塞，伪造源 MAC 是攻击，两者要分得开才好决策。
+type dropBreakdownJSON struct {
+	Backpressure uint64 `json:"backpressure"`
+	SpoofedSrc   uint64 `json:"spoofed_src"`
+	Broadcast    uint64 `json:"broadcast"`
+	Reorder      uint64 `json:"reorder"`
+}
+
+// pskFailJSON 单个远端地址的 PSK 猜测失败记录。窗口计数，不含握手报文。
+type pskFailJSON struct {
+	Remote    string `json:"remote"`
+	Count     int    `json:"count"`
+	WindowSec uint64 `json:"window_sec"`
+}
+
+// protectStatsJSON 防护路径的计数。这些拒绝过去只进日志，面板看不到就无法
+// 量化"伪装站点到底挡住了多少扫描"。
+type protectStatsJSON struct {
+	ConnsRejected    uint64        `json:"conns_rejected"`
+	TLSHandshakeFail uint64        `json:"tls_handshake_fail"`
+	FallbackHTTP     uint64        `json:"fallback_http"`
+	Tarpit           uint64        `json:"tarpit"`
+	FECGroupRejected uint64        `json:"fec_group_rejected"`
+	PSKFail          []pskFailJSON `json:"psk_fail,omitempty"`
+}
+
+// padStatsJSON 混淆填充的线路开销：已填充记录占多少字节、其中多少是填充。
+type padStatsJSON struct {
+	Mode        string  `json:"mode"`
+	WireBytes   uint64  `json:"wire_bytes"`
+	PadBytes    uint64  `json:"pad_bytes"`
+	OverheadPct float64 `json:"overhead_pct"`
+}
+
+// certInfoJSON 服务端证书有效期快照。过期前就能在面板上提前看到，
+// 而不是等客户端全部握手失败才回来看日志。days_left 为负即已过期。
+type certInfoJSON struct {
+	NotAfter   string `json:"not_after,omitempty"`
+	DaysLeft   int64  `json:"days_left"`
+	SelfSigned bool   `json:"self_signed"`
+}
+
+// hookStatusJSON up/down 钩子的配置路径与最近一次执行结果。
+type hookStatusJSON struct {
+	Configured bool   `json:"configured"`
+	UpPath     string `json:"up_path,omitempty"`
+	DownPath   string `json:"down_path,omitempty"`
+	UpRan      bool   `json:"up_ran"`
+	UpOK       bool   `json:"up_ok"`
+	UpMs       int64  `json:"up_ms"`
+	UpErr      string `json:"up_error,omitempty"`
+	DownRan    bool   `json:"down_ran"`
+	DownOK     bool   `json:"down_ok"`
+	DownMs     int64  `json:"down_ms"`
+	DownErr    string `json:"down_error,omitempty"`
+}
+
+// sessionsJSON 会话水位：当前活跃数与配置上限。
+type sessionsJSON struct {
+	Active int `json:"active"`
+	Max    int `json:"max"`
+}
+
+// routeStateJSON 内核里**实际生效**的策略路由内容（netlink 实时读取）。
+// 与配置值分开显示：手工改动、其他进程或 hook 脚本都可能让它漂移。
+type routeStateJSON struct {
+	Rules  []string `json:"rules,omitempty"`
+	Routes []string `json:"routes,omitempty"`
+	AgeSec int64    `json:"age_sec"`
+	Err    string   `json:"error,omitempty"`
+}
+
+// tapLinkJSON TAP 设备在链路层的统计。与隧道层计数不是同一个口径：
+// 这里记的是内核接口的收发与错误/丢弃，TAP 写失败之前内核先记一笔。
+type tapLinkJSON struct {
+	Up      bool   `json:"up"`
+	MTU     int    `json:"mtu"`
+	RxBytes uint64 `json:"rx_bytes"`
+	TxBytes uint64 `json:"tx_bytes"`
+	RxPkts  uint64 `json:"rx_pkts"`
+	TxPkts  uint64 `json:"tx_pkts"`
+	RxErrs  uint64 `json:"rx_errs"`
+	TxErrs  uint64 `json:"tx_errs"`
+	RxDrops uint64 `json:"rx_drops"`
+	TxDrops uint64 `json:"tx_drops"`
+}
+
+// cpuJSON 本进程的 CPU 占用（相邻两次采样差值，单位：单核百分比）
+type cpuJSON struct {
+	Percent float64 `json:"percent"`
+}
+
 // sysInfoJSON 宿主平台与进程信息：面板用来区分"本机运行"与"经隧道访问"，
 // 也用来判断 TCP Brutal 这类内核调优在架构上是否有意义（客户端跑 Windows、
 // 服务端跑 Linux 时只有服务端真正做了 shaping）。
@@ -179,40 +293,50 @@ type brutalInfoJSON struct {
 // runtimeCfgJSON 生效配置的扁平快照（已脱敏）。不直接下发完整 Config：
 // 面板需要的是"哪些开关现在是开/关"，而不是让浏览器缓存一份可保存的配置。
 type runtimeCfgJSON struct {
-	Mode           string       `json:"mode"`
-	Encrypt        bool         `json:"encrypt"`
-	EncAlgo        string       `json:"enc_algo"`
-	MinEnc         string       `json:"min_enc"`
-	PadMode        string       `json:"pad_mode"`
-	Brutal         bool         `json:"brutal"`
-	BrutalUp       uint64       `json:"brutal_up"`
-	BrutalDown     uint64       `json:"brutal_down"`
-	Socks5         bool         `json:"socks5"`
-	FEC            bool         `json:"fec"`
-	FecGroup       int          `json:"fec_group"`
-	FecGroupMin    int          `json:"fec_group_min,omitempty"` // 服务端：接受的对端 FEC 分组 K 下限
-	FecGroupMax    int          `json:"fec_group_max,omitempty"` // 服务端：接受的对端 FEC 分组 K 上限
-	LogLevel       string       `json:"log_level"`
-	Conns          int          `json:"conns"`
-	Tap            string       `json:"tap"`
-	Mac            string       `json:"mac"`
-	Addr           string       `json:"addr"`
-	WebAddr        string       `json:"web_addr"`
-	WebAuth        bool         `json:"web_auth"`
-	WebBind        string       `json:"web_bind"`
-	WebHTTPS       bool         `json:"web_https"`
-	EncryptPSK     bool         `json:"encrypt_psk"`
-	SessionEnc     bool         `json:"session_encrypt"`
-	MaxSess        int          `json:"max_sessions"`
-	V4CIDR         string       `json:"v4_cidr,omitempty"`
-	V6CIDR         string       `json:"v6_cidr,omitempty"`
-	GwV4           string       `json:"gw_v4,omitempty"`
-	GwV6           string       `json:"gw_v6,omitempty"`
-	Fwmark         int          `json:"fwmark,omitempty"`          // 客户端：策略路由标记
-	FwmarkPriority int          `json:"fwmark_priority,omitempty"` // 0 = 交给内核分配
-	FwmarkTable    int          `json:"fwmark_table,omitempty"`    // 与 fwmark 同号
-	ExtraRoutes    []string     `json:"extra_routes,omitempty"`    // 额外路由（iproute2 语法）
-	SourceRules    []SourceRule `json:"source_rules,omitempty"`    // 按源地址前缀的规则
+	Mode             string       `json:"mode"`
+	Encrypt          bool         `json:"encrypt"`
+	EncAlgo          string       `json:"enc_algo"`
+	MinEnc           string       `json:"min_enc"`
+	PadMode          string       `json:"pad_mode"`
+	Brutal           bool         `json:"brutal"`
+	BrutalUp         uint64       `json:"brutal_up"`
+	BrutalDown       uint64       `json:"brutal_down"`
+	Socks5           bool         `json:"socks5"`
+	FEC              bool         `json:"fec"`
+	FecGroup         int          `json:"fec_group"`
+	FecGroupMin      int          `json:"fec_group_min,omitempty"` // 服务端：接受的对端 FEC 分组 K 下限
+	FecGroupMax      int          `json:"fec_group_max,omitempty"` // 服务端：接受的对端 FEC 分组 K 上限
+	LogLevel         string       `json:"log_level"`
+	Conns            int          `json:"conns"`
+	Tap              string       `json:"tap"`
+	Mac              string       `json:"mac"`
+	Addr             string       `json:"addr"`
+	WebAddr          string       `json:"web_addr"`
+	WebAuth          bool         `json:"web_auth"`
+	WebBind          string       `json:"web_bind"`
+	WebHTTPS         bool         `json:"web_https"`
+	EncryptPSK       bool         `json:"encrypt_psk"`
+	SessionEnc       bool         `json:"session_encrypt"`
+	MaxSess          int          `json:"max_sessions"`
+	V4CIDR           string       `json:"v4_cidr,omitempty"`
+	V6CIDR           string       `json:"v6_cidr,omitempty"`
+	GwV4             string       `json:"gw_v4,omitempty"`
+	GwV6             string       `json:"gw_v6,omitempty"`
+	Fwmark           int          `json:"fwmark,omitempty"`          // 客户端：策略路由标记
+	FwmarkPriority   int          `json:"fwmark_priority,omitempty"` // 0 = 交给内核分配
+	FwmarkTable      int          `json:"fwmark_table,omitempty"`    // 与 fwmark 同号
+	ExtraRoutes      []string     `json:"extra_routes,omitempty"`    // 额外路由（iproute2 语法）
+	SourceRules      []SourceRule `json:"source_rules,omitempty"`    // 按源地址前缀的规则
+	Insecure         bool         `json:"insecure,omitempty"`
+	CertSHA256       string       `json:"cert_sha256,omitempty"`
+	SNI              string       `json:"sni,omitempty"`
+	ReqV4            string       `json:"req_v4,omitempty"`
+	ReqV6            string       `json:"req_v6,omitempty"`
+	InterfaceManager string       `json:"interface_manager,omitempty"`
+	TrafficDays      int          `json:"traffic_days,omitempty"`
+	TrafficFile      string       `json:"traffic_file,omitempty"`
+	HooksUp          string       `json:"hooks_up,omitempty"`
+	HooksDown        string       `json:"hooks_down,omitempty"`
 }
 
 // runtimeNegJSON 运行时协商结果快照。客户端模式是端到端会话的实际参数，
@@ -610,16 +734,20 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			txB, rxB, txP, rxP, age uint64
 		}
 		snapClients := make(map[string]tmpSession, len(srv.activeClients))
+		var gTxB, gRxB, gTxP, gRxP uint64
 		for id, session := range srv.activeClients {
 			session.sessionMu.Lock()
 			conns := session.ActiveConns
 			session.sessionMu.Unlock()
+			txB := atomic.LoadUint64(&session.TxBytes)
+			rxB := atomic.LoadUint64(&session.RxBytes)
+			txP := atomic.LoadUint64(&session.TxPackets)
+			rxP := atomic.LoadUint64(&session.RxPackets)
+			// 全局字节/包计数：跨所有会话求和，面板此前一直是 0
+			gTxB, gRxB, gTxP, gRxP = gTxB+txB, gRxB+rxB, gTxP+txP, gRxP+rxP
 			snapClients[id] = tmpSession{
 				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: session.EncAlgo, conns: conns,
-				txB: atomic.LoadUint64(&session.TxBytes),
-				rxB: atomic.LoadUint64(&session.RxBytes),
-				txP: atomic.LoadUint64(&session.TxPackets),
-				rxP: atomic.LoadUint64(&session.RxPackets),
+				txB: txB, rxB: rxB, txP: txP, rxP: rxP,
 				age: uint64(time.Since(session.CreatedAt) / time.Second),
 			}
 		}
@@ -649,9 +777,37 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.Dropped = portDropped
 		stats.Reorder = reorder
 		stats.TapErrors = srv.tapWriteErrs.Load()
+		// 全局字节/包计数：此前声明了字段但从未赋值，面板一直显示 0
+		stats.GlobalTxBytes, stats.GlobalRxBytes = gTxB, gRxB
+		stats.GlobalTxPackets, stats.GlobalRxPackets = gTxP, gRxP
+		stats.DropBreakdown = dropBreakdownJSON{
+			Backpressure: portDropped,
+			SpoofedSrc:   srv.vswitch.spoofDrops.Load(),
+			Broadcast:    srv.vswitch.floodDrops.Load(),
+			Reorder:      reorder.DroppedFrames,
+		}
+		stats.Protect = &protectStatsJSON{
+			ConnsRejected:    srv.protectConnsRejected.Load(),
+			TLSHandshakeFail: srv.protectTLSHandshakeFail.Load(),
+			FallbackHTTP:     srv.protectFallbackHTTP.Load(),
+			Tarpit:           protectTarpit.Load(),
+			FECGroupRejected: srv.protectFECGroupRejected.Load(),
+			PSKFail:          srv.pskFailSnapshot(),
+		}
+		stats.Pad = padStatsJSONPtr()
+		stats.Cert = certInfoSnapshot()
+		if srv.hooks != nil {
+			stats.Hooks = srv.hooks.Status()
+		}
 
 		cfg := srv.curCfg()
 		stats.Cfg = snapshotCfg(cfg, "server")
+		if cfg != nil {
+			// 会话水位：active 对 max_sessions（0 = 不限，面板按"无上限"渲染）
+			stats.Sessions = &sessionsJSON{Active: stats.ActiveClients, Max: cfg.Server.MaxSessions}
+			stats.Routes = routeStateSnapshot(cfg.Client.Fwmark)
+			stats.TapLink = tapLinkStats(cfg.Tap)
+		}
 		stats.Negotiate = srv.negSnapshot()
 		// 逐连接 brutal 生效统计（服务端在握手时为每条 TCP 连接单独 setsockopt）
 		if sb := srv.serverConnsBrutal(); sb.TotalConns > 0 {
@@ -711,10 +867,32 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.TapErrors = cli.tapWriteErrs.Load()
 		stats.FecMode = fec
 		stats.EncAlgo = enc
+		// 客户端只有一条逻辑会话，全局计数等于会话计数
+		stats.GlobalTxBytes = atomic.LoadUint64(&cli.TxBytes)
+		stats.GlobalRxBytes = atomic.LoadUint64(&cli.RxBytes)
+		stats.GlobalTxPackets = atomic.LoadUint64(&cli.TxPackets)
+		stats.GlobalRxPackets = atomic.LoadUint64(&cli.RxPackets)
+		stats.ReconnectAttempts = cli.ReconnectAttempts()
+		stats.LiveConns = conns
+		// 客户端不做转发，没有交换机丢帧；只有限速口与乱序缓冲两个来源
+		stats.DropBreakdown = dropBreakdownJSON{
+			Backpressure: stats.Dropped,
+			Reorder:      stats.Reorder.DroppedFrames,
+		}
+		stats.Pad = padStatsJSONPtr()
+		if cli.hooks != nil {
+			stats.Hooks = cli.hooks.Status()
+		}
 
 		cfg := cli.curCfg()
 		stats.Cfg = snapshotCfg(cfg, "client")
 		stats.Negotiate = cli.negSnapshot()
+		if cfg != nil {
+			// 客户端"会话水位"是本机并发连接数对 conns 上限
+			stats.Sessions = &sessionsJSON{Active: conns, Max: cfg.Client.Conns}
+			stats.Routes = routeStateSnapshot(cfg.Client.Fwmark)
+			stats.TapLink = tapLinkStats(cfg.Tap)
+		}
 		var cfgPath string
 		if cfg != nil {
 			cfgPath = cfg.SourcePath
@@ -727,6 +905,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 	stats.System.FdOpen = countFDs()
 	stats.System.NumGC = ms.NumGC
 	stats.System.GCPauseMs = float64(ms.PauseTotalNs) / 1e6
+	stats.CPU = readProcCPU()
 	if ct := dailyTraffic.ClientSnapshot(); len(ct) > 0 {
 		stats.ClientTraffic = ct
 	}
@@ -792,6 +971,85 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.FwmarkTable = cfg.Client.Fwmark
 	out.ExtraRoutes = cfg.Client.ExtraRoutes
 	out.SourceRules = cfg.Client.SourceRules
+	// TLS 客户端选项：insecure / cert_sha256 / sni 决定本端是否可能被中间人替换
+	out.Insecure = cfg.Client.Insecure
+	out.CertSHA256 = cfg.Client.CertSHA256
+	out.SNI = cfg.Client.SNI
+	out.ReqV4 = cfg.Client.ReqV4
+	out.ReqV6 = cfg.Client.ReqV6
+	out.InterfaceManager = cfg.Client.InterfaceManager
+	// 流量历史保留策略与 up/down 钩子路径（最近一次执行结果见 WebStats.Hooks）
+	out.TrafficDays = cfg.TrafficDays
+	out.TrafficFile = cfg.TrafficFile
+	out.HooksUp = cfg.Up
+	out.HooksDown = cfg.Down
+	return out
+}
+
+// padOverhead 填充占线路字节的百分比；wire=0 返回 0，避免面板出现 NaN。
+func padOverhead(wire, pad uint64) float64 {
+	if wire == 0 {
+		return 0
+	}
+	return float64(pad) * 100 / float64(wire)
+}
+
+// padStatsJSONPtr 混淆填充的线路开销快照。off 模式或还没有已填充记录时返回
+// nil，面板按"未启用"渲染，而不是显示一行 0.00%。
+func padStatsJSONPtr() *padStatsJSON {
+	wire, pad := padStatsSnapshot()
+	if pad == 0 {
+		return nil
+	}
+	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad)}
+}
+
+// certInfoSnapshot 证书有效期换算成面板可直接读的形式；证书信息不可用时返回
+// nil，面板不渲染证书行。days_left 为负表示已过期，0 表示当天到期。
+func certInfoSnapshot() *certInfoJSON {
+	ce := serverCertExp.Load()
+	if ce == nil {
+		return nil
+	}
+	if ce.notAfter.IsZero() {
+		// 解析不到有效期（例如仅持有 DER 且解析失败），只显示是否自签
+		return &certInfoJSON{SelfSigned: ce.selfSigned}
+	}
+	// 向下取整：今天到期的证书算 0 天，今天内已过期的算 -1 天。
+	// 直接 int64() 截断会把"刚过期一小时"和"还有 23 小时到期"都算成 0，
+	// 面板的"已过期"红色告警就抓不到前者。
+	days := int64(math.Floor(ce.notAfter.Sub(time.Now()).Hours() / 24))
+	return &certInfoJSON{
+		NotAfter:   ce.notAfter.UTC().Format("2006-01-02T15:04:05Z"),
+		DaysLeft:   days,
+		SelfSigned: ce.selfSigned,
+	}
+}
+
+// pskFailSnapshot 当前 PSK 失败计数表。窗口计数按远端地址聚合，不含握手报文；
+// 条目变多即有人在猜密钥，这是运维最该被告警的一条。
+func (s *Server) pskFailSnapshot() []pskFailJSON {
+	s.pskFailMu.Lock()
+	defer s.pskFailMu.Unlock()
+	if len(s.pskFail) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make([]pskFailJSON, 0, len(s.pskFail))
+	for remote, b := range s.pskFail {
+		out = append(out, pskFailJSON{
+			Remote:    remote,
+			Count:     b.count,
+			WindowSec: uint64(now.Sub(b.first).Seconds()),
+		})
+	}
+	// 失败次数多的在前，同级按地址排序：面板直接当排行榜渲染
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Remote < out[j].Remote
+	})
 	return out
 }
 

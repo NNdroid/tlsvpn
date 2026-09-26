@@ -427,3 +427,37 @@ body.unauth{display:flex;align-items:center;justify-content:center;min-height:10
   .dl-opt{padding:9px 26px 9px 10px}
   .dl-menu{max-height:56vh}
 }
+
+/* ---------- 概览异常提醒条 / 派生指标条 ---------- */
+/* 异常提醒条：把散在各卡片里的坏消息集中到顶，避免用户一页页翻 */
+.alertbar{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--err-soft);border:1px solid rgba(255,107,139,.28);border-left:3px solid var(--err);
+  border-radius:10px;padding:9px 12px;margin-bottom:14px;font-size:.85em;color:var(--fg);
+  animation:fadein .18s ease;
+}
+.alertbar svg{width:16px;height:16px;flex:none;color:var(--err);fill:none;stroke:currentColor;
+  stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.alertbar-txt{flex:1;min-width:180px;line-height:1.5}
+.alertbar-cnt{font-size:.8em;color:var(--sub);flex:none}
+.alertbar-x{
+  flex:none;background:transparent;border:none;color:var(--sub);
+  font-size:1.3em;line-height:1;cursor:pointer;padding:0 2px;
+}
+.alertbar-x:hover{color:var(--fg)}
+:root[data-theme=light] .alertbar{border-color:rgba(211,49,90,.22);border-left-color:var(--err)}
+
+/* 连接页派生指标条：RTT 分布与质量比率。做成 chip 条而不是新表格列，
+   17 列的连接表已经没有余量再加列 */
+.statstrip{display:flex;flex-wrap:wrap;gap:8px;margin:-2px 0 10px;font-size:.78em}
+.statstrip:empty{display:none}
+.statchip{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--card2);border:1px solid var(--border);border-radius:999px;
+  padding:4px 11px;color:var(--muted);white-space:nowrap;
+}
+.statchip b{color:var(--fg);font-weight:600;font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+.statchip.good b{color:var(--up)}
+.statchip.warn b{color:var(--warn)}
+.statchip.bad b{color:var(--err)}
+.statchip .lbl{color:var(--sub)}

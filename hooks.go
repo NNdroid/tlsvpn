@@ -48,6 +48,18 @@ type LifecycleHooks struct {
 	env      HookEnv
 	upErr    error
 	downErr  error
+	// 面板可见的最后一次执行结果：过去只有日志，面板不知道 up 钩子跑成功没有
+	upInfo   hookRunInfo
+	downInfo hookRunInfo
+}
+
+// hookRunInfo 单次钩子执行的结果。耗时与错误原文都只保留给运维看的信息。
+type hookRunInfo struct {
+	ran bool
+	ok  bool
+	ms  int64
+	out string
+	err error
 }
 
 func NewLifecycleHooks(upPath, downPath string) *LifecycleHooks {
@@ -75,13 +87,13 @@ func (h *LifecycleHooks) Up(env HookEnv) error {
 		if h.upPath == "" {
 			return
 		}
-		out, err := h.run(h.upPath, hookWorkDir(env.Config), hookEnvironment("up", env))
-		if err != nil {
-			h.upErr = hookError("up", h.upPath, out, err)
-			return
-		}
-		if out != "" && log != nil {
-			log.Infof("up hook output: %s", out)
+		info := h.runRecorded("up", h.upPath, hookWorkDir(env.Config), hookEnvironment("up", env))
+		h.mu.Lock()
+		h.upInfo = info
+		h.upErr = info.err
+		h.mu.Unlock()
+		if info.out != "" && log != nil {
+			log.Infof("up hook output: %s", info.out)
 		}
 	})
 	return h.upErr
@@ -98,16 +110,60 @@ func (h *LifecycleHooks) Down() error {
 		if !active || h.downPath == "" {
 			return
 		}
-		out, err := h.run(h.downPath, hookWorkDir(env.Config), hookEnvironment("down", env))
-		if err != nil {
-			h.downErr = hookError("down", h.downPath, out, err)
-			return
-		}
-		if out != "" && log != nil {
-			log.Infof("down hook output: %s", out)
+		info := h.runRecorded("down", h.downPath, hookWorkDir(env.Config), hookEnvironment("down", env))
+		h.mu.Lock()
+		h.downInfo = info
+		h.downErr = info.err
+		h.mu.Unlock()
+		if info.out != "" && log != nil {
+			log.Infof("down hook output: %s", info.out)
 		}
 	})
 	return h.downErr
+}
+
+// runRecorded 执行钩子并记录面板可见的结果（成功与否、耗时、错误原文）。
+// 返回值同时保留输出用于日志，err 为 nil 表示退出码为 0 且未超时。
+func (h *LifecycleHooks) runRecorded(kind, path, workDir string, env []string) hookRunInfo {
+	start := time.Now()
+	out, err := h.run(path, workDir, env)
+	info := hookRunInfo{ran: true, ok: err == nil, ms: time.Since(start).Milliseconds(), out: out}
+	if err != nil {
+		info.err = hookError(kind, path, out, err)
+	}
+	return info
+}
+
+// Status 供面板显示钩子的配置与最近一次执行结果。失败细节只保留错误字符串，
+// 脚本参数与配置路径不含密钥，可以直接展示。
+func (h *LifecycleHooks) Status() *hookStatusJSON {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.upPath == "" && h.downPath == "" {
+		return nil
+	}
+	out := &hookStatusJSON{
+		Configured: h.Configured(),
+		UpPath:     h.upPath,
+		DownPath:   h.downPath,
+		UpRan:      h.upInfo.ran,
+		UpOK:       h.upInfo.ok,
+		UpMs:       h.upInfo.ms,
+		UpErr:      hookErrText(h.upInfo),
+		DownRan:    h.downInfo.ran,
+		DownOK:     h.downInfo.ok,
+		DownMs:     h.downInfo.ms,
+		DownErr:    hookErrText(h.downInfo),
+	}
+	return out
+}
+
+// hookErrText 把钩子错误压成面板可显示的一行；成功时返回空串。
+func hookErrText(info hookRunInfo) string {
+	if info.err == nil {
+		return ""
+	}
+	return info.err.Error()
 }
 
 func hookWorkDir(configPath string) string {

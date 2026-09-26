@@ -72,6 +72,11 @@
       <div class="kpi-sub"><span class="arr-down">↓</span> <span class="num speed dn" id="total-rx-speed">-</span></div>
     </div>
     <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico violet"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 10v6m11-11h-6M7 12H1m17.78-7.78l-4.24 4.24m-7.08 7.08l-4.24 4.24m16.02 0l-4.24-4.24m-7.08-7.08L3.22 4.22"/></svg></span><span class="kpi-label" data-i18n="kpi.cpu">-</span></div>
+      <div class="kpi-val" id="cpu-kpi">-</div>
+      <div class="kpi-sub"><span data-i18n="kpi.cores">-</span> <span class="num" id="cores">-</span></div>
+    </div>
+    <div class="card kpi-card">
       <div class="kpi-top"><span class="kpi-ico amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span><span class="kpi-label" data-i18n="kpi.uptime">-</span></div>
       <div class="kpi-val" id="uptime">-</div>
       <div class="kpi-sub"><span data-i18n="kpi.version">-</span> <span id="ver">-</span> · <a href="#" onclick="doAction('gc');return false;" data-i18n="kpi.gc">-</a></div>
@@ -101,6 +106,23 @@
       <div class="kpi-val" id="ippool-kpi">-</div>
       <div class="kpi-sub"><span data-i18n="kpi.v6used">-</span> <span class="num" id="v6used">-</span></div>
     </div>
+    <div class="card kpi-card" id="pad-card" style="display:none">
+      <div class="kpi-top"><span class="kpi-ico cyan"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1" stroke-dasharray="3 2"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1" stroke-dasharray="3 2"/></svg></span><span class="kpi-label" data-i18n="ov.pad_kpi">-</span></div>
+      <div class="kpi-val" id="pad-kpi">-</div>
+      <div class="kpi-sub"><span data-i18n="ov.pad_bytes">-</span> <span class="num" id="pad-bytes">-</span> / <span id="pad-mode">-</span></div>
+    </div>
+    <div class="card kpi-card" id="sess-card" style="display:none">
+      <div class="kpi-top"><span class="kpi-ico green"><svg viewBox="0 0 24 24"><path d="M2 12a10 10 0 1 1 20 0 10 10 0 0 1-20 0z"/><path d="M12 2v10l7 4"/></svg></span><span class="kpi-label" data-i18n="ov.sessions">-</span></div>
+      <div class="kpi-val" id="sess-kpi">-</div>
+      <div class="kpi-sub"><span data-i18n="ov.reconnect">-</span> <span class="num" id="reconn-kpi">-</span></div>
+    </div>
+  </div>
+
+  <div id="alertbar" class="alertbar" style="display:none">
+    <svg viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <span id="alertbar-txt"></span>
+    <span class="alertbar-cnt mono" id="alertbar-cnt"></span>
+    <button class="alertbar-x" id="alertbar-x" aria-label="dismiss">×</button>
   </div>
 
   <section class="card chart-card">
@@ -142,6 +164,8 @@
           <button class="search-clear" onclick="clearFilter('clients')" aria-label="clear">×</button>
           <span class="search-count mono" id="client-count"></span>
         </div>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" onclick="exportCSV('clients')" data-i18n="ov.export">-</button>
       </div>
       <div class="twrap"><table>
         <thead><tr><th data-sort="id" data-i18n="th.id">-</th><th data-sort="v4" data-i18n="th.v4">-</th><th class="hide-sm" data-i18n="th.v6">-</th><th class="hide-sm" data-i18n="th.mac">-</th><th class="num" data-sort="tcp" data-i18n="th.tcp">-</th><th class="num" data-sort="tx" data-i18n="th.tx">-</th><th class="num" data-sort="rx" data-i18n="th.rx">-</th><th class="num" data-sort="txs" data-i18n="th.txs">-</th><th class="num" data-sort="rxs" data-i18n="th.rxs">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th data-i18n="th.ops">-</th></tr></thead>
@@ -158,7 +182,10 @@
           <button class="search-clear" onclick="clearFilter('conns')" aria-label="clear">×</button>
           <span class="search-count mono" id="conn-count"></span>
         </div>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" onclick="exportCSV('conns')" data-i18n="ov.export">-</button>
       </div>
+      <div class="statstrip" id="conn-quality"></div>
       <div class="twrap"><table>
         <thead><tr><th data-sort="owner" data-i18n="th.owner">-</th><th class="hide-srv" data-sort="target" data-i18n="th.target">-</th><th data-sort="remote" data-i18n="th.remote">-</th><th data-i18n="th.state">-</th><th class="num" data-sort="rtt" data-i18n="th.rtt">-</th><th class="num" data-sort="tx" data-i18n="th.tx">-</th><th class="num" data-sort="rx" data-i18n="th.rx">-</th><th class="hide-sm num" data-sort="txs" data-i18n="th.txs">-</th><th class="hide-sm num" data-sort="rxs" data-i18n="th.rxs">-</th><th class="hide-sm" data-i18n="th.sni">-</th><th class="hide-sm num" data-sort="age" data-i18n="th.age">-</th><th class="hide-sm" data-i18n="th.epoch">-</th><th class="hide-sm" data-i18n="th.enc">-</th><th class="hide-sm" data-i18n="th.fec">-</th><th class="hide-sm" data-i18n="th.brutal">-</th><th class="hide-sm" data-i18n="th.err">-</th><th data-i18n="th.ops">-</th></tr></thead>
         <tbody id="conns-body"></tbody>
@@ -203,6 +230,8 @@
             <option value="" data-i18n="tr.all">-</option>
           </select>
         </label>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" onclick="exportCSV('traffic')" data-i18n="ov.export">-</button>
       </div>
       <div class="st-grid" style="margin-bottom:14px">
         <div class="st-block">
@@ -241,6 +270,13 @@
         <div class="st-block"><h3 data-i18n="stt.negt">-</h3><div class="twrap"><table class="kv" id="st-neg"></table></div></div>
         <div class="st-block"><h3 data-i18n="stt.host">-</h3><div class="twrap"><table class="kv" id="st-sys"></table></div></div>
         <div class="st-block"><h3 data-i18n="stt.cfg">-</h3><div class="twrap"><table class="kv" id="st-cfg"></table></div></div>
+      </div>
+      <div class="st-grid st-cols" style="margin-top:14px">
+        <div class="st-block"><h3 id="st-pad-h" data-i18n="ov.pad_kpi">-</h3><div class="twrap"><table class="kv" id="st-pad"></table></div></div>
+        <div class="st-block"><h3 id="st-protect-h" data-i18n="ov.protect">-</h3><div class="twrap"><table class="kv" id="st-protect"></table></div><div class="twrap" style="margin-top:8px"><table class="kv" id="st-psk"></table></div></div>
+        <div class="st-block"><h3 data-i18n="ov.hooks">-</h3><div class="twrap"><table class="kv" id="st-hooks"></table></div></div>
+        <div class="st-block"><h3 id="st-routes-h" data-i18n="ov.routes">-</h3><div class="twrap"><table class="kv mono" id="st-routes"></table></div></div>
+        <div class="st-block"><h3 data-i18n="ov.tap">-</h3><div class="twrap"><table class="kv" id="st-tap"></table></div></div>
       </div>
     </div>
 

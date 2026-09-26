@@ -49,3 +49,8 @@ func getTCPRTT(conn *net.TCPConn) (uint32, error) {
 }
 
 func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {}
+
+// 非 Linux 没有 netlink，内核态观测项一律缺位；面板按"平台不支持"渲染。
+func routeStateSnapshot(fwmark int) *routeStateJSON { return nil }
+
+func tapLinkStats(tapName string) *tapLinkJSON { return nil }

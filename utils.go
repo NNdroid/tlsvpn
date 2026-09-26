@@ -140,6 +140,7 @@ func serveFallbackHTTP(conn net.Conn, alpn string) {
 }
 
 func camouflageProbe(conn net.Conn) {
+	protectTarpit.Add(1)
 	defer conn.Close()
 	junkBuf := getFrame()
 	defer putFrame(junkBuf)

@@ -233,6 +233,32 @@ func currentPadLength(wireLen int) int {
 	return padBucket(wireLen)
 }
 
+// padCounter 缓存行隔离的填充开销计数器。每条记录的线路字节与其中填充的字节
+// 分置两条缓存行：多连接的发送 goroutine 并发累加时不会在同一行上锁乒乓。
+type padCounter struct {
+	v    atomic.Uint64
+	_pad [56]byte
+}
+
+var (
+	padWireC padCounter // 已填充记录的线路字节：10B 帧头 + 负载 + 填充
+	padPadC  padCounter // 其中属于混淆填充的字节
+)
+
+// recordPadBytes 在成帧热路径上调用。pad=0（off 模式）时完全不写计数器，
+// 因此 off 模式下这条路径与未引入统计前一样热。
+func recordPadBytes(wire, pad uint64) {
+	if pad == 0 {
+		return
+	}
+	padWireC.v.Add(wire)
+	padPadC.v.Add(pad)
+}
+
+func padStatsSnapshot() (wire, pad uint64) {
+	return padWireC.v.Load(), padPadC.v.Load()
+}
+
 // padBucket 小帧填充到固定桶；超出最大桶的大帧（jumbo）只加小额随机填充，
 // 避免为抗流量分析付出过大带宽代价。
 func padBucket(wireLen int) int {
@@ -263,6 +289,7 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) []byte {
 
 	// 1. 一次性算出需要的整包新增长度
 	needed := 10 + wireLen + padLen
+	recordPadBytes(uint64(needed), uint64(padLen))
 	startIdx := len(buf)
 
 	// 2. 检查容量，不够则一次性扩容，防多次 append 扩容崩溃

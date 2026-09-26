@@ -17,6 +17,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // pskKey 由 PSK 派生的 32 字节密钥材料（hashPSK 的二进制形式）
@@ -74,8 +76,8 @@ const (
 	encAlgoGCM    = 2 // AES-256-GCM（兼容既有协议）
 	encAlgoGCM128 = 4 // AES-128-GCM（显式性能模式；3 曾被历史 GCM-v2 占用）
 	gcmTagSize    = 16
-	gcmNonceSize = 12
-	encSaltSize  = 8
+	gcmNonceSize  = 12
+	encSaltSize   = 8
 	// 不同算法使用独立 KDF label，避免 AES-128/256 在同一 PSK 下复用 key material。
 	gcmKeyLabel    = "_enc_key"
 	gcm128KeyLabel = "_enc_key128"
@@ -319,13 +321,39 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 		cert = loadOrGenerateSelfSigned()
 	}
 
+	// 有效期快照供面板显示"证书剩余天数"：过期前运维就能看到，而不是等客户端全挂
+	serverCertExp.Store(certExpiryInfo(&cert, certFile == "" || keyFile == ""))
+
 	return &tls.Config{
-		Certificates:                []tls.Certificate{cert},
-		NextProtos:                  []string{"h2", "http/1.1"},
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"h2", "http/1.1"},
 		// TLSVPN 是长连接 bulk transport。固定最大 record 可减少高吞吐数据面
 		// 的 TLS record/AEAD/write 次数；不改变 TLS 协议或对端兼容性。
 		DynamicRecordSizingDisabled: true,
 	}
+}
+
+// certExpiry 监听证书的有效期。面板协议的一部分，只有一份定义。
+type certExpiry struct {
+	notAfter   time.Time
+	selfSigned bool
+}
+
+var serverCertExp atomic.Pointer[certExpiry]
+
+// certExpiryInfo 解析证书有效期。LoadX509KeyPair 会填 Leaf，自签生成的证书
+// 只有 DER，两种都要处理；解析失败返回零值，面板按"未知"渲染。
+func certExpiryInfo(cert *tls.Certificate, selfSigned bool) *certExpiry {
+	var leaf *x509.Certificate
+	if cert.Leaf != nil {
+		leaf = cert.Leaf
+	} else if len(cert.Certificate) > 0 {
+		leaf, _ = x509.ParseCertificate(cert.Certificate[0])
+	}
+	if leaf == nil {
+		return &certExpiry{selfSigned: selfSigned}
+	}
+	return &certExpiry{notAfter: leaf.NotAfter, selfSigned: selfSigned}
 }
 
 // loadOrGenerateSelfSigned 加载/生成自签名证书并持久化到磁盘：
