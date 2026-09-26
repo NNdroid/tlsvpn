@@ -266,6 +266,60 @@ func TestDashboardThemeSyncRedrawsBothCharts(t *testing.T) {
 	}
 }
 
+// TestDashboardAbsentFieldsDoNotAssertEmptyState 守护"字段缺位"和"确实为空"的区分。
+//
+// 服务端不下发的字段与"下发但为空"是两回事：前者是能力缺失（含老版本二进制），
+// 后者是运行结果。混为一谈的后果很具体——客户端表明确列着 2 个 MAC 的同屏上，
+// MAC 表却写着"尚未学习到 MAC"；Brutal 面板更糟，按缺省值补齐成开关=否、
+// 已生效 0/0，同时挂着一个"全部生效"的绿灯。
+func TestDashboardAbsentFieldsDoNotAssertEmptyState(t *testing.T) {
+	js := dashboardJS(t)
+
+	// Brutal 的"配置意图 + 内核实际状态"是整份数据，缺位时必须走空态
+	if !strings.Contains(js, "kv(document.getElementById('st-brutal'),!!neg.brutal?[") {
+		t.Fatal("st-brutal 必须用 !!neg.brutal 判断字段是否存在，缺位时不能渲染缺省值")
+	}
+	if !strings.Contains(js, "[[t('ov.no_data'),ntxt()]]);") {
+		t.Fatal("Brutal 缺位时应渲染 no_data 空态")
+	}
+
+	// "全部生效"只在确实有连接被塑形时成立：报错列表空只是 omitempty 把字段丢了
+	start := strings.Index(js, "function brutErrCell(b){")
+	if start < 0 {
+		t.Fatal("app.js 缺少 brutErrCell")
+	}
+	block := js[start : strings.Index(js[start:], "\nfunction ")+start]
+	if !strings.Contains(block, "if(b.total_conns>0)return") {
+		t.Fatal("brutErrCell 应只在 total_conns>0 时给绿灯")
+	}
+	if !strings.Contains(block, "b.errors&&b.errors.length") {
+		t.Fatal("brutErrCell 应先展示非空报错列表")
+	}
+	if !strings.Contains(js, "[t('stt.brut.errs'),brutErrCell(b)],") {
+		t.Fatal("Brutal 失败原因行必须走 brutErrCell")
+	}
+
+	// MAC 表与封禁表：字段缺位走 no_data，真的为空才走 no_macs / no_bans
+	if !strings.Contains(js, "emptyTableRow(data.mac_table?'macs':'nodata',3,all.length)") {
+		t.Fatal("macs 空态必须区分字段缺位与真的为空")
+	}
+	if !strings.Contains(js, "emptyRow('bans',3,data.banned?t('no_bans'):t('ov.no_data'))") {
+		t.Fatal("bans 空态必须区分字段缺位与真的为空")
+	}
+	if !strings.Contains(js, "nodata:'ov.no_data'") {
+		// 键名必须是 ov.no_data：no_data 只定义在 ov 块里，裸键 t() 会原样泄漏成 "no_data"
+		t.Fatal("NO_TXT 缺少 nodata:'ov.no_data'")
+	}
+
+	// 最近错误列没有错误时给占位符，而不是留一个看得见但没内容的格子
+	if !strings.Contains(js, "const cerr=r.err||r.brutErr;") {
+		t.Fatal("最近错误列缺少 cerr 取值")
+	}
+	if !strings.Contains(js, `errCell=cerr?'<span style="color:var(--err)"`) {
+		t.Fatal("最近错误列有错误时未走红色样式")
+	}
+}
+
 // TestDashboardTernaryBalance 守护三元条件的括号深度配平。
 //
 // 这类错配平检查完全放过：`((a||0)>0?((b).toFixed(1)+' MB':'-')` 里 `?` 留在外层

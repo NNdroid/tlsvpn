@@ -507,7 +507,10 @@ document.addEventListener('click',function(ev){
 
 function passFilter(obj,f){return !f||JSON.stringify(obj).toLowerCase().includes(f);}
 
-const NO_TXT={clients:'no_clients',conns:'no_conns',macs:'no_macs',bans:'no_bans',srv:'srv_only',traffic:'tr.empty',logs:'no_logs'};
+// nodata 用于"字段整个没下发"：服务端没这项能力或老版本不下发，不等于"确实没有"。
+// 前者是能力缺失，后者是运行结果，空状态文案必须分得开，否则会把 2 个真实 MAC
+// 的客户端表跟"尚未学习到 MAC"的 MAC 表并排放着。
+const NO_TXT={clients:'no_clients',conns:'no_conns',macs:'no_macs',bans:'no_bans',srv:'srv_only',traffic:'tr.empty',logs:'no_logs',nodata:'ov.no_data'};
 // 空状态配一个淡色图标：一整块纯空白读起来像渲染失败
 const EMPTY_ICON={
   clients:'<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/>',
@@ -528,6 +531,13 @@ function emptyRow(key,cols,msg,extra){
 function emptyTableRow(key,cols,total){
   if(!total)return emptyRow(key,cols,t(NO_TXT[key]));
   return emptyRow(key,cols,t('filter_none')+'<br>','<button class="btn ghost sm" onclick="clearFilter(\''+key+'\')">'+t('filter_clear')+'</button>');
+}
+// 失败原因用 omitempty：报错列表为空时字段整个不下发。"没有报错"不等于"全部
+// 生效"——没有连接被塑形时也给绿灯，就会读成开关=否、已生效 0/0 却"全部生效"。
+function brutErrCell(b){
+  if(b.errors&&b.errors.length)return '<span style="color:var(--err)">'+esc(b.errors.join('; '))+'</span>';
+  if(b.total_conns>0)return '<span class="badge b-on">'+t('stt.noerr')+'</span>';
+  return ntxt();
 }
 // ---------- 表格分页：默认 25 行/页，可切 50/100/全部；每页只重画工具条内容有变化时，
 // 否则 2 秒一次的轮询会重建 DOM、打断已展开的页大小下拉框 ----------
@@ -1192,7 +1202,10 @@ function renderStatus(data){
     }
   }
   kv(document.getElementById('st-neg'),nrw);
-  kv(document.getElementById('st-brutal'),[
+  // TCP Brutal 的"配置意图 + 内核实际状态"是一整份数据，整份下发或整份缺失。
+  // 缺失时不能按缺省值补齐渲染：会变成开关=否、0 Mbps、已生效 0/0，
+  // 和同屏连接明细里真实的 brutal 速率打架。
+  kv(document.getElementById('st-brutal'),!!neg.brutal?[
     [t('stt.brut.en'),yn(!!b.enabled)],
     [t('stt.brut.up'),(b.up_mbps||0)+' Mbps'],
     [t('stt.brut.down'),(b.down_mbps||0)+' Mbps'],
@@ -1201,8 +1214,8 @@ function renderStatus(data){
     [t('stt.brut.avail'),(b.kernel_available&&b.kernel_available.length)?mtxt(b.kernel_available.join(', ')):ntxt()],
     [t('stt.brut.applied'),(b.applied_conns||0)+' / '+(b.total_conns||0)],
     [t('stt.brut.perconn'),'<span class="mono">'+rateRange(b.min_up_mbps,b.max_up_mbps)+' / '+rateRange(b.min_down_mbps,b.max_down_mbps)+'</span>'],
-    [t('stt.brut.errs'),(b.errors&&b.errors.length)?'<span style="color:var(--err)">'+esc(b.errors.join('; '))+'</span>':'<span class="badge b-on">'+t('stt.noerr')+'</span>'],
-  ]);
+    [t('stt.brut.errs'),brutErrCell(b)],
+  ]:[[t('ov.no_data'),ntxt()]]);
   kv(document.getElementById('st-cfg'),Object.keys(cfg).map(function(k){
     const v=cfg[k];let cell;
     if(typeof v==='boolean')cell=yn(v);
@@ -1801,6 +1814,10 @@ function renderConnsTable(data,fresh){
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
     const ops=(data.mode==='server'&&r.fullId)?'<button class="btn danger sm" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
     const sniMeta=[r.tlsVer,r.tlsCipher,r.tlsAlpn].filter(Boolean).join(' · ');
+    // 没错误时不能留空格：esc(undefined) 转成空串，同行其它占位列都是 '-'，
+    // 唯独这里是个看得见的洞。
+    const cerr=r.err||r.brutErr;
+    const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
     return '<tr><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num">'+rtt+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="hide-sm num speed">'+fmtBytes(r.sx,true)+'</td><td class="hide-sm num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
@@ -1809,7 +1826,7 @@ function renderConnsTable(data,fresh){
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
-      '<td class="hide-sm" style="color:var(--err)" title="'+esc(r.err||r.brutErr)+'">'+esc(String(r.err||r.brutErr).slice(0,40))+'</td><td>'+ops+'</td></tr>';
+      '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
   }).join('')||emptyTableRow('conns',17,all);
   setCount('conn-count',f,total,all);
   renderPager('conns',total);
@@ -2088,7 +2105,7 @@ function renderMacsTable(data){
   const pv=pageView('macs',list);
   tb.innerHTML=pv.rows.map(function(e){
     return '<tr><td class="num">'+hi(esc(e.mac),f)+'</td><td class="num dim">'+hi(esc(e.port),f)+'</td><td class="num dim">'+e.age_sec+'s</td></tr>';
-  }).join('')||emptyTableRow('macs',3,all.length);
+  }).join('')||emptyTableRow(data.mac_table?'macs':'nodata',3,all.length);
   setCount('mac-count',f,list.length,all.length);
   renderPager('macs',list.length);
 }
@@ -2102,7 +2119,7 @@ function renderBansTable(data){
     return '<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
       '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
       '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>';
-  }).join('')||emptyRow('bans',3,t('no_bans'));
+  }).join('')||emptyRow('bans',3,data.banned?t('no_bans'):t('ov.no_data'));
   renderPager('bans',bans.length);
 }
 
