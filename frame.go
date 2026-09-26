@@ -162,15 +162,19 @@ func freeFrames(batch []VPNFrame) {
 const maxTLSWriteBatchBytes = 64 * 1024
 
 // appendOwnedFrameBatch 把一个 backend batch 成帧进 sendBuffer，并终结该
-// batch 的 payload/描述符所有权。返回帧数供统计批量累加。
-func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher) ([]byte, int) {
+// batch 的 payload/描述符所有权。返回帧数与其中填充字节数，供调用方在 Write
+// 成功之后批量累加统计。
+func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher) ([]byte, int, uint64) {
 	n := len(frames)
+	var pad uint64
 	for _, vf := range frames {
-		sendBuffer = appendPaddedFrame(sendBuffer, vf, ic)
+		var p int
+		sendBuffer, p = appendPaddedFrame(sendBuffer, vf, ic)
+		pad += uint64(p)
 	}
 	freeFrames(frames)
 	putVPNFrameBatch(frames)
-	return sendBuffer, n
+	return sendBuffer, n, pad
 }
 
 // ======================= 混淆填充策略 =======================
@@ -179,7 +183,9 @@ func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher
 // 因为填充的唯一可见效果是改变线路上的总字节数。
 //
 //	off    不填充（吞吐优先）
-//	bucket 填充到固定长度桶：小帧开销降到 <30%，且线路长度分布固定
+//	bucket 把小帧填充到固定长度桶：线路长度分布固定，代价是开销随负载
+//	反比上升——1B 负载的记录要补 117B 填充（占 128B 记录的九成），
+//	近 1KB 负载才把填充压到个位数百分比。
 //
 // 历史上的 legacy 模式是小帧加 300-500B 随机填充（200-350% 的额外线路开销），
 // 抗流量分析收益有限而带宽代价固定，已随旧协议兼容一并移除。
@@ -207,16 +213,24 @@ var padModeCode atomic.Int32
 // 加载前后的填充行为一致，不会出现一段窗口按别的策略发包。
 func init() { padModeCode.Store(padCodeBucket) }
 
-// setPadMode 切换填充策略（非法值回落 bucket），返回实际生效的策略名
+// setPadMode 切换填充策略（非法值回落 bucket），返回实际生效的策略名。
+// 策略真正变化时清零填充累计：两种策略的线路长度分布完全不同，混在一个
+// 累计里会让"填充开销"既不代表旧策略也不代表新策略。
 func setPadMode(mode string) string {
-	switch mode {
-	case padModeOff:
-		padModeCode.Store(padCodeOff)
-	default:
-		padModeCode.Store(padCodeBucket)
-		return padModeBucket
+	actual := padModeBucket
+	if mode == padModeOff {
+		actual = padModeOff
 	}
-	return mode
+	if actual == padModeName() {
+		return actual
+	}
+	padModeCode.Store(padCodeBucket)
+	if actual == padModeOff {
+		padModeCode.Store(padCodeOff)
+	}
+	padWireC.v.Store(0)
+	padPadC.v.Store(0)
+	return actual
 }
 
 func padModeName() string {
@@ -235,18 +249,20 @@ func currentPadLength(wireLen int) int {
 
 // padCounter 缓存行隔离的填充开销计数器。每条记录的线路字节与其中填充的字节
 // 分置两条缓存行：多连接的发送 goroutine 并发累加时不会在同一行上锁乒乓。
+// 两个累计都只在 Write 成功之后累加——写入失败或连接被掐掉的字节不计入。
 type padCounter struct {
 	v    atomic.Uint64
 	_pad [56]byte
 }
 
 var (
-	padWireC padCounter // 已填充记录的线路字节：10B 帧头 + 负载 + 填充
+	padWireC padCounter // 已发出记录的线路字节：10B 帧头 + 负载 + 填充
 	padPadC  padCounter // 其中属于混淆填充的字节
 )
 
-// recordPadBytes 在成帧热路径上调用。pad=0（off 模式）时完全不写计数器，
-// 因此 off 模式下这条路径与未引入统计前一样热。
+// recordPadBytes 在 Write 成功之后调用，wire 是整包的线路字节数。
+// pad=0（off 模式、或心跳等空帧被调用方跳过）时完全不写计数器，因此 off
+// 模式下这条路径与未引入统计前一样热。
 func recordPadBytes(wire, pad uint64) {
 	if pad == 0 {
 		return
@@ -278,7 +294,9 @@ func padBucket(wireLen int) int {
 // ic 为内层加密器：nil 表示明文；seq=0 的控制/握手帧恒不加密（协议约定，
 // 接收端以此区分校验帧与握手帧）。GCM 模式密文后附 16B 标签，线路
 // dataLen = 明文长 + tagLen；ic.tagLen() 用于一次性预留缓冲，避免中途扩容。
-func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) []byte {
+// 返回实际写入的填充字节数：记账由调用方在 Write 成功之后做，写入失败的字节
+// 不能算进填充开销。
+func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {
 	dataLen := len(vf.Data)
 	encTag := 0
 	if ic != nil && vf.Seq != 0 && dataLen > 0 {
@@ -289,7 +307,6 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) []byte {
 
 	// 1. 一次性算出需要的整包新增长度
 	needed := 10 + wireLen + padLen
-	recordPadBytes(uint64(needed), uint64(padLen))
 	startIdx := len(buf)
 
 	// 2. 检查容量，不够则一次性扩容，防多次 append 扩容崩溃
@@ -328,14 +345,17 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) []byte {
 		copy(buf[padStart:padStart+padLen], randomPool[offset:offset+padLen])
 	}
 
-	return buf
+	return buf, padLen
 }
 
 // writeStreamFrame 发送无需去重的控制帧
 func writeStreamFrame(w io.Writer, frame []byte) error {
 	streamBuf := getFrame()[:0]
-	streamBuf = appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil)
+	streamBuf, pad := appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil)
 	_, err := w.Write(streamBuf)
+	if err == nil {
+		recordPadBytes(uint64(len(streamBuf)), uint64(pad))
+	}
 	putFrame(streamBuf[:cap(streamBuf)])
 	return err
 }

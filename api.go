@@ -186,7 +186,12 @@ type protectStatsJSON struct {
 	PSKFail          []pskFailJSON `json:"psk_fail,omitempty"`
 }
 
-// padStatsJSON 混淆填充的线路开销：已填充记录占多少字节、其中多少是填充。
+// padStatsJSON 混淆填充的线路开销：已发出的记录占多少字节、其中多少是填充。
+// 记账点在 Write 成功之后：数据分支记的 wire 与 tx_bytes 是同一个
+// len(sendBuffer)；控制帧（重协商、控制下发）也计入 wire，但走的不是
+// connTxChan，所以不计入 tx_bytes。写失败或被掐断的帧不计入。空心跳帧也不
+// 计入，它是保活代价而不是流量开销。off 模式两项都是 0、overhead_pct 为
+// 0.0，面板照常渲染而不是显示"未启用"。
 type padStatsJSON struct {
 	Mode        string  `json:"mode"`
 	WireBytes   uint64  `json:"wire_bytes"`
@@ -1005,13 +1010,11 @@ func padOverhead(wire, pad uint64) float64 {
 	return float64(pad) * 100 / float64(wire)
 }
 
-// padStatsJSONPtr 混淆填充的线路开销快照。off 模式或还没有已填充记录时返回
-// nil，面板按"未启用"渲染，而不是显示一行 0.00%。
+// padStatsJSONPtr 混淆填充的线路开销快照。off 模式或还没有已发出的记录时
+// 返回全零（mode 仍如实报告）而不是 nil：面板据此显示 0.0%，而不是"未启用"——
+// 后者会把"填充已正确关闭"说成"没配置"。
 func padStatsJSONPtr() *padStatsJSON {
 	wire, pad := padStatsSnapshot()
-	if pad == 0 {
-		return nil
-	}
 	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad)}
 }
 

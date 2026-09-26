@@ -400,7 +400,7 @@ func TestFrameGCMRoundTrip(t *testing.T) {
 	}
 	buf := new(bytes.Buffer)
 	for i, p := range payloads {
-		f := appendPaddedFrame(nil, VPNFrame{Seq: uint32(i + 1), Data: p}, tx)
+		f, _ := appendPaddedFrame(nil, VPNFrame{Seq: uint32(i + 1), Data: p}, tx)
 		buf.Write(f)
 	}
 	scanner := NewFrameScanner(buf)
@@ -426,7 +426,7 @@ func TestFrameGCMRoundTrip(t *testing.T) {
 func TestFrameSeqZeroNotEncrypted(t *testing.T) {
 	payload := []byte("control frame must stay plaintext")
 
-	f := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, encIC("k"))
+	f, _ := appendPaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, encIC("k"))
 	// 头部 10 字节之后即为负载，seq=0 时不应被加密
 	got := f[10 : 10+len(payload)]
 	if !bytes.Equal(got, payload) {
@@ -436,7 +436,7 @@ func TestFrameSeqZeroNotEncrypted(t *testing.T) {
 
 // TestFrameHeaderByteOrder 显式锁定大端字节序
 func TestFrameHeaderByteOrder(t *testing.T) {
-	f := appendPaddedFrame(nil, VPNFrame{Seq: 0x01020304, Data: []byte("ab")}, nil)
+	f, _ := appendPaddedFrame(nil, VPNFrame{Seq: 0x01020304, Data: []byte("ab")}, nil)
 
 	if dl := binary.BigEndian.Uint32(f[0:4]); dl != 2 {
 		t.Errorf("dataLen 应为 2，实际 %d", dl)

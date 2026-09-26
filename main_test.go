@@ -718,10 +718,10 @@ func TestFrameScanner(t *testing.T) {
 	payload2 := []byte("VPN packet 2 data with more content")
 
 	// 產生並寫入兩筆 Frame (不加密)
-	buf1 := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 101, Data: payload1}, nil)
+	buf1, _ := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 101, Data: payload1}, nil)
 	tcpBuffer.Write(buf1)
 
-	buf2 := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 102, Data: payload2}, nil)
+	buf2, _ := appendPaddedFrame(getFrame()[:0], VPNFrame{Seq: 102, Data: payload2}, nil)
 	tcpBuffer.Write(buf2)
 
 	// 使用 Scanner 解析
@@ -838,7 +838,7 @@ func BenchmarkProtocolThroughput(b *testing.B) {
 
 	rx := mustGCM(psk, testGCMSalt)
 	frameBuf := getFrame()[:0]
-	frameBuf = appendPaddedFrame(frameBuf, VPNFrame{Seq: 1, Data: payload}, rx)
+	frameBuf, _ = appendPaddedFrame(frameBuf, VPNFrame{Seq: 1, Data: payload}, rx)
 
 	reader := &infiniteReader{data: frameBuf}
 	scanner := NewFrameScanner(reader)

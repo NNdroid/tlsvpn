@@ -235,7 +235,7 @@ func TestFrameGCMWireRoundtrip(t *testing.T) {
 		bytes.Repeat([]byte{0x88}, 50),
 	}
 	for i, p := range payloads {
-		stream = appendPaddedFrame(stream, VPNFrame{Seq: uint32(i + 1), Data: p}, tx)
+		stream, _ = appendPaddedFrame(stream, VPNFrame{Seq: uint32(i + 1), Data: p}, tx)
 	}
 
 	// 直接用 FrameScanner 解析同一字节流

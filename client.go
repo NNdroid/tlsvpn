@@ -1847,11 +1847,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
+				var padTotal uint64
 			drainBatches:
 				for {
 					var n int
-					sendBuffer, n = appendOwnedFrameBatch(sendBuffer, frames, icTx)
+					var p uint64
+					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx)
 					txPackets += n
+					padTotal += p
 					if len(sendBuffer) >= maxTLSWriteBatchBytes {
 						break
 					}
@@ -1867,6 +1870,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					errChan <- err
 					return
 				}
+				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
+				recordPadBytes(uint64(len(sendBuffer)), padTotal)
 				// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline
 				// 可少一次 runtime_pollSetDeadline syscall。
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
@@ -1874,8 +1879,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
 				dailyTraffic.Add(uint64(len(sendBuffer)), 0) // 上行 = client→server
 			case <-keepAliveTicker.C:
+				// 空心跳帧不计入填充累计：bucket 模式会给它补 118B 填充，
+				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
+				// 流量无关的地板上。
 				sendBuffer = sendBuffer[:0]
-				sendBuffer = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
 				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
 				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
 				// （约 15 分钟才放弃），期间心跳停发，服务端先在自己的读超时上判死
