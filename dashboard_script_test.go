@@ -266,6 +266,34 @@ func TestDashboardThemeSyncRedrawsBothCharts(t *testing.T) {
 	}
 }
 
+// TestDashboardPrefersColorSchemeQueryIsValid 守护 Auto 主题真的读得到系统偏好。
+//
+// 媒体查询不带括号就是无效查询：matchMedia('prefers-color-scheme: dark') 会被解析
+// 成 'not all'，matches 恒为 false。于是 Auto 永远退化成浅色——设备明明是深色也
+// 识别不到，挂在同一对象上的 change 监听也永远收不到事件，而面板照样显示 Auto 处于
+// 选中状态，看起来一切正常。上一版加的结构性守卫（监听是否走 applyTheme、
+// dataset.theme 是否只赋值一次）全部通过，却完全挡不住这个错。
+func TestDashboardPrefersColorSchemeQueryIsValid(t *testing.T) {
+	js := dashboardJS(t)
+
+	if n := strings.Count(js, "matchMedia("); n != 1 {
+		t.Fatalf("matchMedia 应只在 PREFERS_DARK 定义处调用一次，实际 %d 处", n)
+	}
+	if !strings.Contains(js, "matchMedia('(prefers-color-scheme: dark)')") {
+		t.Fatal("PREFERS_DARK 必须用带括号的媒体查询：不带括号是无效查询，matches 恒为 false")
+	}
+	if !strings.Contains(js, "const PREFERS_DARK=matchMedia") {
+		t.Fatal("缺少共享的 PREFERS_DARK 常量")
+	}
+	// isDark 与变更监听必须共用同一个 MediaQueryList：各 new 一个就又是各错一遍
+	if !strings.Contains(js, "function isDark(){return THEME==='dark'||(THEME==='system'&&PREFERS_DARK.matches);}") {
+		t.Fatal("isDark 必须读 PREFERS_DARK.matches，不能自己 new 一个查询")
+	}
+	if !strings.Contains(js, "PREFERS_DARK.addEventListener('change',function(){if(THEME==='system')applyTheme();});") {
+		t.Fatal("系统偏好变更必须监听同一个 PREFERS_DARK 对象")
+	}
+}
+
 // TestDashboardAbsentFieldsDoNotAssertEmptyState 守护"字段缺位"和"确实为空"的区分。
 //
 // 服务端不下发的字段与"下发但为空"是两回事：前者是能力缺失（含老版本二进制），

@@ -2983,7 +2983,12 @@ function downloadLog(){
 
 	let THEME=localStorage.getItem('tlsvpn_theme')||'system';
 function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()||'#888';}
-function isDark(){return THEME==='dark'||(THEME==='system'&&matchMedia('prefers-color-scheme: dark').matches);}
+// 媒体查询必须写成带括号的形式：matchMedia 的裸 'prefers-color-scheme: dark' 会被
+// 解析成 'not all'（无效查询），matches 恒为 false，于是 Auto 永远退化成浅色，
+// 设备明明是深色也识别不到，change 监听也永远收不到事件。定义一处共用，isDark 和
+// 下面的变更监听就不会各写一遍、各错一遍。
+const PREFERS_DARK=matchMedia('(prefers-color-scheme: dark)');
+function isDark(){return THEME==='dark'||(THEME==='system'&&PREFERS_DARK.matches);}
 // 两张画布的颜色都取自 CSS 变量、烘焙进像素，主题一变必须各自重画；漏掉一张
 // 就会有一张图继续顶着旧主题配色。收进这一处，主题同步才不会各改一处各漏一处。
 function redrawCharts(){redrawChart();if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}
@@ -2994,7 +2999,7 @@ function applyTheme(){
 }
 function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();}
 // Auto 跟随系统：操作系统自己切深浅色时，面板得跟着重画，而不等下一轮轮询
-matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system')applyTheme();});
+PREFERS_DARK.addEventListener('change',function(){if(THEME==='system')applyTheme();});
 
 ['clients','conns','macs'].forEach(attachSearch);
 bindChartHover('chart',redrawChart);
