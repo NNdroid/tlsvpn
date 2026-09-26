@@ -1,252 +1,40 @@
 #!/usr/bin/env bash
-# Build OpenWrt 25.12+ APK packages with an official OpenWrt SDK.
-#
-# Required/optional environment variables:
-#   OPENWRT_VERSION=25.12.5          OpenWrt release (must use APK packaging)
-#   OPENWRT_TARGET=x86               OpenWrt target
-#   OPENWRT_SUBTARGET=64             OpenWrt subtarget
-#   OPENWRT_SDK_BASE_URL=...         Override official SDK directory URL
-#   OPENWRT_WORK_DIR=...             SDK download/extract workspace
-#   OPENWRT_OUTPUT_DIR=...           APK output directory
-#   OPENWRT_INCLUDE_ARCH_INDEPENDENT=1
-#                                     Also export tlsvpn-proto and LuCI APKs.
-#                                     Enable this for only one matrix target.
-#   TLSVPN_SOURCE_VERSION=<git SHA>  Exact repo commit to package
-#   TLSVPN_SOURCE_DATE=YYYY-MM-DD    Source date used by OpenWrt package metadata
-#   TLSVPN_PKG_VERSION=1.2.3         APK package version (leading v is stripped)
-#   JOBS=N                           Parallel make jobs
-#
-# Example:
-#   OPENWRT_TARGET=rockchip OPENWRT_SUBTARGET=armv8 \
-#     ./scripts/build_openwrt_apk.sh
-#
-# The output APK filenames are suffixed with the OpenWrt release/target so
-# GitHub Release assets from multiple SDK matrix jobs never collide.
-
 set -Eeuo pipefail
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-
 OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"
 OPENWRT_TARGET="${OPENWRT_TARGET:-x86}"
 OPENWRT_SUBTARGET="${OPENWRT_SUBTARGET:-64}"
 OPENWRT_INCLUDE_ARCH_INDEPENDENT="${OPENWRT_INCLUDE_ARCH_INDEPENDENT:-0}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
-
-case "$OPENWRT_VERSION" in
-    25.12*|SNAPSHOT) ;;
-    *)
-        echo "error: OpenWrt APK builds require 25.12+; got OPENWRT_VERSION=$OPENWRT_VERSION" >&2
-        exit 2
-        ;;
-esac
-
-for tool in curl sha256sum tar zstd git make; do
-    command -v "$tool" >/dev/null 2>&1 || {
-        echo "error: required tool not found: $tool" >&2
-        exit 2
-    }
-done
-
+case "$OPENWRT_VERSION" in 25.12*|SNAPSHOT) ;; *) echo "error: OpenWrt APK builds require 25.12+" >&2; exit 2;; esac
+for tool in curl sha256sum tar zstd git make; do command -v "$tool" >/dev/null || exit 2; done
 SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 SOURCE_DATE="${TLSVPN_SOURCE_DATE:-$(git show -s --format=%cs "$SOURCE_VERSION" 2>/dev/null || date -u +%Y-%m-%d)}"
 SOURCE_EPOCH="$(git show -s --format=%ct "$SOURCE_VERSION" 2>/dev/null || date -u +%s)"
 source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
-
-# apk-tools v3 uses Alpine's version grammar. In particular, SemVer-style
-# build metadata such as "1.2.3+git.deadbeef" is not a valid package version.
-# Keep release tags when they are already apk-safe; map git-describe versions
-# to the supported "_pN" suffix; otherwise fall back to a deterministic
-# "_git<unix timestamp>" snapshot version. The exact source commit is still
-# carried separately by TLSVPN_SOURCE_VERSION.
-normalize_apk_version() {
-    local raw="${1#v}"
-
-    if [[ "$raw" =~ ^[0-9]+([.][0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]+)?$ ]]; then
-        printf '%s\n' "$raw"
-        return
-    fi
-
-    if [[ "$raw" =~ ^([0-9]+([.][0-9]+)*)-([0-9]+)-g[0-9A-Fa-f]+$ ]]; then
-        printf '%s_p%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
-        return
-    fi
-
-    printf '0.0.%s_git%s\n' "$source_day" "$SOURCE_EPOCH"
-}
-
-if [ -n "${TLSVPN_PKG_VERSION:-}" ]; then
-    PACKAGE_VERSION="$(normalize_apk_version "$TLSVPN_PKG_VERSION")"
-elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
-    PACKAGE_VERSION="$(normalize_apk_version "$GITHUB_REF_NAME")"
-else
-    PACKAGE_VERSION="0.0.${source_day}_git${SOURCE_EPOCH}"
-fi
-
+normalize_apk_version(){ local raw="${1#v}"; if [[ "$raw" =~ ^[0-9]+([.][0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]+)?$ ]]; then printf '%s\n' "$raw"; elif [[ "$raw" =~ ^([0-9]+([.][0-9]+)*)-([0-9]+)-g[0-9A-Fa-f]+$ ]]; then printf '%s_p%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"; else printf '0.0.%s_git%s\n' "$source_day" "$SOURCE_EPOCH"; fi; }
+PACKAGE_VERSION="$(normalize_apk_version "${TLSVPN_PKG_VERSION:-0.0.${source_day}_git${SOURCE_EPOCH}}")"
 SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
-
-# Keep the SDK workspace outside the repository tree. OpenWrt builds Go through
-# several bootstrap toolchains; if the SDK lives below ROOT_DIR, an older Go
-# command can walk up to ROOT_DIR/go.mod and incorrectly trigger automatic
-# toolchain selection for TLSVPN (for example, trying to download Go 1.26.x
-# while OpenWrt is still compiling its Go 1.24 bootstrap stage).
-if [ -n "${RUNNER_TEMP:-}" ]; then
-    DEFAULT_OPENWRT_WORK_ROOT="$RUNNER_TEMP/tlsvpn-openwrt-sdk"
-else
-    CACHE_HOME="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"
-    DEFAULT_OPENWRT_WORK_ROOT="$CACHE_HOME/tlsvpn/openwrt-sdk"
-fi
-WORK_DIR="${OPENWRT_WORK_DIR:-$DEFAULT_OPENWRT_WORK_ROOT/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
-DOWNLOAD_DIR="$WORK_DIR/download"
-SDK_DIR="$WORK_DIR/sdk"
-OUTPUT_DIR="${OPENWRT_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt/$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
-
-mkdir -p "$DOWNLOAD_DIR" "$OUTPUT_DIR"
-
-echo "==> OpenWrt APK build"
-echo "    version:       $OPENWRT_VERSION"
-echo "    target:        $OPENWRT_TARGET/$OPENWRT_SUBTARGET"
-echo "    source commit: $SOURCE_VERSION"
-echo "    source date:   $SOURCE_DATE"
-echo "    package ver:   $PACKAGE_VERSION"
-echo "    sdk index:     $SDK_BASE_URL"
-
-index_html="$(curl --retry 4 --retry-all-errors --fail --silent --show-error --location "$SDK_BASE_URL/")"
-sdk_name="$(
-    printf '%s' "$index_html" |
-        grep -oE 'openwrt-sdk-[^"<> ]+\.Linux-x86_64\.tar\.zst' |
-        sort -u |
-        head -n 1
-)"
-
-if [ -z "$sdk_name" ]; then
-    echo "error: no Linux x86_64 SDK archive found at $SDK_BASE_URL/" >&2
-    exit 1
-fi
-
-archive="$DOWNLOAD_DIR/$sdk_name"
-sums="$DOWNLOAD_DIR/sha256sums"
-
-if [ ! -s "$archive" ]; then
-    echo "==> Downloading $sdk_name"
-    curl --retry 4 --retry-all-errors --fail --location         "$SDK_BASE_URL/$sdk_name" -o "$archive"
-else
-    echo "==> Reusing cached $archive"
-fi
-
-curl --retry 4 --retry-all-errors --fail --silent --show-error --location     "$SDK_BASE_URL/sha256sums" -o "$sums"
-
-# OpenWrt publishes GNU sha256sum binary-mode entries as
-#   <hash> *filename
-# while some mirrors/tools may use the text-mode form
-#   <hash>  filename
-# Match the filename field semantically instead of assuming either separator.
-checksum_line="$(
-    awk -v name="$sdk_name" '
-        $2 == name || $2 == "*" name { print; exit }
-    ' "$sums"
-)"
-if [ -z "$checksum_line" ]; then
-    echo "error: checksum for $sdk_name not found in sha256sums" >&2
-    exit 1
-fi
-
-echo "==> Verifying official SDK checksum"
-(
-    cd "$DOWNLOAD_DIR"
-    printf '%s\n' "$checksum_line" | sha256sum -c -
-)
-
-echo "==> Extracting SDK"
-rm -rf "$SDK_DIR"
-mkdir -p "$SDK_DIR"
-tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
-
-echo "==> Preparing the OpenWrt Go build feed"
-(
-    cd "$SDK_DIR"
-    # TLSVPN only needs the Go packaging helpers at build time. The LuCI
-    # protocol package is static JavaScript, while kmod-tun, ca-bundle,
-    # resolveip and luci-base are runtime dependencies supplied by the target
-    # firmware repositories. Installing entire feeds here makes an SDK build
-    # scan thousands of unrelated packages and can drag kernel/Lua build
-    # dependencies into package/tlsvpn/compile.
-    ./scripts/feeds update packages
-    ./scripts/feeds install -p packages golang
-)
-
-echo "==> Injecting TLSVPN packages"
-rm -rf "$SDK_DIR/package/tlsvpn" "$SDK_DIR/package/luci-proto-tlsvpn"
-cp -a "$ROOT_DIR/openwrt/package/tlsvpn" "$SDK_DIR/package/tlsvpn"
-cp -a "$ROOT_DIR/openwrt/luci-proto-tlsvpn" "$SDK_DIR/package/luci-proto-tlsvpn"
-
-cat >> "$SDK_DIR/.config" <<'EOF'
+CACHE_HOME="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"; WORK_DIR="${OPENWRT_WORK_DIR:-${RUNNER_TEMP:-$CACHE_HOME}/tlsvpn-openwrt-sdk/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"; DOWNLOAD_DIR="$WORK_DIR/download"; SDK_DIR="$WORK_DIR/sdk"; OUTPUT_DIR="${OPENWRT_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt/$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"; mkdir -p "$DOWNLOAD_DIR" "$OUTPUT_DIR"
+index_html="$(curl --retry 4 --retry-all-errors --fail -sSL "$SDK_BASE_URL/")"; sdk_name="$(printf '%s' "$index_html"|grep -oE 'openwrt-sdk-[^"<> ]+\.Linux-x86_64\.tar\.zst'|sort -u|head -1)"; [ -n "$sdk_name" ] || exit 1
+archive="$DOWNLOAD_DIR/$sdk_name"; sums="$DOWNLOAD_DIR/sha256sums"; [ -s "$archive" ] || curl --retry 4 --retry-all-errors --fail -L "$SDK_BASE_URL/$sdk_name" -o "$archive"; curl --fail -sSL "$SDK_BASE_URL/sha256sums" -o "$sums"; checksum_line="$(awk -v name="$sdk_name" '$2 == name || $2 == "*" name {print;exit}' "$sums")"; (cd "$DOWNLOAD_DIR"; printf '%s\n' "$checksum_line"|sha256sum -c -)
+rm -rf "$SDK_DIR"; mkdir -p "$SDK_DIR"; tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
+(cd "$SDK_DIR"; ./scripts/feeds update packages luci; ./scripts/feeds install -p packages golang; ./scripts/feeds install -p luci luci-base)
+rm -rf "$SDK_DIR/package/tlsvpn" "$SDK_DIR/package/luci-proto-tlsvpn"; cp -a openwrt/package/tlsvpn "$SDK_DIR/package/tlsvpn"; cp -a openwrt/luci-proto-tlsvpn "$SDK_DIR/package/luci-proto-tlsvpn"
+cat >>"$SDK_DIR/.config" <<'EOF'
 CONFIG_PACKAGE_tlsvpn=m
 CONFIG_PACKAGE_tlsvpn-proto=m
 CONFIG_PACKAGE_luci-proto-tlsvpn=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-en=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-fr=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-de=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-zh-cn=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-zh-tw=m
+CONFIG_PACKAGE_luci-i18n-tlsvpn-ja=m
 EOF
-
-make_args=(
-    "TLSVPN_SOURCE_VERSION=$SOURCE_VERSION"
-    "TLSVPN_SOURCE_DATE=$SOURCE_DATE"
-    "TLSVPN_PKG_VERSION=$PACKAGE_VERSION"
-)
-
-echo "==> Resolving package configuration"
-make -C "$SDK_DIR" "${make_args[@]}" defconfig
-
-echo "==> Building tlsvpn + tlsvpn-proto APKs"
-make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/tlsvpn/compile V=sc
-
-echo "==> Building luci-proto-tlsvpn APK"
-make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/luci-proto-tlsvpn/compile V=sc
-
-echo "==> Collecting APKs"
-rm -f "$OUTPUT_DIR"/*.apk "$OUTPUT_DIR"/SHA256SUMS-*.txt 2>/dev/null || true
-
-main_count=0
-independent_count=0
-
-while IFS= read -r apk; do
-    base="$(basename "$apk")"
-
-    case "$base" in
-        tlsvpn-proto-*.apk|luci-proto-tlsvpn-*.apk)
-            [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = "1" ] || continue
-            dest="${base%.apk}-openwrt-$OPENWRT_VERSION-all.apk"
-            independent_count=$((independent_count + 1))
-            ;;
-        tlsvpn-*.apk)
-            dest="${base%.apk}-openwrt-$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET.apk"
-            main_count=$((main_count + 1))
-            ;;
-        *)
-            continue
-            ;;
-    esac
-
-    cp -f "$apk" "$OUTPUT_DIR/$dest"
-    echo "    $dest"
-done < <(find "$SDK_DIR/bin" -type f -name '*.apk' | sort)
-
-if [ "$main_count" -lt 1 ]; then
-    echo "error: tlsvpn APK was not produced" >&2
-    find "$SDK_DIR/bin" -type f -name '*.apk' -print >&2 || true
-    exit 1
-fi
-
-if [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = "1" ] && [ "$independent_count" -lt 2 ]; then
-    echo "error: expected tlsvpn-proto and luci-proto-tlsvpn APKs" >&2
-    find "$SDK_DIR/bin" -type f -name '*.apk' -print >&2 || true
-    exit 1
-fi
-
-checksum_file="$OUTPUT_DIR/SHA256SUMS-openwrt-$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET.txt"
-(
-    cd "$OUTPUT_DIR"
-    sha256sum ./*.apk > "$(basename "$checksum_file")"
-)
-
-echo "==> APK build complete"
-ls -lh "$OUTPUT_DIR"
+make_args=("TLSVPN_SOURCE_VERSION=$SOURCE_VERSION" "TLSVPN_SOURCE_DATE=$SOURCE_DATE" "TLSVPN_PKG_VERSION=$PACKAGE_VERSION"); make -C "$SDK_DIR" "${make_args[@]}" defconfig; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/tlsvpn/compile V=sc; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/luci-proto-tlsvpn/compile V=sc
+rm -f "$OUTPUT_DIR"/*.apk "$OUTPUT_DIR"/SHA256SUMS-*.txt 2>/dev/null || true; main_count=0; independent_count=0; i18n_count=0
+while IFS= read -r apk; do base="$(basename "$apk")"; case "$base" in luci-i18n-tlsvpn-*.apk) [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = 1 ]||continue; dest="${base%.apk}-openwrt-$OPENWRT_VERSION-all.apk"; independent_count=$((independent_count+1)); i18n_count=$((i18n_count+1));; tlsvpn-proto-*.apk|luci-proto-tlsvpn-*.apk) [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = 1 ]||continue; dest="${base%.apk}-openwrt-$OPENWRT_VERSION-all.apk"; independent_count=$((independent_count+1));; tlsvpn-*.apk) dest="${base%.apk}-openwrt-$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET.apk"; main_count=$((main_count+1));; *) continue;; esac; cp -f "$apk" "$OUTPUT_DIR/$dest"; done < <(find "$SDK_DIR/bin" -type f -name '*.apk'|sort)
+[ "$main_count" -ge 1 ] || { echo 'error: tlsvpn APK was not produced' >&2; exit 1; }; if [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = 1 ]; then [ "$independent_count" -ge 8 ] || { echo "error: expected protocol/LuCI plus 6 i18n APKs; got $independent_count" >&2; exit 1; }; [ "$i18n_count" -ge 6 ] || { echo "error: expected 6 LuCI i18n APKs; got $i18n_count" >&2; exit 1; }; fi
+checksum_file="$OUTPUT_DIR/SHA256SUMS-openwrt-$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET.txt"; (cd "$OUTPUT_DIR"; sha256sum ./*.apk >"$(basename "$checksum_file")"); ls -lh "$OUTPUT_DIR"
