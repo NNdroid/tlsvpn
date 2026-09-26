@@ -177,31 +177,139 @@ document.getElementById('tabs').addEventListener('click',function(ev){
   showPane(btn.dataset.pane);
 });
 
-function drawChart(){
-  const c=document.getElementById('chart'),ctx=c.getContext('2d');
+// ---------- 通用折线图渲染：纵轴刻度 + 末端标签防裁剪 + 悬停提示 ----------
+const chartState={};
+function roundRectPath(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();
+}
+function fmtHM(ms){
+  const d=new Date(ms);
+  return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);
+}
+// pts: [{x∈0..1, up, down, rtt?, label}]；opts: {max, maxRtt, perSec, hover}
+// 上下行共用字节纵轴（左侧刻度），RTT 独立刻度（右侧琥珀色，仅趋势图有值时）。
+function renderLineChart(canvasId,pts,opts){
+  const c=document.getElementById(canvasId);if(!c)return;
+  const ctx=c.getContext('2d');
   const dpr=window.devicePixelRatio||1;
   const W=c.clientWidth||1100,H=c.clientHeight||216;
   if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,W,H);
+  const L=56,R=16,T=16,B=24,pw=W-L-R,ph=H-T-B;
+  const max=Math.max(1,opts.max||1);
+  // 网格 + 纵坐标刻度
   ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
-  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
-  if(txHist.length<2)return;
-  const max=Math.max(...txHist,...rxHist,1);
-  const series=(h,col)=>{
-    const pts=h.map((v,i)=>({x:i/(MAXPTS-1)*W,y:H-10-(v/max)*(H-30)}));
-    const grad=ctx.createLinearGradient(0,0,0,H);
-    grad.addColorStop(0,col+'3d');grad.addColorStop(1,col+'00');
-    ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
-    for(let i=1;i<pts.length-1;i++){const xc=(pts[i].x+pts[i+1].x)/2,yc=(pts[i].y+pts[i+1].y)/2;ctx.quadraticCurveTo(pts[i].x,pts[i].y,xc,yc);}
-    ctx.lineTo(pts[pts.length-1].x,pts[pts.length-1].y);
+  ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';ctx.textAlign='right';
+  for(let g=0;g<=4;g++){
+    const y=T+ph*g/4;
+    ctx.beginPath();ctx.moveTo(L,y+.5);ctx.lineTo(W-R,y+.5);ctx.stroke();
+    ctx.fillText(fmtBytes(max*(4-g)/4,opts.perSec),L-6,y+3);
+  }
+  ctx.textAlign='left';
+  if(!pts||pts.length<2){
+    chartState[canvasId]={pts:[],plot:{l:L,r:W-R,t:T,b:H-B},hover:-1};
+    return;
+  }
+  // 上下行：面积填充 + 折线
+  const plot=(get,col)=>{
+    ctx.beginPath();
+    pts.forEach((p,i)=>{
+      const x=L+p.x*pw,y=T+(1-get(p)/max)*ph;
+      if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
+    });
     ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
-    ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+    const grad=ctx.createLinearGradient(0,T,0,H-B);
+    grad.addColorStop(0,col+'3d');grad.addColorStop(1,col+'00');
+    ctx.lineTo(L+pts[pts.length-1].x*pw,H-B);ctx.lineTo(L,H-B);ctx.closePath();
+    ctx.fillStyle=grad;ctx.fill();
   };
-  series(rxHist,cssv('--down'));
-  series(txHist,cssv('--up'));
-  ctx.fillStyle=cssv('--sub');ctx.font='11px sans-serif';
-  ctx.fillText(fmtBytes(max,true),6,14);
+  plot(p=>p.down,cssv('--down'));
+  plot(p=>p.up,cssv('--up'));
+  // RTT 独立刻度虚线 + 右侧刻度
+  const maxRtt=opts.maxRtt||0;
+  if(maxRtt>0){
+    ctx.beginPath();
+    pts.forEach((p,i)=>{
+      const x=L+p.x*pw,y=T+(1-p.rtt/maxRtt)*ph;
+      if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
+    });
+    ctx.strokeStyle=cssv('--warn');ctx.lineWidth=1.5;ctx.setLineDash([4,4]);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=cssv('--warn');ctx.font='10px sans-serif';ctx.textAlign='right';
+    ctx.fillText('RTT ≤ '+Math.ceil(maxRtt)+' ms',W-R,T+2);
+    ctx.fillText(Math.ceil(maxRtt/2)+' ms',W-R,T+ph/2+2);
+    ctx.textAlign='left';
+  }
+  // x 轴刻度：稀疏标注，末端标签钳制在画布内防裁剪
+  ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';ctx.textAlign='center';
+  const step=Math.ceil(pts.length/8);
+  pts.forEach((p,i)=>{
+    if(i%step!==0&&i!==pts.length-1)return;
+    const tw=ctx.measureText(p.label).width;
+    const tx=Math.max(L,Math.min(L+p.x*pw-tw/2,W-R-tw));
+    ctx.fillText(p.label,tx,H-8);
+  });
+  ctx.textAlign='left';
+  // 悬停：十字线 + 数据点圆标 + 提示框
+  const hover=opts.hover;
+  if(hover>=0&&hover<pts.length){
+    const p=pts[hover],px=L+p.x*pw;
+    ctx.strokeStyle=cssv('--border2');ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(px+.5,T);ctx.lineTo(px+.5,H-B);ctx.stroke();ctx.setLineDash([]);
+    const dot=(y,col)=>{
+      ctx.beginPath();ctx.arc(px,y,3.5,0,Math.PI*2);
+      ctx.fillStyle=col;ctx.fill();
+      ctx.strokeStyle=cssv('--card');ctx.lineWidth=1.5;ctx.stroke();
+    };
+    dot(T+(1-p.up/max)*ph,cssv('--up'));
+    dot(T+(1-p.down/max)*ph,cssv('--down'));
+    if(maxRtt>0&&p.rtt)dot(T+(1-p.rtt/maxRtt)*ph,cssv('--warn'));
+    const lines=[p.label,'↑ '+fmtBytes(p.up,opts.perSec),'↓ '+fmtBytes(p.down,opts.perSec)];
+    if(maxRtt>0&&p.rtt)lines.push('RTT '+p.rtt.toFixed(0)+' ms');
+    ctx.font='11px sans-serif';
+    let bw=0;
+    lines.forEach(s=>{bw=Math.max(bw,ctx.measureText(s).width);});
+    bw+=16;const bh=lines.length*15+10;
+    let bx=px+10;if(bx+bw>W-R)bx=px-10-bw;
+    const by=T;
+    ctx.globalAlpha=.95;ctx.fillStyle=cssv('--card');
+    roundRectPath(ctx,bx,by,bw,bh,7);ctx.fill();
+    ctx.globalAlpha=1;ctx.strokeStyle=cssv('--border2');ctx.lineWidth=1;
+    roundRectPath(ctx,bx,by,bw,bh,7);ctx.stroke();
+    lines.forEach((s,i)=>{
+      ctx.fillStyle=i===0?cssv('--sub'):(i===1?cssv('--up'):(i===2?cssv('--down'):cssv('--warn')));
+      ctx.fillText(s,bx+8,by+18+i*15);
+    });
+  }
+  chartState[canvasId]={pts:pts,plot:{l:L,r:W-R,t:T,b:H-B},hover:opts.hover};
+}
+// 鼠标悬停：定位最近数据点后重绘（几何信息存于 chartState）
+function bindChartHover(canvasId,redraw){
+  const c=document.getElementById(canvasId);if(!c)return;
+  c.addEventListener('mousemove',function(ev){
+    const st=chartState[canvasId];if(!st||st.pts.length<2)return;
+    const rect=c.getBoundingClientRect();
+    let idx=Math.round((ev.clientX-rect.left-st.plot.l)/(st.plot.r-st.plot.l)*(st.pts.length-1));
+    idx=Math.max(0,Math.min(st.pts.length-1,idx));
+    if(st.hover!==idx){st.hover=idx;redraw();}
+  });
+  c.addEventListener('mouseleave',function(){
+    const st=chartState[canvasId];
+    if(st&&st.hover!==-1){st.hover=-1;redraw();}
+  });
+}
+
+function drawChart(){
+  const n=txHist.length;
+  const pts=[];
+  for(let i=0;i<n;i++){
+    pts.push({x:n>1?i/(n-1):0,up:txHist[i],down:rxHist[i],label:fmtHM(txTimes[i]||Date.now())});
+  }
+  const old=chartState['chart'];
+  const hover=(old&&old.hover>=0&&old.hover<n)?old.hover:-1;
+  renderLineChart('chart',pts,{max:Math.max(1,...txHist,...rxHist,1),perSec:true,hover:hover});
 }
 
 // 刷新间隔以秒存储（兼容旧版存毫秒的值）；面板顶栏为分段按钮
@@ -309,8 +417,8 @@ async function fetchStats(){
     if(data.mode==='server'){for(const [id,c] of Object.entries(data.clients||{}))proc(id,c);}
     else if(data.clients&&data.clients.local)proc('local',data.clients.local);
     prev=cur;lastSpeeds=speeds;
-    txHist.push(tTxS);rxHist.push(tRxS);
-    if(txHist.length>MAXPTS){txHist.shift();rxHist.shift();}
+    txHist.push(tTxS);rxHist.push(tRxS);txTimes.push(Date.now());
+    if(txHist.length>MAXPTS){txHist.shift();rxHist.shift();txTimes.shift();}
     if(chartRange==='2m')drawChart(); // 趋势视图下画布由 drawTrendChart 接管
 
     document.getElementById('active-clients').innerText=data.active_clients;
@@ -602,36 +710,13 @@ function renderTrafficView(){
   tb.innerHTML=rows||'<tr><td colspan="4" class="empty">'+t('tr.empty')+'</td></tr>';
 }
 function drawTrafficChart(daily){
-  const c=document.getElementById('traffic-chart'),ctx=c.getContext('2d');
-  const dpr=window.devicePixelRatio||1;
-  const W=c.clientWidth||1100,H=c.clientHeight||220;
-  if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,W,H);
-  const days=daily.slice(-60); // 柱宽可读性：最多渲染最近 60 天
-  ctx.fillStyle=cssv('--sub');ctx.font='12px sans-serif';
-  if(!days.length){ctx.fillText(t('tr.empty'),10,22);return;}
-  const max=Math.max(1,...days.map(d=>d.up+d.down));
-  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
-  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
-  const bw=W/days.length;
-  const barW=Math.max(2,Math.min(26,bw*0.36));
-  days.forEach((d,i)=>{
-    const cx=(i+0.5)*bw;
-    const hu=(d.up/max)*(H-34),hd=(d.down/max)*(H-34);
-    ctx.fillStyle=cssv('--up');
-    if(hu>0)ctx.fillRect(cx-barW-1,H-24-hu,barW,hu);
-    ctx.fillStyle=cssv('--down');
-    if(hd>0)ctx.fillRect(cx+1,H-24-hd,barW,hd);
-  });
-  // 日期刻度按柱数稀疏标注（MM-DD），避免拥挤
-  ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';
-  const step=Math.ceil(days.length/10);
-  days.forEach((d,i)=>{
-    if(i%step===0)ctx.fillText(d.date.slice(5),Math.max(2,(i+0.5)*bw-14),H-8);
-  });
-  ctx.fillStyle=cssv('--sub');ctx.font='11px sans-serif';
-  ctx.fillText(fmtBytes(max),6,12);
+  const days=(daily||[]).slice(-60); // 点数上限：日期标签保持可读
+  const pts=days.map((d,i)=>({x:days.length>1?i/(days.length-1):0,up:d.up,down:d.down,label:d.date.slice(5)}));
+  let max=1;
+  pts.forEach(p=>{if(p.up>max)max=p.up;if(p.down>max)max=p.down;});
+  const old=chartState['traffic-chart'];
+  const hover=(old&&old.hover>=0&&old.hover<pts.length)?old.hover:-1;
+  renderLineChart('traffic-chart',pts,{max:max,perSec:false,hover:hover});
 }
 
 async function kickClient(id){if(!confirm(t('confirm_kick')))return;
@@ -710,6 +795,8 @@ function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme()
 matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();if(txHist.length||rxHist.length)drawChart();}});
 
 ['clients','conns','macs'].forEach(attachSearch);
+bindChartHover('chart',function(){if(chartRange==='2m'){drawChart();}else if(trendData){drawTrendChart(trendData.points||[]);}});
+bindChartHover('traffic-chart',function(){renderTrafficView();});
 let chartRange='2m',trendTimer=null,trendData=null;
 function setRange(v){
   chartRange=v;setSeg('range-seg',v);
@@ -732,56 +819,17 @@ async function fetchTrend(){
   }catch(e){}
 }
 function drawTrendChart(points){
-  const c=document.getElementById('chart'),ctx=c.getContext('2d');
-  const dpr=window.devicePixelRatio||1;
-  const W=c.clientWidth||1100,H=c.clientHeight||216;
-  if(c.width!==Math.round(W*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
-  ctx.setTransform(dpr,0,0,dpr,0,0);
-  ctx.clearRect(0,0,W,H);
-  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
-  for(let g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
-  if(!points||points.length<2)return;
-  const max=Math.max(1,...points.map(p=>Math.max(p.up,p.down)));
-  const line=(get,col,dash)=>{
-    ctx.beginPath();
-    points.forEach((p,i)=>{
-      const x=i/(points.length-1)*W,y=H-10-(get(p)/max)*(H-30);
-      if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
-    });
-    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';
-    ctx.setLineDash(dash||[]);ctx.stroke();ctx.setLineDash([]);
-  };
-  line(p=>p.down,cssv('--down'));
-  line(p=>p.up,cssv('--up'));
-  // RTT 独立刻度的虚线（仅当有采样值）
-  let maxRtt=0;
-  points.forEach(p=>{if(p.rtt>maxRtt)maxRtt=p.rtt;});
-  const rttLegend=document.getElementById('legend-rtt');
-  if(rttLegend)rttLegend.style.display=maxRtt>0?'':'none';
-  if(maxRtt>0){
-    ctx.beginPath();
-    points.forEach((p,i)=>{
-      const x=i/(points.length-1)*W,y=H-10-(p.rtt/maxRtt)*(H-30);
-      if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
-    });
-    ctx.strokeStyle=cssv('--warn');ctx.lineWidth=1.5;ctx.setLineDash([4,4]);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle=cssv('--warn');ctx.textAlign='right';
-    ctx.fillText('RTT ≤ '+Math.ceil(maxRtt)+' ms',W-6,14);
-    ctx.textAlign='left';
-  }
-  // x 轴时间刻度（HH:MM），按点数稀疏标注
-  ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';
-  const stepT=Math.ceil(points.length/8);
-  points.forEach((p,i)=>{
-    if(i%stepT===0){
-      const d=new Date(p.t*1000);
-      ctx.fillText(('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2),Math.max(2,i/(points.length-1)*W-14),H-8);
-    }
-  });
-  ctx.fillStyle=cssv('--sub');ctx.font='11px sans-serif';
-  ctx.fillText(fmtBytes(max,true),6,14);
+  const arr=points||[];
+  const pts=arr.map((p,i)=>({
+    x:arr.length>1?i/(arr.length-1):0,up:p.up,down:p.down,rtt:p.rtt||0,label:fmtHM(p.t*1000).slice(0,5)
+  }));
+  let max=1,maxRtt=0;
+  pts.forEach(p=>{if(p.up>max)max=p.up;if(p.down>max)max=p.down;if(p.rtt>maxRtt)maxRtt=p.rtt;});
+  const old=chartState['chart'];
+  const hover=(old&&old.hover>=0&&old.hover<pts.length)?old.hover:-1;
+  renderLineChart('chart',pts,{max:max,maxRtt:maxRtt,perSec:true,hover:hover});
 }
 
-let prev={},lastT=0;const txHist=[],rxHist=[];const MAXPTS=60;
+let prev={},lastT=0;const txHist=[],rxHist=[],txTimes=[];const MAXPTS=60;
 applyI18n();setRefresh(REFRESH_S);fetchStats();
-window.addEventListener('resize',drawChart);
+window.addEventListener('resize',function(){if(chartRange==='2m'){drawChart();}else if(trendData){drawTrendChart(trendData.points||[]);}});

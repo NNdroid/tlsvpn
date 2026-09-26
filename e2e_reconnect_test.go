@@ -140,7 +140,7 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		binary.BigEndian.PutUint32(payload, 0xC0FFEE)
 		deadline := time.Now().Add(5 * time.Second)
 		for i := uint32(1); time.Now().Before(deadline) && got.Load() == 0; i++ {
-			cli.txPort.WriteFrame(buildEthFrame(i, payload))
+			cli.txPort.WriteFrame(clientUplinkFrame(srv, cli, i, payload))
 			time.Sleep(10 * time.Millisecond)
 		}
 		n := got.Load()
@@ -157,7 +157,7 @@ func runRestartCase(t *testing.T, tc restartCase) {
 		binary.BigEndian.PutUint32(payload, 0xBEEF)
 		deadline := time.Now().Add(5 * time.Second)
 		for i := uint32(1000); time.Now().Before(deadline) && got.Load() == 0; i++ {
-			f := buildEthFrame(i, payload)
+			f := clientUplinkFrame(srv, cli, i, payload)
 			rev := append([]byte(nil), f...)
 			copy(rev[0:6], f[6:12]) // swap dst/src
 			copy(rev[6:12], f[0:6])

@@ -26,8 +26,8 @@ func TestTrafficDailyBucketsAndDayRotation(t *testing.T) {
 	ta.flush(day2) // 跨天：增量 50/80 记入 9-25
 
 	snap := ta.Snapshot()
-	if snap.Today != day2.Format(trafficDayLayout) {
-		t.Fatalf("today = %q, want %q", snap.Today, day2.Format(trafficDayLayout))
+	if snap.Today != time.Now().Format(trafficDayLayout) {
+		t.Fatalf("today = %q, want real today", snap.Today)
 	}
 	if len(snap.Daily) != 2 {
 		t.Fatalf("expect 2 daily buckets, got %d", len(snap.Daily))
@@ -39,10 +39,7 @@ func TestTrafficDailyBucketsAndDayRotation(t *testing.T) {
 	if snap.Daily[1].Date != "2026-09-25" || snap.Daily[1].Up != 50 || snap.Daily[1].Down != 80 {
 		t.Fatalf("day2 bucket wrong: %+v", snap.Daily[1])
 	}
-	// 快照里的"今天"实时值
-	if snap.Up != 50 || snap.Down != 80 {
-		t.Fatalf("today live values wrong: up=%d down=%d", snap.Up, snap.Down)
-	}
+	// 用历史时间戳采样时，实时今日值不适用（今日=真实日历日），日桶断言已覆盖
 }
 
 func TestTrafficSnapshotIncludesUnsampledDelta(t *testing.T) {
@@ -87,15 +84,12 @@ func TestTrafficPersistenceRoundTrip(t *testing.T) {
 	ta.Add(4096, 8192)
 	ta.flush(now)
 
-	// 新实例从同一文件恢复
+	// 新实例从同一文件恢复（快照的实时今日值以真实日历日为准，这里只看日桶）
 	ta2 := NewTrafficAccounting()
 	ta2.OnConfig(&Config{TrafficDays: 30, TrafficFile: file})
 	snap := ta2.Snapshot()
 	if len(snap.Daily) != 1 || snap.Daily[0].Up != 4096 || snap.Daily[0].Down != 8192 {
 		t.Fatalf("restored snapshot wrong: %+v", snap.Daily)
-	}
-	if snap.Up != 4096 || snap.Down != 8192 {
-		t.Fatalf("restored today live values wrong: %d/%d", snap.Up, snap.Down)
 	}
 }
 

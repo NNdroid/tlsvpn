@@ -109,6 +109,7 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
 #chart{width:100%;height:216px;display:block}
 #traffic-chart{width:100%;height:220px;display:block}
+#chart,#traffic-chart{cursor:crosshair}
 
 /* ---------- 标签页 ---------- */
 .tabs{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:4px;width:fit-content;max-width:100%;overflow-x:auto;scrollbar-width:none;margin-bottom:14px}

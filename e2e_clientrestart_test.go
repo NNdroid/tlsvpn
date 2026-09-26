@@ -17,8 +17,8 @@ import (
 // 客户端重建、服务端长命。服务端状态（会话表、IP 池、MAC→IP 粘性绑定、
 // 会话侧重排缓冲、交换机学习表）全部保留，这正是两个方向不对称的地方。
 type clientRestartCase struct {
-	name         string
-	encrypt      bool
+	name    string
+	encrypt bool
 	// macShift 模拟客户端 MAC 在重启后发生变化。
 	// 真实场景：mac 配置留空时 clientID = uuid(MAC+PSK)，而 Linux 上
 	// water.New 创建的 TAP 设备由内核分配随机 MAC，因此客户端每次重启
@@ -61,7 +61,7 @@ func runClientRestartCase(t *testing.T, tc clientRestartCase) {
 		t.Fatalf("第1轮：客户端连不上，测试前提不成立")
 	}
 	h.snapshot("第1轮")
-	if f, r := h.forwardOK(cli1, "第1轮"), h.returnOK(cliTap1, "第1轮"); !f || !r {
+	if f, r := h.forwardOK(cli1, "第1轮"), h.returnOK(cli1, cliTap1, "第1轮"); !f || !r {
 		t.Fatalf("第1轮（客户端重启前）隧道本身不通（上行=%v 下行=%v），测试前提不成立", f, r)
 	}
 
@@ -101,7 +101,7 @@ func runClientRestartCase(t *testing.T, tc clientRestartCase) {
 	if !h.forwardOK(cli2, "第2轮") {
 		t.Error("第2轮（客户端重启后）上行不通：客户端无法自动恢复")
 	}
-	if !h.returnOK(cliTap2, "第2轮") {
+	if !h.returnOK(cli2, cliTap2, "第2轮") {
 		t.Error("第2轮（客户端重启后）下行不通：客户端无法自动恢复")
 	}
 }
@@ -241,6 +241,14 @@ func (h *clientRestartHarness) waitDead(cli *Client, d time.Duration) {
 	}
 }
 
+// uplinkFrame 以当前客户端的真实身份构上行帧（源 MAC/IP 取自该进程的 TAP
+// 身份与其被分配的地址）。vswitch 对会话 MAC 做钉扎校验，换 MAC 重连的
+// 进程必须以新身份构帧——沿用旧身份的帧会被当作 MAC 欺骗丢弃，这正是
+// 产品要防的行为，夹具不能依赖旧行为。
+func (h *clientRestartHarness) uplinkFrame(cli *Client, seq uint32, payload []byte) []byte {
+	return clientUplinkFrame(h.srv, cli, seq, payload)
+}
+
 // forwardOK 上行：持续注帧（真实用户是连续发包，不是一次性注入后判定），
 // 统计交付到服务端 TAP 的帧数。
 func (h *clientRestartHarness) forwardOK(cli *Client, tag string) bool {
@@ -250,7 +258,7 @@ func (h *clientRestartHarness) forwardOK(cli *Client, tag string) bool {
 	binary.BigEndian.PutUint32(payload, 0xC0FFEE)
 	go func() {
 		for i := 0; i < 100; i++ {
-			cli.txPort.WriteFrame(buildEthFrame(uint32(i+1), payload))
+			cli.txPort.WriteFrame(h.uplinkFrame(cli, uint32(i+1), payload))
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -259,15 +267,16 @@ func (h *clientRestartHarness) forwardOK(cli *Client, tag string) bool {
 	return got.Load() > 0
 }
 
-// returnOK 下行：从服务端 TAP 侧持续注帧，统计交付到客户端 TAP 的帧数
-func (h *clientRestartHarness) returnOK(cliTap *memTap, tag string) bool {
+// returnOK 下行：从服务端 TAP 侧持续注帧（目的地为该客户端的身份），
+// 统计交付到客户端 TAP 的帧数
+func (h *clientRestartHarness) returnOK(cli *Client, cliTap *memTap, tag string) bool {
 	var got atomic.Int64
 	cliTap.SetOnWrite(func([]byte) { got.Add(1) })
 	payload := make([]byte, 64)
 	binary.BigEndian.PutUint32(payload, 0xBEEF)
 	go func() {
 		for i := 0; i < 100; i++ {
-			f := buildEthFrame(uint32(i+1000), payload)
+			f := h.uplinkFrame(cli, uint32(i+1000), payload)
 			rev := append([]byte(nil), f...)
 			copy(rev[0:6], f[6:12]) // swap dst/src
 			copy(rev[6:12], f[0:6])
@@ -300,7 +309,7 @@ func TestRevivalBufferResetNeedsAllConnsDead(t *testing.T) {
 	if !h.waitLive(cli1, 15*time.Second) {
 		t.Fatal("第1轮连不上")
 	}
-	if f, r := h.forwardOK(cli1, "第1轮"), h.returnOK(cliTap1, "第1轮"); !f || !r {
+	if f, r := h.forwardOK(cli1, "第1轮"), h.returnOK(cli1, cliTap1, "第1轮"); !f || !r {
 		t.Fatalf("第1轮隧道本身不通（上行=%v 下行=%v），测试前提不成立", f, r)
 	}
 	waterBefore := h.upstreamSeqWaterMark(cli1.clientID)
@@ -324,7 +333,7 @@ func TestRevivalBufferResetNeedsAllConnsDead(t *testing.T) {
 	if !h.forwardOK(cli2, "第2轮") {
 		t.Error("第2轮上行不通：客户端无法自动恢复")
 	}
-	if !h.returnOK(cliTap2, "第2轮") {
+	if !h.returnOK(cli2, cliTap2, "第2轮") {
 		t.Error("第2轮下行不通：客户端无法自动恢复")
 	}
 }

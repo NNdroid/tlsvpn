@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"net"
 	"runtime"
@@ -29,12 +31,20 @@ import (
 //      测 RTT，报告每条路径的可达性与延迟（单跳隧道的路径探测形态）。
 // ===========================================================================
 
-// buildEthFrame 构造一个真实以太网帧（src/dst 单播 MAC + IPv4 头 + payload）
+// buildEthFrame 构造一个真实以太网帧（src/dst 单播 MAC + IPv4 头 + payload）。
+// 默认身份是首客户端（MAC …02 / IP 10.0.0.2）；换 MAC 的用例请用 buildEthFrameFor。
 func buildEthFrame(seq uint32, payload []byte) []byte {
+	return buildEthFrameFor([]byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}, 0x0A000002, seq, payload)
+}
+
+// buildEthFrameFor 构造上行帧：dst 固定为服务端网关（…01），src MAC/IP 由调用方
+// 指定。vswitch 会话 MAC 钉扎后，帧的源 MAC 必须与所在会话一致才会被接受——
+// 换 MAC 重连的用例必须用新身份构帧。
+func buildEthFrameFor(srcMAC []byte, srcIP uint32, seq uint32, payload []byte) []byte {
 	frame := make([]byte, 14+len(payload))
-	copy(frame[0:6], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01})  // dst（client MAC）
-	copy(frame[6:12], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}) // src
-	binary.BigEndian.PutUint16(frame[12:14], 0x0800)              // IPv4
+	copy(frame[0:6], []byte{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}) // dst（服务端网关）
+	copy(frame[6:12], srcMAC)                                    // src（客户端 MAC）
+	binary.BigEndian.PutUint16(frame[12:14], 0x0800)             // IPv4
 	// 最小 IPv4 头 20B，协议号 253（实验用），TotalLength 覆盖
 	ip := frame[14:]
 	ip[0] = 0x45
@@ -42,11 +52,36 @@ func buildEthFrame(seq uint32, payload []byte) []byte {
 	binary.BigEndian.PutUint16(ip[2:4], uint16(total))
 	ip[8] = 64
 	ip[9] = 253
-	binary.BigEndian.PutUint32(ip[12:16], 0x0A000002) // src 10.0.0.2
+	binary.BigEndian.PutUint32(ip[12:16], srcIP)      // src IP
 	binary.BigEndian.PutUint32(ip[16:20], 0x0A000001) // dst 10.0.0.1
 	copy(ip[20:], payload)
 	binary.BigEndian.PutUint32(ip[20:24], seq) // 前 4 字节为序号，便于 ping 匹配
 	return frame
+}
+
+// clientUplinkFrame 以客户端当前真实身份（源 MAC = TAP MAC，源 IP = 会话分配
+// 地址）构上行帧。vswitch 会话 MAC 钉扎后，帧的 src 必须与所在会话一致，
+// 否则按 MAC 欺骗丢弃——测试夹具不能再用硬编码身份。
+func clientUplinkFrame(srv *Server, cli *Client, seq uint32, payload []byte) []byte {
+	srcMAC := make([]byte, 6)
+	for i, part := range strings.Split(cli.macAddr, ":") {
+		if i >= 6 {
+			break
+		}
+		v, _ := strconv.ParseUint(part, 16, 8)
+		srcMAC[i] = byte(v)
+	}
+	srcIP := uint32(0x0A000002)
+	if srv != nil {
+		srv.mu.RLock()
+		if sess := srv.activeClients[cli.clientID]; sess != nil {
+			if ip := net.ParseIP(sess.IPv4).To4(); ip != nil {
+				srcIP = binary.BigEndian.Uint32(ip)
+			}
+		}
+		srv.mu.RUnlock()
+	}
+	return buildEthFrameFor(srcMAC, srcIP, seq, payload)
 }
 
 // perfHarness 进程内起 server+client（mem tap），返回注入/观测通道
