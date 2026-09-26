@@ -656,8 +656,12 @@ tbody tr[data-open]{cursor:pointer}
 }
 .evbox{background:var(--term);border:1px solid var(--border);border-radius:12px;padding:6px 0;
   max-height:calc(100vh - 330px);overflow-y:auto;font-size:.87em}
-.ev-row{display:grid;grid-template-columns:20px 132px minmax(0,1fr) 78px;gap:10px;align-items:center;
-  padding:7px 14px;border-radius:7px;white-space:nowrap}
+/* 时间戳列不能写死：HH:MM:SS.mmm 实测 91.7px，78px 的格子装不下，文字越出格子
+   向右顶到距面板边缘只剩 0.9px，而图标距左边是 14.7px——右边留白被吃光了。
+   auto 让格子贴内容，左右留白就对称了。min-height 取带徽章那一行的实际高度，
+   否则带客户端徽章的行会比纯文本行高一截，列表滚动时对不齐。 */
+.ev-row{display:grid;grid-template-columns:20px 132px minmax(0,1fr) auto;gap:10px;align-items:center;
+  padding:7px 14px;border-radius:7px;white-space:nowrap;min-height:36px}
 .ev-row+.ev-row{border-top:1px solid rgba(255,255,255,.04)}
 .ev-row:hover{background:rgba(255,255,255,.045)}
 .ev-row.new{animation:evin .35s ease}
@@ -671,7 +675,10 @@ tbody tr[data-open]{cursor:pointer}
 .ev-row.lv-warn .ev-type{color:var(--warn)}
 .ev-row.lv-error .ev-type{color:var(--err);font-weight:600}
 .ev-msg{color:var(--fg);overflow:hidden;text-overflow:ellipsis}
-.ev-cl{display:inline-block;max-width:150px;overflow:hidden;text-overflow:ellipsis;vertical-align:1px;
+/* vertical-align 取 middle 而不是手感的 1px：徽章带 1px 上下 padding、比 19.6px 的
+   行框还高，按基线对齐会往上冒 3px，跟后面的消息文字明显不在一条中线。middle 把
+   徽章中心对到行框中线，偏移收到 0.7px 以内（眼睛分辨不出来）。 */
+.ev-cl{display:inline-block;max-width:150px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;
   background:var(--accent-soft);color:var(--accent);border-radius:5px;padding:1px 6px;margin-right:8px;
   cursor:pointer;font-size:.92em}
 .ev-cl:hover{filter:brightness(1.3)}
