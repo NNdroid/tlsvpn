@@ -694,6 +694,11 @@ func (s *Server) Ban(clientID string, ttl time.Duration) bool {
 		s.banned[clientID] = time.Now().Add(ttl).UnixMilli()
 	}
 	s.bannedMu.Unlock()
+	note := "ttl " + ttl.String()
+	if ttl <= 0 {
+		note = "permanent"
+	}
+	evBus.emit("ban", "warn", clientID, note)
 	// 已在线则立刻踢下线
 	s.mu.RLock()
 	session, ok := s.activeClients[clientID]
@@ -710,6 +715,9 @@ func (s *Server) Unban(clientID string) {
 	s.bannedMu.Lock()
 	delete(s.banned, clientID)
 	s.bannedMu.Unlock()
+	if clientID != "" {
+		evBus.emit("unban", "info", clientID, "ban removed")
+	}
 }
 
 // IsBanned 查询 clientID 当前是否被封禁（自动清理过期项）
@@ -762,6 +770,7 @@ func (s *Server) kickSession(session *ClientSession) {
 		s.mu.Unlock()
 		return
 	}
+	evBus.emit("kick", "warn", clientID, "all connections closed and the session dropped")
 	session.sessionMu.Lock()
 	conns := make([]*connInfo, 0, len(session.conns))
 	for ci := range session.conns {
@@ -1223,6 +1232,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 		if !limiter.acquire(conn.RemoteAddr()) {
 			srv.protectConnsRejected.Add(1)
 			log.Debugf("connection limiter rejected remote %s", conn.RemoteAddr())
+			evBus.emit("limit", "warn", "", "remote "+conn.RemoteAddr().String())
 			conn.Close()
 			continue
 		}
@@ -1346,9 +1356,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 挂到读超时，无限触发等于给攻击者一个零成本内存放大器。
 		if s.pskFailExceeded(tcpConn.RemoteAddr().String()) {
 			log.Warnf("PSK verification failed; remote %s exceeded its budget, dropping the connection", tcpConn.RemoteAddr().String())
+			evBus.emit("deny", "error", "", "budget exceeded; remote "+tcpConn.RemoteAddr().String())
 			return
 		}
 		log.Warnf("PSK verification failed (hash mismatch), remote %s", tcpConn.RemoteAddr().String())
+		evBus.emit("deny", "warn", "", "hash mismatch; remote "+tcpConn.RemoteAddr().String())
 		camouflageProbe(conn)
 		return
 	}
@@ -1413,6 +1425,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 封禁检查：命中直接进焦油坑（与 PSK 错误同等对待，不泄露 ban 状态）
 	if s.IsBanned(clientID) {
 		log.Warnf("[%s] banned; access denied", clientID)
+		evBus.emit("deny", "warn", clientID, "banned")
 		camouflageProbe(conn)
 		return
 	}
@@ -1427,6 +1440,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	if exists {
 		if !hmac.Equal([]byte(req.MAC), []byte(session.MAC)) {
 			log.Warnf("[%s] connection refused: MAC mismatch", clientID)
+			evBus.emit("deny", "error", clientID, "MAC mismatch")
 			s.mu.Unlock()
 			camouflageProbe(conn)
 			return
@@ -1449,6 +1463,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if exists && session.InstanceID != req.ClientInstance {
 			if !acceptSessionResumeToken(session, req.SessionToken) {
 				log.Warnf("[%s] reconnect refused: invalid session token for a new client instance", clientID)
+				evBus.emit("deny", "error", clientID, "invalid session token")
 				s.mu.Unlock()
 				camouflageProbe(conn)
 				return
@@ -1587,6 +1602,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		s.vswitch.AddPort(port)
 		s.vswitch.AddStaticMAC(clientID, session.macBin)
 		log.Infof("[%s] new logical client online (FEC=%s EncAlgo=%d), Assigned IPs: %s, %s", clientID, fecMode, encAlgo, v4ip, v6ip)
+		evBus.emit("connect", "info", clientID, "IPv4 "+v4ip+" · IPv6 "+v6ip)
 	}
 
 	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
@@ -1878,6 +1894,7 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 	delete(s.usedV4, session.IPv4)
 	delete(s.usedV6, session.IPv6)
 	delete(s.activeClients, clientID)
+	evBus.emit("off", "warn", clientID, "session destroyed; IPs and MAC binding released")
 	s.macToIPCleanLocked(session.MAC, session.IPv4)
 	s.vswitch.RemovePort(clientID)
 	if session.RxReorder != nil {

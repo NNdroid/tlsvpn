@@ -1,10 +1,11 @@
 const I18N={
 'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',overhead:'FEC 开销',pps:'包速率',cpu:'进程 CPU',cores:'核数:',dropped:'丢帧(队列)',reorder:'重排跳过',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
  chart:{title:'吞吐趋势',win:'(近 120 秒)',r2m:'2 分钟',r1h:'1 小时',r24h:'24 小时'},legend:{up:'上行',down:'下行',rtt:'RTT（均）'},
-	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',traffic:'流量',status:'运行状态',diag:'诊断',logs:'日志',settings:'设置'},
+		tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',traffic:'流量',status:'运行状态',diag:'诊断',ev:'事件',logs:'日志',settings:'设置'},
  tr:{today_up:'今日上行',today_down:'今日下行',today_total:'今日合计',daily:'每日流量',up:'上行',down:'下行',total:'合计',date:'日期',caption:'近 {n} 天',empty:'暂无按日统计数据',client:'客户端',all:'全部'},
  dg:{title:'诊断中心',sub:'基于最近一次状态快照自检，不发新请求',score:'健康度',lvOk:'正常',lvWarn:'注意',lvFail:'异常',lvSkip:'不适用',total:'{n} 项检查',all_ok:'全部检查正常，无需处理',open_fail:'待处理 {n} 项',updated:'{t}前',c_tunnel:'隧道',c_route:'路由',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'保护与钩子',c_res:'资源',c_cfg:'配置',tap:'TAP 写入',drop:'丢帧',reorder:'乱序处理',sess:'会话水位',reconn:'重连次数',rtt:'RTT 分布',connerr:'连接报错',polroute:'策略路由',routes:'自定义路由',pool:'IPv4 地址池',negver:'协商版本',brut:'生效',brutrate:'限速速率',cert:'证书有效期',tlsfail:'握手失败',tlsver:'TLS 版本',enc:'内层加密',fecloss:'恢复 / 确认丢失',fecovh:'FEC 开销',fecmode:'FEC 模式',reject:'拒绝',fallback:'降级与陷阱',psk:'PSK 失败',hookup:'上行钩子',hookdown:'下行钩子',cpu:'CPU 占用',mem:'内存',gor:'协程数',fd:'文件描述符',load:'系统负载',gc:'GC 暂停',loglvl:'日志级别',not_set:'未配置',rtt_tip:'最小 · 平均 · P95 · 最大',err_n:'报错 {n} 条',conns_n:'{n} 条连接'},
  dc:{title:'客户端详情',copy:'复制',copied:'已复制到剪贴板',view_logs:'查看日志',view_traffic:'查看流量',identity:'身份',traffic:'流量',connections:'连接',security:'安全',conns_n:'{n} 条连接',no_conns:'暂无连接明细',sec_hint:'取自最近一条连接的协商结果',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'来源地址',tcp:'TCP 连接',uptime:'在线时长',today:'今日',d7:'近 7 天',d30:'近 30 天',sess_up:'会话上行',sess_down:'会话下行',pkt_up:'上行包数',pkt_dn:'下行包数',rate_up:'↑ 当前速率',rate_dn:'↓ 当前速率',sec_enc:'内层加密',sec_sess:'会话加密',sec_epoch:'密钥代际',sec_fec:'FEC',sec_tls:'TLS 版本',sec_cipher:'TLS 套件',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'},
+	ev:{title:'事件',clear:'清空',empty:'暂无事件',live:'实时推送',reconn:'重连中',poll:'轮询模式',all:'全部',info:'信息',warn:'告警',error:'错误',t_connect:'客户端上线',t_off:'会话销毁',t_kick:'强制断开',t_ban:'封禁',t_unban:'解除封禁',t_deny:'访问拒绝',t_limit:'连接限流',t_up:'隧道建立',t_down:'隧道中断',t_reconnect:'强制重连',t_config:'配置变更',t_loglevel:'日志级别',t_gc:'内存回收',t_unknown:'事件',cleared:'事件已清空'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',sni:'SNI',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
  logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
@@ -30,10 +31,11 @@ const I18N={
    load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'}},
 'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',reorder:'Reorder skipped',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:',pps:'Packet rate',cpu:'Process CPU',cores:'Cores:',overhead:'FEC overhead'},
  chart:{title:'Throughput',win:'(last 120s)',r2m:'2 min',r1h:'1 h',r24h:'24 h'},legend:{up:'Up',down:'Down',rtt:'RTT (avg)'},
-	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',traffic:'Traffic',status:'Runtime status',diag:'Diagnostics',logs:'Logs',settings:'Settings'},
+	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',traffic:'Traffic',status:'Runtime status',diag:'Diagnostics',ev:'Events',logs:'Logs',settings:'Settings'},
  tr:{today_up:'Up today',today_down:'Down today',today_total:'Total today',daily:'Daily traffic',up:'Up',down:'Down',total:'Total',date:'Date',caption:'Last {n} days',empty:'No daily traffic data yet',client:'Client',all:'All'},
  dg:{title:'Diagnostics',sub:'self-check over the latest status snapshot, no extra requests',score:'Health score',lvOk:'OK',lvWarn:'Warn',lvFail:'Fail',lvSkip:'N/A',total:'{n} checks',all_ok:'All checks passed, nothing to fix',open_fail:'{n} item(s) to fix',updated:'{t} ago',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Protection and hooks',c_res:'Resources',c_cfg:'Config',tap:'TAP writes',drop:'Dropped frames',reorder:'Reordering',sess:'Session level',reconn:'Reconnects',rtt:'RTT spread',connerr:'Connection errors',polroute:'Policy routing',routes:'Custom routes',pool:'IPv4 pool',negver:'Negotiated version',brut:'Active',brutrate:'Shaped rate',cert:'Certificate',tlsfail:'Handshake failures',tlsver:'TLS version',enc:'Inner cipher',fecloss:'Recovered / lost',fecovh:'FEC overhead',fecmode:'FEC mode',reject:'Rejected',fallback:'Fallback and tarpit',psk:'PSK failures',hookup:'Up hook',hookdown:'Down hook',cpu:'CPU',mem:'Memory',gor:'Goroutines',fd:'File descriptors',load:'System load',gc:'GC pause',loglvl:'Log level',not_set:'Not configured',rtt_tip:'min · avg · P95 · max',err_n:'{n} error(s)',conns_n:'{n} conn(s)'},
  dc:{title:'Client detail',copy:'Copy',copied:'Copied to clipboard',view_logs:'View logs',view_traffic:'View traffic',identity:'Identity',traffic:'Traffic',connections:'Connections',security:'Security',conns_n:'{n} conn(s)',no_conns:'No connection detail yet',sec_hint:'from the newest connection',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Source address',tcp:'TCP conns',uptime:'Uptime',today:'Today',d7:'Last 7 days',d30:'Last 30 days',sess_up:'Session up',sess_down:'Session down',pkt_up:'Up packets',pkt_dn:'Down packets',rate_up:'↑ Current rate',rate_dn:'↓ Current rate',sec_enc:'Inner cipher',sec_sess:'Session cipher',sec_epoch:'Key epoch',sec_fec:'FEC',sec_tls:'TLS version',sec_cipher:'TLS cipher',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'},
+	ev:{title:'Events',clear:'Clear',empty:'No events yet',live:'Live stream',reconn:'Reconnecting',poll:'Polling',all:'All',info:'Info',warn:'Warning',error:'Error',t_connect:'Client online',t_off:'Session destroyed',t_kick:'Forced disconnect',t_ban:'Banned',t_unban:'Unbanned',t_deny:'Access denied',t_limit:'Connection rate limited',t_up:'Tunnel established',t_down:'Tunnel down',t_reconnect:'Forced reconnect',t_config:'Config changed',t_loglevel:'Log level',t_gc:'Memory reclaim',t_unknown:'Event',cleared:'Events cleared'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',sni:'SNI',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
  logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
@@ -59,7 +61,7 @@ const I18N={
    load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}},
 'de':{kpi:{active:'Aktive Clients',tcp:'TCP-Verbindungen',tx:'Gesendet',rx:'Empfangen',uptime:'Laufzeit',version:'Version',gc:'GC ausführen',fec:'FEC wiederhergestellt / verloren',parity:'Paritätsframes',dropped:'Verworfen (Queue)',reorder:'Reorder übersprungen',mem:'Speicher',goroutines:'Goroutines:',pool:'IPv4-Pool',v6used:'IPv6 zugewiesen:',pps:'Paktrate',cpu:'Prozess-CPU',cores:'Kerne:',overhead:'FEC-Overhead'},
  chart:{title:'Durchsatz',win:'(letzte 120 s)',r2m:'2 Min',r1h:'1 Std',r24h:'24 Std'},legend:{up:'Uplink',down:'Downlink',rtt:'RTT (Ø)'},
- tab:{clients:'Clients',conns:'Verbindungen',macs:'MAC-Tabelle',bans:'Sperren',traffic:'Traffic',status:'Laufzeitstatus',diag:'Diagnostics',logs:'Protokolle',settings:'Einstellungen'},
+ tab:{clients:'Clients',conns:'Verbindungen',macs:'MAC-Tabelle',bans:'Sperren',traffic:'Traffic',status:'Laufzeitstatus',diag:'Diagnostics',ev:'Ereignisse',logs:'Protokolle',settings:'Einstellungen'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (S)',rx:'RX (E)',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Verschlüsselung',brutal:'Brutal',ops:'Aktionen',kick:'Trennen',ban:'Sperren',unban:'Entsperren',owner:'Client',target:'Ziel',remote:'Gegenstelle',state:'Status',rtt:'RTT',retries:'Wiederholungen',age:'Online',epoch:'Schlüssel-Epoche',sni:'SNI',err:'Letzter Fehler'},
  m:{port:'Port',seen:'Zuletzt aktiv'},bans:{id_ph:'ClientID (Präfix ok)',min_ph:'Minuten (leer = dauerhaft)',add:'Sperren',refresh:'Aktualisieren',left:'Restlaufzeit'},
  logs:{level:'Level',autoscroll:'Auto-Scroll',clear:'Leeren',download:'Download'},
@@ -85,10 +87,11 @@ const I18N={
    load:'Neu laden',save:'Speichern',apply:'Speichern & anwenden',saved:'Gespeichert',applied:'Gespeichert & angewendet',restart_nr:'Neustart nötig:',loaded_err:'Ladefehler:'},
  tr:{today_up:'Uplink heute',today_down:'Downlink heute',today_total:'Gesamt heute',daily:'Täglicher Traffic',up:'Uplink',down:'Downlink',total:'Gesamt',date:'Datum',caption:'Letzte {n} Tage',empty:'Noch keine täglichen Traffic-Daten',client:'Client',all:'Alle'},
  dg:{title:'Diagnostics',sub:'Selbstprüfung anhand des letzten Status-Snapshot, ohne Zusatzanfragen',score:'Gesundheitswert',lvOk:'OK',lvWarn:'Warnung',lvFail:'Fehler',lvSkip:'n/a',total:'{n} Prüfung(en)',all_ok:'Alle Prüfungen bestanden, nichts zu tun',open_fail:'{n} Punkt(e) beheben',updated:'vor {t}',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Schutz und Hooks',c_res:'Ressourcen',c_cfg:'Konfiguration',tap:'TAP-Schreiben',drop:'Verlorene Frames',reorder:'Reihenfolge',sess:'Sitzungspegel',reconn:'Reconnects',rtt:'RTT-Verteilung',connerr:'Verbindungsfehler',polroute:'Policy-Routing',routes:'Eigene Routen',pool:'IPv4-Pool',negver:'Verhandelte Version',brut:'Aktiv',brutrate:'Gedrosselte Raten',cert:'Zertifikat',tlsfail:'Handshake-Fehler',tlsver:'TLS-Version',enc:'Innere Verschlüsselung',fecloss:'Wiederhergestellt / verloren',fecovh:'FEC-Overhead',fecmode:'FEC-Modus',reject:'Abgelehnt',fallback:'Fallback und Tarpit',psk:'PSK-Fehler',hookup:'Up-Hook',hookdown:'Down-Hook',cpu:'CPU',mem:'Speicher',gor:'Goroutines',fd:'Dateideskriptoren',load:'Systemlast',gc:'GC-Pause',loglvl:'Protokollstufe',not_set:'Nicht konfiguriert',rtt_tip:'min · Ø · P95 · max',err_n:'{n} Fehler',conns_n:'{n} Verbindung(en)'},
+	ev:{title:'Ereignisse',clear:'Leeren',empty:'Noch keine Ereignisse',live:'Live-Feed',reconn:'Verbinde neu',poll:'Abfrage',all:'Alle',info:'Info',warn:'Warnung',error:'Fehler',t_connect:'Client online',t_off:'Sitzung beendet',t_kick:'Erzwungene Trennung',t_ban:'Gesperrt',t_unban:'Entsperrt',t_deny:'Zugriff verweigert',t_limit:'Verbindungs-Limit',t_up:'Tunnel aufgebaut',t_down:'Tunnel abgerissen',t_reconnect:'Erzwungener Neustart',t_config:'Konfiguration geändert',t_loglevel:'Protokollstufe',t_gc:'Speicheraufräumung',t_unknown:'Ereignis',cleared:'Ereignisse geleert'},
  dc:{title:'Client-Details',copy:'Kopieren',copied:'In die Zwischenablage kopiert',view_logs:'Protokoll anzeigen',view_traffic:'Traffic anzeigen',identity:'Identität',traffic:'Traffic',connections:'Verbindungen',security:'Sicherheit',conns_n:'{n} Verbindung(en)',no_conns:'Noch keine Verbindungsdetails',sec_hint:'aus der neuesten Verbindung',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Quelladresse',tcp:'TCP-Verbindungen',uptime:'Laufzeit',today:'Heute',d7:'Letzte 7 Tage',d30:'Letzte 30 Tage',sess_up:'Sitzung ↑',sess_down:'Sitzung ↓',pkt_up:'Pakete ↑',pkt_dn:'Pakete ↓',rate_up:'↑ aktueller Satz',rate_dn:'↓ aktueller Satz',sec_enc:'Innere Verschlüsselung',sec_sess:'Sitzungsverschlüsselung',sec_epoch:'Schlüssel-Epoche',sec_fec:'FEC',sec_tls:'TLS-Version',sec_cipher:'TLS-Cipher',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}},
 'fr':{kpi:{active:'Clients actifs',tcp:'Connexions TCP',tx:'Total envoyé',rx:'Total reçu',uptime:'Disponibilité',version:'Version',gc:'GC maintenant',fec:'FEC récupérés / perdus',parity:'Trames de parité',dropped:'Abandons (file)',reorder:'Réordonnancement ignoré',mem:'Mémoire',goroutines:'Goroutines :',pool:'Pool IPv4',v6used:'IPv6 allouées :',pps:'Taux de paquets',overhead:'Surcharge FEC',cpu:'CPU du processus',cores:'Cœurs :'},
  chart:{title:'Débit',win:'(120 dernières s)',r2m:'2 min',r1h:'1 h',r24h:'24 h'},legend:{up:'Montant',down:'Descendant',rtt:'RTT (moy.)'},
- tab:{clients:'Clients',conns:'Connexions',macs:'Table MAC',bans:'Bannissements',traffic:'Trafic',status:'État runtime',diag:'Diagnostic',logs:'Journaux',settings:'Paramètres'},
+ tab:{clients:'Clients',conns:'Connexions',macs:'Table MAC',bans:'Bannissements',traffic:'Trafic',status:'État runtime',diag:'Diagnostic',ev:'Événements',logs:'Journaux',settings:'Paramètres'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (env.)',rx:'RX (rec.)',txs:'↑ Débit',rxs:'↓ Débit',fec:'FEC',enc:'Chiffrement',brutal:'Brutal',ops:'Actions',kick:'Éjecter',ban:'Bannir',unban:'Débannir',owner:'Client',target:'Cible',remote:'Distant',state:'État',rtt:'RTT',retries:'Réessais',age:'En ligne',epoch:'Époque de clé',sni:'SNI',err:'Dernière erreur'},
  m:{port:'Port',seen:'Dernière activité'},bans:{id_ph:'ClientID (préfixe accepté)',min_ph:'Minutes (vide = permanent)',add:'Bannir',refresh:'Rafraîchir',left:'Restant'},
  logs:{level:'Niveau',autoscroll:'Défilement auto',clear:'Effacer',download:'Télécharger'},
@@ -114,10 +117,11 @@ const I18N={
    load:'Recharger',save:'Enregistrer',apply:'Enregistrer & appliquer',saved:'Enregistré',applied:'Enregistré & appliqué',restart_nr:'Redémarrage requis :',loaded_err:'Échec du chargement :'},
  tr:{today_up:'Montant du jour',today_down:'Descendant du jour',today_total:'Total du jour',daily:'Trafic quotidien',up:'Montant',down:'Descendant',total:'Total',date:'Date',caption:'{n} derniers jours',empty:'Pas encore de données de trafic quotidien',client:'Client',all:'Tous'},
  dg:{title:'Diagnostic',sub:'autocontrôle sur le dernier instantané, sans nouvelle requête',score:'Score de santé',lvOk:'OK',lvWarn:'Attention',lvFail:'Échec',lvSkip:'N/A',total:'{n} contrôle(s)',all_ok:'Tous les contrôles sont bons, rien à faire',open_fail:'{n} élément(s) à traiter',updated:'il y a {t}',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Protection et hooks',c_res:'Ressources',c_cfg:'Configuration',tap:'Écriture TAP',drop:'Trames perdues',reorder:'Rearrangement',sess:'Niveau de session',reconn:'Reconnexions',rtt:'Répartition RTT',connerr:'Erreurs de connexion',polroute:'Routage par politique',routes:'Routes personnalisées',pool:'Pool IPv4',negver:'Version négociée',brut:'Actif',brutrate:'Débit limité',cert:'Certificat',tlsfail:'Échecs de poignée de main',tlsver:'Version TLS',enc:'Chiffrement interne',fecloss:'Récupéré / perdu',fecovh:'Surcharge FEC',fecmode:'Mode FEC',reject:'Rejetés',fallback:'Repli et tarpit',psk:'Échecs PSK',hookup:'Hook ascendant',hookdown:'Hook descendant',cpu:'CPU',mem:'Mémoire',gor:'Goroutines',fd:'Descripteurs de fichier',load:'Charge système',gc:'Pause GC',loglvl:'Niveau du journal',not_set:'Non configuré',rtt_tip:'min · moyenne · P95 · max',err_n:'{n} erreur(s)',conns_n:'{n} connexion(s)'},
+	ev:{title:'Événements',clear:'Effacer',empty:'Aucun événement',live:'Flux en direct',reconn:'Reconnexion',poll:'Polling',all:'Tous',info:'Info',warn:'Avertissement',error:'Erreur',t_connect:'Client en ligne',t_off:'Session détruite',t_kick:'Déconnexion forcée',t_ban:'Interdit',t_unban:'Interdiction levée',t_deny:'Accès refusé',t_limit:'Débit limité',t_up:'Tunnel établi',t_down:'Tunnel coupé',t_reconnect:'Reconnexion forcée',t_config:'Configuration modifiée',t_loglevel:'Niveau de journal',t_gc:'Libération mémoire',t_unknown:'Événement',cleared:'Événements effacés'},
  dc:{title:'Détails du client',copy:'Copier',copied:'Copié dans le presse-papiers',view_logs:'Voir les journaux',view_traffic:'Voir le trafic',identity:'Identité',traffic:'Trafic',connections:'Connexions',security:'Sécurité',conns_n:'{n} connexion(s)',no_conns:'Pas encore de détail de connexion',sec_hint:'issu de la dernière connexion',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Adresse source',tcp:'Connexions TCP',uptime:'Disponibilité',today:'Aujourd’hui',d7:'7 derniers jours',d30:'30 derniers jours',sess_up:'Session ↑',sess_down:'Session ↓',pkt_up:'Paquets ↑',pkt_dn:'Paquets ↓',rate_up:'↑ débit actuel',rate_dn:'↓ débit actuel',sec_enc:'Chiffrement interne',sec_sess:'Chiffrement de session',sec_epoch:'Époque de clé',sec_fec:'FEC',sec_tls:'Version TLS',sec_cipher:'Suite TLS',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}},
 'ja':{kpi:{active:'アクティブクライアント',tcp:'TCP 接続',tx:'送信合計',rx:'受信合計',uptime:'稼働時間',version:'バージョン',gc:'即時 GC',fec:'FEC 復元 / 確定ロスト',parity:'パリティフレーム',dropped:'廃棄（キュー）',reorder:'並べ替えスキップ',mem:'メモリ',goroutines:'Goroutines:',pool:'IPv4 プール',v6used:'IPv6 割り当て:',pps:'パケット速度',overhead:'FEC オーバーヘッド',cpu:'プロセス CPU',cores:'コア:'},
  chart:{title:'スループット',win:'（過去 120 秒）',r2m:'2 分',r1h:'1 時間',r24h:'24 時間'},legend:{up:'上り',down:'下り',rtt:'RTT（平均）'},
- tab:{clients:'クライアント',conns:'接続明細',macs:'MAC テーブル',bans:'禁止',traffic:'トラフィック',status:'稼働状態',diag:'診断',logs:'ログ',settings:'設定'},
+ tab:{clients:'クライアント',conns:'接続明細',macs:'MAC テーブル',bans:'禁止',traffic:'トラフィック',status:'稼働状態',diag:'診断',ev:'イベント',logs:'ログ',settings:'設定'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX（送）',rx:'RX（受）',txs:'↑ 速度',rxs:'↓ 速度',fec:'FEC',enc:'暗号化',brutal:'Brutal',ops:'操作',kick:'切断',ban:'禁止',unban:'解除',owner:'クライアント',target:'接続先',remote:'対向',state:'状態',rtt:'RTT',retries:'再試行',age:'経過時間',epoch:'鍵世代',sni:'SNI',err:'最新エラー'},
  m:{port:'ポート',seen:'最終アクティブ'},bans:{id_ph:'ClientID（前方一致可）',min_ph:'分数（空欄=永久）',add:'禁止',refresh:'更新',left:'残り'},
  logs:{level:'レベル',autoscroll:'自動スクロール',clear:'クリア',download:'ダウンロード'},
@@ -142,6 +146,7 @@ const I18N={
  set:{hint:'JSON 設定を編集。保存：設定ファイルへ書き戻し。保存して適用：書き戻した上で実行パラメータをホット適用（一部フィールドは再起動が必要）。',load:'再読み込み',save:'保存',apply:'保存して適用',saved:'保存済み',applied:'保存して適用済み',restart_nr:'再起動が必要：',loaded_err:'読み込み失敗：'},
  tr:{today_up:'本日の上り',today_down:'本日の下り',today_total:'本日合計',daily:'日別トラフィック',up:'上り',down:'下り',total:'合計',date:'日付',caption:'過去 {n} 日',empty:'日別トラフィックデータはまだありません',client:'クライアント',all:'全体'},
  dg:{title:'診断センター',sub:'最新の状態スナップショットに基づくセルフチェック、追加リクエストなし',score:'健全度',lvOk:'正常',lvWarn:'注意',lvFail:'異常',lvSkip:'該当なし',total:'{n} 項目のチェック',all_ok:'全チェック正常、対応不要',open_fail:'対応待ち {n} 件',updated:'{t}前',c_tunnel:'トンネル',c_route:'ルーティング',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'保護とフック',c_res:'リソース',c_cfg:'設定',tap:'TAP 書き込み',drop:'ドロップフレーム',reorder:'再順序制御',sess:'セッション水位',reconn:'再接続',rtt:'RTT 分布',connerr:'接続エラー',polroute:'ポリシールーティング',routes:'カスタムルート',pool:'IPv4 プール',negver:'ネゴバージョン',brut:'有効',brutrate:'制限レート',cert:'証明書',tlsfail:'ハンドシェイク失敗',tlsver:'TLS バージョン',enc:'内層暗号化',fecloss:'復旧 / 損失',fecovh:'FEC オーバーヘッド',fecmode:'FEC モード',reject:'拒否',fallback:'フォールバックと tarpit',psk:'PSK 失敗',hookup:'上りフック',hookdown:'下りフック',cpu:'CPU',mem:'メモリ',gor:'ゴルーチン',fd:'FD 数',load:'システム負荷',gc:'GC 停止',loglvl:'ログレベル',not_set:'未設定',rtt_tip:'最小 · 平均 · P95 · 最大',err_n:'エラー {n} 件',conns_n:'{n} 接続'},
+	ev:{title:'イベント',clear:'クリア',empty:'まだイベントなし',live:'リアルタイム',reconn:'再接続中',poll:'ポーリング',all:'すべて',info:'情報',warn:'警告',error:'エラー',t_connect:'クライアント接続',t_off:'セッション破棄',t_kick:'強制切断',t_ban:'ブロック',t_unban:'ブロック解除',t_deny:'アクセス拒否',t_limit:'接続制限',t_up:'トンネル確立',t_down:'トンネル切断',t_reconnect:'強制再接続',t_config:'設定変更',t_loglevel:'ログレベル',t_gc:'メモリ解放',t_unknown:'イベント',cleared:'イベントをクリアしました'},
  dc:{title:'クライアント詳細',copy:'コピー',copied:'クリップボードにコピーしました',view_logs:'ログを見る',view_traffic:'トラフィックを見る',identity:'識別情報',traffic:'トラフィック',connections:'接続',security:'セキュリティ',conns_n:'{n} 接続',no_conns:'接続明細はまだありません',sec_hint:'最新の接続のネゴシエーション結果',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'ソースアドレス',tcp:'TCP 接続',uptime:'オンライン時間',today:'本日',d7:'直近 7 日',d30:'直近 30 日',sess_up:'セッション上り',sess_down:'セッション下り',pkt_up:'上りパケット',pkt_dn:'下りパケット',rate_up:'↑ 現在の速度',rate_dn:'↓ 現在の速度',sec_enc:'内層暗号化',sec_sess:'セッション暗号化',sec_epoch:'鍵世代',sec_fec:'FEC',sec_tls:'TLS バージョン',sec_cipher:'TLS 暗号スイート',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}}};
 // 浏览器语言 → 面板语言：前缀匹配，zh 系一律落到 zh-CN（简体）
 function detectLang(){
@@ -202,6 +207,8 @@ function showPane(id){
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
   document.getElementById('pane-'+id).classList.add('on');
   if(id==='logs')startLogPoll();else stopLogPoll();
+  // 事件在后台一直攒着，面板不在前台时不渲染；切过来补一次全量绘制
+  if(id==='events')evRender(false);
   if(id==='settings')loadConfig();
   // 刚显示的面板之前在 display:none 里量不到宽度，按钮的 min-width 还是 0
   syncSelects();
@@ -2190,6 +2197,190 @@ async function saveConfig(apply){
   }catch(e){st.textContent=String(e);toast(String(e),'err');}
 }
 
+// ---------- 事件流：SSE 长连接优先，连不上两次自动回退轮询 ----------
+// 事件本体在后端内存环形缓冲（events.go）：/api/events 默认推 SSE，?stream=0 给增量 JSON。
+// 浏览器 EventSource 带不了 Authorization 头，-web-auth 生效时直接走轮询；
+// seq 由服务端单调编号，SSE 重连回放与轮询续传都不会重也不会丢。
+let evItems=[],evSeq=0,evES=null,evTimer=null,evBad=0,evLvl='all',evMode='';
+const EV_MAX=300,EV_POLL_MS=2500;
+// 类型 → 图标路径。这里必须是对象而不是数组：词法守卫按「前一个有效字符」判断花括号
+// 是不是对象字面量（只认 ( = , : ? ! & | + - * 与 return/yield），数组里的 {…} 会被当成
+// 块作用域，属性冒号就被误读成三元冒号，整段脚本直接失效。
+const EVICO={
+  connect:'<path d="M12 3v10"/><path d="m7 9 5 5 5-5"/><path d="M5 19h14"/>',
+  off:'<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6"/><path d="m15 9-6 6"/>',
+  kick:'<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
+  ban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/>',
+  unban:'<circle cx="12" cy="12" r="9"/><path d="m5.6 18.4 12.8-12.8"/>',
+  deny:'<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  limit:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5"/><path d="m12 12 3.5 2"/>',
+  up:'<path d="M12 19V5"/><path d="m6 11 6-6 6 6"/>',
+  down:'<path d="M12 5v14"/><path d="m6 13 6 6 6-6"/>',
+  reconnect:'<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+  config:'<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>',
+  loglevel:'<path d="M4 6h16"/><path d="M4 12h10"/><path d="M4 18h7"/>',
+  gc:'<path d="M3 12h4l2-6 4 12 2-6h6"/>',
+  unknown:'<circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/>'
+};
+// 类型文案走 i18n；服务端以后加新类型时回落到通用词，而不是在页面上露出 key 名
+function evTypeLabel(type){
+  const p='ev.t_'+type;
+  const v=t(p);
+  return v===p?t('ev.t_unknown'):v;
+}
+function evPaneOn(){
+  const p=document.getElementById('pane-events');
+  return !!p&&p.classList.contains('on');
+}
+function evRow(e,fresh){
+  const lv=e.level==='warn'?'warn':(e.level==='error'?'error':'info');
+  const ic=EVICO[e.type]||EVICO.unknown;
+  const cid=e.client
+    ?'<span class="ev-cl" data-cid="'+esc(e.client)+'" title="'+esc(e.client)+'">'+esc(shortId(e.client,14))+'</span>'
+    :'';
+  return '<div class="ev-row lv-'+lv+(fresh?' new':'')+'">'+
+    '<span class="ev-ico"><svg viewBox="0 0 24 24">'+ic+'</svg></span>'+
+    '<span class="ev-type">'+esc(evTypeLabel(e.type))+'</span>'+
+    '<span class="ev-msg">'+cid+esc(e.msg||'')+'</span>'+
+    '<span class="ev-ts mono">'+esc(e.time||'')+'</span>'+
+    '</div>';
+}
+function evRender(fresh){
+  const box=document.getElementById('evbox');
+  if(!box)return;
+  const f=evLvl==='all'?'':evLvl;
+  const list=evItems.filter(function(x){return !f||x.level===f;});
+  if(!list.length){
+    box.innerHTML='<div class="empty-box"><svg viewBox="0 0 24 24">'+EVICO.unknown+'</svg>'+
+      '<div>'+esc(t('ev.empty'))+'</div></div>';
+  }else{
+    box.innerHTML=list.map(function(x){return evRow(x,fresh&&x.seq===evSeq);}).join('');
+  }
+  const c=document.getElementById('ev-count');
+  if(c)c.textContent=f?(list.length+' / '+evItems.length):String(evItems.length);
+}
+function evLive(){
+  const box=document.getElementById('ev-live');
+  if(!box)return;
+  let cls='';
+  let txt=t('ev.poll');
+  if(evMode==='sse'){cls='ok';txt=t('ev.live');}
+  else if(evMode==='reconn'){cls='warn';txt=t('ev.reconn');}
+  box.className='ev-live'+(cls?' '+cls:'');
+  const tx=document.getElementById('ev-live-t');
+  if(tx)tx.textContent=txt;
+}
+// 新事件入缓冲；seq 不前进就丢弃（SSE 重连回放会重发同一条）
+function evPush(e){
+  if(!e||!e.seq||e.seq<=evSeq)return;
+  evSeq=e.seq;
+  evItems.unshift(e);
+  if(evItems.length>EV_MAX)evItems.length=EV_MAX;
+  // 面板不在前台时只攒着，切过去再画，省掉隐藏容器上的重排
+  if(evPaneOn())evRender(true);
+}
+function evOpenSSE(){
+  evBad=0;
+  evMode='sse';
+  evLive();
+  let es=null;
+  try{es=new EventSource(url('/api/events?after='+evSeq));}catch(e){es=null;}
+  if(!es){evPollStart();return;}
+  evES=es;
+  // 4 秒内没建成就换轮询。不能用「错误计数」：EventSource 自带重连，
+  // 每次失败后 3 秒再试会各触发一次 error，计数永远到不了阈值，面板就一直挂着"重连中"。
+  let grace=setTimeout(function(){
+    try{evES.close();}catch(e){}
+    evES=null;
+    evPollStart();
+  },4000);
+  evES.onopen=function(){
+    clearTimeout(grace);
+    grace=null;
+    evMode='sse';
+    evLive();
+  };
+  evES.onerror=function(){
+    if(evMode==='off')return;
+    evMode='reconn';
+    evLive();
+  };
+  evES.addEventListener('message',function(m){
+    let e=null;
+    try{e=JSON.parse(m.data);}catch(err){e=null;}
+    if(e)evPush(e);
+  });
+}
+function evPollStart(){
+  if(evTimer)clearInterval(evTimer);
+  evBad=0;
+  evMode='poll';
+  evLive();
+  evPoll();
+  evTimer=setInterval(evPoll,EV_POLL_MS);
+}
+async function evPoll(){
+  let res=null;
+  try{
+    res=await fetch(url('/api/events?stream=0&after='+evSeq),AUTH_HDR);
+    if(res.status===404||res.status===405){
+      // 服务端比这个端点老：别再每 2.5 秒问一次了，直接退成只读空态
+      evStop();
+      evLiveOff();
+      return;
+    }
+    if(!res.ok)return;
+  }catch(e){return;}
+  let list=null;
+  try{list=await res.json();}catch(e){list=null;}
+  if(!list){
+    // 老服务端没有这个路由时会落到静态首页：别对着 HTML 无限轮询
+    evBad++;
+    if(evBad>=2){evStop();evLiveOff();}
+    return;
+  }
+  evBad=0;
+  if(!list.length)return;
+  for(let i=0;i<list.length;i++)evPush(list[i]);
+}
+// 事件端点不存在（老服务端）时的中性状态：不假装在轮询
+function evLiveOff(){
+  const box=document.getElementById('ev-live');
+  if(!box)return;
+  evMode='off';
+  box.className='ev-live';
+  const tx=document.getElementById('ev-live-t');
+  if(tx)tx.textContent=t('ev.empty');
+}
+function evStart(){
+  evStop();
+  // EventSource 无法附加自定义头：带凭据访问面板时直接走轮询，别在认证失败上来回重试
+  if(AUTH_HDR.Authorization||!('EventSource' in window)){
+    evPollStart();
+    return;
+  }
+  evOpenSSE();
+}
+function evStop(){
+  if(evES){try{evES.close();}catch(e){}evES=null;}
+  if(evTimer){clearInterval(evTimer);evTimer=null;}
+  evMode='';
+  evLive();
+}
+function setEvLvl(v){
+  evLvl=v;
+  document.querySelectorAll('#ev-seg button').forEach(function(b){
+    b.classList.toggle('on',b.dataset.evlvl===v);
+  });
+  evRender(false);
+}
+function clearEvents(){
+  // 只清本地显示，不回退 evSeq：退回去会把缓冲里的历史又灌回一遍
+  evItems=[];
+  evRender(false);
+  toast(t('ev.cleared'),'ok');
+}
+
 let logSeq=0,logTimer=null,logFilter='';
 function startLogPoll(){stopLogPoll();pollLogs();logTimer=setInterval(pollLogs,2000);}
 function stopLogPoll(){if(logTimer){clearInterval(logTimer);logTimer=null;}}
@@ -2331,5 +2522,11 @@ applyI18n();
 (function(){const x=document.getElementById('alertbar-x');
   if(x)x.onclick=function(){alertOff=true;document.getElementById('alertbar').style.display='none';toast(t('ov.alerts_off'),'ok');};})();
 document.getElementById('logbox').innerHTML=logEmptyBox();
+// 事件行里的客户端 ID 可点，直接打开客户端详情抽屉
+document.getElementById('evbox').addEventListener('click',function(ev){
+  const el=ev.target.closest('.ev-cl');
+  if(el)openClient(el.dataset.cid);
+});
 setRefresh(REFRESH_S);setRange(chartRange);fetchStats();
+evStart();
 window.addEventListener('resize',redrawChart);

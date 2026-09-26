@@ -153,6 +153,7 @@
       <button data-pane="traffic" data-i18n="tab.traffic">-</button>
       <button data-pane="status" data-i18n="tab.status">-</button>
       <button data-pane="diag" data-i18n="tab.diag">-</button>
+      <button data-pane="events" data-i18n="tab.ev">-</button>
       <button data-pane="logs" data-i18n="tab.logs">-</button>
       <button data-pane="settings" data-i18n="tab.settings">-</button>
     </div>
@@ -306,6 +307,25 @@
         </div>
         <div class="dg-grid" id="dg-grid"></div>
       </div>
+    </div>
+
+    <!-- 事件流：默认走 SSE 长连接（/api/events，先回放积压再转实时），
+         启用 -web-auth 时浏览器 EventSource 带不了 Authorization 头、连续失败两次后
+         自动回退成 2.5s 一次的增量快照轮询；事件本体在后端内存环形缓冲里 -->
+    <div class="pane" id="pane-events">
+      <div class="toolbar">
+        <span class="ev-live" id="ev-live"><span class="ev-pulse"></span><span id="ev-live-t">-</span></span>
+        <div class="seg" id="ev-seg">
+          <button class="on" data-evlvl="all" onclick="setEvLvl('all')" data-i18n="ev.all">-</button>
+          <button data-evlvl="info" onclick="setEvLvl('info')" data-i18n="ev.info">-</button>
+          <button data-evlvl="warn" onclick="setEvLvl('warn')" data-i18n="ev.warn">-</button>
+          <button data-evlvl="error" onclick="setEvLvl('error')" data-i18n="ev.error">-</button>
+        </div>
+        <span class="spacer"></span>
+        <span class="dim mono" id="ev-count"></span>
+        <button class="btn ghost sm" onclick="clearEvents()" data-i18n="ev.clear">-</button>
+      </div>
+      <div id="evbox" class="evbox"></div>
     </div>
 
     <div class="pane" id="pane-logs">

@@ -433,6 +433,9 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		json.NewEncoder(w).Encode(logRing.snapshot(after))
 	}))
 
+	// 事件流：SSE 长连接，?stream=0 时为一次性增量 JSON 快照（见 handleEvents）
+	mux.HandleFunc("/api/events", auth(handleEvents))
+
 	// 吞吐/RTT 趋势：range=2m 取 1 秒粒度的最近 2 分钟，1h|24h 取分钟粒度长周期。
 	// 三者共用 trendSnapshotJSON，前端只按 t/up/down/rtt 读取。
 	mux.HandleFunc("/api/trend", auth(func(w http.ResponseWriter, r *http.Request) {
@@ -520,16 +523,19 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 				return
 			}
 			log.Infof("[WebUI] Log level set to %s", currentLogLevelName())
+			evBus.emit("loglevel", "info", "", currentLogLevelName())
 			writeOK(w)
 
 		case cli != nil && req.Action == "reconnect":
 			cli.ForceReconnect()
 			log.Infof("[WebUI] Forced reconnect triggered")
+			evBus.emit("reconnect", "warn", "", "all tunnels torn down and re-dialed")
 			writeOK(w)
 
 		case req.Action == "gc":
 			debug.FreeOSMemory()
 			log.Infof("[WebUI] Manual GC triggered")
+			evBus.emit("gc", "info", "", "manual memory reclaim")
 			writeOK(w)
 
 		case req.Action == "save" || req.Action == "save_apply":
@@ -558,6 +564,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 				}
 			}
 			log.Infof("[WebUI] Config %s (needs_restart: %v)", req.Action, needsRestart)
+			evBus.emit("config", "info", "", fmt.Sprintf("%s (needs_restart: %v)", req.Action, needsRestart))
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "needs_restart": needsRestart})
 

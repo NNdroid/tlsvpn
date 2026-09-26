@@ -1251,8 +1251,10 @@ func (c *Client) Run(ctx context.Context) {
 						ci.state.Store("retrying")
 					}
 					log.Warnf("[Conn %d] Tunnel down: %v. Reconnecting in %s...", connIndex, err, delay)
+					evBus.emit("down", "warn", "", fmt.Sprintf("conn %d: %s", connIndex, err))
 				} else {
 					log.Infof("[Conn %d] Tunnel closed, reconnecting in %s...", connIndex, delay)
+					evBus.emit("down", "info", "", fmt.Sprintf("conn %d closed by peer", connIndex))
 				}
 				attempt++
 				// 退避等待：热更/强制重连会唤醒并重置退避
@@ -1788,6 +1790,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// The first live backend publishes UP; only the final backend loss publishes
 	// DOWN. notifyNetifdUp itself deduplicates identical address/gateway updates.
 	liveNow := atomic.AddInt32(&c.liveConns, 1)
+	evBus.emit("up", "info", "", fmt.Sprintf("conn %d linked", connIndex))
 	if c.usesNetifd() {
 		if err := c.notifyNetifdUp(resp.IPv4, resp.IPv6, resp.GwV4, resp.GwV6); err != nil {
 			atomic.AddInt32(&c.liveConns, -1)
