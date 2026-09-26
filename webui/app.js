@@ -1456,8 +1456,8 @@ function renderConnsTable(data,fresh){
   }
   const f=Q.conns;
   const all=rows.length;
-  // 质量指标与导出基于过滤前的全量行：过滤条件不该改变统计口径
-  exportCSV('conns');
+  // 质量指标基于过滤前的全量行：过滤条件不该改变统计口径。
+  // 注意这里绝不能调 exportCSV —— 本函数每 2 秒跑一次，导出只能由按钮触发
   renderConnQuality(data,rttStats(rows));
   rows=sortRows('conns',rows);
   syncSortUI('conns');
