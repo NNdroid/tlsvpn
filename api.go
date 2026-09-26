@@ -433,14 +433,18 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		json.NewEncoder(w).Encode(logRing.snapshot(after))
 	}))
 
-	// 长周期吞吐/RTT 趋势（range=1h|24h，默认 1h）
+	// 吞吐/RTT 趋势：range=2m 取 1 秒粒度的最近 2 分钟，1h|24h 取分钟粒度长周期。
+	// 三者共用 trendSnapshotJSON，前端只按 t/up/down/rtt 读取。
 	mux.HandleFunc("/api/trend", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		minutes := 60
-		if r.URL.Query().Get("range") == "24h" {
-			minutes = 1440
+		switch r.URL.Query().Get("range") {
+		case "2m":
+			json.NewEncoder(w).Encode(dailyTraffic.RecentSnapshot())
+		case "24h":
+			json.NewEncoder(w).Encode(dailyTraffic.TrendSnapshot(1440))
+		default:
+			json.NewEncoder(w).Encode(dailyTraffic.TrendSnapshot(60))
 		}
-		json.NewEncoder(w).Encode(dailyTraffic.TrendSnapshot(minutes))
 	}))
 
 	// Prometheus 文本格式指标

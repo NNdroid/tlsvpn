@@ -35,6 +35,10 @@ const (
 	defaultTrafficFile   = "tlsvpn-traffic.json"
 	trendCap             = 1440 // 1 分钟粒度 × 1440 = 24 小时（仅内存，不持久化）
 	trendAggThreshold    = 120  // 趋势点数超过该值时按 5 分钟聚合，控制载荷
+	// recentCap/recentSampleInterval：1 秒粒度 × 120 = 2 分钟。面板的 2 分钟视图
+	// 由此缓冲供数，任何设备刚打开就能看到完整的最近 2 分钟，而不是从零攒 60 次轮询。
+	recentCap            = 120
+	recentSampleInterval = time.Second
 )
 
 type trafficDay struct {
@@ -58,10 +62,12 @@ type trafficDayJSON struct {
 	Down uint64 `json:"down"`
 }
 
-// trendPoint 长周期趋势的一个采样点。Up/Down 是该分钟的平均速率（B/s），
-// Rtt 是该分钟内各物理连接 RTT 的均值（毫秒，无采样回调时缺位）。
+// trendPoint 趋势的一个采样点。Up/Down 是该采样间隔的平均速率（B/s），
+// Rtt 是该间隔内各物理连接 RTT 的均值（毫秒，无采样回调时缺位）。
+// TUnix 的对齐粒度由产出方决定：1 小时/24 小时视图对齐到分钟，
+// 2 分钟视图对齐到秒，所以字段名不带粒度含义。
 type trendPoint struct {
-	Minute  int64   `json:"t"`             // 对齐到分钟的 Unix 秒
+	TUnix   int64   `json:"t"`             // Unix 秒
 	UpBps   float64 `json:"up"`            // 字节/秒
 	DownBps float64 `json:"down"`          // 字节/秒
 	RttMs   float64 `json:"rtt,omitempty"` // 毫秒
@@ -105,6 +111,10 @@ type TrafficAccounting struct {
 	// 重启从零积累；RTT 由 mode 侧注册的采样回调提供（无则缺位）。
 	trend []trendPoint
 	rttFn func() float64
+
+	// recent：1 秒粒度 × 120 = 2 分钟的短缓冲，供面板 2 分钟视图。与 trend 同为
+	// 仅内存、重启清零，但采样频率高 60 倍，所以单独一个环形而不是复用 trend。
+	recent []trendPoint
 
 	// 每客户端记账：mode 侧注册采样回调返回各客户端的会话累计字节
 	// （up=Rx、down=Tx），flush 时做差分入桶。会话重建导致计数器回绕时
@@ -174,6 +184,7 @@ func (t *TrafficAccounting) OnConfig(cfg *Config) {
 		t.clientFile = clientFile
 		t.loadLocked()
 		go t.loop()
+		go t.recentLoop()
 	} else {
 		t.file = file // 热更：下一轮采样落到新路径
 		t.clientFile = clientFile
@@ -196,6 +207,69 @@ func (t *TrafficAccounting) loop() {
 		time.Sleep(trafficFlushInterval)
 		t.flush(time.Now())
 	}
+}
+
+// rttNow 取一次 RTT 均值。回调指针在锁内取出、在锁外调用，避免 rttFn 阻塞时
+// 连带卡住 mu 的其他持有者。
+func (t *TrafficAccounting) rttNow() float64 {
+	t.mu.Lock()
+	fn := t.rttFn
+	t.mu.Unlock()
+	if fn == nil {
+		return 0
+	}
+	return fn()
+}
+
+// appendRecent 追加一个 1 秒粒度的吞吐点，超出 recentCap 的旧点滚动淘汰。
+func (t *TrafficAccounting) appendRecent(p trendPoint) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.recent = append(t.recent, p)
+	if len(t.recent) > recentCap {
+		t.recent = t.recent[len(t.recent)-recentCap:]
+	}
+}
+
+// recentLoop 按秒采样吞吐进 recent 缓冲。独立于 60s 的 flush：面板 2 分钟视图
+// 需要秒级分辨率，而复用 flush 只能每 60 秒得一个点。用真实的相邻采样间隔
+// 做除数而不是假设 1 秒，这样采样协程被调度延迟时速率也不会被放大。
+// 计数器回绕（会话重建导致累计归零）那一轮跳过，与 flush 同策略：宁可少记不多记。
+func (t *TrafficAccounting) recentLoop() {
+	var last time.Time
+	var lastUp, lastDown uint64
+	for {
+		time.Sleep(recentSampleInterval)
+		now := time.Now()
+		if last.IsZero() {
+			last = now
+			continue
+		}
+		up, down := t.up.Load(), t.down.Load()
+		if up >= lastUp && down >= lastDown {
+			sec := now.Sub(last).Seconds()
+			if sec > 0 {
+				t.appendRecent(trendPoint{
+					TUnix:   now.Unix(),
+					UpBps:   float64(up-lastUp) / sec,
+					DownBps: float64(down-lastDown) / sec,
+					RttMs:   t.rttNow(),
+				})
+			}
+		}
+		last = now
+		lastUp, lastDown = up, down
+	}
+}
+
+// RecentSnapshot 返回最近 2 分钟的每秒吞吐/RTT 点。与 TrendSnapshot 共用
+// trendPoint 和 trendSnapshotJSON，前端按 t/up/down/rtt 读取，形状一致。
+func (t *TrafficAccounting) RecentSnapshot() trendSnapshotJSON {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := trendSnapshotJSON{StepSec: 1, Points: make([]trendPoint, len(t.recent))}
+	copy(out.Points, t.recent)
+	return out
 }
 
 // flush 采样一轮：把计数器增量累进当天桶与趋势缓冲，跨天则轮转，
@@ -229,10 +303,10 @@ func (t *TrafficAccounting) flush(now time.Time) {
 	thisMinute := now.Unix() / 60
 	lastMinute := int64(-1)
 	if n := len(t.trend); n > 0 {
-		lastMinute = t.trend[n-1].Minute / 60
+		lastMinute = t.trend[n-1].TUnix / 60
 	}
 	if dUp > 0 || dDown > 0 || thisMinute != lastMinute {
-		p := trendPoint{Minute: thisMinute * 60, UpBps: float64(dUp) / 60, DownBps: float64(dDown) / 60}
+		p := trendPoint{TUnix: thisMinute * 60, UpBps: float64(dUp) / 60, DownBps: float64(dDown) / 60}
 		if t.rttFn != nil {
 			p.RttMs = t.rttFn()
 		}
@@ -460,7 +534,7 @@ func (t *TrafficAccounting) TrendSnapshot(minutes int) trendSnapshotJSON {
 			end = len(raw)
 		}
 		group := raw[i:end]
-		p := trendPoint{Minute: group[0].Minute}
+		p := trendPoint{TUnix: group[0].TUnix}
 		for _, g := range group {
 			p.UpBps += g.UpBps
 			p.DownBps += g.DownBps

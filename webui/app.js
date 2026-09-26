@@ -343,6 +343,9 @@ function drawChart(){
   const old=chartState['chart'];
   const hover=(old&&old.hover>=0&&old.hover<n)?old.hover:-1;
   renderLineChart('chart',pts,{max:Math.max(1,...txHist,...rxHist,1),perSec:true,hover:hover});
+  // 本地轮询视图没有 RTT 数据，图例一并收起
+  const lg=document.getElementById('legend-rtt');
+  if(lg)lg.style.display='none';
 }
 
 // 刷新间隔以秒存储（兼容旧版存毫秒的值）；面板顶栏为分段按钮
@@ -357,7 +360,9 @@ function setRefresh(sec){REFRESH_S=sec;REFRESH=sec*1000;localStorage.setItem('tl
   setSeg('refresh-seg',String(sec));
   document.getElementById('footer-text').textContent=t('footer').replace('{n}',sec);
   restartLoop();}
-function restartLoop(){if(statsTimer)clearInterval(statsTimer);statsTimer=setInterval(fetchStats,REFRESH);}
+function restartLoop(){if(statsTimer)clearInterval(statsTimer);statsTimer=setInterval(fetchStats,REFRESH);
+  // 2 分钟视图跟着面板刷新周期走，刷新间隔改了也要同步换掉趋势定时器
+  if(chartRange==='2m')startTrendTimer();}
 
 // 用带凭据的地址（http://admin:xx@host/ 打开面板）时，Chrome 拒绝构造任何 fetch——
 // "Request cannot be constructed from a URL that includes credentials"——于是每一轮轮询都抛
@@ -991,7 +996,7 @@ async function fetchStats(){
     prev=cur;lastSpeeds=speeds;
     txHist.push(tTxS);rxHist.push(tRxS);txTimes.push(Date.now());
     if(txHist.length>MAXPTS){txHist.shift();rxHist.shift();txTimes.shift();}
-    if(chartRange==='2m')drawChart(); // 趋势视图下画布由 drawTrendChart 接管
+    if(chartRange==='2m'&&!trendData)drawChart(); // 冷启动兜底；拿到服务端 2 分钟缓存后由 drawTrendChart 接管
 
     document.getElementById('active-clients').innerText=data.active_clients;
     document.getElementById('conns-sub').innerText=t('kpi.tcp')+': '+tConns+(data.mode==='client'?' / '+((data.conns||[]).length):'');
@@ -1717,44 +1722,63 @@ function applyTheme(){
   setSeg('theme-seg',THEME);
 }
 function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();
-  if(chartRange!=="2m"&&trendData){drawTrendChart(trendData.points||[]);}else if(txHist.length||rxHist.length){drawChart();}
+  redrawChart();
   if(lastTraffic)drawTrafficChart(lastTraffic.daily||[]);}
-matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();if(txHist.length||rxHist.length)drawChart();}});
+matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system'){applyTheme();redrawChart();}});
 
 ['clients','conns','macs'].forEach(attachSearch);
-bindChartHover('chart',function(){if(chartRange==='2m'){drawChart();}else if(trendData){drawTrendChart(trendData.points||[]);}});
+bindChartHover('chart',redrawChart);
 bindChartHover('traffic-chart',function(){renderTrafficView();});
 let chartRange='2m',trendTimer=null,trendData=null;
+// 2 分钟视图的数据由服务端缓存：TrafficAccounting 里 1 秒粒度 × 120 的环形缓冲
+// 经 /api/trend?range=2m 吐出，任何设备刚打开面板就拿到完整的最近 2 分钟，
+// 不必再靠本机逐次轮询攒 60 个样本。1h/24h 是分钟粒度、变化慢，仍保持低频。
+function trendPollMs(){return chartRange==='2m'?REFRESH:30000;}
+function startTrendTimer(){
+  if(trendTimer){clearInterval(trendTimer);trendTimer=null;}
+  trendTimer=setInterval(fetchTrend,trendPollMs());
+}
 function setRange(v){
   chartRange=v;setSeg('range-seg',v);
+  trendData=null; // 先清掉，切换时不会画出上一个区间的数据
   if(trendTimer){clearInterval(trendTimer);trendTimer=null;}
-  const rttLegend=document.getElementById('legend-rtt');
-  if(v==='2m'){
-    if(rttLegend)rttLegend.style.display='none';
-    drawChart();
-    return;
-  }
+  redrawChart(); // 立刻换视图，不留上一次区间的旧画面等下一轮 fetchTrend
   fetchTrend();
-  trendTimer=setInterval(fetchTrend,30000); // 趋势变化慢，独立低频拉取
+  startTrendTimer();
 }
 async function fetchTrend(){
+  const want=chartRange;
   try{
-    const res=await fetch(url('/api/trend?range='+(chartRange==='24h'?'24h':'1h')),AUTH_HDR);
+    const res=await fetch(url('/api/trend?range='+want),AUTH_HDR);
     if(!res.ok)return;
-    trendData=await res.json();
-    if(chartRange!=='2m')drawTrendChart(trendData.points||[]);
+    const d=await res.json();
+    if(chartRange!==want)return; // 请求在途时切了区间，这次响应不再上画
+    // 旧服务端不认识 range=2m，会退回分钟粒度：不采纳，继续用本地轮询增量
+    if(want==='2m'&&d.step_sec!==1){trendData=null;return;}
+    trendData=d;
+    drawTrendChart(d.points||[]);
   }catch(e){}
+}
+// 图表重绘统一入口：服务端数据到手就用它，冷启动还没拿到时退回本地轮询增量
+function redrawChart(){
+  if(trendData&&trendData.points&&trendData.points.length){drawTrendChart(trendData.points||[]);return;}
+  if(txHist.length||rxHist.length)drawChart();
 }
 function drawTrendChart(points){
   const arr=points||[];
+  // 1 秒粒度下分钟级标签会大面积重复，保留到秒
+  const fine=trendData&&trendData.step_sec<=1;
   const pts=arr.map((p,i)=>({
-    x:arr.length>1?i/(arr.length-1):0,up:p.up,down:p.down,rtt:p.rtt||0,label:fmtHM(p.t*1000).slice(0,5)
+    x:arr.length>1?i/(arr.length-1):0,up:p.up,down:p.down,rtt:p.rtt||0,label:fmtHM(p.t*1000).slice(0,fine?8:5)
   }));
   let max=1,maxRtt=0;
   pts.forEach(p=>{if(p.up>max)max=p.up;if(p.down>max)max=p.down;if(p.rtt>maxRtt)maxRtt=p.rtt;});
   const old=chartState['chart'];
   const hover=(old&&old.hover>=0&&old.hover<pts.length)?old.hover:-1;
   renderLineChart('chart',pts,{max:max,maxRtt:maxRtt,perSec:true,hover:hover});
+  // RTT 图例跟随数据里是否真有 RTT，切区间时一并复位
+  const lg=document.getElementById('legend-rtt');
+  if(lg)lg.style.display=maxRtt>0?'':'none';
 }
 
 let prev={},lastT=0;const txHist=[],rxHist=[],txTimes=[];const MAXPTS=60;
@@ -1763,5 +1787,5 @@ applyI18n();
 (function(){const x=document.getElementById('alertbar-x');
   if(x)x.onclick=function(){alertOff=true;document.getElementById('alertbar').style.display='none';toast(t('ov.alerts_off'),'ok');};})();
 document.getElementById('logbox').innerHTML=logEmptyBox();
-setRefresh(REFRESH_S);fetchStats();
-window.addEventListener('resize',function(){if(chartRange==='2m'){drawChart();}else if(trendData){drawTrendChart(trendData.points||[]);}});
+setRefresh(REFRESH_S);setRange(chartRange);fetchStats();
+window.addEventListener('resize',redrawChart);

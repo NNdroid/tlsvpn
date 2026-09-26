@@ -186,6 +186,65 @@ func TestTrafficTrendRingAndAggregation(t *testing.T) {
 	}
 }
 
+func TestTrafficRecentRingAndSnapshot(t *testing.T) {
+	ta := NewTrafficAccounting()
+	if snap := ta.RecentSnapshot(); len(snap.Points) != 0 || snap.StepSec != 1 {
+		t.Fatalf("空缓冲应返回 1s 步长的空点列: %+v", snap)
+	}
+	base := time.Date(2026, 9, 25, 9, 0, 0, 0, time.Local)
+	// 灌 recentCap+30 个点，超出的旧点应被滚动淘汰
+	for i := 0; i < recentCap+30; i++ {
+		ta.appendRecent(trendPoint{
+			TUnix:   base.Add(time.Duration(i) * time.Second).Unix(),
+			UpBps:   float64(i),
+			DownBps: float64(i) * 2,
+			RttMs:   12,
+		})
+	}
+	snap := ta.RecentSnapshot()
+	if snap.StepSec != 1 {
+		t.Fatalf("2 分钟视图步长应为 1 秒, got %d", snap.StepSec)
+	}
+	if len(snap.Points) != recentCap {
+		t.Fatalf("recent 环形应封顶 %d 点, got %d", recentCap, len(snap.Points))
+	}
+	// 最旧的 30 个点应被淘汰，剩下的从 i=30 开始
+	if snap.Points[0].TUnix != base.Add(30*time.Second).Unix() || snap.Points[0].UpBps != 30 {
+		t.Fatalf("最旧点未被滚动淘汰: %+v", snap.Points[0])
+	}
+	if want := float64(recentCap + 29); snap.Points[recentCap-1].UpBps != want {
+		t.Fatalf("最新点应保留: got %v want %v", snap.Points[recentCap-1].UpBps, want)
+	}
+	for i := 1; i < len(snap.Points); i++ {
+		if snap.Points[i].TUnix <= snap.Points[i-1].TUnix {
+			t.Fatalf("TUnix 应单调递增: %d -> %d", snap.Points[i-1].TUnix, snap.Points[i].TUnix)
+		}
+	}
+	if snap.Points[0].RttMs != 12 {
+		t.Fatalf("rtt 采样缺失: %v", snap.Points[0].RttMs)
+	}
+	// 快照必须是副本，调用方改动不得回写内部缓冲
+	snap.Points[0].UpBps = -1
+	if got := ta.RecentSnapshot().Points[0].UpBps; got != 30 {
+		t.Fatalf("RecentSnapshot 返回了内部切片, UpBps=%v", got)
+	}
+	// recent 与分钟粒度的 trend 各自独立
+	if got := len(ta.TrendSnapshot(60).Points); got != 0 {
+		t.Fatalf("recent 采样不应污染 trend, got %d 点", got)
+	}
+}
+
+func TestTrafficRttNowSampler(t *testing.T) {
+	ta := NewTrafficAccounting()
+	if got := ta.rttNow(); got != 0 {
+		t.Fatalf("无采样回调时应返回 0, got %v", got)
+	}
+	ta.SetRTTSampler(func() float64 { return 25 })
+	if got := ta.rttNow(); got != 25 {
+		t.Fatalf("应返回回调值 25, got %v", got)
+	}
+}
+
 func TestTrafficPerClientDailyBuckets(t *testing.T) {
 	ta := NewTrafficAccounting()
 	ta.OnConfig(trafficTestCfg(30, ""))
