@@ -154,6 +154,8 @@ function applyI18n(){
   setSeg('refresh-seg',String(REFRESH_S));
   setSeg('range-seg',chartRange);
   applyTheme();
+  // 下拉框文案取自 option 文本，换语言后要跟着重画
+  syncSelects();
 }
 function setLang(v){localStorage.setItem('tlsvpn_lang',v);location.reload();}
 function fmtDur(s){s=Math.floor(s);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
@@ -186,6 +188,8 @@ function showPane(id){
   document.getElementById('pane-'+id).classList.add('on');
   if(id==='logs')startLogPoll();else stopLogPoll();
   if(id==='settings')loadConfig();
+  // 刚显示的面板之前在 display:none 里量不到宽度，按钮的 min-width 还是 0
+  syncSelects();
 }
 document.getElementById('tabs').addEventListener('click',function(ev){
   const btn=ev.target.closest('button');if(!btn)return;
@@ -542,7 +546,8 @@ function renderPager(key,total){
       '<span class="pg-of">'+tpl(t('page.of'),{x:c.page,y:c.pages})+'</span>'+
       nextBtn+
     '</span>';
-  if(el.innerHTML!==html)el.innerHTML=html;
+  // 工具条内容变了就整块重画；重画出来的原生 select 要重新包成自绘下拉框
+  if(el.innerHTML!==html){el.innerHTML=html;syncSelects();}
 }
 function goPage(key,p){
   pageConf(key).page=p;
@@ -563,6 +568,282 @@ function tpl(s,o){
   for(const k in o)out=out.split('{'+k+'}').join(o[k]);
   return out;
 }
+// ---------- 自定义下拉框 ----------
+// 原生 <select> 的弹层是操作系统画的，CSS 染不上去（暗色面板配一个白底黑字菜单）。
+// 做法：select 留在 DOM 里继续当唯一取值来源（.dl-native 只把它缩成 1px 藏起来），
+// 外面套自绘的触发按钮和菜单；选中项只写 select.value 再派发一次原生 change 事件，
+// 所以各处 onchange（setLogLevel / renderTrafficView / setPageSize）和程序化写值
+// （服务端每轮轮询回写 log_level）一行都不用改。
+const DL=new WeakMap();
+let dlCur=null;
+const DL_ARROW='<svg width="10" height="6" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+// 包起来：外壳 + 触发按钮（当前值 + chevron）+ 菜单；原生 select 缩成 1px 藏在里面
+function buildSelect(sel){
+  if(DL.has(sel))return;
+  const host=sel.parentNode;
+  const wrap=document.createElement('div');
+  wrap.className='dl';
+  // select 上的内联宽度约束（如 max-width:260px）搬给外壳，否则外壳会塌成按钮内容宽
+  const stStyle=sel.getAttribute('style');
+  if(stStyle)wrap.setAttribute('style',stStyle);
+  host.insertBefore(wrap,sel);
+  wrap.appendChild(sel);
+  sel.classList.add('dl-native');
+  sel.tabIndex=-1;
+  sel.setAttribute('aria-hidden','true');
+  const btn=document.createElement('div');
+  // 复用 select 上的附加类（pg-sel 等）拿到它们的尺寸规则，剥掉 .sel 与 .dl-native 本身
+  let bcls='dl-btn';
+  sel.classList.forEach(function(c){if(c!=='sel'&&c!=='dl-native')bcls+=' '+c;});
+  btn.className=bcls;
+  btn.setAttribute('role','combobox');
+  btn.setAttribute('aria-haspopup','listbox');
+  btn.setAttribute('aria-expanded','false');
+  btn.tabIndex=0;
+  const lab=document.createElement('span');
+  lab.className='dl-lab';
+  // sz 是占位撑子：装最宽的那条选项文本，让按钮宽度跟最宽项走、切选项时不左右抖；
+  // cur 才是真正显示当前值的文本，绝对定位叠在 sz 上面
+  const sz=document.createElement('span');
+  sz.className='dl-sz';
+  const cur=document.createElement('span');
+  cur.className='dl-cur';
+  lab.appendChild(sz);
+  lab.appendChild(cur);
+  btn.appendChild(lab);
+  const ar=document.createElement('span');
+  ar.className='dl-arrow';
+  ar.innerHTML=DL_ARROW;
+  btn.appendChild(ar);
+  wrap.appendChild(btn);
+  const menu=document.createElement('div');
+  menu.className='dl-menu';
+  menu.setAttribute('role','listbox');
+  menu.setAttribute('aria-hidden','true');
+  wrap.appendChild(menu);
+  const st={wrap:wrap,host:host&&host.tagName==='LABEL'?host:null,btn:btn,cur:cur,sz:sz,menu:menu,items:[],active:0};
+  DL.set(sel,st);
+  btn.addEventListener('click',function(ev){ev.stopPropagation();dlToggle(sel);});
+  btn.addEventListener('keydown',function(ev){dlKey(sel,ev);});
+  menu.addEventListener('click',function(ev){
+    const d=ev.target.closest('.dl-opt');
+    if(d)dlPick(sel,parseInt(d.getAttribute('data-i'),10));
+  });
+  // 原生 change 时重建菜单与文案（含我们派发的那一次）
+  sel.addEventListener('change',function(){syncSelect(sel);});
+  // 外层若是 <label>，点标签文字也要能开合弹层
+  if(st.host)st.host.addEventListener('click',function(ev){
+    if(wrap.contains(ev.target))return;
+    ev.preventDefault();
+    dlToggle(sel);
+    btn.focus();
+  });
+  syncSelect(sel);
+}
+
+// 以原生 select 为准重建菜单与触发器文案：选项列表和当前值都可能被外部改写过
+function syncSelect(sel){
+  const st=DL.get(sel);
+  if(!st)return;
+  const ops=sel.options;
+  const n=ops.length;
+  let cur=sel.selectedIndex;
+  if(cur<0)cur=0;
+  if(cur>n-1)cur=n-1;
+  st.items=[];
+  let html='';
+  for(let i=0;i<n;i++){
+    const op=ops[i];
+    let c='dl-opt';
+    if(i===cur)c+=' on';
+    if(op.disabled)c+=' disabled';
+    const asel=i===cur?'true':'false';
+    html+='<div class="'+c+'" role="option" aria-selected="'+asel+'" data-i="'+i+'"><span class="dl-tx">'+esc(op.textContent||op.value||'')+'</span></div>';
+    st.items.push({v:op.value,off:op.disabled});
+  }
+  st.menu.innerHTML=html;
+  let txt='';
+  if(n>0)txt=ops[cur].textContent||ops[cur].value;
+  st.cur.textContent=txt||'-';
+  // 撑子装最宽那一条的文本，按钮宽度因此固定，切选项时右侧控件不会跟着挪
+  let wide='';
+  for(let j=0;j<n;j++){
+    const w=ops[j].textContent||ops[j].value||'';
+    if(dlW(w)>dlW(wide))wide=w;
+  }
+  st.sz.textContent=wide;
+  st.active=cur;
+  if(dlCur===sel)dlPlace(sel);
+}
+
+// 扫一遍所有原生 select：没包的包起来，已经包的按当前选项与值重建
+function syncSelects(){
+  document.querySelectorAll('select.sel').forEach(function(sel){
+    if(DL.has(sel))syncSelect(sel);
+    else buildSelect(sel);
+  });
+}
+
+// 弹层用 fixed 定位：表格容器的 overflow-x 会把 absolute 菜单裁掉；越界就翻转/右移
+function dlPlace(sel){
+  const st=DL.get(sel);
+  if(!st)return;
+  const b=st.btn.getBoundingClientRect();
+  st.menu.style.minWidth=Math.round(b.width)+'px';
+  const mw=st.menu.getBoundingClientRect().width;
+  const mh=st.menu.getBoundingClientRect().height;
+  let left=b.left;
+  if(left+mw>window.innerWidth-8)left=Math.max(8,window.innerWidth-8-mw);
+  let top=b.bottom+6;
+  if(top+mh>window.innerHeight-8&&b.top-6-mh>8)top=Math.max(8,b.top-6-mh);
+  st.menu.style.left=Math.round(left)+'px';
+  st.menu.style.top=Math.round(top)+'px';
+}
+
+function dlToggle(sel){
+  if(dlCur===sel)dlClose(sel);
+  else dlOpen(sel);
+}
+
+function dlOpen(sel){
+  if(dlCur&&dlCur!==sel)dlClose(dlCur);
+  const st=DL.get(sel);
+  if(!st)return;
+  const it=st.active>=0?st.items[st.active]:null;
+  if(!it||it.off)st.active=dlNext(st,st.active,1);
+  dlPlace(sel);
+  st.btn.classList.add('on');
+  st.menu.classList.add('on');
+  st.btn.setAttribute('aria-expanded','true');
+  st.menu.setAttribute('aria-hidden','false');
+  dlHot(sel,st.active);
+  dlCur=sel;
+}
+
+function dlClose(sel){
+  const st=DL.get(sel);
+  if(st){
+    st.btn.classList.remove('on');
+    st.menu.classList.remove('on');
+    st.btn.setAttribute('aria-expanded','false');
+    st.menu.setAttribute('aria-hidden','true');
+  }
+  if(dlCur===sel)dlCur=null;
+}
+
+// 选中：写回原生 select.value，再派一次 change 让原有 onchange 生效
+function dlPick(sel,i){
+  const st=DL.get(sel);
+  if(!st)return;
+  dlClose(sel);
+  const it=st.items[i];
+  if(!it||it.off)return;
+  sel.value=it.v;
+  sel.dispatchEvent(new Event('change',{bubbles:true}));
+  st.btn.focus();
+}
+
+// 从 i 出发按 dir 找下一个可用项（跳过 disabled），越过末端回绕
+function dlNext(st,i,dir){
+  const n=st.items.length;
+  if(n===0)return -1;
+  if(i<0)i=dir>0?n-1:0;
+  for(let k=1;k<=n;k++){
+    let j=(i+dir*k)%n;
+    if(j<0)j+=n;
+    if(!st.items[j].off)return j;
+  }
+  return -1;
+}
+
+// 粗估文本宽度：中日韩全角字符按两格计。只做同组比较，不出回流
+function dlW(s){
+  let n=0;
+  for(let k=0;k<s.length;k++)n+=s.charCodeAt(k)>0xff?2:1;
+  return n;
+}
+
+// 键盘高亮移动；滚出菜单可视区时把它滚进来看见
+function dlHot(sel,i){
+  const st=DL.get(sel);
+  if(!st)return;
+  const ops=st.menu.querySelectorAll('.dl-opt');
+  ops.forEach(function(o,k){o.classList.toggle('hot',k===i);});
+  if(i<0)return;
+  const o=ops[i];
+  if(!o)return;
+  const r=o.getBoundingClientRect();
+  const m=st.menu.getBoundingClientRect();
+  if(r.top<m.top||r.bottom>m.bottom)o.scrollIntoView({block:'nearest'});
+}
+
+// 触发器上的键盘：上下/Home/End 移动，Enter/Space 展开或选中，Esc 收起，Tab 收起
+function dlKey(sel,ev){
+  const st=DL.get(sel);
+  if(!st)return;
+  const open=dlCur===sel;
+  if(ev.key==='ArrowDown'||ev.key==='ArrowUp'){
+    ev.preventDefault();
+    if(!open){dlOpen(sel);return;}
+    // 要记下这次移动，否则 Enter 还是选中原来那一项
+    st.active=dlNext(st,st.active,ev.key==='ArrowUp'?-1:1);
+    dlHot(sel,st.active);
+    return;
+  }
+  if(ev.key==='Home'){
+    if(open){st.active=dlNext(st,-1,1);dlHot(sel,st.active);}
+    ev.preventDefault();
+    return;
+  }
+  if(ev.key==='End'){
+    if(open){st.active=dlNext(st,0,-1);dlHot(sel,st.active);}
+    ev.preventDefault();
+    return;
+  }
+  if(ev.key==='Enter'||ev.key===' '){
+    ev.preventDefault();
+    if(open)dlPick(sel,st.active);
+    else dlOpen(sel);
+    return;
+  }
+  if(ev.key==='Escape'&&open)ev.preventDefault();
+  if(ev.key==='Tab'&&open)dlClose(sel);
+}
+
+// 点在控件外就收起；外层 <label> 的文字算控件的一部分
+function dlOutside(ev){
+  if(!dlCur)return;
+  const sel=dlCur;
+  const st=DL.get(sel);
+  if(st){
+    if(st.wrap.contains(ev.target))return;
+    if(st.host&&st.host.contains(ev.target))return;
+  }
+  dlClose(sel);
+}
+
+// 页面滚动时 fixed 弹层不会跟着动，收起比留一个错位菜单强；菜单自己滚动不算
+function dlScroll(ev){
+  if(!dlCur)return;
+  const st=DL.get(dlCur);
+  if(st&&ev&&ev.target===st.menu)return;
+  dlClose(dlCur);
+}
+
+// Esc 收起（触发器没聚焦时也要有效）；Tab 让焦点正常走
+document.addEventListener('keydown',function(ev){
+  if(ev.key==='Escape'&&dlCur){
+    const sel=dlCur;
+    const st=DL.get(sel);
+    dlClose(sel);
+    if(st)st.btn.focus();
+  }
+});
+document.addEventListener('mousedown',dlOutside);
+window.addEventListener('scroll',dlScroll,true);
+window.addEventListener('resize',function(){if(dlCur)dlClose(dlCur);});
+
 // ---------- 表头排序：点击 <th data-sort> 循环 降序 → 升序 → 取消 ----------
 // 数值列按数值比较、其余按字符串；速率列用最近一次快照算出的差分
 const SORTCOLS={
@@ -682,7 +963,10 @@ async function fetchStats(){
     if(chip)chip.classList.toggle('client',data.mode!=='server');
     document.getElementById('ver').innerText=data.version||'-';
     document.getElementById('uptime').innerText=fmtDur(data.uptime_sec||0);
-    document.getElementById('loglevel').value=data.log_level||'info';
+    // 级别来自服务端：直接写 value 不会触发 change，要顺手刷新自绘下拉框的文案
+    const lvSel=document.getElementById('loglevel');
+    lvSel.value=data.log_level||'info';
+    syncSelect(lvSel);
     document.getElementById('tls-flag').innerText=location.protocol==='https:'?'HTTPS':t('tls_http');
 
     // 速率/总量统计覆盖全部客户端；过滤只作用于表格行
@@ -990,6 +1274,7 @@ function syncTrafficClients(){
     sel.innerHTML=opts;
   }
   sel.value=want;
+  syncSelect(sel);
 }
 function renderTrafficView(){
   if(!lastTraffic)return;

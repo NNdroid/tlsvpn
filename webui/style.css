@@ -162,18 +162,62 @@ body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(-
 mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}
 .lbl{display:flex;align-items:center;gap:6px;font-size:.84em;color:var(--sub)}
 .spacer{flex:1}
-/* 下拉框：原生 select 去掉系统外观，自绘箭头 */
-.sel{
-  appearance:none;-webkit-appearance:none;-moz-appearance:none;
-  background-color:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:8px;
-  padding:5px 28px 5px 10px;font:inherit;font-size:.9em;outline:none;cursor:pointer;
-  transition:border-color .15s ease;
-  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b93a5' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat:no-repeat;background-position:right 9px center;
+/* 下拉框：原生 <select> 藏起来当取值来源，外观全部由下面的 .dl 触发按钮接管 */
+.sel{appearance:none;-webkit-appearance:none;-moz-appearance:none;font:inherit;outline:none}
+/* 下拉框弹层：原生 <select> 的弹层由操作系统绘制、CSS 染不上去（暗色面板配一个白底黑字菜单）。
+   所以弹层自绘，select 留在 DOM 里继续当唯一取值来源——.dl-native 只把它缩成 1px 藏起来，
+   选中项写回 select.value 再派一次 change，各处 onchange 调用方不用改 */
+.dl{position:relative;display:inline-flex;align-items:center;max-width:100%}
+.dl-native{
+  position:absolute;width:1px;height:1px;margin:0;padding:0;border:0;
+  opacity:0;visibility:hidden;overflow:hidden;pointer-events:none;
 }
-.sel:hover{border-color:var(--border2)}
-.sel:focus,.sel:focus-visible{border-color:var(--accent)}
-.sel option{background:var(--card);color:var(--fg)}
+.dl-btn{
+  position:relative;display:inline-flex;align-items:center;gap:8px;min-width:0;
+  background-color:var(--card2);color:var(--fg);border:1px solid var(--border);border-radius:8px;
+  padding:5px 10px;font:inherit;font-size:.9em;cursor:pointer;outline:none;
+  transition:border-color .15s ease,box-shadow .15s ease;
+}
+.dl-btn:hover{border-color:var(--border2)}
+.dl-btn:focus-visible,.dl-btn.on{border-color:var(--accent)}
+.dl-btn:focus-visible{box-shadow:0 0 0 3px var(--accent-soft)}
+/* .dl-lab 里藏一个 .dl-sz 撑子（最宽选项的文本），显示用 .dl-cur 绝对定位叠在上面：
+   按钮宽度因此由最宽选项决定，切换选中项时右侧控件不会跟着挪 */
+.dl-lab{position:relative;display:inline-block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dl-sz{visibility:hidden;white-space:nowrap}
+.dl-cur{position:absolute;left:0;top:0;right:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dl-arrow{flex:none;display:inline-flex;color:var(--sub);transition:transform .18s ease,color .15s ease}
+.dl-btn.on .dl-arrow{transform:rotate(180deg);color:var(--accent)}
+/* 固定定位 + 收起时移出屏幕：表格容器的 overflow-x 会裁掉 absolute 菜单；
+   收起时仍保留布局（不是 display:none）才能在打开前量出宽度做翻转判断 */
+.dl-menu{
+  position:fixed;left:-9999px;top:0;z-index:200;
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  box-shadow:0 14px 34px rgba(0,0,0,.34),0 3px 8px rgba(0,0,0,.2);
+  padding:5px;max-height:min(320px,72vh);overflow-y:auto;overscroll-behavior:contain;
+  visibility:hidden;pointer-events:none;
+}
+:root[data-theme=light] .dl-menu{box-shadow:0 14px 34px rgba(16,24,40,.16),0 3px 8px rgba(16,24,40,.10)}
+.dl-menu.on{visibility:visible;pointer-events:auto;animation:dl-in .13s ease}
+@keyframes dl-in{from{opacity:0;transform:translateY(-4px) scale(.985)}to{opacity:1;transform:none}}
+.dl-opt{
+  position:relative;display:flex;align-items:center;gap:8px;
+  padding:6px 26px 6px 10px;border-radius:7px;
+  font-size:.86em;line-height:1.45;color:var(--fg);cursor:pointer;
+  white-space:nowrap;transition:background-color .1s ease,color .1s ease;
+}
+.dl-opt:hover{background:var(--card2)}
+.dl-opt.hot{background:var(--accent-soft);color:var(--accent)}
+.dl-opt.on{color:var(--accent);font-weight:600}
+.dl-opt.disabled{opacity:.4;cursor:not-allowed}
+.dl-tx{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 勾选用 mask 画，颜色取 --accent，暗色/亮色主题下都跟着走 */
+.dl-opt.on::after{
+  content:'';position:absolute;right:9px;top:50%;transform:translateY(-50%);
+  width:13px;height:13px;background-color:var(--accent);
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 13 13'%3E%3Cpath d='M2.5 6.6l2.8 2.8L10.6 3.6' stroke='%23000' stroke-width='1.9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center/contain;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 13 13'%3E%3Cpath d='M2.5 6.6l2.8 2.8L10.6 3.6' stroke='%23000' stroke-width='1.9' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center/contain;
+}
 /* 开关：checkbox 换肤为 switch（保留原生语义与 checked 属性） */
 .switch{
   appearance:none;-webkit-appearance:none;-moz-appearance:none;
@@ -378,4 +422,8 @@ body.unauth{display:flex;align-items:center;justify-content:center;min-height:10
   .pager{gap:8px;margin-top:9px}
   .pg-sel{padding:3px 6px;font-size:.78em}
   .pg-btn{padding:2.5px 9px}
+  /* 下拉框跟着收紧，选项行加高成可点的触控目标（约 38px） */
+  .dl-btn{padding:4px 8px}
+  .dl-opt{padding:9px 26px 9px 10px}
+  .dl-menu{max-height:56vh}
 }
