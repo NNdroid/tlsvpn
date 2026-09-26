@@ -9,3 +9,33 @@ device="$TLSVPN_DEVICE"
 
 proto_init_update "$device" 0
 proto_send_update "$interface"
+
+# Normally netifd removing the TLSVPN dynamic state exposes the still-present
+# uplink default again. Recover defensively if the main table was instead left
+# without any default route. Never overwrite a default that already exists:
+# this keeps DHCP/PPPoE/mwan/BIRD changes made while the tunnel was up intact.
+state_base="/var/run/tlsvpn/$interface"
+
+if ! ip -4 route show default 2>/dev/null | grep -q '^default\b'; then
+	if [ -s "$state_base.default4" ]; then
+		while IFS= read -r route; do
+			[ -n "$route" ] || continue
+			# route is kernel-generated `ip route show` output; word splitting is
+			# intentional so ip receives the serialized route as argv fields.
+			# shellcheck disable=SC2086
+			ip -4 route add $route 2>/dev/null || true
+		done < "$state_base.default4"
+	fi
+fi
+
+if ! ip -6 route show default 2>/dev/null | grep -q '^default\b'; then
+	if [ -s "$state_base.default6" ]; then
+		while IFS= read -r route; do
+			[ -n "$route" ] || continue
+			# shellcheck disable=SC2086
+			ip -6 route add $route 2>/dev/null || true
+		done < "$state_base.default6"
+	fi
+fi
+
+rm -f "$state_base.default4" "$state_base.default6"
