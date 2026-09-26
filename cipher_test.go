@@ -662,7 +662,7 @@ func TestReconnectBackoff(t *testing.T) {
 	}
 	d5 := reconnectBackoffDelay(5)
 	if d5 > reconnectBackoffMax {
-		t.Fatalf("退避应封顶 30s, got %s", d5)
+		t.Fatalf("退避应封顶 %s, got %s", reconnectBackoffMax, d5)
 	}
 	d9 := reconnectBackoffDelay(9)
 	if d9 > reconnectBackoffMax {
@@ -670,6 +670,16 @@ func TestReconnectBackoff(t *testing.T) {
 	}
 	if d5 <= d0 {
 		t.Fatalf("退避应单调递增区间: d0=%s d5=%s", d0, d5)
+	}
+	// 封顶必须停留在秒级：这是"升级窗口"的预算。封顶一旦放大到数十秒，服务端停机
+	// 超过一轮后就会每隔很久才拨一次，先换服务端再换客户端会出现肉眼可见的断线段。
+	if reconnectBackoffMax > 5*time.Second {
+		t.Fatalf("退避封顶应保持秒级, got %s", reconnectBackoffMax)
+	}
+	// 快速失败阈值必须低于封顶：否则归零后的等待不比退避更短，
+	// "端口被拒不退避"这条优化就名存实亡。
+	if reconnectFastFailMax >= reconnectBackoffMax {
+		t.Fatalf("快速失败阈值应低于封顶: fast=%s max=%s", reconnectFastFailMax, reconnectBackoffMax)
 	}
 }
 

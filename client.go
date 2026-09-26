@@ -1234,9 +1234,15 @@ func (c *Client) Run(ctx context.Context) {
 				if ci := c.connInfoAt(connIndex); ci != nil {
 					atomic.AddUint64(&ci.retries, 1)
 				}
+				start := time.Now()
 				linked, err := c.dialAndServe(ctx, connIndex)
 				if linked >= reconnectBackoffReset {
 					attempt = 0 // 长连接断开后以短间隔立即重试
+				} else if err != nil && time.Since(start) < reconnectFastFailMax {
+					// 快速失败（典型是被拒绝的连接）：对端端口根本没人听，指数退避毫无意义。
+					// 只按"在线满 30s"归零不够——服务端停机时 refused 秒回、linked 恒为 0，
+					// attempt 会一路顶到封顶，服务恢复后反而要多等整整一轮才拨得到。
+					attempt = 0
 				}
 				delay := reconnectBackoffDelay(attempt)
 				if err != nil {
@@ -1290,16 +1296,23 @@ func (c *Client) connInfoAt(i int) *clientConnInfo {
 	return c.conns[i]
 }
 
-// 重连退避参数：1s 起指数增长，封顶 30s；持续在线 reconnectBackoffReset
-// 以上视为稳定连接，断开后重置退避
+// 重连退避参数：1s 起指数增长，封顶 3s；持续在线 reconnectBackoffReset
+// 以上视为稳定连接，断开后重置退避。
+//
+// 封顶刻意压到 3s：VPN 客户端的价值就是尽快恢复，而 30s 封顶的实际后果是
+// 服务端停机超过一轮后就每隔约 25s 才拨一次，升级窗口被拖成几十秒。
 const (
 	reconnectBackoffBase  = 1 * time.Second
-	reconnectBackoffMax   = 30 * time.Second
+	reconnectBackoffMax   = 3 * time.Second
 	reconnectBackoffReset = 30 * time.Second
+	// 单轮拨号在此时长内就失败即视为快速失败（典型是端口被拒、或连上后立刻被拒），
+	// 说明对端还没起来；这种情况不做退避，保持 attempt 归零用最短间隔重试。
+	// 拨号超时（5s）与 TLS 握手超时（10s）都远超这个阈值，仍按指数退避。
+	reconnectFastFailMax = 1 * time.Second
 )
 
 // reconnectBackoffDelay 第 attempt 次重试前的等待时长。基值 1s 起指数增长，
-// 封顶 30s；再叠 ±33% 的对称抖动把 4 条共享同一 ISP 路径的连接在时间上
+// 封顶 reconnectBackoffMax；再叠 ±33% 的对称抖动把 4 条共享同一 ISP 路径的连接在时间上
 // 错开，避免 ISP 抖动时全体同步重拨。抖动带对称分布在 d 附近；封顶阶段
 // 抖动上界被 reconnectBackoffMax 裁掉（下界仍在 2d/3 处），不影响封顶。
 func reconnectBackoffDelay(attempt int) time.Duration {
