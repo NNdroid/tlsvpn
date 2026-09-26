@@ -563,3 +563,81 @@ tbody tr[data-open]{cursor:pointer}
   .dc-grid{grid-template-columns:1fr}
   .dc-conn-rate{margin-left:0;flex-basis:100%}
 }
+
+/* ---------- 诊断中心：健康度环 + 分类自检清单 ---------- */
+.dg-wrap{display:grid;grid-template-columns:288px minmax(0,1fr);gap:16px;align-items:start}
+.dg-score{
+  background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:20px 18px 18px;box-shadow:var(--shadow)
+}
+.dg-ring{position:relative;width:120px;height:120px;margin:2px auto 0}
+.dg-ring svg{display:block}
+.dg-bg{fill:none;stroke:var(--border);stroke-width:8}
+.dg-fg{
+  fill:none;stroke:var(--up);stroke-width:8;stroke-linecap:round;
+  transform:rotate(-90deg);transform-origin:60px 60px;
+  transition:stroke-dashoffset .5s ease,stroke .5s ease
+}
+.dg-ring-c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.dg-score-n{font-size:2rem;font-weight:650;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.dg-score-l{margin-top:4px;font-size:.7em;color:var(--sub);letter-spacing:.08em}
+.dg-verdict{margin-top:16px;font-size:.86em;line-height:1.5;text-align:center;color:var(--muted)}
+.dg-verdict.v-warn{color:var(--warn)}
+.dg-verdict.v-fail{color:var(--err)}
+.dg-chips{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:14px}
+.dg-chip{
+  display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
+  border:1px solid var(--border);background:var(--card2);font-size:.72em;
+  color:var(--muted);font-variant-numeric:tabular-nums
+}
+.dg-chip i{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+.dg-chip .n{font-weight:650;margin-left:1px}
+.dg-chip.c-ok{color:var(--up);border-color:var(--up-soft)}
+.dg-chip.c-warn{color:var(--warn);border-color:var(--warn-soft)}
+.dg-chip.c-fail{color:var(--err);border-color:var(--err-soft)}
+.dg-chip.c-skip{color:var(--sub);border-color:var(--border)}
+.dg-chip.zero{opacity:.45}
+.dg-meta{display:flex;justify-content:center;gap:14px;margin-top:16px;font-size:.74em;color:var(--sub)}
+.dg-meta .dim{color:var(--sub)}
+.dg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(292px,1fr));gap:14px}
+.dg-cat{
+  background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:12px 13px 10px;box-shadow:var(--shadow)
+}
+.dg-cat-h{display:flex;align-items:center;gap:9px;padding-bottom:9px;margin-bottom:6px;border-bottom:1px dashed var(--border)}
+.dg-cat-ico{
+  width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:7px;
+  background:var(--accent-soft);color:var(--accent)
+}
+.dg-cat-ico svg{width:13px;height:13px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.dg-cat-h h4{margin:0;flex:1;min-width:0;font-size:.86em;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dg-cat-n{flex:none;font-size:.72em;color:var(--sub);font-variant-numeric:tabular-nums}
+.dg-checks{display:flex;flex-direction:column}
+.dg-chk{display:flex;align-items:center;gap:10px;padding:7px;border-radius:7px;font-size:.83em}
+.dg-chk:hover{background:var(--card2)}
+.dg-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--sub)}
+.dg-chk-t{flex:1;min-width:0;color:var(--muted)}
+.dg-chk-d{flex:none;text-align:right;color:var(--fg);font-size:.92em;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.dg-chk-d .dim{color:var(--sub)}
+.dg-chk.l-ok .dg-dot{background:var(--up)}
+.dg-chk.l-warn .dg-dot{background:var(--warn)}
+.dg-chk.l-warn .dg-chk-d{color:var(--warn)}
+.dg-chk.l-fail .dg-dot{background:var(--err)}
+.dg-chk.l-fail .dg-chk-d{color:var(--err)}
+.dg-chk.l-skip .dg-dot{background:transparent;box-shadow:inset 0 0 0 1.5px var(--sub)}
+.dg-chk.l-skip .dg-chk-t,.dg-chk.l-skip .dg-chk-d{color:var(--sub)}
+
+@media (max-width:940px){
+  .dg-wrap{grid-template-columns:1fr}
+  .dg-score{display:grid;grid-template-columns:120px minmax(0,1fr);column-gap:18px;align-items:center}
+  .dg-ring{margin:0}
+  .dg-verdict,.dg-chips,.dg-meta{grid-column:2;margin-top:0;margin-left:0}
+  .dg-chips{margin-top:12px}
+  .dg-meta{margin-top:10px}
+  .dg-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))}
+}
+@media (max-width:560px){
+  .dg-score{grid-template-columns:1fr;text-align:center}
+  .dg-ring{margin:0 auto}
+  .dg-verdict,.dg-chips,.dg-meta{grid-column:auto}
+}

@@ -152,6 +152,7 @@
       <button data-pane="bans" data-i18n="tab.bans">-</button>
       <button data-pane="traffic" data-i18n="tab.traffic">-</button>
       <button data-pane="status" data-i18n="tab.status">-</button>
+      <button data-pane="diag" data-i18n="tab.diag">-</button>
       <button data-pane="logs" data-i18n="tab.logs">-</button>
       <button data-pane="settings" data-i18n="tab.settings">-</button>
     </div>
@@ -277,6 +278,33 @@
         <div class="st-block"><h3 data-i18n="ov.hooks">-</h3><div class="twrap"><table class="kv" id="st-hooks"></table></div></div>
         <div class="st-block"><h3 id="st-routes-h" data-i18n="ov.routes">-</h3><div class="twrap"><table class="kv mono" id="st-routes"></table></div></div>
         <div class="st-block"><h3 data-i18n="ov.tap">-</h3><div class="twrap"><table class="kv" id="st-tap"></table></div></div>
+      </div>
+    </div>
+
+    <!-- 诊断中心：健康度环 + 分类自检清单。检查项全部取自最近一次 /api/stats
+         快照（clients/server_conns/fec/reorder/protect/system/cfg…）加本地算的读数，
+         不新增端点、不发额外请求；阈值与"概览"页顶部异常提醒条同源 -->
+    <div class="pane" id="pane-diag">
+      <div class="dg-wrap">
+        <div class="dg-score">
+          <div class="dg-ring">
+            <svg viewBox="0 0 120 120" width="120" height="120" aria-hidden="true">
+              <circle class="dg-bg" cx="60" cy="60" r="50"/>
+              <circle class="dg-fg" id="dg-ring-fg" cx="60" cy="60" r="50"/>
+            </svg>
+            <div class="dg-ring-c">
+              <div class="dg-score-n" id="dg-score-n">-</div>
+              <div class="dg-score-l" data-i18n="dg.score">-</div>
+            </div>
+          </div>
+          <div class="dg-verdict" id="dg-verdict">-</div>
+          <div class="dg-chips" id="dg-chips"></div>
+          <div class="dg-meta">
+            <span id="dg-total">-</span>
+            <span id="dg-updated" class="dim">-</span>
+          </div>
+        </div>
+        <div class="dg-grid" id="dg-grid"></div>
       </div>
     </div>
 

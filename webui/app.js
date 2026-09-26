@@ -1,8 +1,9 @@
 const I18N={
 'zh-CN':{kpi:{active:'活跃客户端/设备',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',overhead:'FEC 开销',pps:'包速率',cpu:'进程 CPU',cores:'核数:',dropped:'丢帧(队列)',reorder:'重排跳过',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
  chart:{title:'吞吐趋势',win:'(近 120 秒)',r2m:'2 分钟',r1h:'1 小时',r24h:'24 小时'},legend:{up:'上行',down:'下行',rtt:'RTT（均）'},
-	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',traffic:'流量',status:'运行状态',logs:'日志',settings:'设置'},
+	tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',traffic:'流量',status:'运行状态',diag:'诊断',logs:'日志',settings:'设置'},
  tr:{today_up:'今日上行',today_down:'今日下行',today_total:'今日合计',daily:'每日流量',up:'上行',down:'下行',total:'合计',date:'日期',caption:'近 {n} 天',empty:'暂无按日统计数据',client:'客户端',all:'全部'},
+ dg:{title:'诊断中心',sub:'基于最近一次状态快照自检，不发新请求',score:'健康度',lvOk:'正常',lvWarn:'注意',lvFail:'异常',lvSkip:'不适用',total:'{n} 项检查',all_ok:'全部检查正常，无需处理',open_fail:'待处理 {n} 项',updated:'{t}前',c_tunnel:'隧道',c_route:'路由',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'保护与钩子',c_res:'资源',c_cfg:'配置',tap:'TAP 写入',drop:'丢帧',reorder:'乱序处理',sess:'会话水位',reconn:'重连次数',rtt:'RTT 分布',connerr:'连接报错',polroute:'策略路由',routes:'自定义路由',pool:'IPv4 地址池',negver:'协商版本',brut:'生效',brutrate:'限速速率',cert:'证书有效期',tlsfail:'握手失败',tlsver:'TLS 版本',enc:'内层加密',fecloss:'恢复 / 确认丢失',fecovh:'FEC 开销',fecmode:'FEC 模式',reject:'拒绝',fallback:'降级与陷阱',psk:'PSK 失败',hookup:'上行钩子',hookdown:'下行钩子',cpu:'CPU 占用',mem:'内存',gor:'协程数',fd:'文件描述符',load:'系统负载',gc:'GC 暂停',loglvl:'日志级别',not_set:'未配置',rtt_tip:'最小 · 平均 · P95 · 最大',err_n:'报错 {n} 条',conns_n:'{n} 条连接'},
  dc:{title:'客户端详情',copy:'复制',copied:'已复制到剪贴板',view_logs:'查看日志',view_traffic:'查看流量',identity:'身份',traffic:'流量',connections:'连接',security:'安全',conns_n:'{n} 条连接',no_conns:'暂无连接明细',sec_hint:'取自最近一条连接的协商结果',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'来源地址',tcp:'TCP 连接',uptime:'在线时长',today:'今日',d7:'近 7 天',d30:'近 30 天',sess_up:'会话上行',sess_down:'会话下行',pkt_up:'上行包数',pkt_dn:'下行包数',rate_up:'↑ 当前速率',rate_dn:'↓ 当前速率',sec_enc:'内层加密',sec_sess:'会话加密',sec_epoch:'密钥代际',sec_fec:'FEC',sec_tls:'TLS 版本',sec_cipher:'TLS 套件',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',target:'目标',remote:'对端',state:'状态',rtt:'RTT',retries:'重试',age:'在线',epoch:'密钥代际',sni:'SNI',err:'最近错误'},
  m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
@@ -29,8 +30,9 @@ const I18N={
    load:'重新加载',save:'保存',apply:'保存并应用',saved:'已保存',applied:'已保存并应用',restart_nr:'需重启生效:',loaded_err:'加载失败:'}},
 'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / confirmed lost',parity:'Parity frames',dropped:'Dropped (queue)',reorder:'Reorder skipped',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:',pps:'Packet rate',cpu:'Process CPU',cores:'Cores:',overhead:'FEC overhead'},
  chart:{title:'Throughput',win:'(last 120s)',r2m:'2 min',r1h:'1 h',r24h:'24 h'},legend:{up:'Up',down:'Down',rtt:'RTT (avg)'},
-	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',traffic:'Traffic',status:'Runtime status',logs:'Logs',settings:'Settings'},
+	tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',traffic:'Traffic',status:'Runtime status',diag:'Diagnostics',logs:'Logs',settings:'Settings'},
  tr:{today_up:'Up today',today_down:'Down today',today_total:'Total today',daily:'Daily traffic',up:'Up',down:'Down',total:'Total',date:'Date',caption:'Last {n} days',empty:'No daily traffic data yet',client:'Client',all:'All'},
+ dg:{title:'Diagnostics',sub:'self-check over the latest status snapshot, no extra requests',score:'Health score',lvOk:'OK',lvWarn:'Warn',lvFail:'Fail',lvSkip:'N/A',total:'{n} checks',all_ok:'All checks passed, nothing to fix',open_fail:'{n} item(s) to fix',updated:'{t} ago',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Protection and hooks',c_res:'Resources',c_cfg:'Config',tap:'TAP writes',drop:'Dropped frames',reorder:'Reordering',sess:'Session level',reconn:'Reconnects',rtt:'RTT spread',connerr:'Connection errors',polroute:'Policy routing',routes:'Custom routes',pool:'IPv4 pool',negver:'Negotiated version',brut:'Active',brutrate:'Shaped rate',cert:'Certificate',tlsfail:'Handshake failures',tlsver:'TLS version',enc:'Inner cipher',fecloss:'Recovered / lost',fecovh:'FEC overhead',fecmode:'FEC mode',reject:'Rejected',fallback:'Fallback and tarpit',psk:'PSK failures',hookup:'Up hook',hookdown:'Down hook',cpu:'CPU',mem:'Memory',gor:'Goroutines',fd:'File descriptors',load:'System load',gc:'GC pause',loglvl:'Log level',not_set:'Not configured',rtt_tip:'min · avg · P95 · max',err_n:'{n} error(s)',conns_n:'{n} conn(s)'},
  dc:{title:'Client detail',copy:'Copy',copied:'Copied to clipboard',view_logs:'View logs',view_traffic:'View traffic',identity:'Identity',traffic:'Traffic',connections:'Connections',security:'Security',conns_n:'{n} conn(s)',no_conns:'No connection detail yet',sec_hint:'from the newest connection',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Source address',tcp:'TCP conns',uptime:'Uptime',today:'Today',d7:'Last 7 days',d30:'Last 30 days',sess_up:'Session up',sess_down:'Session down',pkt_up:'Up packets',pkt_dn:'Down packets',rate_up:'↑ Current rate',rate_dn:'↓ Current rate',sec_enc:'Inner cipher',sec_sess:'Session cipher',sec_epoch:'Key epoch',sec_fec:'FEC',sec_tls:'TLS version',sec_cipher:'TLS cipher',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',target:'Target',remote:'Remote',state:'State',rtt:'RTT',retries:'Retries',age:'Uptime',epoch:'Epoch',sni:'SNI',err:'Last error'},
  m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
@@ -57,7 +59,7 @@ const I18N={
    load:'Reload',save:'Save',apply:'Save & apply',saved:'Saved',applied:'Saved & applied',restart_nr:'Needs restart:',loaded_err:'Load failed:'}},
 'de':{kpi:{active:'Aktive Clients',tcp:'TCP-Verbindungen',tx:'Gesendet',rx:'Empfangen',uptime:'Laufzeit',version:'Version',gc:'GC ausführen',fec:'FEC wiederhergestellt / verloren',parity:'Paritätsframes',dropped:'Verworfen (Queue)',reorder:'Reorder übersprungen',mem:'Speicher',goroutines:'Goroutines:',pool:'IPv4-Pool',v6used:'IPv6 zugewiesen:',pps:'Paktrate',cpu:'Prozess-CPU',cores:'Kerne:',overhead:'FEC-Overhead'},
  chart:{title:'Durchsatz',win:'(letzte 120 s)',r2m:'2 Min',r1h:'1 Std',r24h:'24 Std'},legend:{up:'Uplink',down:'Downlink',rtt:'RTT (Ø)'},
- tab:{clients:'Clients',conns:'Verbindungen',macs:'MAC-Tabelle',bans:'Sperren',traffic:'Traffic',status:'Laufzeitstatus',logs:'Protokolle',settings:'Einstellungen'},
+ tab:{clients:'Clients',conns:'Verbindungen',macs:'MAC-Tabelle',bans:'Sperren',traffic:'Traffic',status:'Laufzeitstatus',diag:'Diagnostics',logs:'Protokolle',settings:'Einstellungen'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (S)',rx:'RX (E)',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Verschlüsselung',brutal:'Brutal',ops:'Aktionen',kick:'Trennen',ban:'Sperren',unban:'Entsperren',owner:'Client',target:'Ziel',remote:'Gegenstelle',state:'Status',rtt:'RTT',retries:'Wiederholungen',age:'Online',epoch:'Schlüssel-Epoche',sni:'SNI',err:'Letzter Fehler'},
  m:{port:'Port',seen:'Zuletzt aktiv'},bans:{id_ph:'ClientID (Präfix ok)',min_ph:'Minuten (leer = dauerhaft)',add:'Sperren',refresh:'Aktualisieren',left:'Restlaufzeit'},
  logs:{level:'Level',autoscroll:'Auto-Scroll',clear:'Leeren',download:'Download'},
@@ -82,10 +84,11 @@ const I18N={
  set:{hint:'JSON-Konfiguration bearbeiten. Speichern: in die Datei zurückschreiben. Speichern & anwenden: zurückschreiben und Laufzeitparameter heiß anwenden (genannte Felder erfordern einen Neustart).',
    load:'Neu laden',save:'Speichern',apply:'Speichern & anwenden',saved:'Gespeichert',applied:'Gespeichert & angewendet',restart_nr:'Neustart nötig:',loaded_err:'Ladefehler:'},
  tr:{today_up:'Uplink heute',today_down:'Downlink heute',today_total:'Gesamt heute',daily:'Täglicher Traffic',up:'Uplink',down:'Downlink',total:'Gesamt',date:'Datum',caption:'Letzte {n} Tage',empty:'Noch keine täglichen Traffic-Daten',client:'Client',all:'Alle'},
+ dg:{title:'Diagnostics',sub:'Selbstprüfung anhand des letzten Status-Snapshot, ohne Zusatzanfragen',score:'Gesundheitswert',lvOk:'OK',lvWarn:'Warnung',lvFail:'Fehler',lvSkip:'n/a',total:'{n} Prüfung(en)',all_ok:'Alle Prüfungen bestanden, nichts zu tun',open_fail:'{n} Punkt(e) beheben',updated:'vor {t}',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Schutz und Hooks',c_res:'Ressourcen',c_cfg:'Konfiguration',tap:'TAP-Schreiben',drop:'Verlorene Frames',reorder:'Reihenfolge',sess:'Sitzungspegel',reconn:'Reconnects',rtt:'RTT-Verteilung',connerr:'Verbindungsfehler',polroute:'Policy-Routing',routes:'Eigene Routen',pool:'IPv4-Pool',negver:'Verhandelte Version',brut:'Aktiv',brutrate:'Gedrosselte Raten',cert:'Zertifikat',tlsfail:'Handshake-Fehler',tlsver:'TLS-Version',enc:'Innere Verschlüsselung',fecloss:'Wiederhergestellt / verloren',fecovh:'FEC-Overhead',fecmode:'FEC-Modus',reject:'Abgelehnt',fallback:'Fallback und Tarpit',psk:'PSK-Fehler',hookup:'Up-Hook',hookdown:'Down-Hook',cpu:'CPU',mem:'Speicher',gor:'Goroutines',fd:'Dateideskriptoren',load:'Systemlast',gc:'GC-Pause',loglvl:'Protokollstufe',not_set:'Nicht konfiguriert',rtt_tip:'min · Ø · P95 · max',err_n:'{n} Fehler',conns_n:'{n} Verbindung(en)'},
  dc:{title:'Client-Details',copy:'Kopieren',copied:'In die Zwischenablage kopiert',view_logs:'Protokoll anzeigen',view_traffic:'Traffic anzeigen',identity:'Identität',traffic:'Traffic',connections:'Verbindungen',security:'Sicherheit',conns_n:'{n} Verbindung(en)',no_conns:'Noch keine Verbindungsdetails',sec_hint:'aus der neuesten Verbindung',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Quelladresse',tcp:'TCP-Verbindungen',uptime:'Laufzeit',today:'Heute',d7:'Letzte 7 Tage',d30:'Letzte 30 Tage',sess_up:'Sitzung ↑',sess_down:'Sitzung ↓',pkt_up:'Pakete ↑',pkt_dn:'Pakete ↓',rate_up:'↑ aktueller Satz',rate_dn:'↓ aktueller Satz',sec_enc:'Innere Verschlüsselung',sec_sess:'Sitzungsverschlüsselung',sec_epoch:'Schlüssel-Epoche',sec_fec:'FEC',sec_tls:'TLS-Version',sec_cipher:'TLS-Cipher',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}},
 'fr':{kpi:{active:'Clients actifs',tcp:'Connexions TCP',tx:'Total envoyé',rx:'Total reçu',uptime:'Disponibilité',version:'Version',gc:'GC maintenant',fec:'FEC récupérés / perdus',parity:'Trames de parité',dropped:'Abandons (file)',reorder:'Réordonnancement ignoré',mem:'Mémoire',goroutines:'Goroutines :',pool:'Pool IPv4',v6used:'IPv6 allouées :',pps:'Taux de paquets',overhead:'Surcharge FEC',cpu:'CPU du processus',cores:'Cœurs :'},
  chart:{title:'Débit',win:'(120 dernières s)',r2m:'2 min',r1h:'1 h',r24h:'24 h'},legend:{up:'Montant',down:'Descendant',rtt:'RTT (moy.)'},
- tab:{clients:'Clients',conns:'Connexions',macs:'Table MAC',bans:'Bannissements',traffic:'Trafic',status:'État runtime',logs:'Journaux',settings:'Paramètres'},
+ tab:{clients:'Clients',conns:'Connexions',macs:'Table MAC',bans:'Bannissements',traffic:'Trafic',status:'État runtime',diag:'Diagnostic',logs:'Journaux',settings:'Paramètres'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (env.)',rx:'RX (rec.)',txs:'↑ Débit',rxs:'↓ Débit',fec:'FEC',enc:'Chiffrement',brutal:'Brutal',ops:'Actions',kick:'Éjecter',ban:'Bannir',unban:'Débannir',owner:'Client',target:'Cible',remote:'Distant',state:'État',rtt:'RTT',retries:'Réessais',age:'En ligne',epoch:'Époque de clé',sni:'SNI',err:'Dernière erreur'},
  m:{port:'Port',seen:'Dernière activité'},bans:{id_ph:'ClientID (préfixe accepté)',min_ph:'Minutes (vide = permanent)',add:'Bannir',refresh:'Rafraîchir',left:'Restant'},
  logs:{level:'Niveau',autoscroll:'Défilement auto',clear:'Effacer',download:'Télécharger'},
@@ -110,10 +113,11 @@ const I18N={
  set:{hint:'Éditer la config JSON. Enregistrer : réécrire le fichier. Enregistrer & appliquer : réécrire et appliquer à chaud les paramètres runtime (certains champs exigent un redémarrage).',
    load:'Recharger',save:'Enregistrer',apply:'Enregistrer & appliquer',saved:'Enregistré',applied:'Enregistré & appliqué',restart_nr:'Redémarrage requis :',loaded_err:'Échec du chargement :'},
  tr:{today_up:'Montant du jour',today_down:'Descendant du jour',today_total:'Total du jour',daily:'Trafic quotidien',up:'Montant',down:'Descendant',total:'Total',date:'Date',caption:'{n} derniers jours',empty:'Pas encore de données de trafic quotidien',client:'Client',all:'Tous'},
+ dg:{title:'Diagnostic',sub:'autocontrôle sur le dernier instantané, sans nouvelle requête',score:'Score de santé',lvOk:'OK',lvWarn:'Attention',lvFail:'Échec',lvSkip:'N/A',total:'{n} contrôle(s)',all_ok:'Tous les contrôles sont bons, rien à faire',open_fail:'{n} élément(s) à traiter',updated:'il y a {t}',c_tunnel:'Tunnel',c_route:'Routing',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'Protection et hooks',c_res:'Ressources',c_cfg:'Configuration',tap:'Écriture TAP',drop:'Trames perdues',reorder:'Rearrangement',sess:'Niveau de session',reconn:'Reconnexions',rtt:'Répartition RTT',connerr:'Erreurs de connexion',polroute:'Routage par politique',routes:'Routes personnalisées',pool:'Pool IPv4',negver:'Version négociée',brut:'Actif',brutrate:'Débit limité',cert:'Certificat',tlsfail:'Échecs de poignée de main',tlsver:'Version TLS',enc:'Chiffrement interne',fecloss:'Récupéré / perdu',fecovh:'Surcharge FEC',fecmode:'Mode FEC',reject:'Rejetés',fallback:'Repli et tarpit',psk:'Échecs PSK',hookup:'Hook ascendant',hookdown:'Hook descendant',cpu:'CPU',mem:'Mémoire',gor:'Goroutines',fd:'Descripteurs de fichier',load:'Charge système',gc:'Pause GC',loglvl:'Niveau du journal',not_set:'Non configuré',rtt_tip:'min · moyenne · P95 · max',err_n:'{n} erreur(s)',conns_n:'{n} connexion(s)'},
  dc:{title:'Détails du client',copy:'Copier',copied:'Copié dans le presse-papiers',view_logs:'Voir les journaux',view_traffic:'Voir le trafic',identity:'Identité',traffic:'Trafic',connections:'Connexions',security:'Sécurité',conns_n:'{n} connexion(s)',no_conns:'Pas encore de détail de connexion',sec_hint:'issu de la dernière connexion',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'Adresse source',tcp:'Connexions TCP',uptime:'Disponibilité',today:'Aujourd’hui',d7:'7 derniers jours',d30:'30 derniers jours',sess_up:'Session ↑',sess_down:'Session ↓',pkt_up:'Paquets ↑',pkt_dn:'Paquets ↓',rate_up:'↑ débit actuel',rate_dn:'↓ débit actuel',sec_enc:'Chiffrement interne',sec_sess:'Chiffrement de session',sec_epoch:'Époque de clé',sec_fec:'FEC',sec_tls:'Version TLS',sec_cipher:'Suite TLS',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}},
 'ja':{kpi:{active:'アクティブクライアント',tcp:'TCP 接続',tx:'送信合計',rx:'受信合計',uptime:'稼働時間',version:'バージョン',gc:'即時 GC',fec:'FEC 復元 / 確定ロスト',parity:'パリティフレーム',dropped:'廃棄（キュー）',reorder:'並べ替えスキップ',mem:'メモリ',goroutines:'Goroutines:',pool:'IPv4 プール',v6used:'IPv6 割り当て:',pps:'パケット速度',overhead:'FEC オーバーヘッド',cpu:'プロセス CPU',cores:'コア:'},
  chart:{title:'スループット',win:'（過去 120 秒）',r2m:'2 分',r1h:'1 時間',r24h:'24 時間'},legend:{up:'上り',down:'下り',rtt:'RTT（平均）'},
- tab:{clients:'クライアント',conns:'接続明細',macs:'MAC テーブル',bans:'禁止',traffic:'トラフィック',status:'稼働状態',logs:'ログ',settings:'設定'},
+ tab:{clients:'クライアント',conns:'接続明細',macs:'MAC テーブル',bans:'禁止',traffic:'トラフィック',status:'稼働状態',diag:'診断',logs:'ログ',settings:'設定'},
  th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX（送）',rx:'RX（受）',txs:'↑ 速度',rxs:'↓ 速度',fec:'FEC',enc:'暗号化',brutal:'Brutal',ops:'操作',kick:'切断',ban:'禁止',unban:'解除',owner:'クライアント',target:'接続先',remote:'対向',state:'状態',rtt:'RTT',retries:'再試行',age:'経過時間',epoch:'鍵世代',sni:'SNI',err:'最新エラー'},
  m:{port:'ポート',seen:'最終アクティブ'},bans:{id_ph:'ClientID（前方一致可）',min_ph:'分数（空欄=永久）',add:'禁止',refresh:'更新',left:'残り'},
  logs:{level:'レベル',autoscroll:'自動スクロール',clear:'クリア',download:'ダウンロード'},
@@ -137,6 +141,7 @@ const I18N={
    yes:'はい',no:'いいえ'},
  set:{hint:'JSON 設定を編集。保存：設定ファイルへ書き戻し。保存して適用：書き戻した上で実行パラメータをホット適用（一部フィールドは再起動が必要）。',load:'再読み込み',save:'保存',apply:'保存して適用',saved:'保存済み',applied:'保存して適用済み',restart_nr:'再起動が必要：',loaded_err:'読み込み失敗：'},
  tr:{today_up:'本日の上り',today_down:'本日の下り',today_total:'本日合計',daily:'日別トラフィック',up:'上り',down:'下り',total:'合計',date:'日付',caption:'過去 {n} 日',empty:'日別トラフィックデータはまだありません',client:'クライアント',all:'全体'},
+ dg:{title:'診断センター',sub:'最新の状態スナップショットに基づくセルフチェック、追加リクエストなし',score:'健全度',lvOk:'正常',lvWarn:'注意',lvFail:'異常',lvSkip:'該当なし',total:'{n} 項目のチェック',all_ok:'全チェック正常、対応不要',open_fail:'対応待ち {n} 件',updated:'{t}前',c_tunnel:'トンネル',c_route:'ルーティング',c_brut:'TCP Brutal',c_tls:'TLS',c_fec:'FEC',c_prot:'保護とフック',c_res:'リソース',c_cfg:'設定',tap:'TAP 書き込み',drop:'ドロップフレーム',reorder:'再順序制御',sess:'セッション水位',reconn:'再接続',rtt:'RTT 分布',connerr:'接続エラー',polroute:'ポリシールーティング',routes:'カスタムルート',pool:'IPv4 プール',negver:'ネゴバージョン',brut:'有効',brutrate:'制限レート',cert:'証明書',tlsfail:'ハンドシェイク失敗',tlsver:'TLS バージョン',enc:'内層暗号化',fecloss:'復旧 / 損失',fecovh:'FEC オーバーヘッド',fecmode:'FEC モード',reject:'拒否',fallback:'フォールバックと tarpit',psk:'PSK 失敗',hookup:'上りフック',hookdown:'下りフック',cpu:'CPU',mem:'メモリ',gor:'ゴルーチン',fd:'FD 数',load:'システム負荷',gc:'GC 停止',loglvl:'ログレベル',not_set:'未設定',rtt_tip:'最小 · 平均 · P95 · 最大',err_n:'エラー {n} 件',conns_n:'{n} 接続'},
  dc:{title:'クライアント詳細',copy:'コピー',copied:'クリップボードにコピーしました',view_logs:'ログを見る',view_traffic:'トラフィックを見る',identity:'識別情報',traffic:'トラフィック',connections:'接続',security:'セキュリティ',conns_n:'{n} 接続',no_conns:'接続明細はまだありません',sec_hint:'最新の接続のネゴシエーション結果',cid:'ClientID',v4:'IPv4',v6:'IPv6',mac:'MAC',remote:'ソースアドレス',tcp:'TCP 接続',uptime:'オンライン時間',today:'本日',d7:'直近 7 日',d30:'直近 30 日',sess_up:'セッション上り',sess_down:'セッション下り',pkt_up:'上りパケット',pkt_dn:'下りパケット',rate_up:'↑ 現在の速度',rate_dn:'↓ 現在の速度',sec_enc:'内層暗号化',sec_sess:'セッション暗号化',sec_epoch:'鍵世代',sec_fec:'FEC',sec_tls:'TLS バージョン',sec_cipher:'TLS 暗号スイート',sec_alpn:'TLS ALPN',sec_sni:'SNI',sec_brut:'TCP Brutal'}}};
 // 浏览器语言 → 面板语言：前缀匹配，zh 系一律落到 zh-CN（简体）
 function detectLang(){
@@ -961,7 +966,7 @@ document.addEventListener('keydown',function(e){
   if(box){box.querySelector('.search-input').focus();e.preventDefault();}
 });
 
-let lastStats=null,lastSpeeds={},lastTraffic=null,lastClientTraffic=null,trClientSig='';
+let lastStats=null,lastStatsT=0,lastSpeeds={},lastTraffic=null,lastClientTraffic=null,trClientSig='';
 let prevPps={tx:0,rx:0,ok:false},prevConns={},lastConnsT=0,lastConnSpeeds={};
 // 异常提醒条手动关闭后，在下一个不同的告警组合出现前不再自动弹回
 let alertOff=false,alertSig='';
@@ -971,6 +976,7 @@ async function fetchStats(){
     if(res.status===401){showUnauthorized();return;}
     const data=await res.json();
     lastStats=data;
+    lastStatsT=Date.now();
     const upd=document.getElementById('updated-at');
     if(upd)upd.textContent=t('updated').replace('{n}',new Date().toLocaleTimeString());
     const now=performance.now();const dt=lastT?(now-lastT)/1000:2;lastT=now;
@@ -1198,6 +1204,282 @@ function renderStatus(data){
   renderRouteStatus(data.routes);
   renderTapStatus(data.tap_link);
   renderOverview(data);
+  renderDiag(data);
+}
+
+// ---------- 诊断中心：健康度环 + 分类自检清单 ----------
+// 只算最近一次 /api/stats 快照就能得出的项，不发新请求、不新增端点。
+// 判定字段与方向取自概览页顶部异常提醒条那批条件，只是把它的一档提醒拆成 warn/fail 两档。
+// lv: ok / warn / fail / skip —— skip 是当前模式或平台缺这份数据（含老服务端不下发），
+// 不计分也不报忧，免得缺数据的一片红把真正的问题淹掉。
+// 图标按分类名索引。这里必须是对象而不是数组：词法守卫据「前一个有效字符」判断花括号
+// 是不是对象字面量（只认 ( = , : ? ! & | + - * 与 return/yield），数组里的 {…} 会被当成
+// 块作用域，属性冒号就被误读成三元冒号，整段脚本直接失效。
+const DG_CATS={
+  tunnel:'<path d="M3 12h4l2-6 3 12 3-9 2 3h4"/>',
+  route:'<circle cx="5" cy="6" r="2"/><circle cx="19" cy="18" r="2"/><path d="M7 6h6a4 4 0 0 1 4 4v6"/><path d="M5 8v8a4 4 0 0 0 4 4h2"/>',
+  brut:'<path d="M13 2 4 14h6l-1 8 9-12h-6z"/>',
+  tls:'<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  fec:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17.5h7M17.5 14v7"/>',
+  prot:'<path d="M12 3 4 6v6c0 5 3.5 7.5 8 9 4.5-1.5 8-4 8-9V6z"/>',
+  res:'<path d="M4 14a8 8 0 0 1 16 0"/><line x1="12" y1="14" x2="16" y2="9"/>',
+  cfg:'<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>'
+};
+// 三级阈值：nonzero 是计数器（大于 0 即注意），ge 越大越坏，le 越小越坏。
+// soft/hard 分别是 warn 与 fail 拐点；写成 if/else 便于加新档位。
+function dgLevel(kind,v,soft,hard){
+  if(kind==='skip')return 'skip';
+  if(kind==='nonzero')return v>0?'warn':'ok';
+  if(kind==='ge')return v>=hard?'fail':(v>=soft?'warn':'ok');
+  if(kind==='le')return v<=hard?'fail':(v<=soft?'warn':'ok');
+  return 'ok';
+}
+function dgRun(data){
+  const out={};
+  const add=function(cat,ch,lv,det,tip){
+    if(!out[cat])out[cat]=[];
+    out[cat].push({ch:ch,lv:lv,det:det||'',tip:tip||''});
+  };
+  const N=function(v){return fmtNum(v||0);};
+  const miss=t('dg.not_set');
+  const cr=data.mode==='server'?(data.server_conns||[]):(data.conns||[]);
+  // FEC 开销的分母是真实承载的客户端包，填充字节不算
+  let txPk=0;
+  if(data.mode==='server'){
+    const cl=data.clients||{};
+    Object.keys(cl).forEach(function(k){txPk+=(cl[k].tx_packets||0);});
+  }else{
+    const lc=data.clients&&data.clients.local;
+    txPk=lc?(lc.tx_packets||0):0;
+  }
+  const f=data.fec||{},ro=data.drop_breakdown||{},np=data.negotiate||{},
+        sm=data.system||{},mm=data.mem||{},cfg=data.cfg||{},
+        pf=data.protect,ho=data.hooks,ip=data.ip_pool,cpu=data.cpu,
+        sysMem=sm.mem||{},load=sm.load||{};
+
+  // ---- 隧道 ----
+  add('tunnel','tap',data.tap_write_errors>0?'fail':'ok',N(data.tap_write_errors));
+  const df=data.dropped_frames||0,bk=[];
+  if(ro.backpressure)bk.push(t('ov.err_bp'));
+  if(ro.spoofed_src)bk.push(t('ov.err_spoof'));
+  if(ro.broadcast)bk.push(t('ov.err_bcast'));
+  if(ro.reorder)bk.push(t('ov.err_reord'));
+  add('tunnel','drop',dgLevel('nonzero',df),
+      N(df)+(bk.length?'<span class="dim"> · '+bk.join(' · ')+'</span>':''));
+  add('tunnel','reorder',dgLevel('nonzero',ro.skipped_frames),
+      N(ro.skipped_frames)+(ro.gap_events?'<span class="dim"> · '+N(ro.gap_events)+'</span>':''));
+  const sm2=data.sessions;
+  if(sm2&&sm2.max){
+    const sv=sm2.active/sm2.max;
+    add('tunnel','sess',dgLevel('ge',sv,0.8,1),
+        sm2.active+'<span class="dim"> / '+sm2.max+'</span>');
+  }else add('tunnel','sess','skip',miss);
+  add('tunnel','reconn',dgLevel('nonzero',data.reconnect_attempts),N(data.reconnect_attempts));
+  // rttStats 吃 {rtt} 形状的连接明细；先从快照里的连接记录重排出来。
+  // 不用 return {…}（带空格）：词法守卫靠 return 紧邻花括号判断对象字面量。
+  const rl=[];
+  cr.forEach(function(x){rl.push({rtt:x.rtt_ms||0});});
+  const rts=rttStats(rl);
+  if(rts){
+    add('tunnel','rtt',dgLevel('ge',rts.p95,200,500),
+        rts.min+'<span class="dim"> · '+Math.round(rts.avg)+' · '+Math.round(rts.p95)+' · '+rts.max+' ms</span>',
+        t('dg.rtt_tip'));
+  }else add('tunnel','rtt','skip',miss);
+  const cerr=cr.filter(function(x){return !!x.last_error;}).length;
+  add('tunnel','connerr',dgLevel('nonzero',cerr),cerr?t('dg.err_n').replace('{n}',N(cerr)):N(0));
+
+  // ---- 路由 ----
+  const prl=np.policy_routing;
+  if(prl===true)add('route','polroute','ok',yn(true));
+  else if(prl===false)add('route','polroute','fail',yn(false));
+  else add('route','polroute','skip',miss);
+  if(data.routes){
+    const rn=(data.routes.rules||[]).length+(data.routes.routes||[]).length;
+    add('route','routes',data.routes.error?'warn':'ok',
+        N(rn)+(data.routes.error?'<span class="dim"> · '+esc(data.routes.error)+'</span>':''));
+  }else add('route','routes','skip',miss);
+  if(ip&&ip.v4_total){
+    add('route','pool',dgLevel('ge',ip.v4_used/ip.v4_total*100,80,100),
+        ip.v4_used+'<span class="dim"> / '+ip.v4_total+'</span>');
+  }else add('route','pool','skip',miss);
+  if(np.protocol_version!==undefined)add('route','negver','ok','v'+np.protocol_version);
+  else add('route','negver','skip',miss);
+
+  // ---- TCP Brutal ----
+  const bOk=cr.filter(function(x){return x.brutal_applied===true;}).length;
+  const bErr=cr.filter(function(x){return !!x.brutal_error;}).length;
+  if(!cr.length)add('brut','brut','skip',miss);
+  else if(bErr>0)add('brut','brut','warn',bOk+'<span class="dim"> / '+cr.length+'</span>',
+      cr[0].brutal_error);
+  else if(bOk>0)add('brut','brut','ok',bOk+'<span class="dim"> / '+cr.length+'</span>');
+  else add('brut','brut','skip',miss);
+  let uMax=0,dMax=0;
+  cr.forEach(function(x){
+    uMax=Math.max(uMax,x.brutal_cli_tx_mbps||x.brutal_tx_mbps||0);
+    dMax=Math.max(dMax,x.brutal_srv_tx_mbps||x.brutal_rx_mbps||0);
+  });
+  if(!cr.length)add('brut','brutrate','skip',miss);
+  else if(uMax>0||dMax>0)add('brut','brutrate','ok',
+      uMax+'<span class="dim"> ↑ / '+dMax+' ↓ Mbps</span>');
+  else add('brut','brutrate','skip',miss);
+
+  // ---- TLS ----
+  if(data.cert){
+    add('tls','cert',dgLevel('le',data.cert.days_left,30,0),
+        N(data.cert.days_left)+(data.cert.self_signed?'<span class="dim"> · self-signed</span>':''));
+  }else add('tls','cert','skip',miss);
+  if(pf&&pf.tls_handshake_fail!==undefined)add('tls','tlsfail',dgLevel('nonzero',pf.tls_handshake_fail),
+      N(pf.tls_handshake_fail));
+  else add('tls','tlsfail','skip',miss);
+  const vers=[];
+  cr.forEach(function(x){if(x.tls_version&&vers.indexOf(x.tls_version)<0)vers.push(x.tls_version);});
+  if(!vers.length)add('tls','tlsver','skip',miss);
+  else add('tls','tlsver',vers.every(function(v){return v.indexOf('1.3')>=0;} )?'ok':'warn',
+      esc(vers.join(', ')));
+  const encs=cr.map(function(x){return x.enc_algo;}).filter(function(v){return v!==undefined;});
+  if(!encs.length){
+    if(cfg.encrypt===false)add('tls','enc','fail',esc(encName(data.enc_algo)));
+    else if(data.enc_algo)add('tls','enc','ok',esc(encName(data.enc_algo)));
+    else add('tls','enc','skip',miss);
+  }else{
+    const nBad=encs.filter(function(v){return !v;}).length;
+    add('tls','enc',nBad>0?'warn':'ok',
+        nBad>0?N(nBad)+'<span class="dim"> / '+encs.length+'</span>':esc(encName(encs[0])));
+  }
+
+  // ---- FEC ----
+  if(f.enabled===false)add('fec','fecloss','skip',miss);
+  else add('fec','fecloss',dgLevel('nonzero',f.lost),
+      N(f.recovered)+(f.lost?'<span class="dim"> · '+N(f.lost)+'</span>':''));
+  if(f.enabled===false||!txPk)add('fec','fecovh','skip',miss);
+  else add('fec','fecovh',dgLevel('ge',f.parity_tx/txPk*100,15,25),
+      (f.parity_tx/txPk*100).toFixed(1)+'<span class="dim">%</span>');
+  const base=data.fec_mode||cfg.fec_mode;
+  const modes=[];
+  cr.forEach(function(x){if(x.fec&&modes.indexOf(x.fec)<0)modes.push(x.fec);});
+  if(!base||!modes.length)add('fec','fecmode','skip',miss);
+  else add('fec','fecmode',modes.every(function(m){return m===base;} )?'ok':'warn',
+      esc(modes.join(', ')));
+
+  // ---- 保护与钩子 ----
+  const nRj=pf?((pf.conns_rejected||0)+(pf.fec_group_rejected||0)):0;
+  if(!pf)add('prot','reject','skip',miss);
+  else add('prot','reject',dgLevel('nonzero',nRj),N(nRj));
+  const nFb=pf?((pf.fallback_http||0)+(pf.tarpit||0)):0;
+  if(!pf)add('prot','fallback','skip',miss);
+  else add('prot','fallback',dgLevel('nonzero',nFb),N(nFb));
+  if(!pf)add('prot','psk','skip',miss);
+  else if(!(pf.psk_fail||[]).length)add('prot','psk','ok',N(0));
+  else add('prot','psk','warn',N(pf.psk_fail.length));
+  if(!ho||!ho.configured)add('prot','hookup','skip',miss);
+  else add('prot','hookup',ho.up_ran&&!ho.up_ok?'fail':'ok',
+      ho.up_ok?N(ho.up_ms)+'<span class="dim"> ms</span>':esc(ho.up_error||'-'));
+  if(!ho||!ho.configured)add('prot','hookdown','skip',miss);
+  else add('prot','hookdown',ho.down_ran&&!ho.down_ok?'fail':'ok',
+      ho.down_ok?N(ho.down_ms)+'<span class="dim"> ms</span>':esc(ho.down_error||'-'));
+
+  // ---- 资源 ----
+  if(!cpu)add('res','cpu','skip',miss);
+  else add('res','cpu',dgLevel('ge',cpu.percent,60,80),
+      cpu.percent.toFixed(1)+'<span class="dim">%</span>');
+  if(sysMem.total_mb){
+    add('res','mem',dgLevel('ge',sysMem.used_mb/sysMem.total_mb*100,80,90),
+        sysMem.used_mb.toFixed(0)+'<span class="dim"> / '+sysMem.total_mb.toFixed(0)+' MB</span>');
+  }else add('res','mem','skip',miss);
+  if(mm.num_goroutine!==undefined)add('res','gor',dgLevel('ge',mm.num_goroutine,400,1000),
+      N(mm.num_goroutine));
+  else add('res','gor','skip',miss);
+  if(sm.fd_open!==undefined)add('res','fd',dgLevel('ge',sm.fd_open,4000,8000),N(sm.fd_open));
+  else add('res','fd','skip',miss);
+  if(load.fifteen!==undefined&&sm.num_cpu){
+    // 读数是 15 分钟负载，dim 里是核数——两相除才是每核压力
+    add('res','load',dgLevel('ge',load.fifteen/sm.num_cpu,1.5,2.5),
+        load.fifteen.toFixed(2)+'<span class="dim"> / '+sm.num_cpu+'</span>');
+  }else add('res','load','skip',miss);
+  if(sm.gc_pause_ms!==undefined)add('res','gc',dgLevel('ge',sm.gc_pause_ms,30,50),
+      sm.gc_pause_ms.toFixed(1)+'<span class="dim"> ms</span>');
+  else add('res','gc','skip',miss);
+
+  // ---- 配置 ----
+  // 级别在快照里是顶层 log_level；cfg.log_level 只有较新的服务端才一起下发
+  const logLv=cfg.log_level||data.log_level;
+  if(!logLv)add('cfg','loglvl','skip',miss);
+  else add('cfg','loglvl',logLv==='debug'?'warn':'ok',esc(logLv));
+  return out;
+}
+
+function renderDiag(data){
+  if(!data)return;
+  const grp=dgRun(data);
+  const keys=Object.keys(grp);
+  const cnt={ok:0,warn:0,fail:0,skip:0};
+  keys.forEach(function(k){grp[k].forEach(function(x){cnt[x.lv]++;});});
+  const scored=cnt.ok+cnt.warn+cnt.fail;
+  const score=scored?Math.round((cnt.ok+cnt.warn/2)/scored*100):100;
+  // 环半径 50 → 周长 314.16；offset 越大剩得越少
+  const C=2*Math.PI*50;
+  const fg=document.getElementById('dg-ring-fg');
+  if(fg){
+    fg.setAttribute('stroke-dasharray',C.toFixed(2));
+    fg.setAttribute('stroke-dashoffset',(C*(1-score/100)).toFixed(2));
+    let col='var(--up)';
+    if(score<60)col='var(--err)';
+    else if(score<90)col='var(--warn)';
+    fg.style.stroke=col;
+  }
+  const sn=document.getElementById('dg-score-n');
+  if(sn)sn.innerText=score;
+  const chips=document.getElementById('dg-chips');
+  if(chips){
+    chips.innerHTML=['ok','warn','fail','skip'].map(function(lv){
+      const nm='dg.lv'+lv.charAt(0).toUpperCase()+lv.slice(1);
+      return '<span class="dg-chip c-'+lv+(cnt[lv]?'':' zero')+'"><i></i>'+esc(t(nm))+
+        '<span class="n">'+cnt[lv]+'</span></span>';
+    }).join('');
+  }
+  const vd=document.getElementById('dg-verdict');
+  if(vd){
+    if(cnt.fail===0&&cnt.warn===0){
+      vd.className='dg-verdict';
+      vd.innerText=t('dg.all_ok');
+    }else{
+      vd.className='dg-verdict '+(cnt.fail>0?'v-fail':'v-warn');
+      vd.innerText=t('dg.open_fail').replace('{n}',String(cnt.fail+cnt.warn));
+    }
+  }
+  const tot=document.getElementById('dg-total');
+  if(tot)tot.innerText=t('dg.total').replace('{n}',String(scored));
+  const up=document.getElementById('dg-updated');
+  if(up){
+    const ago=lastStatsT>0?Math.max(0,Math.round((Date.now()-lastStatsT)/1000)):0;
+    up.innerText=t('dg.updated').replace('{t}',fmtDur(ago));
+  }
+  const grid=document.getElementById('dg-grid');
+  if(grid){
+    // 整个分类都取不到数据（老服务端不下发、或该模式没有）就不占位——
+    // 一排"未配置"只会稀释真正的问题；单项缺数据仍然保留，好说明这项为什么没判定
+    grid.innerHTML=keys.filter(function(k){
+      return grp[k].some(function(x){return x.lv!=='skip';});
+    }).map(function(k){
+      const cs=grp[k];
+      const nBad=cs.filter(function(x){return x.lv==='warn'||x.lv==='fail';}).length;
+      const nSkip=cs.filter(function(x){return x.lv==='skip';}).length;
+      const nOk=cs.length-nBad-nSkip;
+      const ic=DG_CATS[k]||'';
+      return '<div class="dg-cat"><div class="dg-cat-h">'+
+        '<span class="dg-cat-ico"><svg viewBox="0 0 24 24">'+ic+'</svg></span>'+
+        '<h4>'+esc(t('dg.c_'+k))+'</h4>'+
+        '<span class="dg-cat-n">'+nOk+'/'+(nOk+nBad)+'</span>'+
+        '</div><div class="dg-checks">'+
+        cs.map(function(x){
+          return '<div class="dg-chk l-'+x.lv+'"'+(x.tip?' title="'+esc(x.tip)+'"':'')+'>'+
+            '<span class="dg-dot"></span>'+
+            '<span class="dg-chk-t">'+esc(t('dg.'+x.ch))+'</span>'+
+            '<span class="dg-chk-d mono">'+x.det+'</span>'+
+          '</div>';
+        }).join('')+'</div></div>';
+    }).join('');
+  }
 }
 
 // ---------- 新增观测面板：填充开销 / 防护路径 / 钩子 / 策略路由 / TAP 链路 ----------
