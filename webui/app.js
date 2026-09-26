@@ -1243,7 +1243,9 @@ function renderHookStatus(h){
     else if(info.out)o.push([t('ov.hook.out'),'<span class="mono">'+esc(String(info.out).slice(0,240))+'</span>']);
     return o;
   };
-  const rows=[];
+  // let 而非 const：下面用 concat 追加钩子输出行，const 会在第二次追加时抛
+  // "Assignment to constant variable"，把整个状态页的渲染一起打断。
+  let rows=[];
   if(h.up_path)rows.push([t('ov.hook.up'),'<span class="mono">'+esc(h.up_path)+'</span>']);
   if(h.down_path)rows.push([t('ov.hook.down'),'<span class="mono">'+esc(h.down_path)+'</span>']);
   rows.push([t('ov.hook.ran')+' (up)',run(h.up_ok,h.up_ran,h.up_ms,h.up_error)]);
