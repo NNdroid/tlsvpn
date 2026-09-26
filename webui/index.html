@@ -270,8 +270,8 @@
         <div class="st-block"><h3 data-i18n="stt.negt">-</h3><div class="twrap"><table class="kv" id="st-neg"></table></div></div>
         <div class="st-block"><h3 data-i18n="stt.host">-</h3><div class="twrap"><table class="kv" id="st-sys"></table></div></div>
         <div class="st-block"><h3 data-i18n="stt.cfg">-</h3><div class="twrap"><table class="kv" id="st-cfg"></table></div></div>
-      </div>
-      <div class="st-grid st-cols" style="margin-top:14px">
+        <!-- 下面几块与上面共用同一个列容器。st-cols 是 CSS 多栏，每个容器各自独立
+             平衡高度；拆成两个容器时前一组末尾会空出一整列，新块只能整体挤到下一行 -->
         <div class="st-block"><h3 id="st-pad-h" data-i18n="ov.pad_kpi">-</h3><div class="twrap"><table class="kv" id="st-pad"></table></div></div>
         <div class="st-block"><h3 id="st-protect-h" data-i18n="ov.protect">-</h3><div class="twrap"><table class="kv" id="st-protect"></table></div><div class="twrap" style="margin-top:8px"><table class="kv" id="st-psk"></table></div></div>
         <div class="st-block"><h3 data-i18n="ov.hooks">-</h3><div class="twrap"><table class="kv" id="st-hooks"></table></div></div>
