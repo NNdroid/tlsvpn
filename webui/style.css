@@ -681,3 +681,56 @@ tbody tr[data-open]{cursor:pointer}
   .ev-ts{grid-column:2 / span 2;text-align:left;font-size:.9em}
   .evbox{max-height:calc(100vh - 370px)}
 }
+
+/* ---------- 拓扑：端点 → 核心 → 出口 的关系图 ---------- */
+/* 结构：上方一条协议链（TLS → PSK → 内层加密 → FEC → 交换 → 填充），
+   下方三列节点，列间是流向箭头；窄屏竖排并把箭头转 90 度 */
+.tpo{display:flex;flex-direction:column;gap:14px}
+.tp-mode{font-size:.72em;font-weight:650;letter-spacing:.08em;padding:3px 9px;border-radius:999px;
+  border:1px solid var(--border2);background:var(--card2);color:var(--muted)}
+.tp-mode.t-srv{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft)}
+.tp-mode.t-cli{color:var(--cyan);border-color:var(--cyan-soft);background:var(--cyan-soft)}
+.tp-chain{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:11px 12px;border-radius:10px;
+  background:var(--card);border:1px solid var(--border);box-shadow:var(--shadow)}
+.tp-chip{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:8px;
+  background:var(--card2);border:1px solid var(--border)}
+.tp-chip i{font-style:normal;font-size:.7em;color:var(--sub);letter-spacing:.03em}
+.tp-chip b{font-size:.78em;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere}
+.tp-chain-sep{color:var(--sub);font-size:.8em}
+.tp-flow{display:grid;grid-template-columns:minmax(0,1fr) 28px minmax(0,1fr) 28px minmax(0,1fr);
+  gap:10px;align-items:stretch}
+.tp-arrow{display:flex;align-items:center;justify-content:center;color:var(--sub);font-size:1.05rem}
+.tp-col{display:flex;flex-direction:column;gap:9px;min-width:0}
+.tp-col-t{display:flex;align-items:center;gap:7px;font-size:.7em;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--sub)}
+.tp-nodes{display:flex;flex-direction:column;gap:9px;min-width:0}
+.tp-node{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;
+  box-shadow:var(--shadow);min-width:0}
+.tp-node[data-open]{cursor:pointer}
+.tp-node[data-open]:hover{border-color:var(--accent);background:var(--card2)}
+.tp-node-h{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:7px;
+  border-bottom:1px dashed var(--border)}
+.tp-node-ico{flex:none;width:16px;height:16px;color:var(--accent);
+  display:flex;align-items:center;justify-content:center}
+.tp-node-ico svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round}
+.tp-node-t{flex:1;min-width:0;font-size:.84em;font-weight:600;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.tp-node-b{display:flex;flex-direction:column;gap:4px}
+.tp-kv{display:flex;align-items:baseline;gap:8px;font-size:.76em;line-height:1.45}
+.tp-kv>span:first-child{flex:none;width:58px;color:var(--sub)}
+.tp-v{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.tp-node .neg{color:var(--err)}
+.tp-node .warn{color:var(--warn)}
+.tp-node.tp-bad{border-color:var(--err-soft)}
+.tp-node.tp-bad .tp-node-t{color:var(--err)}
+.tp-node.tp-empty{border-style:dashed;background:transparent;box-shadow:none;opacity:.62;
+  display:flex;align-items:center;justify-content:center;padding:22px 12px}
+.tp-node.tp-empty .tp-node-b{display:none}
+@media (max-width:1000px){
+  .tp-flow{grid-template-columns:1fr;gap:14px}
+  .tp-arrow{transform:rotate(90deg);padding:2px 0}
+  .tp-kv>span:first-child{width:76px}
+}
+

@@ -153,6 +153,8 @@
       <button data-pane="traffic" data-i18n="tab.traffic">-</button>
       <button data-pane="status" data-i18n="tab.status">-</button>
       <button data-pane="diag" data-i18n="tab.diag">-</button>
+      <button data-pane="sec" data-i18n="tab.sc">-</button>
+      <button data-pane="topo" data-i18n="tab.tp">-</button>
       <button data-pane="events" data-i18n="tab.ev">-</button>
       <button data-pane="logs" data-i18n="tab.logs">-</button>
       <button data-pane="settings" data-i18n="tab.settings">-</button>
@@ -307,6 +309,49 @@
         </div>
         <div class="dg-grid" id="dg-grid"></div>
       </div>
+    </div>
+
+    <!-- 安全中心：与诊断中心同源（最近一次 /api/stats 快照），取向不同——
+         诊断问"有没有东西坏了"，这里问"每一项防护现在是不是开着、有没有被试探过"。
+         结构复用诊断中心的 dg-* 样式，只换数据源与文案；
+         布尔开关一律三态（开/关/字段缺位），缺位判不适用而不当漏洞 -->
+    <div class="pane" id="pane-sec">
+      <div class="dg-wrap">
+        <div class="dg-score">
+          <div class="dg-ring">
+            <svg viewBox="0 0 120 120" width="120" height="120" aria-hidden="true">
+              <circle class="dg-bg" cx="60" cy="60" r="50"/>
+              <circle class="dg-fg" id="sc-ring-fg" cx="60" cy="60" r="50"/>
+            </svg>
+            <div class="dg-ring-c">
+              <div class="dg-score-n" id="sc-score-n">-</div>
+              <div class="dg-score-l" data-i18n="sc.score">-</div>
+            </div>
+          </div>
+          <div class="dg-verdict" id="sc-verdict">-</div>
+          <div class="dg-chips" id="sc-chips"></div>
+          <div class="dg-meta">
+            <span id="sc-total">-</span>
+            <span id="sc-updated" class="dim">-</span>
+          </div>
+        </div>
+        <div class="dg-grid" id="sc-grid"></div>
+      </div>
+    </div>
+
+    <!-- 拓扑：同一份快照画成「端点 → 核心 → 出口」的关系图，不新增端点。
+         服务端是「客户端 → 虚拟交换机 → TAP/内核路由」，客户端是「本机 → 多后端 → 对端」。
+         节点上的加密/FEC/密钥代际/TLS/SNI 标记逐端点显示；
+         服务端模式的客户端节点可点，复用客户端表的 data-open 抽屉 -->
+    <div class="pane" id="pane-topo">
+      <div class="toolbar">
+        <span class="dim" data-i18n="tp.title">-</span>
+        <span class="tp-mode" id="tp-mode">-</span>
+        <span class="spacer"></span>
+        <span class="dim" id="tp-meta"></span>
+        <span class="dim mono" id="tp-updated">-</span>
+      </div>
+      <div id="tpo" class="tpo"></div>
     </div>
 
     <!-- 事件流：默认走 SSE 长连接（/api/events，先回放积压再转实时），
