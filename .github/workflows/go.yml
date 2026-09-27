@@ -20,6 +20,9 @@ jobs:
     - name: Build
       run: go build -v ./...
 
+    - name: Test interop probe
+      run: (cd interop && go test ./...)
+
     - name: Cross-build ARM64 v8.2
       run: GOOS=linux GOARCH=arm64 GOARM64=v8.2 CGO_ENABLED=0 go build ./...
 
@@ -43,14 +46,14 @@ jobs:
       run: go test -v ./...
 
     - name: Deterministic crypto/FEC core (hard gate)
-      # These tests are pure logic/in-memory and must never be softened by the
-      # hosted-runner networking exceptions in the full-suite step above.
-      run: go test -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM'
+      # Pure logic/in-memory tests for every authenticated inner AEAD and FEC.
+      # These must never be softened by hosted-runner networking exceptions.
+      run: go test -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM|TestChaCha|TestXChaCha|TestEncAlgo'
 
-    - name: "Race detector (FEC/GCM hard gate)"
-      # FEC/GCM are session-global hot paths touched concurrently by multiple
+    - name: "Race detector (FEC/AEAD hard gate)"
+      # FEC/AEAD are session-global hot paths touched concurrently by multiple
       # physical connections; a race here is a correctness failure.
-      run: go test -race -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM'
+      run: go test -race -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM|TestChaCha|TestXChaCha|TestEncAlgo'
 
     - name: "Race detector (web, ban, stats soft signal)"
       # These suites include hosted-runner/network-sensitive cases. Keep them
@@ -62,7 +65,7 @@ jobs:
       run: go test -v -run 'TestProtocol|TestGenerateGoldenVectors' ./...
 
     - name: Benchmark (full suite, deterministic run count)
-      # -bench=. runs every benchmark incl. GCM/FEC; -count=5 gives
+      # -bench=. runs every benchmark incl. AEAD/FEC; -count=5 gives
       # benchstat-compatible samples instead of a single noisy number.
       continue-on-error: true
       run: go test -bench . -run '^$' -benchmem -count=5 -timeout 20m | tee bench.txt
