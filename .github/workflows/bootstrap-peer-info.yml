@@ -1,7 +1,8 @@
 name: Bootstrap peer info handshake
 on:
   push:
-    branches: ["feat/peer-info-handshake"]
+    branches:
+      - feat/peer-info-handshake
 permissions:
   contents: write
 jobs:
@@ -15,107 +16,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Apply peer info integration
+      - name: Apply patch
+        run: python3 scripts/bootstrap_peer_info.py
+      - name: Format and test
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def rep(path, old, new, n=1):
-              p=Path(path); s=p.read_text()
-              if s.count(old) < n:
-                  raise SystemExit(f"{path}: expected {n} occurrence(s), got {s.count(old)} for {old[:80]!r}")
-              s=s.replace(old,new,n)
-              p.write_text(s)
-
-          # Protocol: optional extension, ignored by older peers.
-          rep('frame.go', '\tSessionToken string `json:"session_token,omitempty"`\n}',
-              '\tSessionToken string `json:"session_token,omitempty"`\n\t// PeerInfo is diagnostic metadata only; never use it for authentication/authorization.\n\tPeerInfo *PeerInfo `json:"peer_info,omitempty"`\n}', 1)
-          rep('frame.go', '\tTLS *TLSHandshakeInfo `json:"tls,omitempty"`\n}',
-              '\tTLS *TLSHandshakeInfo `json:"tls,omitempty"`\n\t// PeerInfo is returned only after application-layer authentication succeeds.\n\tPeerInfo *PeerInfo `json:"peer_info,omitempty"`\n}', 1)
-
-          # Client: advertise local metadata, retain server metadata at logical-session scope.
-          rep('client.go', '\tsessionEpoch     uint64                 // 服务端确认的密钥代际\n\tnegInfo          *sessionNeg',
-              '\tsessionEpoch     uint64                 // 服务端确认的密钥代际\n\tpeerInfo         PeerInfo               // 服务端自报诊断元数据；sessionMu 保护\n\tnegInfo          *sessionNeg', 1)
-          rep('client.go', '\t\tSessionToken: sessionToken,\n\t}',
-              '\t\tSessionToken: sessionToken,\n\t\tPeerInfo:     localPeerInfo(),\n\t}', 1)
-          rep('client.go', '\tif resp.ProtocolVersion != 2 {\n\t\treturn 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)\n\t}\n',
-              '\tif resp.ProtocolVersion != 2 {\n\t\treturn 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)\n\t}\n\tif resp.PeerInfo != nil {\n\t\tc.sessionMu.Lock()\n\t\tc.peerInfo = normalizePeerInfo(resp.PeerInfo)\n\t\tc.sessionMu.Unlock()\n\t}\n', 1)
-
-          # Server: keep client metadata on the logical session and return local metadata only on success.
-          rep('server.go', '\tMAC                string\n\tmacBin',
-              '\tMAC                string\n\tPeerInfo           PeerInfo // 客户端自报诊断元数据；不参与认证/授权\n\tmacBin', 1)
-          rep('server.go', '\t\t\tSessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,\n\t\t\tActiveConns:',
-              '\t\t\tSessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, PeerInfo: normalizePeerInfo(req.PeerInfo),\n\t\t\tActiveConns:', 1)
-          rep('server.go', '\tsaltA, saltB := session.SaltA, session.SaltB\n',
-              '\tif req.PeerInfo != nil {\n\t\tsession.sessionMu.Lock()\n\t\tsession.PeerInfo = normalizePeerInfo(req.PeerInfo)\n\t\tsession.sessionMu.Unlock()\n\t}\n\tsaltA, saltB := session.SaltA, session.SaltB\n', 1)
-          rep('server.go', '\t\tSessionToken: sessionToken, TLS: tlsInfo,\n\t}',
-              '\t\tSessionToken: sessionToken, TLS: tlsInfo,\n\t}\n\tif ok {\n\t\tresp.PeerInfo = localPeerInfo()\n\t}', 1)
-
-          # Web API: top-level peer for client mode; per-session peer for server mode.
-          rep('api.go', '\tSessionEpoch uint64 `json:"session_epoch,omitempty"`\n',
-              '\tSessionEpoch uint64 `json:"session_epoch,omitempty"`\n\t// Peer is the authenticated remote endpoint\'s self-reported diagnostic metadata.\n\tPeer *PeerInfo `json:"peer,omitempty"`\n', 1)
-          rep('api.go', '\t\t\ttxB, rxB, txP, rxP, age uint64\n\t\t}',
-              '\t\t\ttxB, rxB, txP, rxP, age uint64\n\t\t\tpeer                     PeerInfo\n\t\t}', 1)
-          rep('api.go', '\t\t\t\tage: uint64(time.Since(session.CreatedAt) / time.Second),\n\t\t\t}',
-              '\t\t\t\tage: uint64(time.Since(session.CreatedAt) / time.Second), peer: session.PeerInfo,\n\t\t\t}', 1)
-          rep('api.go', '\t\t\t\t"fec": snap.fec, "enc_algo": snap.enc, "uptime_sec": snap.age,\n\t\t\t}',
-              '\t\t\t\t"fec": snap.fec, "enc_algo": snap.enc, "uptime_sec": snap.age,\n\t\t\t\t"peer_info": func() interface{} { if peerInfoEmpty(snap.peer) { return nil }; return snap.peer }(),\n\t\t\t}', 1)
-          rep('api.go', '\t\tstats.SessionEpoch = sessionEpoch\n',
-              '\t\tstats.SessionEpoch = sessionEpoch\n\t\tif p := cli.remotePeerInfoSnapshot(); p != nil { stats.Peer = p }\n', 1)
-
-          # Small regression tests: optional wire compatibility, normalization and auth-success response metadata.
-          Path('peer_info_test.go').write_text(r'''package main
-
-import (
-    "encoding/json"
-    "strings"
-    "testing"
-)
-
-func TestPeerInfoOptionalHandshakeCompatibility(t *testing.T) {
-    raw := []byte(`{"protocol_version":2,"client_id":"x","psk":"y"}`)
-    var req HandshakeReq
-    if err := json.Unmarshal(raw, &req); err != nil { t.Fatal(err) }
-    if req.PeerInfo != nil { t.Fatalf("old handshake unexpectedly has peer info: %+v", req.PeerInfo) }
-
-    req.PeerInfo = &PeerInfo{Implementation:"go", Hostname:"node-a", OS:"linux", Arch:"arm64", Version:"v1"}
-    b, err := json.Marshal(req); if err != nil { t.Fatal(err) }
-    var round HandshakeReq
-    if err := json.Unmarshal(b, &round); err != nil { t.Fatal(err) }
-    if round.PeerInfo == nil || round.PeerInfo.Hostname != "node-a" || round.PeerInfo.Arch != "arm64" { t.Fatalf("peer info lost: %+v", round.PeerInfo) }
-}
-
-func TestNormalizePeerInfoBoundsUntrustedFields(t *testing.T) {
-    in := &PeerInfo{Hostname:"  host  ", OSVersion: strings.Repeat("x", peerInfoFieldMax+100)}
-    got := normalizePeerInfo(in)
-    if got.Hostname != "host" { t.Fatalf("hostname=%q", got.Hostname) }
-    if len(got.OSVersion) != peerInfoFieldMax { t.Fatalf("os_version len=%d", len(got.OSVersion)) }
-}
-
-func TestLocalPeerInfoHasStableCoreFields(t *testing.T) {
-    p := localPeerInfo()
-    if p == nil || p.Implementation != "go" || p.OS == "" || p.Arch == "" || p.Version == "" { t.Fatalf("incomplete local peer info: %+v", p) }
-}
-''')
-          PY
-          cat >> peer_info.go <<'EOF'
-
-// remotePeerInfoSnapshot returns a copy so WebUI serialization never races a reconnect.
-func (c *Client) remotePeerInfoSnapshot() *PeerInfo {
-	c.sessionMu.Lock()
-	p := c.peerInfo
-	c.sessionMu.Unlock()
-	if peerInfoEmpty(p) {
-		return nil
-	}
-	return &p
-}
-EOF
           gofmt -w peer_info.go peer_info_test.go frame.go client.go server.go api.go
           go test ./...
-      - name: Commit implementation and remove bootstrap workflow
+      - name: Commit implementation
         run: |
-          rm -f .github/workflows/bootstrap-peer-info.yml
+          rm -f .github/workflows/bootstrap-peer-info.yml scripts/bootstrap_peer_info.py
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
