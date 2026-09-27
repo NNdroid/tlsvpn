@@ -1115,7 +1115,7 @@ function renderClientsTable(data){
   const total=rows.length;
   const pv=pageView('clients',rows);
   document.getElementById('clients-body').innerHTML=pv.rows.map(function(r){
-    return '<tr data-open="'+esc(r.id)+'"><td class="num dim" title="'+esc(r.id)+'">'+hi(esc(shortId(r.id,10)),f)+(r.c.peer_info&&r.c.peer_info.hostname?'<br><span class="dim">'+hi(esc(r.c.peer_info.hostname),f)+'</span>':'')+'</td>'+
+    return '<tr data-open="'+esc(r.id)+'"><td class="num dim" title="'+esc(r.id)+'">'+hi(esc(shortId(r.id,10)),f)+(r.c.peer_info&&r.c.peer_info.hostname?'<br><span class="dim">'+hi(esc(r.c.peer_info.hostname),f)+'</span>':'')+(r.c.peer_info&&(r.c.peer_info.os||r.c.peer_info.arch)?'<br>'+platformIconsOnly(r.c.peer_info.os,r.c.peer_info.arch):'')+'</td>'+
       '<td class="num">'+hi(esc(r.c.ipv4||'-'),f)+'</td>'+
       '<td class="hide-sm num dim">'+hi(esc(r.c.ipv6||'-'),f)+'</td>'+
       '<td class="hide-sm num dim">'+hi(esc(r.c.mac||'-'),f)+'</td>'+
@@ -1168,7 +1168,7 @@ function renderStatus(data){
   if(rn.length){rw.style.display='';rw.innerHTML='<strong>'+t('stt.restart')+'</strong><br><span class="mono">'+esc(rn.join(', '))+'</span>';}
   else{rw.style.display='none';}
   const sysRows=[
-    [t('stt.sys.os'),esc(sys.os||'-')+' '+mtxt(sys.arch||'')],
+    [t('stt.sys.os'),platformSummary(sys.os,'',sys.arch)],
     [t('stt.sys.go'),mtxt(sys.go_version||'-')],
     [t('stt.sys.cpu'),sys.num_cpu||'-'],
     [t('stt.sys.host'),mtxt(sys.host||'-')],
@@ -2778,7 +2778,7 @@ function tpPeerNodes(data){
   const rs=[];
   if(peer.hostname)rs.push([t('tp.host'),'<span class="mono">'+esc(peer.hostname)+'</span>']);
   if(peer.implementation||peer.version)rs.push([t('kpi.version'),'<span class="mono">'+esc([peer.implementation,peer.version].filter(Boolean).join(' '))+'</span>']);
-  if(peer.os||peer.os_version||peer.arch)rs.push([t('stt.sys.os'),'<span class="mono">'+esc([peer.os,peer.os_version,peer.arch].filter(Boolean).join(' '))+'</span>']);
+  if(peer.os||peer.os_version||peer.arch)rs.push([t('stt.sys.os'),platformSummary(peer.os,peer.os_version,peer.arch)]);
   rs.push([t('tp.addr'),'<span class="mono">'+esc(cfg.addr||'-')+'</span>']);
   rs.push([t('tp.sni'),tl.sni?'<span class="mono">'+esc(tl.sni)+'</span>':'<span class="dim">'+t('sc.none')+'</span>']);
   if(tl.version)rs.push([t('tp.tls'),'<span class="mono">'+esc(tl.version)+'</span>']);
@@ -2820,7 +2820,7 @@ function tpEndpoints(data){
       const pi=c.peer_info||{};
       if(pi.hostname)rs.push([t('tp.host'),'<span class="mono">'+esc(pi.hostname)+'</span>']);
       if(pi.implementation||pi.version)rs.push([t('kpi.version'),'<span class="mono">'+esc([pi.implementation,pi.version].filter(Boolean).join(' '))+'</span>']);
-      if(pi.os||pi.os_version||pi.arch)rs.push([t('stt.sys.os'),'<span class="mono">'+esc([pi.os,pi.os_version,pi.arch].filter(Boolean).join(' '))+'</span>']);
+      if(pi.os||pi.os_version||pi.arch)rs.push([t('stt.sys.os'),platformSummary(pi.os,pi.os_version,pi.arch)]);
       if(b.n){
         const mn=b.min===1e9?0:b.min;
         rs.push([t('tp.rtt'),'<span class="mono">'+mn+'<span class="dim"> - '+b.max+' ms</span></span>']);
@@ -3090,3 +3090,42 @@ document.getElementById('evbox').addEventListener('click',function(ev){
 setRefresh(REFRESH_S);setRange(chartRange);fetchStats();
 evStart();
 window.addEventListener('resize',redrawChart);
+
+
+function platformAssetName(kind,value){
+  const v=String(value||'').trim().toLowerCase();
+  if(kind==='os'){
+    if(/windows|win32|mingw|msys/.test(v))return 'os-windows.svg';
+    if(/darwin|macos|mac os|osx/.test(v))return 'os-macos.svg';
+    if(/android/.test(v))return 'os-android.svg';
+    if(/freebsd|openbsd|netbsd|dragonfly/.test(v))return 'os-bsd.svg';
+    if(/linux|openwrt|immortalwrt|debian|ubuntu|alpine|fedora|centos|rhel|rocky|arch/.test(v))return 'os-linux.svg';
+    return 'os-generic.svg';
+  }
+  if(/amd64|x86_64|x64/.test(v))return 'arch-x86_64.svg';
+  if(/(^|[^0-9])386|i[3-6]86|(^|[^a-z])x86([^_]|$)/.test(v))return 'arch-x86.svg';
+  if(/arm64|aarch64/.test(v))return 'arch-arm64.svg';
+  if(/(^|[^a-z])arm(v[5-9])?([^a-z]|$)/.test(v))return 'arch-arm.svg';
+  if(/riscv64/.test(v))return 'arch-riscv64.svg';
+  if(/mips/.test(v))return 'arch-mips.svg';
+  if(/loong64|loongarch/.test(v))return 'arch-loong64.svg';
+  return 'arch-generic.svg';
+}
+function platformBadge(kind,value,label){
+  const raw=String(value||'').trim(), text=String(label===undefined?raw:label||'').trim();
+  if(!raw&&!text)return '';
+  return '<span class="platform-badge"><img class="platform-icon" src="icons/'+platformAssetName(kind,raw)+'" alt="" loading="lazy" decoding="async"><span class="mono">'+esc(text||raw)+'</span></span>';
+}
+function platformIconsOnly(os,arch){
+  const parts=[];
+  if(os)parts.push('<img class="platform-icon" src="icons/'+platformAssetName('os',os)+'" alt="" title="'+esc(os)+'" loading="lazy" decoding="async">');
+  if(arch)parts.push('<img class="platform-icon" src="icons/'+platformAssetName('arch',arch)+'" alt="" title="'+esc(arch)+'" loading="lazy" decoding="async">');
+  return parts.length?'<span class="platform-icons-only">'+parts.join('')+'</span>':'';
+}
+function platformSummary(os,version,arch){
+  const parts=[];
+  if(os)parts.push(platformBadge('os',os,os));
+  if(version)parts.push('<span class="mono dim">'+esc(version)+'</span>');
+  if(arch)parts.push(platformBadge('arch',arch,arch));
+  return parts.length?'<span class="platform-summary">'+parts.join('')+'</span>':'<span class="mono">-</span>';
+}
