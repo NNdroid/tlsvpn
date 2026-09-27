@@ -29,19 +29,19 @@ type Backend struct {
 }
 
 type AsyncPort struct {
-	id         string
-	ch         chan []byte
-	ctx        context.Context
-	cancel     context.CancelFunc
-	backendsMu sync.RWMutex
-	backends   []*Backend
-	preferred  atomic.Pointer[Backend]
-	encoder    *fecEncoder
-	txSeq      uint32
-	resetEpoch chan portEpochReset
-	exhausted  atomic.Bool
-	onExhaust  func()
-	dropped    uint64 // 各环节丢弃帧计数（面板/metrics）
+	id            string
+	ch            chan []byte
+	ctx           context.Context
+	cancel        context.CancelFunc
+	backendsMu    sync.RWMutex
+	backends      []*Backend
+	preferred     atomic.Pointer[Backend]
+	encoder       *fecEncoder
+	txSeq         uint32
+	resetEpoch    chan portEpochReset
+	exhausted     atomic.Bool
+	onExhaust     func()
+	dropped       uint64 // 各环节丢弃帧计数（面板/metrics）
 	paritySent    atomic.Uint64
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
@@ -72,7 +72,7 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	pCtx, pCancel := context.WithCancel(ctx)
 	p := &AsyncPort{
 		id: id, ch: make(chan []byte, 4096), ctx: pCtx, cancel: pCancel,
-		resetEpoch: make(chan portEpochReset),
+		resetEpoch:    make(chan portEpochReset),
 		parityScratch: make([][]byte, 0, 32),
 	}
 	go p.run()
@@ -283,6 +283,7 @@ func (p *AsyncPort) run() {
 // dispatchBatch 把一批帧分发给后端，并接管 batch 内全部缓冲的所有权：
 //   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
 //   - 普通模式：MinRTT 单路发送。
+//
 // wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
@@ -392,9 +393,8 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 	return bestBackend
 }
 
-
 const (
-	multipathStripeBacklog = 64
+	multipathStripeBacklog     = 64
 	multipathStripeBatchFrames = 32
 )
 
@@ -433,7 +433,6 @@ func (p *AsyncPort) pickDataBackendFor(backends []*Backend, bulk bool) *Backend 
 	}
 	return best
 }
-
 
 // pickParityBackend 选择一条健康连接承载单份 parity。多连接时优先避开
 // 当前 data path，并从轮转游标开始扫描，避免所有 parity 固定压在同一 TCP 流。
@@ -652,49 +651,49 @@ type Client struct {
 	prErr       string
 	// live 指向当前生效配置；面板热更时整体替换该指针，
 	// dialAndServe 每轮重拨前取最新值
-	live          atomic.Pointer[liveConfig]
+	live             atomic.Pointer[liveConfig]
 	interfaceManager string
 	netifdInterface  string
 	netifdMu         sync.Mutex
 	netifdState      netifdLinkState
-	tapName       string
-	macAddr       string
-	tap           io.ReadWriteCloser
-	connsCount    int32  // 与 live.conns 一致的只读影子（连接注册表按此建）
-	fecNegotiated int    // 0=未协商, >0=XOR 分组大小
-	fecStatus     string // 面板展示用
-	fecAlgo       int    // fecDec 绑定的加密算法（会话重建判据）
-	fecSaltKey    string // fecDec 绑定的盐（会话重建判据）
-	txPort        *AsyncPort
-	rxReorder     *ReorderBuffer
-	fecDec        *fecDecoder
-	TxBytes       uint64
-	RxBytes       uint64
-	TxPackets     uint64
-	RxPackets     uint64
-	icTx          *innerCipher           // 当前会话发送方向（GCM）
-	icRx          *innerCipher           // 当前会话接收方向（GCM）
-	encAlgo       int                    // 当前会话协商结果（encAlgoNone / encAlgoGCM）
-	assignedV4    string                 // 服务端分配的 IPv4（面板展示）
-	assignedV6    string                 // 服务端分配的 IPv6（面板展示）
-	liveConns     int32                  // 当前已建立的物理连接数（面板展示）
-	tapWriteErrs  atomic.Uint64          // TAP 交付失败帧数（旧实现被静默吞掉）
-	reconnects    uint64                 // 累计重连尝试次数（面板展示）
-	forceGen      uint64                 // 强制重连世代：递增即要求重连循环跳过退避
-	wake          chan struct{}          // 重连唤醒：强制重连/热更配置时广播（缓冲 1，非阻塞）
-	instanceID    atomic.Value           // string：本进程实例；变化即要求服务端换密钥代际
-	sessionEpoch  uint64                 // 服务端确认的密钥代际
-	negInfo       *sessionNeg            // 上次成功握手的协商快照（面板展示用）
-	cfgSnap       atomic.Pointer[Config] // 当前生效完整配置（面板"状态"页数据源）
-	bootCfg       atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
-	connsMu       sync.Mutex
-	conns         map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
-	startedAt     time.Time
-	hooks         *LifecycleHooks
-	runCancel     context.CancelFunc
-	fatalOnce     sync.Once
-	fatalErr      chan error
-	networkSetup  sync.Mutex
+	tapName          string
+	macAddr          string
+	tap              io.ReadWriteCloser
+	connsCount       int32  // 与 live.conns 一致的只读影子（连接注册表按此建）
+	fecNegotiated    int    // 0=未协商, >0=XOR 分组大小
+	fecStatus        string // 面板展示用
+	fecAlgo          int    // fecDec 绑定的加密算法（会话重建判据）
+	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
+	txPort           *AsyncPort
+	rxReorder        *ReorderBuffer
+	fecDec           *fecDecoder
+	TxBytes          uint64
+	RxBytes          uint64
+	TxPackets        uint64
+	RxPackets        uint64
+	icTx             *innerCipher           // 当前会话发送方向（GCM）
+	icRx             *innerCipher           // 当前会话接收方向（GCM）
+	encAlgo          int                    // 当前会话协商结果（encAlgoNone / encAlgoGCM）
+	assignedV4       string                 // 服务端分配的 IPv4（面板展示）
+	assignedV6       string                 // 服务端分配的 IPv6（面板展示）
+	liveConns        int32                  // 当前已建立的物理连接数（面板展示）
+	tapWriteErrs     atomic.Uint64          // TAP 交付失败帧数（旧实现被静默吞掉）
+	reconnects       uint64                 // 累计重连尝试次数（面板展示）
+	forceGen         uint64                 // 强制重连世代：递增即要求重连循环跳过退避
+	wake             chan struct{}          // 重连唤醒：强制重连/热更配置时广播（缓冲 1，非阻塞）
+	instanceID       atomic.Value           // string：本进程实例；变化即要求服务端换密钥代际
+	sessionEpoch     uint64                 // 服务端确认的密钥代际
+	negInfo          *sessionNeg            // 上次成功握手的协商快照（面板展示用）
+	cfgSnap          atomic.Pointer[Config] // 当前生效完整配置（面板"状态"页数据源）
+	bootCfg          atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
+	connsMu          sync.Mutex
+	conns            map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
+	startedAt        time.Time
+	hooks            *LifecycleHooks
+	runCancel        context.CancelFunc
+	fatalOnce        sync.Once
+	fatalErr         chan error
+	networkSetup     sync.Mutex
 }
 
 // sessionNeg 最近一次握手成功的端到端协商结果快照。面板"状态"页展示的是
@@ -1125,16 +1124,25 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		}
 	}
 
-	// 初始化重排缓冲区：当包按序理顺后，统一写入 c.tap
-	c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
-		if _, werr := c.tap.Write(orderedFrame); werr != nil {
-			// 旧实现静默丢弃错误：TAP 故障时表现为"隧道在线但本机不通"
-			n := c.tapWriteErrs.Add(1)
-			if n == 1 || n%1000 == 0 {
-				log.Warnf("[Client] TAP write failed #%d: %v", n, werr)
-			}
+	// v2 只在单物理连接时把 RX/reorder 与阻塞 TAP write 解耦。旧 real-TAP
+	// 实验显示 conns=1 有正收益信号，而 conns=2/4 的额外 channel/goroutine
+	// 调度会抵消收益；多连接因此继续保留直接 TAP 交付路径。
+	reportTapWriteErr := func(werr error) {
+		n := c.tapWriteErrs.Add(1)
+		if n == 1 || n%1000 == 0 {
+			log.Warnf("[Client] TAP write failed #%d: %v", n, werr)
 		}
-	})
+	}
+	if cl.Conns == 1 {
+		tapDelivery := newOwnedTapDelivery(ctx, c.tap, asyncTapDeliveryQueue, reportTapWriteErr)
+		c.rxReorder = NewOwnedReorderBuffer(tapDelivery.EnqueueOwned)
+	} else {
+		c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+			if _, werr := c.tap.Write(orderedFrame); werr != nil {
+				reportTapWriteErr(werr)
+			}
+		})
+	}
 
 	// Web 面板（可选，web.addr 未指定时不启动）；携带完整配置供面板热更
 	if cfg.Web.Addr != "" {
@@ -1448,9 +1456,9 @@ func (c *Client) snapshotConns() []connSnapshot {
 // negotiateUTLS 负责配置 uTLS、选择指纹并执行 TLS 握手（参数取自热更快照）
 func (c *Client) negotiateUTLS(ctx context.Context, rawConn net.Conn, lv *liveConfig) (*utls.UConn, error) {
 	utlsConf := &utls.Config{
-		ServerName:                  lv.sni,
-		InsecureSkipVerify:          lv.insecure,
-		NextProtos:                  []string{"h2", "http/1.1"},
+		ServerName:         lv.sni,
+		InsecureSkipVerify: lv.insecure,
+		NextProtos:         []string{"h2", "http/1.1"},
 		// VPN 是持续大流量而不是交互式短响应；关闭动态 record sizing 后
 		// 从一开始就使用满尺寸 TLS record，减少 record/AEAD/write 调用。
 		DynamicRecordSizingDisabled: true,
@@ -1580,8 +1588,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		BrutalConns:     lv.connsCount,
 		BrutalConnIndex: connIndex,
 		Encrypt:         lv.encrypt,
-		EncAlgo:         func() int { if lv.encrypt { return lv.encAlgo }; return encAlgoNone }(),
-		SessionToken:    sessionToken,
+		EncAlgo: func() int {
+			if lv.encrypt {
+				return lv.encAlgo
+			}
+			return encAlgoNone
+		}(),
+		SessionToken: sessionToken,
 	}
 	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
