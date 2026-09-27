@@ -35,9 +35,10 @@ jobs:
           set -euxo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          rm -f .github/workflows/zz-webui-maintenance.yml
           rm -f .github/workflows/zz-webui-maintenance-v2.yml
           rm -f .github/scripts/oneoff_webui_maint.py
           git add -A
           git commit -m "feat(webui): add local platform icons and fix favicon"
           git push origin HEAD:main
+
+# one-off trigger: 2026-09-27
