@@ -396,7 +396,8 @@ type ClientSession struct {
 	IPv4               string
 	IPv6               string
 	MAC                string
-	macBin             macKey // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
+	PeerInfo           PeerInfo // 客户端自报诊断元数据；不参与认证/授权
+	macBin             macKey   // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
 	RxReorder          *ReorderBuffer
 	FecDec             *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK            int               // 下行 XOR 分组大小（0 表示未启用）
@@ -1570,7 +1571,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			}
 		}
 		session = &ClientSession{
-			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC,
+			SessionID: uuid.New().String(), Port: port, IPv4: v4ip, IPv6: v6ip, MAC: req.MAC, PeerInfo: normalizePeerInfo(req.PeerInfo),
 			ActiveConns: 1, FecEncK: fecEncK, FecMode: fecMode,
 			EncAlgo: encAlgo, Encrypt: encrypt, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
 			InstanceID: req.ClientInstance, Epoch: 1, ResumeToken: resumeToken,
@@ -1617,6 +1618,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	sessionID := session.SessionID // 提取出来准备发给客户端
 	encAlgo := session.EncAlgo
 	icTx, icRx := session.icTx, session.icRx
+	if req.PeerInfo != nil {
+		session.sessionMu.Lock()
+		session.PeerInfo = normalizePeerInfo(req.PeerInfo)
+		session.sessionMu.Unlock()
+	}
 	saltA, saltB := session.SaltA, session.SaltB
 	resumeToken := responseResumeToken(session)
 	fecEncK := session.FecEncK
@@ -2021,6 +2027,9 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 		BrutalGroups: brutalGroups, BrutalTotalTx: cliTotalTx, BrutalTotalRx: srvTotalTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
 		SessionToken: sessionToken, TLS: tlsInfo,
+	}
+	if ok {
+		resp.PeerInfo = localPeerInfo()
 	}
 	log.Debugf("[%s] => handshake response session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		clientID, sessionID, protocolVersion, epoch, fec, fecGroup, encrypt, encAlgo, sessionToken != "")

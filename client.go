@@ -683,6 +683,7 @@ type Client struct {
 	wake             chan struct{}          // 重连唤醒：强制重连/热更配置时广播（缓冲 1，非阻塞）
 	instanceID       atomic.Value           // string：本进程实例；变化即要求服务端换密钥代际
 	sessionEpoch     uint64                 // 服务端确认的密钥代际
+	peerInfo         PeerInfo               // 服务端自报诊断元数据；sessionMu 保护
 	negInfo          *sessionNeg            // 上次成功握手的协商快照（面板展示用）
 	cfgSnap          atomic.Pointer[Config] // 当前生效完整配置（面板"状态"页数据源）
 	bootCfg          atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
@@ -1598,6 +1599,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			return encAlgoNone
 		}(),
 		SessionToken: sessionToken,
+		PeerInfo:     localPeerInfo(),
 	}
 	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
@@ -1630,6 +1632,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if resp.ProtocolVersion != 2 {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
+	c.sessionMu.Lock()
+	if resp.PeerInfo != nil {
+		c.peerInfo = normalizePeerInfo(resp.PeerInfo)
+	} else {
+		// Rolling upgrade: an authenticated old server omits peer_info. Clear the
+		// previous node's metadata instead of showing stale identity in WebUI.
+		c.peerInfo = PeerInfo{}
+	}
+	c.sessionMu.Unlock()
 
 	// TLS 和 TLSVPN 应用层握手都已完成，现在才切换 TCP congestion control。
 	// 优先使用服务端裁剪后的会话总预算；若对端未提供 group 语义，则兼容旧端，

@@ -89,6 +89,8 @@ type WebStats struct {
 	// client 模式会话级密钥代际。服务端逐连接有 session_epoch，客户端只有一条
 	// 逻辑会话，故放在顶层；连接表按列展示它，代际漂移一眼可见。
 	SessionEpoch uint64 `json:"session_epoch,omitempty"`
+	// Peer is the authenticated remote endpoint self-reported diagnostic metadata.
+	Peer *PeerInfo `json:"peer,omitempty"`
 	// 按日流量统计（上行=client→server，下行=server→client，线路字节口径）
 	Traffic *trafficSnapshotJSON `json:"traffic,omitempty"`
 	// 服务端模式下各客户端的按日流量历史（客户端模式缺位）
@@ -752,6 +754,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			v4, v6, mac, fec        string
 			conns, enc              int
 			txB, rxB, txP, rxP, age uint64
+			peer                    PeerInfo
 		}
 		snapClients := make(map[string]tmpSession, len(srv.activeClients))
 		var gTxB, gRxB, gTxP, gRxP uint64
@@ -768,7 +771,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			snapClients[id] = tmpSession{
 				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: session.EncAlgo, conns: conns,
 				txB: txB, rxB: rxB, txP: txP, rxP: rxP,
-				age: uint64(time.Since(session.CreatedAt) / time.Second),
+				age: uint64(time.Since(session.CreatedAt) / time.Second), peer: session.PeerInfo,
 			}
 		}
 		stats.Banned = srv.BanList()
@@ -850,6 +853,12 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 				"ipv4": snap.v4, "ipv6": snap.v6, "mac": snap.mac, "active_conns": snap.conns,
 				"tx_bytes": snap.txB, "rx_bytes": snap.rxB, "tx_packets": snap.txP, "rx_packets": snap.rxP,
 				"fec": snap.fec, "enc_algo": snap.enc, "uptime_sec": snap.age,
+				"peer_info": func() interface{} {
+					if peerInfoEmpty(snap.peer) {
+						return nil
+					}
+					return snap.peer
+				}(),
 			}
 		}
 	} else if cli != nil {
@@ -861,6 +870,9 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		sessionEpoch := cli.sessionEpoch
 		cli.sessionMu.Unlock()
 		stats.SessionEpoch = sessionEpoch
+		if p := cli.remotePeerInfoSnapshot(); p != nil {
+			stats.Peer = p
+		}
 		conns := int(atomic.LoadInt32(&cli.liveConns))
 		fec := cli.fecStatus
 		lv := cli.live.Load()

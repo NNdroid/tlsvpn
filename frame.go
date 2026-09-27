@@ -509,6 +509,8 @@ type HandshakeReq struct {
 	// 服务端开启 session_token 时，重连既有会话必须携带正确令牌，
 	// 仅持有共享 PSK 的第三方无法冒充既有会话（见 computeSessionToken）。
 	SessionToken string `json:"session_token,omitempty"`
+	// PeerInfo is diagnostic metadata only; never use it for authentication/authorization.
+	PeerInfo *PeerInfo `json:"peer_info,omitempty"`
 }
 
 type MacBinding struct {
@@ -546,4 +548,6 @@ type HandshakeResp struct {
 	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要。新增客户端接受
 	// 字段缺失，旧客户端会忽略该可选字段，支持滚动升级与回滚。
 	TLS *TLSHandshakeInfo `json:"tls,omitempty"`
+	// PeerInfo is returned only after application-layer authentication succeeds.
+	PeerInfo *PeerInfo `json:"peer_info,omitempty"`
 }
