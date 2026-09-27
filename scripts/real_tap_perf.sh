@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# real_tap_perf.sh — Go tlsvpn real-TAP throughput/profiling harness.
+#
+# The server and client live in separate network namespaces connected only by
+# a veth underlay, so iperf traffic cannot bypass the tunnel through table
+# local. The tunnel path therefore includes TAP + framing + TLS + inner crypto
+# + VSwitch.
+#
+# Environment:
+#   BIN                 tlsvpn binary (default: ./tlsvpn)
+#   PERF_CONNS          client physical connections (default: 1)
+#   PERF_ENC_ALGO       gcm256 | gcm128 (default: gcm256)
+#   PERF_PAD_MODE       bucket | off (default: bucket)
+#   PERF_DIRECTION      upload | download | both (default: both)
+#   PERF_SECONDS        iperf duration per direction (default: 3)
+#   PERF_MIN_MBPS       hard minimum for each measured direction (default: 500)
+#   PERF_RESULT_FILE    append TSV results here (optional)
+#   PERF_PROFILE_DIR    enable CPU/heap profiles for both endpoints (optional)
+#
+# When PERF_PROFILE_DIR is set the binary receives TLSVPN_CPU_PROFILE and
+# TLSVPN_HEAP_PROFILE. The processes are terminated with SIGTERM and awaited so
+# deferred profile finalization runs before artifacts are collected.
+set -uo pipefail
+
+BIN="${BIN:-./tlsvpn}"
+PERF_CONNS="${PERF_CONNS:-1}"
+PERF_ENC_ALGO="${PERF_ENC_ALGO:-gcm256}"
+PERF_PAD_MODE="${PERF_PAD_MODE:-bucket}"
+PERF_DIRECTION="${PERF_DIRECTION:-both}"
+PERF_SECONDS="${PERF_SECONDS:-3}"
+PERF_MIN_MBPS="${PERF_MIN_MBPS:-500}"
+PERF_RESULT_FILE="${PERF_RESULT_FILE:-}"
+PERF_PROFILE_DIR="${PERF_PROFILE_DIR:-}"
+
+PORT="${PORT:-18600}"
+GW_V4="10.77.0.1"
+CLI_V4="10.77.0.2"
+SUBNET_V4="10.77.0.0/24"
+GW_V6="fd77::1"
+SUBNET_V6="fd77::/64"
+TAP_SRV="tap_t0"
+TAP_CLI="tap_t1"
+UNDERLAY_SRV="192.0.2.1"
+UNDERLAY_CLI="192.0.2.2"
+UNDERLAY_PREFIX=30
+NS_SRV="tlsvpn-perf-srv-$$"
+NS_CLI="tlsvpn-perf-cli-$$"
+VETH_SRV="tps$$"
+VETH_CLI="tpc$$"
+
+TMP=""
+PIDS=()
+RESULTS=()
+
+log() { echo "[real-tap-perf] $*"; }
+die() { log "ERROR: $*"; exit 1; }
+
+validate_inputs() {
+  [[ "$PERF_CONNS" =~ ^[1-9][0-9]*$ ]] || die "PERF_CONNS must be a positive integer"
+  case "$PERF_ENC_ALGO" in gcm256|gcm128) ;; *) die "PERF_ENC_ALGO must be gcm256 or gcm128" ;; esac
+  case "$PERF_PAD_MODE" in bucket|off) ;; *) die "PERF_PAD_MODE must be bucket or off" ;; esac
+  case "$PERF_DIRECTION" in upload|download|both) ;; *) die "PERF_DIRECTION must be upload, download or both" ;; esac
+  [[ "$PERF_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "PERF_SECONDS must be a positive integer"
+  [[ -x "$BIN" ]] || die "BIN is not executable: $BIN"
+  command -v ip >/dev/null || die "iproute2 is required"
+  command -v iperf3 >/dev/null || die "iperf3 is required"
+  command -v openssl >/dev/null || die "openssl is required"
+  command -v awk >/dev/null || die "awk is required"
+}
+
+capability_gate() {
+  if [[ $EUID -ne 0 ]]; then
+    log "SKIP: root/CAP_NET_ADMIN required"
+    exit 0
+  fi
+  if [[ ! -c /dev/net/tun ]]; then
+    log "SKIP: /dev/net/tun unavailable"
+    exit 0
+  fi
+
+  local cap_ns="tlsvpn-perf-cap-$$" cap_a="tpa$$" cap_b="tpb$$" reason=""
+  if ! ip netns add "$cap_ns" 2>/dev/null; then
+    reason="cannot create network namespace"
+  elif ! ip link add "$cap_a" type veth peer name "$cap_b" 2>/dev/null; then
+    reason="cannot create veth pair"
+  elif ! ip link set "$cap_b" netns "$cap_ns" 2>/dev/null; then
+    reason="cannot move veth into namespace"
+  elif ! ip netns exec "$cap_ns" ip link set lo up 2>/dev/null; then
+    reason="cannot configure namespace loopback"
+  elif ! ip netns exec "$cap_ns" ip tuntap add dev tap_cap mode tap 2>/dev/null; then
+    reason="cannot create TAP"
+  elif ! ip netns exec "$cap_ns" ip link set tap_cap up 2>/dev/null; then
+    reason="cannot bring TAP up"
+  elif ! ip netns exec "$cap_ns" ip addr add 10.77.99.1/24 dev tap_cap 2>/dev/null; then
+    reason="cannot configure TAP address"
+  fi
+  ip link del "$cap_a" 2>/dev/null || true
+  ip netns del "$cap_ns" 2>/dev/null || true
+  if [[ -n "$reason" ]]; then
+    log "SKIP: $reason"
+    exit 0
+  fi
+}
+
+gracious_stop() {
+  local p
+  for p in "${PIDS[@]:-}"; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  local deadline=$((SECONDS + 8))
+  for p in "${PIDS[@]:-}"; do
+    while kill -0 "$p" 2>/dev/null && (( SECONDS < deadline )); do
+      sleep 0.1
+    done
+    if kill -0 "$p" 2>/dev/null; then
+      kill -KILL "$p" 2>/dev/null || true
+    fi
+    wait "$p" 2>/dev/null || true
+  done
+  PIDS=()
+}
+
+cleanup() {
+  gracious_stop
+  ip netns del "$NS_SRV" 2>/dev/null || true
+  ip netns del "$NS_CLI" 2>/dev/null || true
+  ip link del "$VETH_SRV" 2>/dev/null || true
+  ip link del "$VETH_CLI" 2>/dev/null || true
+  [[ -n "$TMP" && -d "$TMP" ]] && rm -rf "$TMP"
+}
+trap cleanup EXIT INT TERM
+
+setup_namespaces() {
+  ip netns add "$NS_SRV" || return 1
+  ip netns add "$NS_CLI" || return 1
+  ip link add "$VETH_SRV" type veth peer name "$VETH_CLI" || return 1
+  ip link set "$VETH_SRV" netns "$NS_SRV" || return 1
+  ip link set "$VETH_CLI" netns "$NS_CLI" || return 1
+  ip netns exec "$NS_SRV" ip link set lo up || return 1
+  ip netns exec "$NS_CLI" ip link set lo up || return 1
+  ip netns exec "$NS_SRV" ip link set "$VETH_SRV" name underlay0 || return 1
+  ip netns exec "$NS_CLI" ip link set "$VETH_CLI" name underlay0 || return 1
+  ip netns exec "$NS_SRV" ip addr add "$UNDERLAY_SRV/$UNDERLAY_PREFIX" dev underlay0 || return 1
+  ip netns exec "$NS_CLI" ip addr add "$UNDERLAY_CLI/$UNDERLAY_PREFIX" dev underlay0 || return 1
+  ip netns exec "$NS_SRV" ip link set underlay0 up || return 1
+  ip netns exec "$NS_CLI" ip link set underlay0 up || return 1
+}
+
+wait_for_port() {
+  local deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    if ip netns exec "$NS_CLI" bash -c "exec 3<>/dev/tcp/$UNDERLAY_SRV/$PORT" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+wait_for_client_ip() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if ip netns exec "$NS_CLI" ip -4 addr show "$TAP_CLI" 2>/dev/null | grep -q "$CLI_V4"; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+write_configs() {
+  local fp="$1" psk="$2"
+  cat >"$TMP/server.json" <<EOF
+{
+  "mode": "server",
+  "addr": "$UNDERLAY_SRV:$PORT",
+  "psk": "$psk",
+  "tap": "$TAP_SRV",
+  "encrypt": true,
+  "enc_algo": "$PERF_ENC_ALGO",
+  "pad_mode": "$PERF_PAD_MODE",
+  "log_level": "warn",
+  "server": {
+    "cert": "$TMP/cert.pem",
+    "key": "$TMP/key.pem",
+    "v4_cidr": "$SUBNET_V4",
+    "v6_cidr": "$SUBNET_V6"
+  }
+}
+EOF
+
+  cat >"$TMP/client.json" <<EOF
+{
+  "mode": "client",
+  "addr": "$UNDERLAY_SRV:$PORT",
+  "psk": "$psk",
+  "tap": "$TAP_CLI",
+  "encrypt": true,
+  "enc_algo": "$PERF_ENC_ALGO",
+  "pad_mode": "$PERF_PAD_MODE",
+  "log_level": "warn",
+  "client": {
+    "conns": $PERF_CONNS,
+    "cert_sha256": "$fp",
+    "insecure": true
+  }
+}
+EOF
+}
+
+profile_env_for() {
+  local side="$1"
+  if [[ -z "$PERF_PROFILE_DIR" ]]; then
+    return 0
+  fi
+  mkdir -p "$PERF_PROFILE_DIR"
+  printf 'TLSVPN_CPU_PROFILE=%s/%s.cpu.prof\n' "$PERF_PROFILE_DIR" "$side"
+  printf 'TLSVPN_HEAP_PROFILE=%s/%s.heap.prof\n' "$PERF_PROFILE_DIR" "$side"
+}
+
+start_endpoint() {
+  local ns="$1" side="$2" cfg="$3" log_file="$4"
+  local -a env_args=()
+  if [[ -n "$PERF_PROFILE_DIR" ]]; then
+    mkdir -p "$PERF_PROFILE_DIR"
+    env_args+=("TLSVPN_CPU_PROFILE=$PERF_PROFILE_DIR/$side.cpu.prof")
+    env_args+=("TLSVPN_HEAP_PROFILE=$PERF_PROFILE_DIR/$side.heap.prof")
+  fi
+  ip netns exec "$ns" env "${env_args[@]}" "$BIN" -c "$cfg" >"$log_file" 2>&1 &
+  PIDS+=($!)
+}
+
+route_path_check() {
+  local croute sroute
+  croute=$(ip netns exec "$NS_CLI" ip -4 route get "$GW_V4" 2>&1) || return 1
+  sroute=$(ip netns exec "$NS_SRV" ip -4 route get "$CLI_V4" 2>&1) || return 1
+  [[ "$croute" == *"dev $TAP_CLI"* ]] || { log "client route bypasses TAP: $croute"; return 1; }
+  [[ "$sroute" == *"dev $TAP_SRV"* ]] || { log "server route bypasses TAP: $sroute"; return 1; }
+  log "route proof: client->$GW_V4 via $TAP_CLI; server->$CLI_V4 via $TAP_SRV"
+}
+
+parse_mbps() {
+  awk -F: '/"bits_per_second"[[:space:]]*:/ {gsub(/[ ,[:space:]]/, "", $2); v=$2} END {if (v=="") exit 1; printf "%.1f", v/1000000}'
+}
+
+record_result() {
+  local direction="$1" mbps="$2"
+  RESULTS+=("$direction=$mbps")
+  printf '%s\t%s\t%s\t%s\t%s\n' "$PERF_CONNS" "$PERF_ENC_ALGO" "$PERF_PAD_MODE" "$direction" "$mbps"
+  if [[ -n "$PERF_RESULT_FILE" ]]; then
+    printf '%s\t%s\t%s\t%s\t%s\n' "$PERF_CONNS" "$PERF_ENC_ALGO" "$PERF_PAD_MODE" "$direction" "$mbps" >>"$PERF_RESULT_FILE"
+  fi
+  if ! awk -v a="$mbps" -v b="$PERF_MIN_MBPS" 'BEGIN {exit !(a+0 >= b+0)}'; then
+    die "$direction throughput ${mbps} Mbps is below PERF_MIN_MBPS=${PERF_MIN_MBPS}"
+  fi
+}
+
+iperf_direction() {
+  local direction="$1" json mbps extra=""
+  [[ "$direction" == "download" ]] && extra="-R"
+  json=$(ip netns exec "$NS_CLI" iperf3 -c "$GW_V4" -p "$((PORT + 1))" -t "$PERF_SECONDS" -J $extra 2>"$TMP/iperf-$direction.err") || {
+    cat "$TMP/iperf-$direction.err" >&2 || true
+    die "iperf3 $direction failed"
+  }
+  mbps=$(printf '%s\n' "$json" | parse_mbps) || die "cannot parse iperf3 $direction result"
+  log "$direction: ${mbps} Mbps (conns=$PERF_CONNS enc=$PERF_ENC_ALGO pad=$PERF_PAD_MODE)"
+  record_result "$direction" "$mbps"
+}
+
+verify_profiles() {
+  [[ -n "$PERF_PROFILE_DIR" ]] || return 0
+  local f
+  for f in server.cpu.prof server.heap.prof client.cpu.prof client.heap.prof; do
+    [[ -s "$PERF_PROFILE_DIR/$f" ]] || die "profile missing or empty: $PERF_PROFILE_DIR/$f"
+  done
+}
+
+validate_inputs
+capability_gate
+TMP=$(mktemp -d)
+setup_namespaces || die "failed to create isolated real-TAP topology"
+
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout "$TMP/key.pem" -out "$TMP/cert.pem" -days 2 \
+  -subj "/CN=tlsvpn-real-tap-perf" >/dev/null 2>&1 || die "certificate generation failed"
+FP=$(openssl x509 -in "$TMP/cert.pem" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-Z' 'a-z')
+PSK=$(openssl rand -hex 16)
+write_configs "$FP" "$PSK"
+
+start_endpoint "$NS_SRV" server "$TMP/server.json" "$TMP/server.log"
+if ! wait_for_port; then
+  tail -80 "$TMP/server.log" >&2 || true
+  die "server did not become reachable"
+fi
+start_endpoint "$NS_CLI" client "$TMP/client.json" "$TMP/client.log"
+if ! wait_for_client_ip; then
+  tail -80 "$TMP/client.log" >&2 || true
+  die "client tunnel address did not appear"
+fi
+sleep 0.5
+route_path_check || die "real-TAP route proof failed"
+
+ip netns exec "$NS_SRV" iperf3 -s -B "$GW_V4" -p "$((PORT + 1))" >"$TMP/iperf-server.log" 2>&1 &
+PIDS+=($!)
+sleep 0.3
+
+case "$PERF_DIRECTION" in
+  upload) iperf_direction upload ;;
+  download) iperf_direction download ;;
+  both)
+    iperf_direction upload
+    iperf_direction download
+    ;;
+esac
+
+# Stop iperf first, then client/server. SIGTERM lets tlsvpn return through main
+# and flush deferred CPU/heap profiles.
+gracious_stop
+verify_profiles
+log "completed: ${RESULTS[*]}"
