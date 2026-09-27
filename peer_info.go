@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // PeerInfo 是握手阶段交换的诊断元数据。它只用于可观测性/版本诊断，
@@ -87,7 +88,11 @@ func normalizePeerInfo(in *PeerInfo) PeerInfo {
 func trimPeerField(v string) string {
 	v = strings.TrimSpace(v)
 	if len(v) > peerInfoFieldMax {
-		v = v[:peerInfoFieldMax]
+		end := peerInfoFieldMax
+		for end > 0 && !utf8.RuneStart(v[end]) {
+			end--
+		}
+		v = v[:end]
 	}
 	return v
 }
