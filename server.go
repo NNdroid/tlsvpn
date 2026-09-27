@@ -1618,11 +1618,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	sessionID := session.SessionID // 提取出来准备发给客户端
 	encAlgo := session.EncAlgo
 	icTx, icRx := session.icTx, session.icRx
-	if req.PeerInfo != nil {
-		session.sessionMu.Lock()
-		session.PeerInfo = normalizePeerInfo(req.PeerInfo)
-		session.sessionMu.Unlock()
-	}
+	// peer_info describes the peer on this authenticated handshake. During a
+	// rolling downgrade an older client omits it, so overwrite with the empty
+	// normalized value instead of retaining identity from a previous connection.
+	session.sessionMu.Lock()
+	session.PeerInfo = normalizePeerInfo(req.PeerInfo)
+	session.sessionMu.Unlock()
 	saltA, saltB := session.SaltA, session.SaltB
 	resumeToken := responseResumeToken(session)
 	fecEncK := session.FecEncK
