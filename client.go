@@ -269,7 +269,10 @@ func (p *AsyncPort) run() {
 				batchBytes += len(f)
 			}
 
-			p.dispatchBatch(batch)
+			// queueLen 是 drain 前的积压快照；len(batch) 则保留‘这一轮已经聚成大批量’的事实。
+			// 旧实现只在 dispatch 时重新看 len(p.ch)，队列刚被 drain 空时会误判为交互流量。
+			bulk := queueLen >= multipathStripeBacklog || len(batch) >= multipathStripeBatchFrames
+			p.dispatchBatch(batch, bulk)
 
 			batch = batch[:0]
 			batchBytes = 0
@@ -281,7 +284,7 @@ func (p *AsyncPort) run() {
 //   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
 //   - 普通模式：MinRTT 单路发送。
 // wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
-func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
+func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
 	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
 	p.backendsMu.RLock()
@@ -300,7 +303,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 				parities = append(parities, par)
 			}
 		}
-		best := p.pickDataBackend(backends)
+		best := p.pickDataBackendFor(backends, bulk)
 		// 低负载仍走 MinRTT；持续 backlog 时会在 RTT 接近的健康路径间主动 striping。
 		// 若目标连接瞬时满则继续尝试其它后端；全部满时
 		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
@@ -324,7 +327,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {
 		return
 	}
 
-	p.dropN(sendBatchToAny(backends, p.pickDataBackend(backends), batch))
+	p.dropN(sendBatchToAny(backends, p.pickDataBackendFor(backends, bulk), batch))
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -390,14 +393,23 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 }
 
 
-const multipathStripeBacklog = 64
+const (
+	multipathStripeBacklog = 64
+	multipathStripeBatchFrames = 32
+)
 
 // pickDataBackend 保留低负载 MinRTT 行为；只有 AsyncPort 输入出现持续 backlog 时，
 // 才在 RTT 接近最佳路径的健康后端中轮转。这样 bulk 流量可以真正并行使用多条
 // TCP 连接，而交互式小流量仍保持最低延迟并避免不必要的跨流乱序。
 func (p *AsyncPort) pickDataBackend(backends []*Backend) *Backend {
+	return p.pickDataBackendFor(backends, len(p.ch) >= multipathStripeBacklog)
+}
+
+// pickDataBackendFor 接收 run goroutine 捕获的 bulk 快照。这样一次大批量已经
+// drain 掉 p.ch 后仍能 striping；直接调用 pickDataBackend 的交互/测试语义不变。
+func (p *AsyncPort) pickDataBackendFor(backends []*Backend, bulk bool) *Backend {
 	best := p.pickBackend(backends)
-	if len(backends) < 2 || len(p.ch) < multipathStripeBacklog || best == nil {
+	if len(backends) < 2 || !bulk || best == nil {
 		return best
 	}
 
