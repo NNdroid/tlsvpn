@@ -35,7 +35,7 @@ func webuiHandler() http.Handler {
 		`<button data-v="zh-CN" onclick="setLang('zh-CN')">简中</button>
         <button data-v="zh-TW" onclick="setLang('zh-TW')">繁中</button>`, 1)
 	indexHTML = strings.Replace(indexHTML, "</body>",
-		"<script src=\"zh-tw.js\"></script>\n<script src=\"frameviz.js\"></script>\n</body>", 1)
+		"<script src=\"zh-tw.js\"></script>\n<script src=\"frameviz.js\"></script>\n<script src=\"frameviz-zh-tw.js\"></script>\n</body>", 1)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// FileServer 会对目录生成列表页；面板只允许根页面和具名静态资产。
