@@ -1,0 +1,35 @@
+name: Bootstrap ChaCha interop probe
+
+on:
+  push:
+    branches:
+      - 'feat/chacha-inner-aead'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.actor != 'github-actions[bot]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Add probe support and test
+        run: |
+          python3 scripts/add_chacha_probe_support.py
+          gofmt -w interop/probe.go
+          (cd interop && go mod tidy && go test ./... && go build -o probe .)
+          go test -count=1 ./...
+      - name: Commit probe support
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm scripts/add_chacha_probe_support.py .github/workflows/bootstrap-chacha-probe.yml
+          git add interop/probe.go interop/go.mod interop/go.sum
+          git commit -m 'test(interop): support ChaCha inner AEAD in Go probe'
+          git push origin HEAD:feat/chacha-inner-aead
