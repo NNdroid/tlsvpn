@@ -122,3 +122,14 @@ func readOSReleasePrettyName(path string) string {
 func peerInfoEmpty(p PeerInfo) bool {
 	return p == (PeerInfo{})
 }
+
+// remotePeerInfoSnapshot returns a copy so WebUI serialization never races a reconnect.
+func (c *Client) remotePeerInfoSnapshot() *PeerInfo {
+	c.sessionMu.Lock()
+	p := c.peerInfo
+	c.sessionMu.Unlock()
+	if peerInfoEmpty(p) {
+		return nil
+	}
+	return &p
+}
