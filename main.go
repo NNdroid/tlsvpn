@@ -152,6 +152,25 @@ func main() {
 	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
+
+	// Runtime profiling is deliberately opt-in and has no listener or API
+	// surface. CI/performance runs set TLSVPN_CPU_PROFILE and/or
+	// TLSVPN_HEAP_PROFILE; ordinary production processes do not pay profiler
+	// overhead. Profiles are finalized on the normal SIGINT/SIGTERM shutdown
+	// path so real-TAP iperf runs capture the actual dataplane process.
+	profiler, err := startRuntimeProfiler()
+	if err != nil {
+		log.Fatalf("Runtime profiler setup failed: %v", err)
+	}
+	if profiler != nil {
+		defer func() {
+			if err := profiler.Close(); err != nil {
+				log.Warnf("Runtime profiler close failed: %v", err)
+			}
+		}()
+		log.Infof("Runtime profiling enabled: cpu=%q heap=%q", profiler.paths.CPU, profiler.paths.Heap)
+	}
+
 	// 按日流量统计：恢复历史并启动采样协程（无配置文件来源时仅内存统计）
 	dailyTraffic.OnConfig(cfg)
 	// 填充策略全局生效（发送路径读取），支持面板热更
