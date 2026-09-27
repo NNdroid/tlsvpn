@@ -42,7 +42,7 @@ func TestWebUIFrameVisualizerIsInjected(t *testing.T) {
 		"フレーム形式の例",
 		"dataLen",
 		"padLen",
-		"RandomPool",
+		"1 MiB",
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("frameviz.js missing %q", want)
