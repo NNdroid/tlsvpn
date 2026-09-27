@@ -1,0 +1,38 @@
+name: Bootstrap ChaCha inner AEAD
+
+on:
+  push:
+    branches:
+      - 'feat/chacha-inner-aead'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.actor != 'github-actions[bot]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Apply implementation
+        run: |
+          python3 scripts/apply_chacha_inner_aead.py
+          gofmt -w crypto.go client.go server.go config.go frame.go protocol_conformance_test.go chacha_cipher_test.go chacha_bench_test.go
+          go mod tidy
+          go test -run TestGenerateGoldenVectors -update-golden .
+          go test -count=1 ./...
+          go test -run '^$' -bench 'Benchmark(ChaCha20|XChaCha20)Poly1305SealOpen' -benchtime=200ms .
+          bash tests/test_openwrt_integration.sh
+      - name: Commit candidate
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm scripts/apply_chacha_inner_aead.py .github/workflows/bootstrap-chacha-inner-aead.yml
+          git add crypto.go client.go server.go config.go frame.go README.md scripts/real_tap_perf.sh openwrt/luci-proto-tlsvpn/htdocs/luci-static/resources/protocol/tlsvpn.js tests/test_openwrt_integration.sh protocol_conformance_test.go testdata/protocol_golden.json chacha_cipher_test.go chacha_bench_test.go go.mod go.sum
+          git commit -m 'feat(crypto): add ChaCha20 and XChaCha20 inner AEAD'
+          git push origin HEAD:feat/chacha-inner-aead
