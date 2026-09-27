@@ -1565,8 +1565,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if lv.fecMode {
 		fecGroupReq = clampFecGroup(lv.fecGroup)
 	}
-	// 回带上一次握手收到的会话令牌（首次接入时为空）。与 PSK 快照一起读，
-	// 避免与握手响应处理协程的写入构成数据竞争。
+	// 回带上一次握手收到的会话令牌（首次接入时为空）。客户端服务重启时
+	// 新旧进程可能短暂重叠：旧进程可能在新进程启动后完成 token rollover 并
+	// 把更新的 token 写回同一 state 文件。每次握手前重新吸收同一 SessionID
+	// 的较新落盘状态，避免新进程永远拿着启动瞬间读到的旧 token 重试。
+	c.refreshSessionStateFromDisk()
 	c.sessionMu.Lock()
 	sessionToken := c.sessionToken
 	c.sessionMu.Unlock()
@@ -2047,21 +2050,84 @@ func assignTapAddr(link netlink.Link, fam, cidr string) error {
 	return nil
 }
 
-// persistSessionState 把服务端下发的会话身份落盘，供进程重启后第一次握手
-// 复用既有会话。按 clientID（MAC+PSK 派生）绑定：配置变更后旧令牌自动失效。
-func (c *Client) persistSessionState(sessionID, token string, epoch uint64) {
+// refreshSessionStateFromDisk 吸收另一个、仍在退出中的同客户端进程刚刚
+// 写下的 token rollover。SessionEpoch 只在同一个 SessionID 内可比较；不同
+// SessionID 可能来自服务端重启，不能用 epoch 大小判断新旧。
+func (c *Client) refreshSessionStateFromDisk() {
 	if c.stateFile == "" {
 		return
 	}
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
+	disk, err := loadClientState(c.stateFile)
+	if err != nil {
+		log.Warnf("Client failed to refresh persisted session state: %v", err)
+		return
+	}
+	if disk == nil || disk.ClientID != c.clientID || disk.SessionID == "" || disk.SessionToken == "" {
+		return
+	}
+
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	// 只自动吸收同一服务端 session 的进展。不同 SessionID 的磁盘状态可能是
+	// 当前进程建立新会话之前留下的旧状态，不能在这里反向覆盖内存。
+	if disk.SessionID != c.serverSessionID {
+		return
+	}
+	if disk.SessionEpoch < c.sessionEpoch {
+		return
+	}
+	if disk.SessionEpoch == c.sessionEpoch && disk.SessionToken == c.sessionToken {
+		return
+	}
+	c.serverSessionID = disk.SessionID
+	c.sessionEpoch = disk.SessionEpoch
+	c.sessionToken = disk.SessionToken
+	c.state = disk
+	log.Infof("Refreshed session token from state file for %s at epoch %d", disk.SessionID, disk.SessionEpoch)
+}
+
+// persistSessionState 把服务端下发的会话身份落盘，供进程重启后第一次握手
+// 复用既有会话。SessionEpoch 是 session-local generation：服务端重启后会生成
+// 新 SessionID，并可能从更小的 epoch 重新开始，因此绝不能拿旧 SessionID 的
+// epoch 阻止新 SessionID 落盘。
+func (c *Client) persistSessionState(sessionID, token string, epoch uint64) {
+	if c.stateFile == "" {
+		return
+	}
+
+	// 多条物理连接可能并发返回；只允许仍与当前内存会话完全一致的响应落盘。
+	// 若期间另一条握手已经切到新 SessionID/epoch/token，这个迟到响应直接丢弃。
+	c.sessionMu.Lock()
+	currentID, currentToken, currentEpoch := c.serverSessionID, c.sessionToken, c.sessionEpoch
+	c.sessionMu.Unlock()
+	// 生产握手路径一定已经初始化 current session；保留空值兼容直接调用
+	// persistSessionState 的单元测试/内部工具。
+	if currentID != "" && (sessionID != currentID || epoch != currentEpoch || token != currentToken) {
+		return
+	}
+
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	// stateMu 只能序列化当前进程。服务管理器重启时新旧进程可能短暂重叠，
+	// 所以再读一次磁盘：同一 SessionID 下不允许较低 epoch 覆盖较高 epoch；
+	// 同 epoch 出现不同 token 时保留已经落盘的一方，避免交叉进程回滚。
+	if disk, err := loadClientState(c.stateFile); err == nil && disk != nil && disk.ClientID == c.clientID && disk.SessionID == sessionID {
+		if disk.SessionEpoch > epoch || (disk.SessionEpoch == epoch && disk.SessionToken != "" && disk.SessionToken != token) {
+			c.state = disk
+			return
+		}
+	}
+
 	st := c.state
 	if st == nil {
 		st = &clientState{}
 	}
-	// 多条物理连接会并发完成握手。迟到的旧响应不能覆盖已经持久化的
-	// 新 epoch，否则下次进程重启会携带不匹配的令牌和代际。
-	if epoch < st.SessionEpoch {
+	// 只有同一 SessionID 的 epoch 才能比较。不同 SessionID 表示服务端会话已
+	// 重建（最常见是服务端重启），即使新 epoch 更小也必须覆盖旧状态。
+	if st.ClientID == c.clientID && st.SessionID == sessionID && epoch < st.SessionEpoch {
 		return
 	}
 	st.ClientID = c.clientID
@@ -2070,7 +2136,9 @@ func (c *Client) persistSessionState(sessionID, token string, epoch uint64) {
 	st.SessionEpoch = epoch
 	if err := saveClientState(c.stateFile, st); err != nil {
 		log.Warnf("Client failed to persist session state: %v", err)
+		return
 	}
+	c.state = st
 }
 
 func incrementIP(ip net.IP) {
