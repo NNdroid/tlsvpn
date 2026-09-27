@@ -48,6 +48,8 @@ grep -Fq "'tlsvpn-proto'" "${luci}"
 grep -Fq "form.ListValue, 'enc_algo'" "${luci}"
 grep -Fq "o.value('gcm256'" "${luci}"
 grep -Fq "o.value('gcm128'" "${luci}"
+grep -Fq "o.value('chacha20'" "${luci}"
+grep -Fq "o.value('xchacha20'" "${luci}"
 
 if command -v node >/dev/null 2>&1; then
 	node --check "${luci}"

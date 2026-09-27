@@ -40,6 +40,80 @@
       "ciphertext_hex": "108721428cf9bacbba87a5b5ca28423d6a4af4d23d0c3338a676c8a584088b56"
     }
   ],
+  "aead_domain_vectors": [
+    {
+      "algo": 2,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "data",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "6b7d896fdb4baed8b0775ea1ee38aba4097de242650d322e5a3a6775c4f07c8b"
+    },
+    {
+      "algo": 2,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "fec",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "108721428cf9bacbba87a5b5ca28423d6a4af4d23d0c3338a676c8a584088b56"
+    },
+    {
+      "algo": 4,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "data",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "aca23415a7f2daba74e4b585171732e8970a3346125a0ce7ff4a3681c5dc098b"
+    },
+    {
+      "algo": 4,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "fec",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "46276ec436392e1ea49e5f00726d9079703524f0b623df8e1ccf582216a12375"
+    },
+    {
+      "algo": 5,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "data",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "720c46b7bdec71fd38fbde65073f9bab7b0f40fa6bed33a973127531ce7f14d5"
+    },
+    {
+      "algo": 5,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "fec",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "ba223e31950d27fe521b6629df45160df251cc361c649e3e7654bf6be23bd7b0"
+    },
+    {
+      "algo": 6,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "data",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "dab95dcd60c7526fea52c69928fcce4fe639b2d03e02e543dc5158522649d397"
+    },
+    {
+      "algo": 6,
+      "psk": "cross-language-domain-vector",
+      "salt_hex": "0011223344556677",
+      "domain": "fec",
+      "seq": 16909060,
+      "plaintext_hex": "65746865726e65742d7061796c6f6164",
+      "ciphertext_hex": "47fa22c20f87f0b4e46db710bace56dfab35bccf7ed17ca820ad3b4f35dad9d8"
+    }
+  ],
   "frame_headers": [
     {
       "data_len": 0,

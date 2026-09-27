@@ -5,7 +5,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 ## Features
 
 - **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
-- **Inner encryption** — `encrypt: true` adds authenticated AES-GCM inside the tunnel: per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: "gcm256"` remains the default; `"gcm128"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.
+- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel (AES-GCM, ChaCha20-Poly1305 or XChaCha20-Poly1305): per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: "gcm256"` remains the default; `"gcm128"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.
 - **XOR FEC** — one parity frame per K data frames reconstructs any single lost frame. The parity is sent once and rotated across healthy physical links, so redundancy is ≈1/K instead of N/K on N-link sessions.
 - **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).

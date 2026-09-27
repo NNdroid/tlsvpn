@@ -9,7 +9,7 @@
 # Environment:
 #   BIN                 tlsvpn binary (default: ./tlsvpn)
 #   PERF_CONNS          client physical connections (default: 1)
-#   PERF_ENC_ALGO       gcm256 | gcm128 (default: gcm256)
+#   PERF_ENC_ALGO       gcm256 | gcm128 | chacha20 | xchacha20 (default: gcm256)
 #   PERF_PAD_MODE       bucket | off (default: bucket)
 #   PERF_DIRECTION      upload | download | both (default: both)
 #   PERF_SECONDS        iperf duration per direction (default: 3)

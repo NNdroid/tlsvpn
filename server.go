@@ -654,19 +654,19 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	var icTx, icRx, fecTx, fecRx *innerCipher
 	if session.Encrypt {
 		var err error
-		icTx, err = newGCMInnerCipherForAlgo(psk, saltB[:], session.EncAlgo)
+		icTx, err = newInnerCipherForAlgo(psk, saltB[:], session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		icRx, err = newGCMInnerCipherForAlgo(psk, saltA[:], session.EncAlgo)
+		icRx, err = newInnerCipherForAlgo(psk, saltA[:], session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		fecTx, err = newGCMInnerCipherDomainForAlgo(psk, saltB[:], "fec", session.EncAlgo)
+		fecTx, err = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", session.EncAlgo)
 		if err != nil {
 			return err
 		}
-		fecRx, err = newGCMInnerCipherDomainForAlgo(psk, saltA[:], "fec", session.EncAlgo)
+		fecRx, err = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", session.EncAlgo)
 		if err != nil {
 			return err
 		}
@@ -1378,7 +1378,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 	// 强度下限：运维强制 GCM 时拒绝能力不足的客户端。这里刻意**不**走焦油坑——
 	// 这是运维侧的期望结果（客户端未启用内层加密），需要一条明确可查的失败记录。
-	if encrypt && minEnc > 0 && !isGCMAlgo(req.EncAlgo) {
+	if encrypt && minEnc > 0 && !isInnerAEADAlgo(req.EncAlgo) {
 		log.Warnf("connection refused: client inner cipher (algo=%d) is below the min_enc floor, remote %s",
 			req.EncAlgo, tcpConn.RemoteAddr().String())
 		return
@@ -1542,10 +1542,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		var icTx, icRx, fecTx, fecRx *innerCipher
 		if encrypt {
 			encAlgo = expectedEncAlgo
-			icTx, _ = newGCMInnerCipherForAlgo(psk, saltB[:], encAlgo) // s2c
-			icRx, _ = newGCMInnerCipherForAlgo(psk, saltA[:], encAlgo) // c2s
-			fecTx, _ = newGCMInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo)
-			fecRx, _ = newGCMInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo)
+			icTx, _ = newInnerCipherForAlgo(psk, saltB[:], encAlgo) // s2c
+			icRx, _ = newInnerCipherForAlgo(psk, saltA[:], encAlgo) // c2s
+			fecTx, _ = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo)
+			fecRx, _ = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo)
 		}
 		fecMode := "off"
 		if fecEncK > 0 {
@@ -2001,7 +2001,7 @@ func negotiateBrutalRates(serverUp, serverDown, cliTx, cliRx uint64) (srvTx, cli
 }
 
 func handshakeEncSalts(encAlgo int, saltA, saltB [encSaltSize]byte) (string, string) {
-	if !isGCMAlgo(encAlgo) {
+	if !isInnerAEADAlgo(encAlgo) {
 		return "", ""
 	}
 	return hex.EncodeToString(saltA[:]), hex.EncodeToString(saltB[:])

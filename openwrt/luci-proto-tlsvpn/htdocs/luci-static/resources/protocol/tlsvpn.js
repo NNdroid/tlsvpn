@@ -109,6 +109,8 @@ return network.registerProtocol('tlsvpn', {
 			_('Inner cipher'));
 		o.value('gcm256', _('AES-256-GCM (default)'));
 		o.value('gcm128', _('AES-128-GCM (faster)'));
+		o.value('chacha20', _('ChaCha20-Poly1305'));
+		o.value('xchacha20', _('XChaCha20-Poly1305'));
 		o.default = 'gcm256';
 		o.depends('encrypt', '1');
 

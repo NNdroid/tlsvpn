@@ -40,14 +40,14 @@ type Config struct {
 	Down     string `json:"down,omitempty"`      // 进程退出/启动回滚时执行一次
 	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
 	// 显式的 false，下次重载又被默认值翻回 true。
-	Encrypt    bool         `json:"encrypt"`
-	EncAlgo    string       `json:"enc_algo,omitempty"` // gcm256（默认）| gcm128（显式性能模式）
-	MinEnc     string       `json:"min_enc,omitempty"`  // 最低内层加密强度：gcm（空/any=不设下限）
-	PadMode    string       `json:"pad_mode,omitempty"` // 混淆填充：bucket | off（默认 bucket）
-	Socks5     string       `json:"socks5,omitempty"`   // 全局 SOCKS5 出口（client）
-	Brutal     bool         `json:"brutal,omitempty"`
-	BrutalUp   uint64       `json:"brutal_up,omitempty"`   // Mbps
-	BrutalDown uint64       `json:"brutal_down,omitempty"` // Mbps
+	Encrypt    bool   `json:"encrypt"`
+	EncAlgo    string `json:"enc_algo,omitempty"` // gcm256（默认）| gcm128 | chacha20 | xchacha20
+	MinEnc     string `json:"min_enc,omitempty"`  // 最低内层加密强度：gcm（空/any=不设下限）
+	PadMode    string `json:"pad_mode,omitempty"` // 混淆填充：bucket | off（默认 bucket）
+	Socks5     string `json:"socks5,omitempty"`   // 全局 SOCKS5 出口（client）
+	Brutal     bool   `json:"brutal,omitempty"`
+	BrutalUp   uint64 `json:"brutal_up,omitempty"`   // Mbps
+	BrutalDown uint64 `json:"brutal_down,omitempty"` // Mbps
 	// 按日流量统计：traffic_days 为保留天数（默认 30，最大 3650，面板热更生效）；
 	// traffic_file 为持久化文件，留空时默认放在配置文件同目录的
 	// tlsvpn-traffic.json（经命令行标志启动、无配置文件来源时仅内存统计）。
@@ -109,12 +109,12 @@ type ClientConfig struct {
 	// creates and owns the TAP/data plane, while netifd owns addresses,
 	// routes, metrics and firewall lifecycle through fixed helper scripts.
 	InterfaceManager string `json:"interface_manager,omitempty"`
-	ReqV4      string `json:"req_v4,omitempty"`
-	ReqV6      string `json:"req_v6,omitempty"`
-	SNI        string `json:"sni,omitempty"` // 默认 www.cloudflare.com
-	Insecure   bool   `json:"insecure,omitempty"`
-	CertSHA256 string `json:"cert_sha256,omitempty"` // 证书指纹锁定
-	Fwmark     int    `json:"fwmark,omitempty"`
+	ReqV4            string `json:"req_v4,omitempty"`
+	ReqV6            string `json:"req_v6,omitempty"`
+	SNI              string `json:"sni,omitempty"` // 默认 www.cloudflare.com
+	Insecure         bool   `json:"insecure,omitempty"`
+	CertSHA256       string `json:"cert_sha256,omitempty"` // 证书指纹锁定
+	Fwmark           int    `json:"fwmark,omitempty"`
 	// FwmarkPriority 是策略路由规则的优先级；0 = 交给内核分配（默认）。
 	// 混有其他 ip rule 的机器上用它压住或抬高本项目的规则。
 	FwmarkPriority int `json:"fwmark_priority,omitempty"`
@@ -398,9 +398,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.EncAlgo {
-	case "", "gcm256", "gcm128":
+	case "", "gcm256", "gcm128", "chacha20", "xchacha20":
 	default:
-		return fmt.Errorf("invalid enc_algo %q (want gcm256 or gcm128)", c.EncAlgo)
+		return fmt.Errorf("invalid enc_algo %q (want gcm256, gcm128, chacha20 or xchacha20)", c.EncAlgo)
 	}
 	if c.EncAlgo != "" && !c.Encrypt {
 		return fmt.Errorf("enc_algo %q requires encrypt=true", c.EncAlgo)

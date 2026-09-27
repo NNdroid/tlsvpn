@@ -19,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // pskKey 由 PSK 派生的 32 字节密钥材料（hashPSK 的二进制形式）
@@ -65,51 +67,64 @@ func verifyRandomSessionToken(stored, want string) bool {
 
 const (
 	// encAlgoNone 未启用内层加密（encrypt=false）：线路负载即明文，只靠 TLS。
-	// 与算法号区分：0 不再表示任何加密算法，面板可无歧义地显示"明文"。
 	encAlgoNone = 0
-	// encAlgoGCM AES-256-GCM：nonce = seq(4BE) || salt(8B)。salt 每会话随机
-	// 且 c2s/s2c 各一个，seq 会话内连续 —— 密钥流空间按 (salt, seq) 严格
-	// 不相交，根治密钥流重放；GCM 标签同时提供完整性，任何篡改/异源注入
-	// 的帧在解密时被丢弃（重放帧被重排窗口吸收或标签校验拦截）。
-	// 唯一支持的内层算法：旧版 AES-CTR（无完整性校验、密钥流仅由 (PSK, seq)
-	// 决定，跨会话/跨客户端重用）已随旧协议兼容一并移除，不再存在回退路径。
-	encAlgoGCM    = 2 // AES-256-GCM（兼容既有协议）
-	encAlgoGCM128 = 4 // AES-128-GCM（显式性能模式；3 曾被历史 GCM-v2 占用）
-	gcmTagSize    = 16
-	gcmNonceSize  = 12
-	encSaltSize   = 8
-	// 不同算法使用独立 KDF label，避免 AES-128/256 在同一 PSK 下复用 key material。
-	gcmKeyLabel    = "_enc_key"
-	gcm128KeyLabel = "_enc_key128"
+	// 2 保持既有 AES-256-GCM wire 语义；3 曾被历史 GCM-v2 占用；4 是 AES-128-GCM。
+	// 新算法只扩展握手 enc_algo，帧头、16B tag、8B session salt 字段均保持不变。
+	encAlgoGCM       = 2
+	encAlgoGCM128    = 4
+	encAlgoChaCha20  = 5
+	encAlgoXChaCha20 = 6
+
+	aeadTagSize       = 16
+	standardNonceSize = 12
+	xNonceSize        = 24
+	encSaltSize       = 8
+
+	gcmKeyLabel       = "_enc_key"
+	gcm128KeyLabel    = "_enc_key128"
+	chachaKeyLabel    = "_enc_chacha20"
+	xchachaKeyLabel   = "_enc_xchacha20"
+	xchachaNonceLabel = "tlsvpn-xchacha20-nonce-v1"
 )
 
-// innerCipher 封装内层 AES-GCM（AES-256 默认，AES-128 显式性能模式）：密文后附 16B 标签
-// （线路 dataLen = 明文长 + 16，帧格式不变），AAD 覆盖 [线路 dataLen(4BE) ||
-// seq(4BE)]，防止把有效密文挪到别的 seq 位置。nil 表示本方向未启用内层加密。
+// 历史名称保留，避免测试/外部辅助代码因常量重命名失效。
+const (
+	gcmTagSize   = aeadTagSize
+	gcmNonceSize = standardNonceSize
+)
+
+// innerCipher 是统一的内层 AEAD。AES-GCM 与 ChaCha20-Poly1305 使用 12B nonce：
+// seq(4BE)||salt(8B)。XChaCha20-Poly1305 需要 24B nonce；为了不新增握手字段，
+// 使用现有随机 salt 确定性派生 20B prefix，再追加 seq(4BE)。salt 每个 session
+// epoch、每个方向都会重新随机，seq 在 epoch 内单调，因此 nonce 不复用。
 type innerCipher struct {
-	aead cipher.AEAD
-	salt [encSaltSize]byte
+	aead         cipher.AEAD
+	algo         int
+	salt         [encSaltSize]byte
+	xnoncePrefix [20]byte
 }
 
-// newGCMInnerCipher 保持历史 AES-256-GCM 构造语义，供旧测试/调用继续使用。
+// 兼容历史 AES-256-GCM 构造 API。
 func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
-	return newGCMInnerCipherForAlgo(psk, salt, encAlgoGCM)
+	return newInnerCipherForAlgo(psk, salt, encAlgoGCM)
 }
-
 func newGCMInnerCipherForAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
-	return newGCMInnerCipherDomainForAlgo(psk, salt, "data", algo)
+	return newInnerCipherForAlgo(psk, salt, algo)
 }
-
-// newGCMInnerCipherDomain 保持历史 AES-256-GCM 语义。
 func newGCMInnerCipherDomain(psk string, salt []byte, domain string) (*innerCipher, error) {
-	return newGCMInnerCipherDomainForAlgo(psk, salt, domain, encAlgoGCM)
+	return newInnerCipherDomainForAlgo(psk, salt, domain, encAlgoGCM)
+}
+func newGCMInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo int) (*innerCipher, error) {
+	return newInnerCipherDomainForAlgo(psk, salt, domain, algo)
 }
 
-// newGCMInnerCipherDomainForAlgo 为数据帧/FEC 和 AES-128/256 分别派生独立 key。
-// nonce/AAD/tag/frame wire format 完全相同，因此变化只由握手 enc_algo 显式协商。
-func newGCMInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo int) (*innerCipher, error) {
+func newInnerCipherForAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
+	return newInnerCipherDomainForAlgo(psk, salt, "data", algo)
+}
+
+func newInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo int) (*innerCipher, error) {
 	if domain != "data" && domain != "fec" {
-		return nil, fmt.Errorf("unknown GCM domain %q", domain)
+		return nil, fmt.Errorf("unknown AEAD domain %q", domain)
 	}
 	if len(salt) != encSaltSize {
 		return nil, fmt.Errorf("encryption salt must be %d bytes, got %d", encSaltSize, len(salt))
@@ -122,27 +137,52 @@ func newGCMInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo
 		label, keyLen = gcmKeyLabel, 32
 	case encAlgoGCM128:
 		label, keyLen = gcm128KeyLabel, 16
+	case encAlgoChaCha20:
+		label, keyLen = chachaKeyLabel, chacha20poly1305.KeySize
+	case encAlgoXChaCha20:
+		label, keyLen = xchachaKeyLabel, chacha20poly1305.KeySize
 	default:
-		return nil, fmt.Errorf("unsupported GCM algorithm %d", algo)
+		return nil, fmt.Errorf("unsupported inner AEAD algorithm %d", algo)
 	}
 	if domain == "fec" {
 		label += "_fec"
 	}
 	keyHash := sha256.Sum256([]byte(psk + label))
-	block, err := aes.NewCipher(keyHash[:keyLen])
+	key := keyHash[:keyLen]
+
+	var aead cipher.AEAD
+	var err error
+	switch algo {
+	case encAlgoGCM, encAlgoGCM128:
+		var block cipher.Block
+		block, err = aes.NewCipher(key)
+		if err == nil {
+			aead, err = cipher.NewGCM(block)
+		}
+	case encAlgoChaCha20:
+		aead, err = chacha20poly1305.New(key)
+	case encAlgoXChaCha20:
+		aead, err = chacha20poly1305.NewX(key)
+	}
 	if err != nil {
 		return nil, err
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
+	if aead.Overhead() != aeadTagSize {
+		return nil, fmt.Errorf("unexpected AEAD tag size %d", aead.Overhead())
 	}
-	ic := &innerCipher{aead: aead}
+
+	ic := &innerCipher{aead: aead, algo: algo}
 	copy(ic.salt[:], salt)
+	if algo == encAlgoXChaCha20 {
+		h := sha256.New()
+		h.Write([]byte(xchachaNonceLabel))
+		h.Write(salt)
+		sum := h.Sum(nil)
+		copy(ic.xnoncePrefix[:], sum[:20])
+	}
 	return ic, nil
 }
 
-// newRandomSalt 生成会话盐（crypto/rand）
 func newRandomSalt() [encSaltSize]byte {
 	var s [encSaltSize]byte
 	if _, err := rand.Read(s[:]); err != nil {
@@ -151,43 +191,14 @@ func newRandomSalt() [encSaltSize]byte {
 	return s
 }
 
-// gcmNonce nonce = seq(4BE) || salt(8B)。GCM 计数器从 nonce||0x00000002 起
-// 递增，永不触碰 nonce 本身。
-func (ic *innerCipher) gcmNonce(seq uint32) []byte {
-	var nonce [gcmNonceSize]byte
-	binary.BigEndian.PutUint32(nonce[0:4], seq)
-	copy(nonce[4:], ic.salt[:])
-	return nonce[:]
-}
-
-// gcmAAD AAD 覆盖线路负载长度（含 tag）与 seq
-func gcmAAD(wireLen, seq uint32) []byte {
-	var aad [8]byte
-	binary.BigEndian.PutUint32(aad[0:4], wireLen)
-	binary.BigEndian.PutUint32(aad[4:8], seq)
-	return aad[:]
-}
-
-func newGCMScratch() any { return new([gcmNonceSize + 8]byte) }
-
-var gcmScratchPool = sync.Pool{New: newGCMScratch}
-
-// gcmNonceAAD 在调用方提供的 20 字节 scratch 上一次构造 nonce 与 AAD。
-// 热路径（每帧 Seal/Open）单独调用 gcmNonce/gcmAAD 会因接口调用逃逸产生
-// 两次小堆分配；合并成单块 scratch 后每帧至多一次 20B 分配。
-// 布局：buf[0:12] = nonce = seq(4BE) || salt(8B)；buf[12:20] = AAD = wireLen(4BE) || seq(4BE)。
-func (ic *innerCipher) gcmNonceAAD(seq uint32, wireLen uint32, buf *[gcmNonceSize + 8]byte) (nonce, aad []byte) {
-	binary.BigEndian.PutUint32(buf[0:4], seq)
-	copy(buf[4:12], ic.salt[:])
-	binary.BigEndian.PutUint32(buf[12:16], wireLen)
-	binary.BigEndian.PutUint32(buf[16:20], seq)
-	return buf[:gcmNonceSize], buf[gcmNonceSize:]
-}
-
 func encAlgoFromConfig(mode string) int {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "gcm128":
 		return encAlgoGCM128
+	case "chacha20":
+		return encAlgoChaCha20
+	case "xchacha20":
+		return encAlgoXChaCha20
 	default:
 		return encAlgoGCM
 	}
@@ -197,6 +208,10 @@ func encAlgoLabel(algo int) string {
 	switch algo {
 	case encAlgoGCM128:
 		return "gcm128"
+	case encAlgoChaCha20:
+		return "chacha20"
+	case encAlgoXChaCha20:
+		return "xchacha20"
 	case encAlgoGCM:
 		return "gcm256"
 	default:
@@ -204,27 +219,22 @@ func encAlgoLabel(algo int) string {
 	}
 }
 
-func isGCMAlgo(algo int) bool {
-	return algo == encAlgoGCM || algo == encAlgoGCM128
+func isGCMAlgo(algo int) bool { return algo == encAlgoGCM || algo == encAlgoGCM128 }
+func isInnerAEADAlgo(algo int) bool {
+	return isGCMAlgo(algo) || algo == encAlgoChaCha20 || algo == encAlgoXChaCha20
 }
 
-func (ic *innerCipher) isGCM() bool {
-	return ic != nil
-}
+func (ic *innerCipher) isGCM() bool { return ic != nil && isGCMAlgo(ic.algo) }
 
-// ======================= 加密强度下限 =======================
-//
-// 内层算法属于同一认证 GCM 家族（AES-256-GCM / AES-128-GCM），所以
-// "强度下限"表示是否强制要求 GCM；具体 key size 由 enc_algo 精确匹配。
-// 取值 ""/"any"（不设下限）与 "gcm"。
-// 历史上的 ctr / legacy 档位对应的 AES-CTR 回退路径已移除。
-
+// min_enc 的配置值 "gcm" 为历史兼容名称。过去全部内层认证加密都是 GCM，
+// 所以它事实上承担的是“必须启用认证 AEAD”的策略。新增 ChaCha 后继续沿用同一
+// 配置值，不增加配置项：gcm 表示任何受支持的认证内层 AEAD 均可，具体算法仍
+// 由 enc_algo 精确匹配，不做隐式升级/降级。
 const (
-	minEncNone = 0 // 不设下限
-	minEncGCM  = 1 // 最低要求 GCM 能力声明
+	minEncNone = 0
+	minEncGCM  = 1
 )
 
-// minEncRank 解析最低强度配置；0 表示不设下限
 func minEncRank(mode string) int {
 	if strings.EqualFold(strings.TrimSpace(mode), "gcm") {
 		return minEncGCM
@@ -232,58 +242,84 @@ func minEncRank(mode string) int {
 	return minEncNone
 }
 
-// tagLen 该加密器在线路上额外占用的字节数
 func (ic *innerCipher) tagLen() int {
-	if ic.isGCM() {
-		return gcmTagSize
+	if ic == nil {
+		return 0
 	}
-	return 0
+	return ic.aead.Overhead()
 }
 
-// sealInPlace 就地加密 region 的前 ptLen 字节；region 必须预留 tagLen 空间。
-// 返回写入总长（明文长 + tagLen）。
+// nonceAADScratch 同时容纳最大 24B nonce 与 8B AAD，避免热路径每帧分配。
+type nonceAADScratch [xNonceSize + 8]byte
+
+var aeadScratchPool = sync.Pool{New: func() any { return new(nonceAADScratch) }}
+
+func (ic *innerCipher) nonceAAD(seq uint32, wireLen uint32, buf *nonceAADScratch) (nonce, aad []byte) {
+	if ic.algo == encAlgoXChaCha20 {
+		copy(buf[0:20], ic.xnoncePrefix[:])
+		binary.BigEndian.PutUint32(buf[20:24], seq)
+		binary.BigEndian.PutUint32(buf[24:28], wireLen)
+		binary.BigEndian.PutUint32(buf[28:32], seq)
+		return buf[:xNonceSize], buf[xNonceSize : xNonceSize+8]
+	}
+	binary.BigEndian.PutUint32(buf[0:4], seq)
+	copy(buf[4:12], ic.salt[:])
+	binary.BigEndian.PutUint32(buf[12:16], wireLen)
+	binary.BigEndian.PutUint32(buf[16:20], seq)
+	return buf[:standardNonceSize], buf[standardNonceSize : standardNonceSize+8]
+}
+
+// 历史测试辅助函数保留 AES-GCM 的 nonce/AAD 观察语义。
+func (ic *innerCipher) gcmNonce(seq uint32) []byte {
+	var nonce [standardNonceSize]byte
+	binary.BigEndian.PutUint32(nonce[0:4], seq)
+	copy(nonce[4:], ic.salt[:])
+	return nonce[:]
+}
+func gcmAAD(wireLen, seq uint32) []byte {
+	var aad [8]byte
+	binary.BigEndian.PutUint32(aad[0:4], wireLen)
+	binary.BigEndian.PutUint32(aad[4:8], seq)
+	return aad[:]
+}
+
 func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen uint32) int {
 	if ptLen == 0 || ic == nil {
 		return ptLen
 	}
-	// cipher.AEAD 是接口调用，栈上的 [20]byte scratch 会逃逸。池中保存的是
-	// *[20]byte 指针，不会产生 slice-header 装箱分配；AEAD 返回前不会保留
-	// nonce/AAD 引用，因此调用结束即可安全归池。
-	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
-	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
+	scratch := aeadScratchPool.Get().(*nonceAADScratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
 	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
-	gcmScratchPool.Put(scratch)
+	aeadScratchPool.Put(scratch)
 	return len(out)
 }
 
-// openInPlace 就地解密并校验，返回明文切片（dst 的前缀，复用原缓冲）。
-// 校验失败返回错误，data 内容不可信。
 func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	if len(data) == 0 || ic == nil {
 		return data, nil
 	}
-	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
-	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
+	if len(data) < ic.tagLen() {
+		return nil, fmt.Errorf("AEAD payload too short: %d", len(data))
+	}
+	scratch := aeadScratchPool.Get().(*nonceAADScratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
 	plain, err := ic.aead.Open(data[:0], nonce, data, aad)
-	gcmScratchPool.Put(scratch)
+	aeadScratchPool.Put(scratch)
 	return plain, err
 }
 
-// openTo 解密 src（含标签）写入 dst（长度须等于明文长），返回明文。
-// wireLen 与 seal 时的 AAD 长度字段一致。nonce + AAD 共用池化 scratch，
-// 避免 FEC parity 解密路径再单独生成一个逃逸的 []byte AAD。
 func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	if ic == nil {
 		copy(dst, src)
 		return dst, nil
 	}
-	if len(src) < gcmTagSize {
-		return nil, fmt.Errorf("gcm payload too short: %d", len(src))
+	if len(src) < ic.tagLen() {
+		return nil, fmt.Errorf("AEAD payload too short: %d", len(src))
 	}
-	scratch := gcmScratchPool.Get().(*[gcmNonceSize + 8]byte)
-	nonce, aad := ic.gcmNonceAAD(seq, wireLen, scratch)
+	scratch := aeadScratchPool.Get().(*nonceAADScratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
 	plain, err := ic.aead.Open(dst[:0], nonce, src, aad)
-	gcmScratchPool.Put(scratch)
+	aeadScratchPool.Put(scratch)
 	return plain, err
 }
 
