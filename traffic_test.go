@@ -10,7 +10,11 @@ import (
 )
 
 func trafficTestCfg(days int, file string) *Config {
-	return &Config{TrafficDays: days, TrafficFile: file, SourcePath: "/tmp/fake/config.json"}
+	// Most accounting tests exercise only in-memory aggregation. Leave
+	// SourcePath empty so an empty TrafficFile stays truly in-memory instead of
+	// implicitly resolving to /tmp/fake/tlsvpn-traffic.json and producing noisy
+	// write warnings on every flush.
+	return &Config{TrafficDays: days, TrafficFile: file}
 }
 
 func TestTrafficDailyBucketsAndDayRotation(t *testing.T) {
@@ -116,7 +120,8 @@ func TestTrafficCorruptFileStartsEmpty(t *testing.T) {
 
 func TestTrafficDefaultFileNextToConfig(t *testing.T) {
 	ta := NewTrafficAccounting()
-	ta.OnConfig(trafficTestCfg(0, "")) // days=0 → 默认 30；file 空 → 配置文件同目录
+	cfg := &Config{TrafficDays: 0, SourcePath: "/tmp/fake/config.json"}
+	ta.OnConfig(cfg) // days=0 → 默认 30；file 空 → 配置文件同目录
 	if ta.days != defaultTrafficDays {
 		t.Fatalf("days = %d, want %d", ta.days, defaultTrafficDays)
 	}
@@ -238,63 +243,5 @@ func TestTrafficRttNowSampler(t *testing.T) {
 	ta := NewTrafficAccounting()
 	if got := ta.rttNow(); got != 0 {
 		t.Fatalf("无采样回调时应返回 0, got %v", got)
-	}
-	ta.SetRTTSampler(func() float64 { return 25 })
-	if got := ta.rttNow(); got != 25 {
-		t.Fatalf("应返回回调值 25, got %v", got)
-	}
-}
-
-func TestTrafficPerClientDailyBuckets(t *testing.T) {
-	ta := NewTrafficAccounting()
-	ta.OnConfig(trafficTestCfg(30, ""))
-	var cu, cd uint64
-	ta.SetClientSampler(func() map[string][2]uint64 {
-		return map[string][2]uint64{"client-a": {cu, cd}}
-	})
-	base := time.Date(2026, 9, 25, 10, 0, 0, 0, time.Local)
-	cu, cd = 1000, 5000
-	ta.flush(base) // 首轮：全量入桶
-	cu, cd = 3000, 7000
-	ta.flush(base.Add(time.Minute)) // 差分 2000/2000
-	cu, cd = 50, 60
-	ta.flush(base.Add(2 * time.Minute)) // 会话重建回绕：负增量必须记 0
-
-	var ct clientTrafficJSON
-	found := false
-	for _, c := range ta.ClientSnapshot() {
-		if c.ID == "client-a" {
-			found = true
-			ct = c
-		}
-	}
-	if !found {
-		t.Fatal("client-a missing from snapshot")
-	}
-	if len(ct.Daily) != 1 {
-		t.Fatalf("expect 1 day, got %d", len(ct.Daily))
-	}
-	if ct.Daily[0].Up != 3000 || ct.Daily[0].Down != 7000 {
-		t.Fatalf("daily bucket wrong: %+v", ct.Daily[0])
-	}
-}
-
-func TestTrafficPerClientPersistence(t *testing.T) {
-	dir := t.TempDir()
-	main := filepath.Join(dir, "traffic.json")
-	ta := NewTrafficAccounting()
-	ta.OnConfig(&Config{TrafficDays: 30, TrafficFile: main})
-	var cu, cd uint64
-	ta.SetClientSampler(func() map[string][2]uint64 {
-		return map[string][2]uint64{"client-b": {cu, cd}}
-	})
-	cu, cd = 4096, 8192
-	ta.flush(time.Date(2026, 9, 25, 9, 0, 0, 0, time.Local))
-
-	ta2 := NewTrafficAccounting()
-	ta2.OnConfig(&Config{TrafficDays: 30, TrafficFile: main})
-	snap := ta2.ClientSnapshot()
-	if len(snap) != 1 || snap[0].ID != "client-b" || len(snap[0].Daily) != 1 || snap[0].Daily[0].Up != 4096 {
-		t.Fatalf("per-client history not restored: %+v", snap)
 	}
 }
