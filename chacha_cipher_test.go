@@ -81,3 +81,49 @@ func TestEncAlgoConfigIncludesChaCha(t *testing.T) {
 		}
 	}
 }
+
+func TestChaChaFECParityRoundTrip(t *testing.T) {
+	salt := []byte{0, 1, 2, 3, 4, 5, 6, 7}
+	for _, algo := range []int{encAlgoChaCha20, encAlgoXChaCha20} {
+		tx, err := newInnerCipherDomainForAlgo("chacha-fec-psk", salt, "fec", algo)
+		if err != nil {
+			t.Fatalf("algo=%d tx init: %v", algo, err)
+		}
+		rx, err := newInnerCipherDomainForAlgo("chacha-fec-psk", salt, "fec", algo)
+		if err != nil {
+			t.Fatalf("algo=%d rx init: %v", algo, err)
+		}
+
+		enc := newFECEncoder(2, tx)
+		f1 := []byte{1, 2, 3, 4, 5}
+		f2 := []byte{9, 8, 7, 6, 5}
+		if got := enc.add(VPNFrame{Seq: 1, Data: f1}); got != nil {
+			t.Fatalf("algo=%d parity emitted early", algo)
+		}
+		parity := enc.add(VPNFrame{Seq: 2, Data: f2})
+		if parity == nil {
+			t.Fatalf("algo=%d no parity", algo)
+		}
+		defer putFrame(parity)
+
+		recovered := make(chan []byte, 1)
+		dec := NewFECDecoder(2, rx, func(seq uint32, frame []byte) {
+			if seq != 2 {
+				t.Errorf("algo=%d recovered seq=%d want=2", algo, seq)
+			}
+			cp := append([]byte(nil), frame...)
+			recovered <- cp
+			putFrame(frame)
+		})
+		dec.OnData(1, f1)
+		dec.OnParity(parity)
+		select {
+		case got := <-recovered:
+			if !bytes.Equal(got, f2) {
+				t.Fatalf("algo=%d recovered=%x want=%x", algo, got, f2)
+			}
+		default:
+			t.Fatalf("algo=%d FEC did not recover missing frame", algo)
+		}
+	}
+}

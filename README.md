@@ -59,9 +59,9 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `mac` | (Empty) | Pin the TAP interface MAC |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
 | `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks in self-managed mode; changing either requires restart |
-| `encrypt` | `true` when omitted in JSON | Enable inner authenticated AES-GCM |
-| `enc_algo` | `gcm256` | Inner cipher key size: `gcm256` (AES-256-GCM, compatibility default) or `gcm128` (AES-128-GCM performance mode). Both peers must match exactly |
-| `min_enc` | (Empty) | Strength floor: `gcm` requires authenticated GCM (either configured key size), `any`/empty sets no floor (needs `encrypt`) |
+| `encrypt` | `true` when omitted in JSON | Enable inner authenticated AEAD |
+| `enc_algo` | `gcm256` | Inner AEAD: `gcm256` (AES-256-GCM, compatibility default), `gcm128`, `chacha20`, or `xchacha20`. Both peers must match exactly |
+| `min_enc` | (Empty) | Legacy floor value `gcm` now means any supported authenticated inner AEAD; `any`/empty sets no floor (needs `encrypt`) |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
 | `socks5` | (Empty) | Client: route all outbound sockets through a SOCKS5 proxy |
 | `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |

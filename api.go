@@ -864,7 +864,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		conns := int(atomic.LoadInt32(&cli.liveConns))
 		fec := cli.fecStatus
 		lv := cli.live.Load()
-		// encAlgoNone=0（TLS only）/ 2（AES-256-GCM）/ 4（AES-128-GCM）。
+		// encAlgoNone=0（TLS only）/ 2（AES-256-GCM）/ 4（AES-128-GCM）/ 5（ChaCha20）/ 6（XChaCha20）。
 		// 算法号本身已无歧义，直接下发。
 		enc := cli.encAlgo
 		stats.ActiveClients = 1
