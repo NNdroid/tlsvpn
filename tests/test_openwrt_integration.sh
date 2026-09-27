@@ -66,12 +66,13 @@ if grep -Ev '^[[:space:]]*#' "${apk_builder}" | grep -Fq '+git.'; then
 	exit 1
 fi
 
-grep -Fq './scripts/feeds update packages' "${apk_builder}"
+grep -Fq './scripts/feeds update packages luci' "${apk_builder}"
 grep -Fq './scripts/feeds install -p packages golang' "${apk_builder}"
-if grep -Fq './scripts/feeds update packages luci' "${apk_builder}"; then
-	echo "APK builder must not install the full LuCI feed" >&2
-	exit 1
-fi
+grep -Fq './scripts/feeds install -p luci luci-base' "${apk_builder}"
+for lang in en fr de zh-cn zh-tw ja; do
+	grep -Fq "CONFIG_PACKAGE_luci-i18n-tlsvpn-${lang}=m" "${apk_builder}"
+done
+grep -Fq 'expected 6 LuCI i18n APKs' "${apk_builder}"
 
 grep -Fq 'EXTRA_DEPENDS:=kmod-tun (>=0), ca-bundle (>=0)' "${package_makefile}"
 grep -Fq 'EXTRA_DEPENDS:=resolveip (>=0)' "${package_makefile}"
@@ -84,14 +85,14 @@ if grep -Fq 'define Package/tlsvpn/install' "${package_makefile}"; then
 	exit 1
 fi
 
-grep -Fq 'EXTRA_DEPENDS:=luci-base (>=0)' "${luci_makefile}"
-grep -Fq 'define Build/Compile' "${luci_makefile}"
-grep -Fq 'endef' "${luci_makefile}"
-grep -Fq '$(INSTALL_DATA) ./htdocs/luci-static/resources/protocol/tlsvpn.js' "${luci_makefile}"
-if grep -Fq 'luci.mk' "${luci_makefile}"; then
-	echo "static LuCI protocol package must not require luci.mk/lua-host" >&2
-	exit 1
-fi
+grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' "${luci_makefile}"
+grep -Fq 'LUCI_DEPENDS:=+tlsvpn-proto' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.en:=English' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.fr:=Français' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.de:=Deutsch' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.zh_Hans:=简体中文' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.zh_Hant:=繁體中文' "${luci_makefile}"
+grep -Fq 'LUCI_LANG.ja:=日本語' "${luci_makefile}"
 
 # OpenWrt 25.12 sha256sums uses GNU binary-mode entries ("*filename").
 # Keep a behavioral regression check for the exact lookup form used by the
