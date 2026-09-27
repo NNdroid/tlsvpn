@@ -215,10 +215,14 @@ type hookStatusJSON struct {
 	UpRan      bool   `json:"up_ran"`
 	UpOK       bool   `json:"up_ok"`
 	UpMs       int64  `json:"up_ms"`
+	UpAt       string `json:"up_at,omitempty"`
+	UpOut      string `json:"up_out,omitempty"`
 	UpErr      string `json:"up_error,omitempty"`
 	DownRan    bool   `json:"down_ran"`
 	DownOK     bool   `json:"down_ok"`
 	DownMs     int64  `json:"down_ms"`
+	DownAt     string `json:"down_at,omitempty"`
+	DownOut    string `json:"down_out,omitempty"`
 	DownErr    string `json:"down_error,omitempty"`
 }
 
