@@ -29,7 +29,7 @@ import (
 //	[1B 0xFE][4B groupStart(大端)][1B 成员数][成员数×4B 长度(大端)][异或载荷]
 //
 // 异或载荷为组内成员【明文】负载的异或，-encrypt 开启时以 groupStart 为
-// seq 用 GCM 独立 key domain 加密（见 newGCMInnerCipherDomain）。
+// seq 用独立 AEAD key domain 加密（见 newInnerCipherDomainForAlgo）。
 // seq=0 + 负载首字节 0xFE 即为识别标志；握手帧同为 seq=0 但以 '{' 开头，
 // 且仅出现在数据循环建立之前，不会混淆。
 //
@@ -153,8 +153,8 @@ func (e *fecEncoder) reset() {
 func (e *fecEncoder) buildParity() []byte {
 	maxLen := len(e.acc)
 	tagLen := 0
-	if e.ic != nil && e.ic.isGCM() {
-		tagLen = gcmTagSize
+	if e.ic != nil {
+		tagLen = e.ic.tagLen()
 	}
 	total := 6 + 4*len(e.lens) + maxLen + tagLen
 	buf := getFrameAtLeast(total)[:total]
@@ -168,8 +168,8 @@ func (e *fecEncoder) buildParity() []byte {
 	}
 	copy(buf[off:], e.acc)
 	if e.ic != nil {
-		// 校验帧线路负载 = 描述符 + 加密后的异或载荷（GCM 时附标签），
-		// 以 groupStart 为 CTR/GCM 的 seq。接收端解码时用同方向盐。
+		// 校验帧线路负载 = 描述符 + 加密后的异或载荷（AEAD 附标签），
+		// 以 groupStart 为 AEAD 的 seq。接收端解码时用同方向盐。
 		e.ic.sealInPlace(buf[off:off+maxLen+tagLen], maxLen, e.seqs[0], uint32(maxLen+tagLen))
 	}
 	return buf
@@ -187,26 +187,26 @@ type fecGroupState struct {
 }
 
 type fecDecoder struct {
-	mu        sync.Mutex
-	k         int
-	ic        *innerCipher
-	out       func(seq uint32, frame []byte)
-	groups    map[uint32]*fecGroupState // 组起点 → 组状态
-	groupOrder []uint32                 // group 创建顺序；已完成项 lazy skip
-	groupHead  int                      // groupOrder 首个可能仍活跃的位置
-	doneRing  [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
-	spares    []*fecGroupState // decoder 内部 free-list，最多复用 pending 上限数量
-	recovered uint64 // 异或恢复帧计数
-	lost      uint64 // 确认丢失帧计数
+	mu         sync.Mutex
+	k          int
+	ic         *innerCipher
+	out        func(seq uint32, frame []byte)
+	groups     map[uint32]*fecGroupState // 组起点 → 组状态
+	groupOrder []uint32                  // group 创建顺序；已完成项 lazy skip
+	groupHead  int                       // groupOrder 首个可能仍活跃的位置
+	doneRing   [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
+	spares     []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
+	recovered  uint64                    // 异或恢复帧计数
+	lost       uint64                    // 确认丢失帧计数
 }
 
 // NewFECDecoder 创建解码器。k 必须与对端编码分组大小一致（来自握手协商）；
 // ic 为对端→本端方向的解密器（校验帧用 groupStart 作 seq 解密校验载荷）。
 func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *fecDecoder {
 	return &fecDecoder{
-		k:      clampFecGroup(k),
-		ic:     ic,
-		out:    out,
+		k:          clampFecGroup(k),
+		ic:         ic,
+		out:        out,
 		groups:     make(map[uint32]*fecGroupState, 64),
 		groupOrder: make([]uint32, 0, fecMaxPendingGroups+64),
 		spares:     make([]*fecGroupState, 0, fecMaxPendingGroups),
@@ -277,8 +277,8 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	descLen := 6 + 4*k
 	tagLen := 0
-	if d.ic != nil && d.ic.isGCM() {
-		tagLen = gcmTagSize
+	if d.ic != nil {
+		tagLen = d.ic.tagLen()
 	}
 	if len(payload) < descLen+tagLen {
 		return

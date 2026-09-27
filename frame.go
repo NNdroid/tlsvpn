@@ -502,7 +502,7 @@ type HandshakeReq struct {
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
 	Encrypt         bool   `json:"encrypt,omitempty"`
-	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM）。
+	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM / ChaCha20-Poly1305 / XChaCha20-Poly1305）。
 	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
 	// SessionToken：客户端回带上一次收到的会话令牌（hex）。

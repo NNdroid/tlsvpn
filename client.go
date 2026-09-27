@@ -1669,19 +1669,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			return 0, fmt.Errorf("server sent invalid enc salts")
 		}
 		var errTx, errRx error
-		icTx, errTx = newGCMInnerCipherForAlgo(lv.psk, saltTx, resp.EncAlgo)
-		icRx, errRx = newGCMInnerCipherForAlgo(lv.psk, saltRx, resp.EncAlgo)
+		icTx, errTx = newInnerCipherForAlgo(lv.psk, saltTx, resp.EncAlgo)
+		icRx, errRx = newInnerCipherForAlgo(lv.psk, saltRx, resp.EncAlgo)
 		if errTx != nil || errRx != nil {
-			return 0, fmt.Errorf("GCM cipher init failed: %v/%v", errTx, errRx)
+			return 0, fmt.Errorf("inner AEAD init failed: %v/%v", errTx, errRx)
 		}
-		fecTx, _ = newGCMInnerCipherDomainForAlgo(lv.psk, saltTx, "fec", resp.EncAlgo)
-		fecRx, _ = newGCMInnerCipherDomainForAlgo(lv.psk, saltRx, "fec", resp.EncAlgo)
+		fecTx, _ = newInnerCipherDomainForAlgo(lv.psk, saltTx, "fec", resp.EncAlgo)
+		fecRx, _ = newInnerCipherDomainForAlgo(lv.psk, saltRx, "fec", resp.EncAlgo)
 		encAlgo = resp.EncAlgo
 	}
 
-	// min_enc=gcm 要求任一种认证 GCM；算法具体强度由 enc_algo 显式固定，
-	// 所以这里不把 AES-128 悄悄升级/降级成 AES-256。
-	if lv.minEnc > 0 && !isGCMAlgo(encAlgo) {
+	// min_enc=gcm 要求任一种认证内层 AEAD；算法具体强度由 enc_algo 显式固定，
+	// 所以这里不把 不同 AEAD 悄悄升级/降级。
+	if lv.minEnc > 0 && !isInnerAEADAlgo(encAlgo) {
 		return 0, fmt.Errorf("server negotiated inner cipher %d is below min_enc %q", encAlgo, "gcm")
 	}
 

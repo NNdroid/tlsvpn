@@ -5,7 +5,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 ## Features
 
 - **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
-- **Inner encryption** — `encrypt: true` adds authenticated AES-GCM inside the tunnel: per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: "gcm256"` remains the default; `"gcm128"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.
+- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel (AES-GCM, ChaCha20-Poly1305 or XChaCha20-Poly1305): per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: "gcm256"` remains the default; `"gcm128"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.
 - **XOR FEC** — one parity frame per K data frames reconstructs any single lost frame. The parity is sent once and rotated across healthy physical links, so redundancy is ≈1/K instead of N/K on N-link sessions.
 - **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
@@ -59,9 +59,9 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `mac` | (Empty) | Pin the TAP interface MAC |
 | `log_level` | `info` | `debug`/`info`/`warn`/`error`, switchable live |
 | `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks in self-managed mode; changing either requires restart |
-| `encrypt` | `true` when omitted in JSON | Enable inner authenticated AES-GCM |
-| `enc_algo` | `gcm256` | Inner cipher key size: `gcm256` (AES-256-GCM, compatibility default) or `gcm128` (AES-128-GCM performance mode). Both peers must match exactly |
-| `min_enc` | (Empty) | Strength floor: `gcm` requires authenticated GCM (either configured key size), `any`/empty sets no floor (needs `encrypt`) |
+| `encrypt` | `true` when omitted in JSON | Enable inner authenticated AEAD |
+| `enc_algo` | `gcm256` | Inner AEAD: `gcm256` (AES-256-GCM, compatibility default), `gcm128`, `chacha20`, or `xchacha20`. Both peers must match exactly |
+| `min_enc` | (Empty) | Legacy floor value `gcm` now means any supported authenticated inner AEAD; `any`/empty sets no floor (needs `encrypt`) |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
 | `socks5` | (Empty) | Client: route all outbound sockets through a SOCKS5 proxy |
 | `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |

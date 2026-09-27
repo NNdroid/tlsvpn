@@ -187,9 +187,9 @@ func TestInterfaceManagerDefaultsToSelf(t *testing.T) {
 func TestValidateNetifdInterfaceManager(t *testing.T) {
 	base := func() *Config {
 		cfg := &Config{
-			Mode: "client",
-			PSK:  "test-only-high-entropy-secret",
-			Addr: "1.2.3.4:4000",
+			Mode:   "client",
+			PSK:    "test-only-high-entropy-secret",
+			Addr:   "1.2.3.4:4000",
 			Client: ClientConfig{InterfaceManager: "netifd"},
 		}
 		cfg.applyDefaults()
@@ -419,14 +419,13 @@ func TestSaveConfigFileKeepsExplicitEncryptFalse(t *testing.T) {
 	}
 }
 
-
 func TestEncAlgoDefaultsAndValidation(t *testing.T) {
 	base := Config{
-		Mode: "client",
-		PSK: "0123456789abcdef0123456789abcdef",
-		Addr: "127.0.0.1:4000",
+		Mode:    "client",
+		PSK:     "0123456789abcdef0123456789abcdef",
+		Addr:    "127.0.0.1:4000",
 		Encrypt: true,
-		Client: ClientConfig{Conns: 1},
+		Client:  ClientConfig{Conns: 1},
 	}
 	base.applyDefaults()
 	if base.EncAlgo != "gcm256" {
@@ -440,6 +439,14 @@ func TestEncAlgoDefaultsAndValidation(t *testing.T) {
 	fast.EncAlgo = "gcm128"
 	if err := fast.Validate(); err != nil {
 		t.Fatalf("explicit gcm128 config rejected: %v", err)
+	}
+
+	for _, algo := range []string{"chacha20", "xchacha20"} {
+		cfg := base
+		cfg.EncAlgo = algo
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("explicit %s config rejected: %v", algo, err)
+		}
 	}
 
 	bad := base

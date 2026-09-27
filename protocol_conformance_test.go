@@ -39,7 +39,8 @@ type GoldenVectors struct {
 	PSKHashes []PSKHashVec `json:"psk_hashes"`
 
 	// GCM 数据/FEC 域分离：锁定 key label、nonce、AAD 与 tag 字节
-	GCMDomainVectors []GCMDomainVec `json:"gcm_domain_vectors"`
+	GCMDomainVectors  []GCMDomainVec  `json:"gcm_domain_vectors"`
+	AEADDomainVectors []AEADDomainVec `json:"aead_domain_vectors"`
 
 	// 帧头布局：10 字节头 [4B dataLen][2B padLen][4B seq]
 	FrameHeaders []FrameHeaderVec `json:"frame_headers"`
@@ -53,6 +54,16 @@ type GoldenVectors struct {
 }
 
 type GCMDomainVec struct {
+	PSK           string `json:"psk"`
+	SaltHex       string `json:"salt_hex"`
+	Domain        string `json:"domain"`
+	Seq           uint32 `json:"seq"`
+	PlaintextHex  string `json:"plaintext_hex"`
+	CiphertextHex string `json:"ciphertext_hex"`
+}
+
+type AEADDomainVec struct {
+	Algo          int    `json:"algo"`
 	PSK           string `json:"psk"`
 	SaltHex       string `json:"salt_hex"`
 	Domain        string `json:"domain"`
@@ -116,6 +127,23 @@ func buildGoldenVectors() *GoldenVectors {
 			Domain: domain, Seq: 0x01020304, PlaintextHex: hex.EncodeToString(gcmPlain),
 			CiphertextHex: hex.EncodeToString(wire),
 		})
+	}
+
+	for _, algo := range []int{encAlgoGCM, encAlgoGCM128, encAlgoChaCha20, encAlgoXChaCha20} {
+		for _, domain := range []string{"data", "fec"} {
+			ic, err := newInnerCipherDomainForAlgo(gcmPSK, gcmSalt, domain, algo)
+			if err != nil {
+				panic(err)
+			}
+			wire := make([]byte, len(gcmPlain)+aeadTagSize)
+			copy(wire, gcmPlain)
+			ic.sealInPlace(wire, len(gcmPlain), 0x01020304, uint32(len(wire)))
+			gv.AEADDomainVectors = append(gv.AEADDomainVectors, AEADDomainVec{
+				Algo: algo, PSK: gcmPSK, SaltHex: hex.EncodeToString(gcmSalt),
+				Domain: domain, Seq: 0x01020304, PlaintextHex: hex.EncodeToString(gcmPlain),
+				CiphertextHex: hex.EncodeToString(wire),
+			})
+		}
 	}
 
 	headers := []struct {

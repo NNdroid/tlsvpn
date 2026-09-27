@@ -200,6 +200,8 @@ function badge(f){if(!f||f==='off')return '<span class="badge b-off">'+t('badge.
   if(f==='dup')return '<span class="badge b-dup">'+t('badge.dup')+'</span>';return '<span class="badge b-on">'+f+'</span>';}
 function encBadge(a){if(a===2)return '<span class="badge b-on">AES-256-GCM</span>';
   if(a===4)return '<span class="badge b-on">AES-128-GCM</span>';
+  if(a===5)return '<span class="badge b-on">ChaCha20-Poly1305</span>';
+  if(a===6)return '<span class="badge b-on">XChaCha20-Poly1305</span>';
   return '<span class="badge b-off">'+t('badge.plain')+'</span>';}
 function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
