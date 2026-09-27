@@ -1,0 +1,34 @@
+name: Bootstrap client restart session-state fix
+
+on:
+  push:
+    branches:
+      - 'fix/client-restart-session-state'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: "github.actor != 'github-actions[bot]'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Apply fix and run targeted regression tests
+        run: |
+          python3 scripts/apply_client_restart_session_fix.py
+          gofmt -w client.go client_restart_state_regression_test.go
+          go test -count=1 ./... -run 'TestPersistSessionState|TestRefreshSessionStateFromDisk|TestClientRecoversAfterClientRestart'
+      - name: Commit final candidate and remove bootstrap files
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm scripts/apply_client_restart_session_fix.py .github/workflows/bootstrap-client-restart-session-fix.yml
+          git add client.go client_restart_state_regression_test.go
+          git commit -m 'fix(client): make restart session state generation-safe'
+          git push origin HEAD:fix/client-restart-session-state
