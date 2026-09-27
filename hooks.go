@@ -58,6 +58,7 @@ type hookRunInfo struct {
 	ran bool
 	ok  bool
 	ms  int64
+	at  time.Time
 	out string
 	err error
 }
@@ -127,7 +128,7 @@ func (h *LifecycleHooks) Down() error {
 func (h *LifecycleHooks) runRecorded(kind, path, workDir string, env []string) hookRunInfo {
 	start := time.Now()
 	out, err := h.run(path, workDir, env)
-	info := hookRunInfo{ran: true, ok: err == nil, ms: time.Since(start).Milliseconds(), out: out}
+	info := hookRunInfo{ran: true, ok: err == nil, ms: time.Since(start).Milliseconds(), at: start, out: out}
 	if err != nil {
 		info.err = hookError(kind, path, out, err)
 	}
@@ -149,10 +150,14 @@ func (h *LifecycleHooks) Status() *hookStatusJSON {
 		UpRan:      h.upInfo.ran,
 		UpOK:       h.upInfo.ok,
 		UpMs:       h.upInfo.ms,
+		UpAt:       hookTimeText(h.upInfo),
+		UpOut:      h.upInfo.out,
 		UpErr:      hookErrText(h.upInfo),
 		DownRan:    h.downInfo.ran,
 		DownOK:     h.downInfo.ok,
 		DownMs:     h.downInfo.ms,
+		DownAt:     hookTimeText(h.downInfo),
+		DownOut:    h.downInfo.out,
 		DownErr:    hookErrText(h.downInfo),
 	}
 	return out
@@ -164,6 +169,13 @@ func hookErrText(info hookRunInfo) string {
 		return ""
 	}
 	return info.err.Error()
+}
+
+func hookTimeText(info hookRunInfo) string {
+	if !info.ran || info.at.IsZero() {
+		return ""
+	}
+	return info.at.UTC().Format(time.RFC3339Nano)
 }
 
 func hookWorkDir(configPath string) string {
