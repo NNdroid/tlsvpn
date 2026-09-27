@@ -1,0 +1,168 @@
+name: Go Real-TAP Performance
+
+on:
+  push:
+    branches:
+      - 'perf/**'
+  workflow_dispatch:
+
+jobs:
+  real-tap-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+
+      - name: Checkout main baseline
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: baseline
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install real-TAP benchmark dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iproute2 iperf3 openssl
+
+      - name: Validate profiler and harness
+        run: |
+          go test -count=1 ./... -run 'TestRuntimeProfile|TestCreateProfileFile'
+          bash -n scripts/real_tap_perf.sh
+
+      - name: Build candidate and main baseline
+        run: |
+          mkdir -p perf-bin perf-artifacts
+          go build -trimpath -o "$PWD/perf-bin/tlsvpn-candidate" .
+          (cd baseline && go build -trimpath -o "$OLDPWD/perf-bin/tlsvpn-main" .)
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/main.tsv
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/candidate.tsv
+          printf 'profile\tconns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/profile-throughput.tsv
+
+      - name: Profile candidate server RX / client TX
+        env:
+          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          PERF_CONNS: '1'
+          PERF_ENC_ALGO: gcm256
+          PERF_PAD_MODE: bucket
+          PERF_DIRECTION: upload
+          PERF_SECONDS: '5'
+          PERF_MIN_MBPS: '500'
+          PERF_PROFILE_DIR: ${{ github.workspace }}/perf-artifacts/profile-upload
+          PERF_RESULT_FILE: ${{ github.workspace }}/perf-artifacts/profile-upload.tsv
+        run: |
+          sudo -E bash scripts/real_tap_perf.sh
+          sudo chown -R "$USER:$USER" perf-artifacts
+          awk -F '\t' 'BEGIN{OFS="\t"} {print "upload", $0}' perf-artifacts/profile-upload.tsv >> perf-artifacts/profile-throughput.tsv
+
+      - name: Profile candidate server TX / client RX
+        env:
+          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          PERF_CONNS: '1'
+          PERF_ENC_ALGO: gcm256
+          PERF_PAD_MODE: bucket
+          PERF_DIRECTION: download
+          PERF_SECONDS: '5'
+          PERF_MIN_MBPS: '500'
+          PERF_PROFILE_DIR: ${{ github.workspace }}/perf-artifacts/profile-download
+          PERF_RESULT_FILE: ${{ github.workspace }}/perf-artifacts/profile-download.tsv
+        run: |
+          sudo -E bash scripts/real_tap_perf.sh
+          sudo chown -R "$USER:$USER" perf-artifacts
+          awk -F '\t' 'BEGIN{OFS="\t"} {print "download", $0}' perf-artifacts/profile-download.tsv >> perf-artifacts/profile-throughput.tsv
+
+      - name: Render real-TAP pprof summaries
+        run: |
+          for direction in upload download; do
+            for side in server client; do
+              go tool pprof -top -nodecount=40 \
+                perf-bin/tlsvpn-candidate \
+                "perf-artifacts/profile-${direction}/${side}.cpu.prof" \
+                > "perf-artifacts/${direction}-${side}-cpu-top.txt"
+              go tool pprof -top -alloc_space -nodecount=40 \
+                perf-bin/tlsvpn-candidate \
+                "perf-artifacts/profile-${direction}/${side}.heap.prof" \
+                > "perf-artifacts/${direction}-${side}-alloc-top.txt"
+            done
+          done
+
+      - name: Run paired main/candidate throughput matrix
+        env:
+          MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
+          CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          MAIN_RESULTS: ${{ github.workspace }}/perf-artifacts/main.tsv
+          CANDIDATE_RESULTS: ${{ github.workspace }}/perf-artifacts/candidate.tsv
+        run: |
+          set -euo pipefail
+          for conns in 1 2 4; do
+            for enc in gcm256 gcm128; do
+              for pad in bucket off; do
+                echo "=== main: conns=$conns enc=$enc pad=$pad ==="
+                sudo -E env \
+                  BIN="$MAIN_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
+                  PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
+                  PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
+                  bash scripts/real_tap_perf.sh
+
+                echo "=== candidate: conns=$conns enc=$enc pad=$pad ==="
+                sudo -E env \
+                  BIN="$CANDIDATE_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
+                  PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
+                  PERF_MIN_MBPS=500 PERF_RESULT_FILE="$CANDIDATE_RESULTS" \
+                  bash scripts/real_tap_perf.sh
+              done
+            done
+          done
+          sudo chown -R "$USER:$USER" perf-artifacts
+
+      - name: Compare candidate against main on the same runner
+        run: |
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+
+          root = Path('perf-artifacts')
+          key_fields = ('conns', 'enc_algo', 'pad_mode', 'direction')
+
+          def load(path):
+              out = {}
+              with path.open(newline='') as f:
+                  for row in csv.DictReader(f, delimiter='\t'):
+                      key = tuple(row[k] for k in key_fields)
+                      out[key] = float(row['mbps'])
+              return out
+
+          base = load(root / 'main.tsv')
+          cand = load(root / 'candidate.tsv')
+          missing = sorted(set(base) ^ set(cand))
+          if missing:
+              raise SystemExit(f'matrix mismatch: {missing}')
+
+          rows = []
+          for key in sorted(base, key=lambda k: (int(k[0]), k[1], k[2], k[3])):
+              b = base[key]
+              c = cand[key]
+              delta = ((c / b) - 1.0) * 100.0 if b else 0.0
+              rows.append((*key, b, c, delta))
+
+          with (root / 'comparison.tsv').open('w', newline='') as f:
+              w = csv.writer(f, delimiter='\t')
+              w.writerow((*key_fields, 'main_mbps', 'candidate_mbps', 'delta_pct'))
+              for row in rows:
+                  w.writerow((*row[:4], f'{row[4]:.1f}', f'{row[5]:.1f}', f'{row[6]:+.2f}'))
+
+          print((root / 'comparison.tsv').read_text())
+          PY
+
+      - name: Upload real-TAP performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-real-tap-perf
+          path: perf-artifacts/
+          retention-days: 30
