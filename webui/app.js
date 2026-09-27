@@ -1115,7 +1115,7 @@ function renderClientsTable(data){
   const total=rows.length;
   const pv=pageView('clients',rows);
   document.getElementById('clients-body').innerHTML=pv.rows.map(function(r){
-    return '<tr data-open="'+esc(r.id)+'"><td class="num dim" title="'+esc(r.id)+'">'+hi(esc(shortId(r.id,10)),f)+'</td>'+
+    return '<tr data-open="'+esc(r.id)+'"><td class="num dim" title="'+esc(r.id)+'">'+hi(esc(shortId(r.id,10)),f)+(r.c.peer_info&&r.c.peer_info.hostname?'<br><span class="dim">'+hi(esc(r.c.peer_info.hostname),f)+'</span>':'')+'</td>'+
       '<td class="num">'+hi(esc(r.c.ipv4||'-'),f)+'</td>'+
       '<td class="hide-sm num dim">'+hi(esc(r.c.ipv6||'-'),f)+'</td>'+
       '<td class="hide-sm num dim">'+hi(esc(r.c.mac||'-'),f)+'</td>'+
@@ -1138,6 +1138,15 @@ function kv(el,rows){
 function yn(v){return v?'<span class="badge b-on">'+t('stt.yes')+'</span>':'<span class="badge b-off">'+t('stt.no')+'</span>';}
 function mtxt(v){return '<span class="mono">'+esc(v)+'</span>';}
 function ntxt(){return '<span style="color:var(--sub)">-</span>';}
+function peerSummary(p){
+  if(!p)return '';
+  const a=[];
+  if(p.hostname)a.push(p.hostname);
+  const impl=[p.implementation,p.version].filter(Boolean).join(' ');if(impl)a.push(impl);
+  const plat=[p.os,p.os_version,p.arch].filter(Boolean).join(' ');if(plat)a.push(plat);
+  if(p.kernel)a.push('kernel '+p.kernel);
+  return a.join(' · ');
+}
 // 证书有效期：剩余天数按远近配色，过期与自签都显式标出来
 function certCell(c){
   const d=c.days_left;
@@ -1153,7 +1162,7 @@ function certCell(c){
 function encName(a){return a===2?'AES-256-GCM':(a===4?'AES-128-GCM':(a===0?'none (TLS only)':String(a)));}
 function rateRange(lo,hi2){if(!lo&&!hi2)return '-';return (lo===hi2?String(lo):lo+'~'+hi2)+' Mbps';}
 function renderStatus(data){
-  const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{};
+  const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{},peer=data.peer||{};
   const rw=document.getElementById('status-restart');
   const rn=sys.needs_restart||[];
   if(rn.length){rw.style.display='';rw.innerHTML='<strong>'+t('stt.restart')+'</strong><br><span class="mono">'+esc(rn.join(', '))+'</span>';}
@@ -1187,6 +1196,7 @@ function renderStatus(data){
     [t('stt.neg.stoken'),yn(!!neg.session_token)],
   ];
   if(data.mode==='client'){
+    if(peerSummary(peer))nrw.push([t('tp.peer'),mtxt(peerSummary(peer))]);
     nrw.push([t('stt.neg.epoch'),neg.session_epoch?String(neg.session_epoch):ntxt()]);
     nrw.push([t('stt.neg.tx'),(neg.tx_rate_mbps||0)+' Mbps']);
     nrw.push([t('stt.neg.rx'),(neg.rx_rate_mbps||0)+' Mbps']);
@@ -2764,8 +2774,11 @@ function tpCoreNodes(data){
   return nodes;
 }
 function tpPeerNodes(data){
-  const cfg=data.cfg||{},np=data.negotiate||{},tl=np.tls||{},ci=data.cert;
+  const cfg=data.cfg||{},np=data.negotiate||{},tl=np.tls||{},ci=data.cert,peer=data.peer||{};
   const rs=[];
+  if(peer.hostname)rs.push([t('tp.host'),'<span class="mono">'+esc(peer.hostname)+'</span>']);
+  if(peer.implementation||peer.version)rs.push([t('kpi.version'),'<span class="mono">'+esc([peer.implementation,peer.version].filter(Boolean).join(' '))+'</span>']);
+  if(peer.os||peer.os_version||peer.arch)rs.push([t('stt.sys.os'),'<span class="mono">'+esc([peer.os,peer.os_version,peer.arch].filter(Boolean).join(' '))+'</span>']);
   rs.push([t('tp.addr'),'<span class="mono">'+esc(cfg.addr||'-')+'</span>']);
   rs.push([t('tp.sni'),tl.sni?'<span class="mono">'+esc(tl.sni)+'</span>':'<span class="dim">'+t('sc.none')+'</span>']);
   if(tl.version)rs.push([t('tp.tls'),'<span class="mono">'+esc(tl.version)+'</span>']);
@@ -2804,6 +2817,10 @@ function tpEndpoints(data){
       if(c.ipv4)rs.push([t('tp.v4'),'<span class="mono">'+esc(c.ipv4)+'</span>']);
       if(c.ipv6)rs.push([t('tp.v6'),'<span class="mono">'+esc(c.ipv6)+'</span>']);
       if(c.mac)rs.push([t('tp.mac2'),'<span class="mono">'+esc(c.mac)+'</span>']);
+      const pi=c.peer_info||{};
+      if(pi.hostname)rs.push([t('tp.host'),'<span class="mono">'+esc(pi.hostname)+'</span>']);
+      if(pi.implementation||pi.version)rs.push([t('kpi.version'),'<span class="mono">'+esc([pi.implementation,pi.version].filter(Boolean).join(' '))+'</span>']);
+      if(pi.os||pi.os_version||pi.arch)rs.push([t('stt.sys.os'),'<span class="mono">'+esc([pi.os,pi.os_version,pi.arch].filter(Boolean).join(' '))+'</span>']);
       if(b.n){
         const mn=b.min===1e9?0:b.min;
         rs.push([t('tp.rtt'),'<span class="mono">'+mn+'<span class="dim"> - '+b.max+' ms</span></span>']);
