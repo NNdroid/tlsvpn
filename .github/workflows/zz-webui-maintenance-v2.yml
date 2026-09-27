@@ -1,0 +1,43 @@
+name: One-off WebUI maintenance v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/zz-webui-maintenance-v2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Remove merged and stale branches
+        run: |
+          set -euxo pipefail
+          for b in feat/chacha-inner-aead fix/client-restart-session-state perf/async-tap-delivery-v2 perf/backend-slot-wakeup; do
+            git push origin --delete "$b" || true
+          done
+
+      - name: Apply WebUI maintenance
+        run: python3 .github/scripts/oneoff_webui_maint.py
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Commit and push
+        run: |
+          set -euxo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          rm -f .github/workflows/zz-webui-maintenance.yml
+          rm -f .github/workflows/zz-webui-maintenance-v2.yml
+          rm -f .github/scripts/oneoff_webui_maint.py
+          git add -A
+          git commit -m "feat(webui): add local platform icons and fix favicon"
+          git push origin HEAD:main
