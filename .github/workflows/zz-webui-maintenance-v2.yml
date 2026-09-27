@@ -1,20 +1,21 @@
 name: One-off WebUI maintenance v2
 
 on:
-  push:
+  pull_request:
     branches: [main]
-    paths:
-      - .github/workflows/zz-webui-maintenance-v2.yml
+    types: [opened]
 
 permissions:
   contents: write
 
 jobs:
   maintain:
+    if: github.head_ref == 'chore/webui-maintenance-trigger'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Remove merged and stale branches
@@ -41,4 +42,6 @@ jobs:
           git commit -m "feat(webui): add local platform icons and fix favicon"
           git push origin HEAD:main
 
-# one-off trigger: 2026-09-27
+      - name: Remove trigger branch
+        if: always()
+        run: git push origin --delete chore/webui-maintenance-trigger || true
