@@ -1,0 +1,40 @@
+name: Apply async TAP v2 integration
+
+on:
+  push:
+    branches:
+      - 'perf/async-tap-delivery-v2'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/async-tap-delivery-v2
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Apply and validate integration
+        run: |
+          set -euo pipefail
+          python3 scripts/apply_async_tap_v2.py
+          gofmt -w client.go tap_delivery.go tap_delivery_test.go tap_delivery_bench_test.go
+          go test -count=1 ./... -run 'TestOwnedTapDelivery|TestAsyncTapDeliveryQueue|TestPickDataBackend'
+
+      - name: Commit final candidate
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm scripts/apply_async_tap_v2.py .github/workflows/apply-async-tap-v2.yml
+          git add client.go tap_delivery.go tap_delivery_test.go tap_delivery_bench_test.go
+          git commit -m 'perf: enable async TAP delivery for single-connection RX'
+          git push origin HEAD:perf/async-tap-delivery-v2
