@@ -26,8 +26,8 @@ rep("  const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg
 rep("  if(data.mode==='client'){\n    nrw.push([t('stt.neg.epoch'),neg.session_epoch?String(neg.session_epoch):ntxt()]);",
     "  if(data.mode==='client'){\n    if(peerSummary(peer))nrw.push([t('tp.peer'),mtxt(peerSummary(peer))]);\n    nrw.push([t('stt.neg.epoch'),neg.session_epoch?String(neg.session_epoch):ntxt()]);",1)
 
-old="      '<td class=\"num dim\" title=\"'+esc(r.id)+'\">'+hi(esc(shortId(r.id,10)),f)+'</td>'+\n"
-new="      '<td class=\"num dim\" title=\"'+esc(r.id)+'\">'+hi(esc(shortId(r.id,10)),f)+(r.c.peer_info&&r.c.peer_info.hostname?'<br><span class=\"dim\">'+hi(esc(r.c.peer_info.hostname),f)+'</span>':'')+'</td>'+\n"
+old="'<td class=\"num dim\" title=\"'+esc(r.id)+'\">'+hi(esc(shortId(r.id,10)),f)+'</td>'"
+new="'<td class=\"num dim\" title=\"'+esc(r.id)+'\">'+hi(esc(shortId(r.id,10)),f)+(r.c.peer_info&&r.c.peer_info.hostname?'<br><span class=\"dim\">'+hi(esc(r.c.peer_info.hostname),f)+'</span>':'')+'</td>'"
 rep(old,new,1)
 
 rep("function tpPeerNodes(data){\n  const cfg=data.cfg||{},np=data.negotiate||{},tl=np.tls||{},ci=data.cert;\n  const rs=[];",
