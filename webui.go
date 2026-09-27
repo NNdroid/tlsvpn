@@ -9,8 +9,7 @@ import (
 
 // 面板静态资源独立存放在 webui/ 目录并在编译期整目录嵌入二进制，
 // 运行期零外部依赖。app.js 由 dashboard_script_test.go 做词法级守护，
-// 改动主脚本前先跑那组测试。frameviz.js 独立加载，避免把协议示意逻辑
-// 混入已经很大的主面板脚本。
+// 改动主脚本前先跑那组测试。附加功能保持独立脚本，避免继续膨胀主脚本。
 //
 //go:embed webui
 var webuiFS embed.FS
@@ -24,13 +23,19 @@ func webuiHandler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(sub))
 
-	// index.html 保持原文件简单；在响应时插入独立的帧格式可视化脚本。
-	// 这样无需复制主面板的 I18N/状态逻辑，也不会改变 app.js 的加载顺序。
 	index, err := fs.ReadFile(sub, "index.html")
 	if err != nil {
 		panic(err)
 	}
-	indexHTML := strings.Replace(string(index), "</body>", "<script src=\"frameviz.js\"></script>\n</body>", 1)
+	indexHTML := string(index)
+	// WebUI 主文件仍以 zh-CN 为 canonical key set；繁中 locale 在 app.js
+	// 执行后克隆同一棵 key tree，因此新增 key 不会因两份手写字典而漏翻。
+	indexHTML = strings.Replace(indexHTML,
+		`<button data-v="zh-CN" onclick="setLang('zh-CN')">中文</button>`,
+		`<button data-v="zh-CN" onclick="setLang('zh-CN')">简中</button>
+        <button data-v="zh-TW" onclick="setLang('zh-TW')">繁中</button>`, 1)
+	indexHTML = strings.Replace(indexHTML, "</body>",
+		"<script src=\"zh-tw.js\"></script>\n<script src=\"frameviz.js\"></script>\n</body>", 1)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// FileServer 会对目录生成列表页；面板只允许根页面和具名静态资产。
