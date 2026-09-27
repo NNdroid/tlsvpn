@@ -32,7 +32,10 @@ func TestWebUILoginPageEmbedded(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/login", nil))
 	if rr.Code != http.StatusOK { t.Fatalf("login page status=%d", rr.Code) }
 	body := rr.Body.String()
-	for _, want := range []string{"/api/login", "zh-CN", "zh-TW", "Français", "日本語"} {
+	// Keep this assertion aligned with the actual locale identifiers and labels
+	// embedded in webui/login.html. The French and German buttons intentionally
+	// use compact labels (FR/DE), while Japanese is displayed as 日本語.
+	for _, want := range []string{"/api/login", "'fr'", "'de'", "zh-CN", "zh-TW", "日本語"} {
 		if !strings.Contains(body, want) { t.Fatalf("login page missing %q", want) }
 	}
 }
