@@ -1632,11 +1632,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if resp.ProtocolVersion != 2 {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
+	c.sessionMu.Lock()
 	if resp.PeerInfo != nil {
-		c.sessionMu.Lock()
 		c.peerInfo = normalizePeerInfo(resp.PeerInfo)
-		c.sessionMu.Unlock()
+	} else {
+		// Rolling upgrade: an authenticated old server omits peer_info. Clear the
+		// previous node's metadata instead of showing stale identity in WebUI.
+		c.peerInfo = PeerInfo{}
 	}
+	c.sessionMu.Unlock()
 
 	// TLS 和 TLSVPN 应用层握手都已完成，现在才切换 TCP congestion control。
 	// 优先使用服务端裁剪后的会话总预算；若对端未提供 group 语义，则兼容旧端，
