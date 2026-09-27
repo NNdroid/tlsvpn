@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestPeerInfoOptionalHandshakeCompatibility(t *testing.T) {
@@ -37,6 +38,17 @@ func TestNormalizePeerInfoBoundsUntrustedFields(t *testing.T) {
 	}
 	if len(got.OSVersion) != peerInfoFieldMax {
 		t.Fatalf("os_version len=%d", len(got.OSVersion))
+	}
+}
+
+func TestNormalizePeerInfoPreservesUTF8WhenTruncated(t *testing.T) {
+	in := &PeerInfo{OSVersion: strings.Repeat("界", 200)}
+	got := normalizePeerInfo(in)
+	if len(got.OSVersion) > peerInfoFieldMax {
+		t.Fatalf("os_version exceeds bound: %d", len(got.OSVersion))
+	}
+	if !utf8.ValidString(got.OSVersion) {
+		t.Fatalf("os_version is invalid UTF-8 after truncation: %q", got.OSVersion)
 	}
 }
 
