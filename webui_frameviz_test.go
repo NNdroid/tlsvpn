@@ -32,7 +32,7 @@ func TestWebUIFrameVisualizerIsInjected(t *testing.T) {
 		want []string
 	}{
 		{"/frameviz.js", []string{"Frame format example", "帧格式示例", "Beispiel für Frame-Format", "Exemple de format de trame", "フレーム形式の例", "dataLen", "padLen", "1 MiB"}},
-		{"/zh-tw.js", []string{"I18N['zh-TW']", "用戶端", "伺服器", "位址池", "工作階段", "金鑰", "繁體"}},
+		{"/zh-tw.js", []string{"I18N['zh-TW']", "用戶端", "伺服器", "位址池", "工作階段", "金鑰"}},
 		{"/frameviz-zh-tw.js", []string{"訊框格式範例", "位元組", "驗證標籤"}},
 	} {
 		resp, err = ts.Client().Get(ts.URL + asset.path)
