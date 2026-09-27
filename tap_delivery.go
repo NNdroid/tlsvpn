@@ -8,7 +8,8 @@ import (
 // asyncTapDeliveryQueue is deliberately much smaller than the v1 experiment's
 // 1024-frame queue. 128 Ethernet frames are enough to overlap short TAP write
 // stalls without retaining ~1.5 MiB of packet buffers or adding a large latency
-// reservoir in front of the kernel device.
+// reservoir in front of the kernel device. The repeated real-TAP validation
+// below is intended to verify this smaller queue on the final integrated code.
 const asyncTapDeliveryQueue = 128
 
 // ownedTapDelivery decouples the receive/reorder hot path from the blocking TAP
