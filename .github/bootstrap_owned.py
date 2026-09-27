@@ -1,0 +1,253 @@
+from pathlib import Path
+
+p = Path("buffer.go")
+s = p.read_text()
+old = "\toutChan chan *reorderBatch\n\toutFunc func([]byte)\n"
+new = "\toutChan  chan *reorderBatch\n\toutFunc  func([]byte)\n\toutOwned bool // true: callback 接管 frame 所有权，ReorderBuffer 不再 putFrame\n"
+assert old in s, "ReorderBuffer output fields not found"
+s = s.replace(old, new, 1)
+
+old = '''// NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
+func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+\trb := &ReorderBuffer{
+\t\tring:       make([][]byte, ReorderWindowSize),
+\t\tseqSlots:   make([]uint32, ReorderWindowSize),
+\t\twindowMask: ReorderWindowSize - 1,
+\t\toutFunc: outFunc,
+\t\toutChan: make(chan *reorderBatch, reorderOutQueue),
+\t\tgapWake: make(chan struct{}, 1),
+\t\tclosed:  make(chan struct{}),
+\t}
+\tgo rb.timeoutWorker()
+\tgo rb.outWorker()
+\treturn rb
+}
+'''
+new = '''// NewReorderBuffer 创建借用式重排缓冲区。callback 返回后由 ReorderBuffer
+// 负责把 frame 归还到池，适合 TAP.Write 等同步消费接口。
+func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+\treturn newReorderBuffer(outFunc, false)
+}
+
+// NewOwnedReorderBuffer 创建所有权转移式重排缓冲区。callback 一旦收到
+// frame 就永久接管其所有权，必须负责最终消费或归还；用于把解密后的池缓冲
+// 直接转交 VSwitch/AsyncPort，避免重新复制一次 payload。
+func NewOwnedReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+\treturn newReorderBuffer(outFunc, true)
+}
+
+func newReorderBuffer(outFunc func([]byte), outOwned bool) *ReorderBuffer {
+\trb := &ReorderBuffer{
+\t\tring:       make([][]byte, ReorderWindowSize),
+\t\tseqSlots:   make([]uint32, ReorderWindowSize),
+\t\twindowMask: ReorderWindowSize - 1,
+\t\toutFunc:    outFunc,
+\t\toutOwned:   outOwned,
+\t\toutChan:    make(chan *reorderBatch, reorderOutQueue),
+\t\tgapWake:    make(chan struct{}, 1),
+\t\tclosed:     make(chan struct{}),
+\t}
+\tgo rb.timeoutWorker()
+\tgo rb.outWorker()
+\treturn rb
+}
+'''
+assert old in s, "NewReorderBuffer constructor block not found"
+s = s.replace(old, new, 1)
+
+old = '''func (rb *ReorderBuffer) outputBatch(batch *reorderBatch) {
+\tfor batch != nil {
+\t\tnext := batch.next
+\t\tfor i := 0; i < batch.n; i++ {
+\t\t\tframe := batch.frames[i]
+\t\t\tif rb.outFunc != nil && len(frame) > 0 {
+\t\t\t\trb.outFunc(frame)
+\t\t\t}
+\t\t\tputFrame(frame)
+\t\t}
+\t\tputReorderBatch(batch)
+\t\tbatch = next
+\t}
+}
+'''
+new = '''func (rb *ReorderBuffer) outputBatch(batch *reorderBatch) {
+\tfor batch != nil {
+\t\tnext := batch.next
+\t\tfor i := 0; i < batch.n; i++ {
+\t\t\tframe := batch.frames[i]
+\t\t\tif rb.outFunc != nil && len(frame) > 0 {
+\t\t\t\trb.outFunc(frame)
+\t\t\t\tif rb.outOwned {
+\t\t\t\t\tcontinue
+\t\t\t\t}
+\t\t\t}
+\t\t\tputFrame(frame)
+\t\t}
+\t\tputReorderBatch(batch)
+\t\tbatch = next
+\t}
+}
+'''
+assert old in s, "outputBatch block not found"
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+p = Path("server.go")
+s = p.read_text()
+old = '''func (vs *VSwitch) ProcessSessionFrame(srcPortID string, registeredMAC macKey, frame []byte) {
+\tvs.processFrame(srcPortID, frame, false, &registeredMAC)
+}
+
+// ProcessOwnedFrame 接管 frame 所有权。单播命中 AsyncPort 时直接把池缓冲转交
+'''
+new = '''func (vs *VSwitch) ProcessSessionFrame(srcPortID string, registeredMAC macKey, frame []byte) {
+\tvs.processFrame(srcPortID, frame, false, &registeredMAC)
+}
+
+// ProcessOwnedSessionFrame 同时保留已认证 session 的源 MAC 校验和 owned
+// payload 语义。命中 AsyncPort 单播时直接转交池缓冲；其它路径由 VSwitch
+// 在返回前负责归还。
+func (vs *VSwitch) ProcessOwnedSessionFrame(srcPortID string, registeredMAC macKey, frame []byte) {
+\tvs.processFrame(srcPortID, frame, true, &registeredMAC)
+}
+
+// ProcessOwnedFrame 接管 frame 所有权。单播命中 AsyncPort 时直接把池缓冲转交
+'''
+assert old in s, "ProcessSessionFrame block not found"
+s = s.replace(old, new, 1)
+
+old = '''\t\t// 初始化服务端重排缓冲区，理顺后交由交换机转发
+\t\tsession.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+\t\t\tif session.macBin != (macKey{}) {
+\t\t\t\ts.vswitch.ProcessSessionFrame(clientID, session.macBin, orderedFrame)
+\t\t\t} else {
+\t\t\t\ts.vswitch.ProcessFrame(clientID, orderedFrame)
+\t\t\t}
+\t\t})
+'''
+new = '''\t\t// 服务端收到的解密 frame 已来自 frame pool；重排后把所有权直接交给
+\t\t// VSwitch，命中 AsyncPort 单播时可继续零拷贝进入后端发送队列。
+\t\tsession.RxReorder = NewOwnedReorderBuffer(func(orderedFrame []byte) {
+\t\t\tif session.macBin != (macKey{}) {
+\t\t\t\ts.vswitch.ProcessOwnedSessionFrame(clientID, session.macBin, orderedFrame)
+\t\t\t} else {
+\t\t\t\ts.vswitch.ProcessOwnedFrame(clientID, orderedFrame)
+\t\t\t}
+\t\t})
+'''
+assert old in s, "server RxReorder block not found"
+s = s.replace(old, new, 1)
+p.write_text(s)
+
+Path("owned_reorder_test.go").write_text(r'''package main
+
+import (
+    "context"
+    "runtime"
+    "testing"
+    "time"
+)
+
+func TestOwnedReorderDoesNotReturnDeliveredFrameToPool(t *testing.T) {
+    oldProcs := runtime.GOMAXPROCS(1)
+    defer runtime.GOMAXPROCS(oldProcs)
+
+    delivered := make(chan []byte, 1)
+    rb := NewOwnedReorderBuffer(func(frame []byte) {
+        delivered <- frame
+    })
+    defer rb.Close()
+
+    frame := getFrame()[:64]
+    frame[0] = 0x5a
+    ptr := &frame[0]
+    rb.Insert(1, frame)
+
+    var owned []byte
+    select {
+    case owned = <-delivered:
+    case <-time.After(time.Second):
+        t.Fatal("timed out waiting for owned reorder delivery")
+    }
+    if &owned[0] != ptr {
+        t.Fatal("owned reorder copied the frame")
+    }
+
+    held := make([][]byte, 0, 512)
+    found := false
+    for i := 0; i < cap(held); i++ {
+        probe := getFrame()
+        held = append(held, probe)
+        if &probe[0] == ptr {
+            found = true
+            break
+        }
+    }
+    for _, probe := range held {
+        putFrame(probe)
+    }
+    if found {
+        t.Fatal("owned reorder returned a delivered frame to the pool")
+    }
+    putFrame(owned)
+}
+
+func TestVSwitchOwnedSessionUnicastTransfersAndValidatesMAC(t *testing.T) {
+    ctx, cancel := context.WithCancel(context.Background())
+    defer cancel()
+
+    vs := NewVSwitch()
+    src := NewAsyncPort(ctx, "owned-session-src")
+    dst := NewAsyncPort(ctx, "owned-session-dst")
+    vs.AddPort(src)
+    vs.AddPort(dst)
+    defer vs.RemovePort(src.ID())
+    defer vs.RemovePort(dst.ID())
+
+    rtt := uint32(1)
+    dstCh := make(chan []VPNFrame, 4)
+    dst.RegisterBackend(dstCh, &rtt)
+    defer dst.UnregisterBackend(dstCh)
+
+    srcMAC := macKey{0x02, 0, 0, 0, 0, 0x11}
+    dstMAC := macKey{0x02, 0, 0, 0, 0, 0x22}
+    vs.AddStaticMAC(src.ID(), srcMAC)
+    vs.AddStaticMAC(dst.ID(), dstMAC)
+
+    frame := getFrameAtLeast(1400)[:1400]
+    copy(frame[0:6], dstMAC[:])
+    copy(frame[6:12], srcMAC[:])
+    ptr := &frame[0]
+    vs.ProcessOwnedSessionFrame(src.ID(), srcMAC, frame)
+
+    select {
+    case batch := <-dstCh:
+        if len(batch) != 1 || len(batch[0].Data) != 1400 {
+            t.Fatalf("unexpected owned session batch: %+v", batch)
+        }
+        if &batch[0].Data[0] != ptr {
+            t.Fatal("owned session unicast copied payload before AsyncPort delivery")
+        }
+        freeFrames(batch)
+        putVPNFrameBatch(batch)
+    case <-time.After(time.Second):
+        t.Fatal("timed out waiting for owned session frame")
+    }
+
+    before := vs.spoofDrops.Load()
+    spoof := getFrameAtLeast(64)[:64]
+    copy(spoof[0:6], dstMAC[:])
+    copy(spoof[6:12], []byte{0x02, 0, 0, 0, 0, 0x99})
+    vs.ProcessOwnedSessionFrame(src.ID(), srcMAC, spoof)
+    if got := vs.spoofDrops.Load(); got != before+1 {
+        t.Fatalf("spoof drop counter=%d, want %d", got, before+1)
+    }
+    select {
+    case batch := <-dstCh:
+        freeFrames(batch)
+        putVPNFrameBatch(batch)
+        t.Fatal("spoofed owned session frame reached destination")
+    default:
+    }
+}
+''')
