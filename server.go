@@ -192,6 +192,13 @@ func (vs *VSwitch) ProcessSessionFrame(srcPortID string, registeredMAC macKey, f
 	vs.processFrame(srcPortID, frame, false, &registeredMAC)
 }
 
+// ProcessOwnedSessionFrame 同时保留已认证 session 的源 MAC 校验和 owned
+// payload 语义。命中 AsyncPort 单播时直接转交池缓冲；其它路径由 VSwitch
+// 在返回前负责归还。
+func (vs *VSwitch) ProcessOwnedSessionFrame(srcPortID string, registeredMAC macKey, frame []byte) {
+	vs.processFrame(srcPortID, frame, true, &registeredMAC)
+}
+
 // ProcessOwnedFrame 接管 frame 所有权。单播命中 AsyncPort 时直接把池缓冲转交
 // 给目标端口；广播/未知单播仍按现有 copy-to-many 语义发送，最后归还原 buffer。
 func (vs *VSwitch) ProcessOwnedFrame(srcPortID string, frame []byte) {
@@ -1584,12 +1591,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.mu.Unlock()
 			log.Warnf("[%s] sequence space exhausted; forcing a fresh key epoch", clientID)
 		})
-		// 初始化服务端重排缓冲区，理顺后交由交换机转发
-		session.RxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+		// 服务端收到的解密 frame 已来自 frame pool；重排后把所有权直接交给
+		// VSwitch，命中 AsyncPort 单播时可继续零拷贝进入后端发送队列。
+		session.RxReorder = NewOwnedReorderBuffer(func(orderedFrame []byte) {
 			if session.macBin != (macKey{}) {
-				s.vswitch.ProcessSessionFrame(clientID, session.macBin, orderedFrame)
+				s.vswitch.ProcessOwnedSessionFrame(clientID, session.macBin, orderedFrame)
 			} else {
-				s.vswitch.ProcessFrame(clientID, orderedFrame)
+				s.vswitch.ProcessOwnedFrame(clientID, orderedFrame)
 			}
 		})
 		if fecEncK > 0 {

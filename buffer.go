@@ -101,8 +101,9 @@ type ReorderBuffer struct {
 	pendingHead *reorderBatch // 锁内收集、出锁后交给交付协程的固定 chunk 链
 	pendingTail *reorderBatch
 
-	outChan chan *reorderBatch
-	outFunc func([]byte)
+	outChan  chan *reorderBatch
+	outFunc  func([]byte)
+	outOwned bool // true: callback 接管 frame 所有权，ReorderBuffer 不再 putFrame
 	// deliverMu 在不把慢 TAP/VSwitch 写放回重排锁的前提下，保留多个 Insert
 	// 和超时协程从锁内取出批次时的先后次序。
 	deliverMu sync.Mutex
@@ -122,16 +123,29 @@ type ReorderBuffer struct {
 	closeOnce sync.Once
 }
 
-// NewReorderBuffer 创建重排缓冲区，参数为按序输出时的处理函数
+// NewReorderBuffer 创建借用式重排缓冲区。callback 返回后由 ReorderBuffer
+// 负责把 frame 归还到池，适合 TAP.Write 等同步消费接口。
 func NewReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+	return newReorderBuffer(outFunc, false)
+}
+
+// NewOwnedReorderBuffer 创建所有权转移式重排缓冲区。callback 一旦收到
+// frame 就永久接管其所有权，必须负责最终消费或归还；用于把解密后的池缓冲
+// 直接转交 VSwitch/AsyncPort，避免重新复制一次 payload。
+func NewOwnedReorderBuffer(outFunc func([]byte)) *ReorderBuffer {
+	return newReorderBuffer(outFunc, true)
+}
+
+func newReorderBuffer(outFunc func([]byte), outOwned bool) *ReorderBuffer {
 	rb := &ReorderBuffer{
 		ring:       make([][]byte, ReorderWindowSize),
 		seqSlots:   make([]uint32, ReorderWindowSize),
 		windowMask: ReorderWindowSize - 1,
-		outFunc: outFunc,
-		outChan: make(chan *reorderBatch, reorderOutQueue),
-		gapWake: make(chan struct{}, 1),
-		closed:  make(chan struct{}),
+		outFunc:    outFunc,
+		outOwned:   outOwned,
+		outChan:    make(chan *reorderBatch, reorderOutQueue),
+		gapWake:    make(chan struct{}, 1),
+		closed:     make(chan struct{}),
 	}
 	go rb.timeoutWorker()
 	go rb.outWorker()
@@ -411,6 +425,9 @@ func (rb *ReorderBuffer) outputBatch(batch *reorderBatch) {
 			frame := batch.frames[i]
 			if rb.outFunc != nil && len(frame) > 0 {
 				rb.outFunc(frame)
+				if rb.outOwned {
+					continue
+				}
 			}
 			putFrame(frame)
 		}
