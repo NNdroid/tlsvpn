@@ -1563,10 +1563,11 @@ function renderProtectStatus(pr){
 // up/down 钩子：面板此前只知道配了什么，不知道跑成功没有
 function renderHookStatus(h){
   if(!h){kv(document.getElementById('st-hooks'),[[t('ov.not_applied'),ntxt()]]);return;}
-  const run=function(ok,ran,ms,err){
+  const run=function(ok,ran,ms,err,at){
     if(!ran)return '<span style="color:var(--sub)">'+t('ov.hook.never')+'</span>';
-    if(ok)return '<span class="badge b-on">'+t('ov.hook.ran')+'</span> <span class="mono">'+ms+' ms</span>';
-    return '<span class="badge b-off">'+t('ov.hook.fail')+'</span> <span class="mono">'+ms+' ms</span>';
+    const when=at?'<span class="dim"> · '+esc(new Date(at).toLocaleString())+'</span>':'';
+    if(ok)return '<span class="badge b-on">'+t('ov.hook.ran')+'</span> <span class="mono">'+ms+' ms</span>'+when;
+    return '<span class="badge b-off">'+t('ov.hook.fail')+'</span> <span class="mono">'+ms+' ms</span>'+when;
   };
   const tail=function(info){
     const o=[];
@@ -1579,9 +1580,9 @@ function renderHookStatus(h){
   let rows=[];
   if(h.up_path)rows.push([t('ov.hook.up'),'<span class="mono">'+esc(h.up_path)+'</span>']);
   if(h.down_path)rows.push([t('ov.hook.down'),'<span class="mono">'+esc(h.down_path)+'</span>']);
-  rows.push([t('ov.hook.ran')+' (up)',run(h.up_ok,h.up_ran,h.up_ms,h.up_error)]);
+  rows.push([t('ov.hook.ran')+' (up)',run(h.up_ok,h.up_ran,h.up_ms,h.up_error,h.up_at)]);
   rows=rows.concat(tail({err:h.up_error,out:h.up_out}));
-  rows.push([t('ov.hook.ran')+' (down)',run(h.down_ok,h.down_ran,h.down_ms,h.down_error)]);
+  rows.push([t('ov.hook.ran')+' (down)',run(h.down_ok,h.down_ran,h.down_ms,h.down_error,h.down_at)]);
   rows=rows.concat(tail({err:h.down_error,out:h.down_out}));
   kv(document.getElementById('st-hooks'),rows);
 }
