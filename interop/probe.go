@@ -24,6 +24,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 const (
@@ -110,8 +112,10 @@ func (s *recordScanner) read(r net.Conn, deadline time.Time) ([]byte, uint32, er
 }
 
 type probeCipher struct {
-	aead cipher.AEAD
-	salt [8]byte
+	aead         cipher.AEAD
+	algo         int
+	salt         [8]byte
+	xnoncePrefix [20]byte
 }
 
 func newProbeCipher(psk string, salt []byte, algo int) (*probeCipher, error) {
@@ -122,28 +126,52 @@ func newProbeCipher(psk string, salt []byte, algo int) (*probeCipher, error) {
 	keyLen := 32
 	switch algo {
 	case 2:
-		// existing AES-256-GCM
 	case 4:
-		label = "_enc_key128"
-		keyLen = 16
+		label, keyLen = "_enc_key128", 16
+	case 5:
+		label, keyLen = "_enc_chacha20", chacha20poly1305.KeySize
+	case 6:
+		label, keyLen = "_enc_xchacha20", chacha20poly1305.KeySize
 	default:
 		return nil, fmt.Errorf("unsupported inner cipher %d", algo)
 	}
 	key := sha256.Sum256([]byte(psk + label))
-	block, err := aes.NewCipher(key[:keyLen])
+	var aead cipher.AEAD
+	var err error
+	switch algo {
+	case 2, 4:
+		var block cipher.Block
+		block, err = aes.NewCipher(key[:keyLen])
+		if err == nil {
+			aead, err = cipher.NewGCM(block)
+		}
+	case 5:
+		aead, err = chacha20poly1305.New(key[:])
+	case 6:
+		aead, err = chacha20poly1305.NewX(key[:])
+	}
 	if err != nil {
 		return nil, err
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	pc := &probeCipher{aead: aead}
+	pc := &probeCipher{aead: aead, algo: algo}
 	copy(pc.salt[:], salt)
+	if algo == 6 {
+		h := sha256.New()
+		h.Write([]byte("tlsvpn-xchacha20-nonce-v1"))
+		h.Write(salt)
+		sum := h.Sum(nil)
+		copy(pc.xnoncePrefix[:], sum[:20])
+	}
 	return pc, nil
 }
 
 func (c *probeCipher) nonce(seq uint32) []byte {
+	if c.algo == 6 {
+		n := make([]byte, chacha20poly1305.NonceSizeX)
+		copy(n[:20], c.xnoncePrefix[:])
+		binary.BigEndian.PutUint32(n[20:], seq)
+		return n
+	}
 	n := make([]byte, 12)
 	binary.BigEndian.PutUint32(n[:4], seq)
 	copy(n[4:], c.salt[:])
@@ -168,7 +196,7 @@ func record(seq uint32, plain []byte, c *probeCipher) []byte {
 		binary.BigEndian.PutUint32(aad[4:], seq)
 		sealed := c.aead.Seal(out[10:10], c.nonce(seq), plain, aad[:])
 		if len(sealed) != wireLen {
-			panic("unexpected GCM length")
+			panic("unexpected AEAD length")
 		}
 	}
 	for i := headerSize + wireLen; i < len(out); i++ {
@@ -304,7 +332,7 @@ func main() {
 	if len(resp.TLS.OfferedCipherSuites) == 0 || len(resp.TLS.OfferedSignatureSchemes) == 0 || len(resp.TLS.OfferedGroups) == 0 || len(resp.TLS.OfferedALPN) == 0 {
 		fatalf("server returned incomplete ClientHello feature lists: %+v", *resp.TLS)
 	}
-	if !resp.Encrypt || (resp.EncAlgo != 2 && resp.EncAlgo != 4) {
+	if !resp.Encrypt || (resp.EncAlgo != 2 && resp.EncAlgo != 4 && resp.EncAlgo != 5 && resp.EncAlgo != 6) {
 		fatalf("unexpected encryption negotiation: enabled=%v algo=%d", resp.Encrypt, resp.EncAlgo)
 	}
 	salt, err := hex.DecodeString(resp.EncSalt)
