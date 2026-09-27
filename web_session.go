@@ -15,6 +15,7 @@ import (
 const (
 	webSessionCookie = "tlsvpn_session"
 	webSessionTTL    = 24 * time.Hour
+	basicTokenPrefix = "basic:"
 )
 
 type webSession struct {
@@ -53,6 +54,16 @@ func (s *webSessionStore) valid(token, auth string) bool {
 	if token == "" || auth == "" {
 		return false
 	}
+	// Keep explicit Basic Auth compatible for scripts and automation. The
+	// middleware never emits WWW-Authenticate, so browsers still use /login.
+	if strings.HasPrefix(token, basicTokenPrefix) {
+		encoded := strings.TrimPrefix(token, basicTokenPrefix)
+		credential, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			return false
+		}
+		return constantTimeCredentialEqual(string(credential), auth)
+	}
 	now := time.Now()
 	h := webAuthHash(auth)
 	s.mu.Lock()
@@ -64,16 +75,13 @@ func (s *webSessionStore) valid(token, auth string) bool {
 		}
 		return false
 	}
-	// Sliding expiry keeps an actively used dashboard signed in while still
-	// bounding abandoned sessions. Changing web.auth invalidates it immediately
-	// because the stored auth hash no longer matches.
 	v.expires = now.Add(webSessionTTL)
 	s.sessions[token] = v
 	return true
 }
 
 func (s *webSessionStore) revoke(token string) {
-	if token == "" {
+	if token == "" || strings.HasPrefix(token, basicTokenPrefix) {
 		return
 	}
 	s.mu.Lock()
@@ -82,11 +90,14 @@ func (s *webSessionStore) revoke(token string) {
 }
 
 func dashboardSessionToken(r *http.Request) string {
-	c, err := r.Cookie(webSessionCookie)
-	if err != nil {
-		return ""
+	if c, err := r.Cookie(webSessionCookie); err == nil && c.Value != "" {
+		return c.Value
 	}
-	return c.Value
+	if user, pass, ok := r.BasicAuth(); ok {
+		credential := base64.RawURLEncoding.EncodeToString([]byte(user + ":" + pass))
+		return basicTokenPrefix + credential
+	}
+	return ""
 }
 
 func setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
