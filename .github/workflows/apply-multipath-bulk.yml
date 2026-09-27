@@ -1,0 +1,104 @@
+name: Apply multipath bulk trigger experiment
+
+on:
+  push:
+    branches:
+      - perf/multipath-bulk-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/multipath-bulk-trigger
+          fetch-depth: 0
+
+      - name: Patch AsyncPort bulk hint propagation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('client.go')
+          s = p.read_text()
+
+          old = '''\t\t\tp.dispatchBatch(batch)
+
+\t\t\tbatch = batch[:0]'''
+          new = '''\t\t\t// queueLen 是 drain 前的积压快照；len(batch) 则保留“这一轮已经
+\t\t\t// 聚成大批量”的事实。旧实现只在 dispatch 时重新看 len(p.ch)，
+\t\t\t// 队列刚被本 goroutine drain 空时会误判为交互流量，bulk 退回单路。
+\t\t\tbulk := queueLen >= multipathStripeBacklog || len(batch) >= multipathStripeBatchFrames
+\t\t\tp.dispatchBatch(batch, bulk)
+
+\t\t\tbatch = batch[:0]'''
+          if old not in s:
+              raise SystemExit('dispatch call site not found')
+          s = s.replace(old, new, 1)
+
+          old = 'func (p *AsyncPort) dispatchBatch(batch []VPNFrame) {'
+          new = 'func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {'
+          if old not in s:
+              raise SystemExit('dispatchBatch signature not found')
+          s = s.replace(old, new, 1)
+
+          # Only the two dispatch-path selections occur before pickDataBackend's
+          # own definition. Replacing exactly two prevents test/helper semantics
+          # from being accidentally rewritten.
+          marker = 'const multipathStripeBacklog = 64'
+          before, sep, after = s.partition(marker)
+          if not sep:
+              raise SystemExit('multipathStripeBacklog marker not found')
+          count = before.count('p.pickDataBackend(backends)')
+          if count != 2:
+              raise SystemExit(f'expected 2 dispatch pickDataBackend calls, found {count}')
+          before = before.replace('p.pickDataBackend(backends)', 'p.pickDataBackendFor(backends, bulk)')
+          s = before + sep + after
+
+          old = 'const multipathStripeBacklog = 64\n'
+          new = '''const (
+\tmultipathStripeBacklog    = 64
+\tmultipathStripeBatchFrames = 32
+)
+'''
+          if old not in s:
+              raise SystemExit('multipath constant not found')
+          s = s.replace(old, new, 1)
+
+          old = '''func (p *AsyncPort) pickDataBackend(backends []*Backend) *Backend {
+\tbest := p.pickBackend(backends)
+\tif len(backends) < 2 || len(p.ch) < multipathStripeBacklog || best == nil {
+\t\treturn best
+\t}
+'''
+          new = '''func (p *AsyncPort) pickDataBackend(backends []*Backend) *Backend {
+\treturn p.pickDataBackendFor(backends, len(p.ch) >= multipathStripeBacklog)
+}
+
+// pickDataBackendFor 接收 run goroutine 捕获的 bulk 快照。这样一次大批量已经
+// drain 掉 p.ch 后仍能 striping；直接调用 pickDataBackend 的交互/测试语义不变。
+func (p *AsyncPort) pickDataBackendFor(backends []*Backend, bulk bool) *Backend {
+\tbest := p.pickBackend(backends)
+\tif len(backends) < 2 || !bulk || best == nil {
+\t\treturn best
+\t}
+'''
+          if old not in s:
+              raise SystemExit('pickDataBackend body not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+          PY
+
+      - name: Commit experiment and remove patch workflow
+        run: |
+          git rm .github/workflows/apply-multipath-bulk.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add client.go
+          git commit -m 'perf: preserve bulk hint after AsyncPort drain'
+          git push origin HEAD:perf/multipath-bulk-trigger
