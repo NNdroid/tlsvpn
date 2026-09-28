@@ -1,0 +1,39 @@
+name: Apply adaptive padding patch
+
+on:
+  push:
+    branches:
+      - perf/adaptive-padding-budget-20260928
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/adaptive-padding-budget-20260928
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Apply source patch
+        run: python3 .ci/apply_adaptive_coalesce.py
+      - name: Format
+        run: gofmt -w client.go stream_padding.go stream_padding_test.go
+      - name: Test
+        run: |
+          go test ./...
+          go test -race ./... -run 'TestFEC|TestInner|TestStream'
+      - name: Remove temporary patch helpers
+        run: git rm .ci/apply_adaptive_coalesce.py .github/workflows/apply-adaptive-padding.yml
+      - name: Commit final source
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add client.go stream_padding.go stream_padding_test.go
+          git commit -m 'perf: cap padding overhead and adapt sparse coalescing'
+          git push origin HEAD:perf/adaptive-padding-budget-20260928
