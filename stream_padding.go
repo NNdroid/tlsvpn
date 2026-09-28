@@ -191,6 +191,31 @@ func (p *tunnelStreamPacker) fullChunkSize() int {
 	return streamMaxAlignedTLSPlaintext(p.mss)
 }
 
+// alignedPrefixSize returns the largest MSS-aligned plaintext prefix already
+// present in the stream. It deliberately requires at least two outer segments:
+// a lone ~1500B inner frame must not be split into one full record plus a tiny
+// immediate tail. The unsent remainder is <1 MSS and naturally joins the next
+// producer batch.
+func (p *tunnelStreamPacker) alignedPrefixSize() int {
+	avail := p.available()
+	if avail <= 0 {
+		return 0
+	}
+	maxTarget := streamMaxAlignedTLSPlaintext(p.mss)
+	if avail >= maxTarget {
+		return maxTarget
+	}
+	segs := (avail + tlsRecordOverheadReserve) / p.mss
+	if segs < 2 {
+		return 0
+	}
+	target := segs*p.mss - tlsRecordOverheadReserve
+	if target <= 0 || target > avail {
+		return 0
+	}
+	return target
+}
+
 // appendOwnedFrames encodes complete VPN frames consecutively but does not
 // preserve those frame boundaries for transport writes. Ownership is released
 // immediately after encoding.

@@ -7,28 +7,27 @@ func TestPersistentStreamChunkMaySplitVPNFrame(t *testing.T) {
 	defer setPadMode(old)
 
 	p := newTunnelStreamPacker(paddingRecordLimitForMSS(1440))
-	frames := getVPNFrameBatch(12)
+	frames := getVPNFrameBatch(2)
 	for i := range frames {
 		frames[i] = VPNFrame{Seq: uint32(i + 1), Data: cloneFrame(make([]byte, 1500))}
 	}
 	p.appendOwnedFrames(frames, nil)
 
-	target := p.fullChunkSize()
+	target := p.alignedPrefixSize()
+	if want := 2*1440 - tlsRecordOverheadReserve; target != want {
+		t.Fatalf("downward MSS target=%d want=%d", target, want)
+	}
 	if got := (target + tlsRecordOverheadReserve) % 1440; got != 0 {
-		t.Fatalf("full chunk is not MSS aligned: target=%d remainder=%d", target, got)
+		t.Fatalf("aligned prefix remainder=%d", got)
 	}
-	if p.available() <= target {
-		t.Fatalf("test needs residual stream after first chunk: available=%d target=%d", p.available(), target)
-	}
-
-	// Each unencrypted frame is 1510 bytes. 10 frames end at 15100 bytes,
-	// while an MSS-aligned target of 15808 lands 708 bytes inside frame 11.
+	// Each frame is 1510B. A 2848B prefix contains all of frame 1 and 1338B
+	// of frame 2, proving the transport boundary cuts through a logical frame.
 	completed := p.consume(target)
-	if completed != 10 {
-		t.Fatalf("MSS chunk should end inside frame 11: completed=%d want=10", completed)
+	if completed != 1 {
+		t.Fatalf("aligned prefix should finish exactly one frame: completed=%d", completed)
 	}
-	if p.available() == 0 {
-		t.Fatal("split frame remainder was unexpectedly discarded")
+	if p.available() != 2*1510-target {
+		t.Fatalf("unexpected carry tail: got=%d want=%d", p.available(), 2*1510-target)
 	}
 }
 

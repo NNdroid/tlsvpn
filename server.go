@@ -1789,8 +1789,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 							break drainReady
 						}
 					}
-					chunkSize := streamPacker.fullChunkSize()
-					for streamPacker.available() >= chunkSize {
+					chunkSize := streamPacker.alignedPrefixSize()
+					for chunkSize > 0 {
 						chunk := streamPacker.peek(chunkSize)
 						refreshWriteDeadline()
 						if err := writeFull(conn, chunk); err != nil {
@@ -1805,6 +1805,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						atomic.AddUint64(&ci.txBytes, uint64(chunkSize))
 						atomic.AddUint64(&ci.txPackets, uint64(completed))
 						dailyTraffic.Add(0, uint64(chunkSize))
+						chunkSize = streamPacker.alignedPrefixSize()
 					}
 					if streamPacker.available() == 0 {
 						break

@@ -258,6 +258,12 @@ func (p *AsyncPort) run() {
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
 
+			// Keep the proven aggregation cadence from main. The connection-level
+			// stream packer carries only the sub-MSS tail across these batches.
+			if len(p.ch) == 0 && batchBytes < MaxBatchBytes {
+				time.Sleep(150 * time.Microsecond)
+			}
+
 			queueLen := len(p.ch)
 			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
 				f := <-p.ch
@@ -1910,8 +1916,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					// Under sustained load emit the largest <=16KiB plaintext chunk
 					// whose conservative ciphertext size is N*TCP_MAXSEG. This slice
 					// may end in the middle of a VPN frame; FrameScanner reassembles it.
-					chunkSize := streamPacker.fullChunkSize()
-					for streamPacker.available() >= chunkSize {
+					chunkSize := streamPacker.alignedPrefixSize()
+					for chunkSize > 0 {
 						chunk := streamPacker.peek(chunkSize)
 						refreshWriteDeadline()
 						if err := writeFull(tlsConn, chunk); err != nil {
@@ -1924,6 +1930,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						atomic.AddUint64(&c.TxPackets, uint64(completed))
 						atomic.AddUint64(&ci.txBytes, uint64(chunkSize))
 						dailyTraffic.Add(uint64(chunkSize), 0)
+						chunkSize = streamPacker.alignedPrefixSize()
 					}
 					if streamPacker.available() == 0 {
 						break
