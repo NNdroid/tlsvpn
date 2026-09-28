@@ -1,0 +1,59 @@
+name: README refresh helper
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-readme:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Refresh README against current implementation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('README.md')
+          s = p.read_text()
+          replacements = [
+            ("A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over standard TCP + TLS, with optional inner AES-256-GCM encryption, XOR FEC, multipath MinRTT load balancing and TCP Brutal — built for stability and throughput on lossy or restricted networks.",
+             "A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over standard TCP + TLS, with optional authenticated inner AEAD, XOR FEC, multipath MinRTT load balancing and TCP Brutal — built for stability and throughput on lossy or restricted networks."),
+            ("- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel (AES-GCM, ChaCha20-Poly1305 or XChaCha20-Poly1305): per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: \"gcm256\"` remains the default; `\"gcm128\"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.",
+             "- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel: AES-256-GCM (`gcm256`, default), AES-128-GCM (`gcm128`), ChaCha20-Poly1305 (`chacha20`) or XChaCha20-Poly1305 (`xchacha20`). Data and FEC use separate keys and per-session/per-direction salts. AES-GCM/ChaCha20 use `seq(4BE) || salt(8B)` nonces; XChaCha20 derives a 20-byte nonce prefix from the session salt and appends `seq(4BE)`. AAD binds `dataLen(4BE) || seq(4BE)`, and all current algorithms use a 16-byte authentication tag. Peers must agree on the exact algorithm; there is no implicit downgrade."),
+            ("| `min_enc` | (Empty) | Legacy floor value `gcm` now means any supported authenticated inner AEAD; `any`/empty sets no floor (needs `encrypt`) |",
+             "| `min_enc` | `gcm` when `encrypt=true` | Minimum inner-encryption policy. Omitted/empty normalizes to `gcm`; legacy name `gcm` means require a supported authenticated inner AEAD, while explicit `any` removes the floor. Requires `encrypt=true` |"),
+            ("| `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |",
+             "| `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |\n| `traffic_days` | `30` | Daily traffic-accounting retention in local-calendar days (`1`–`3650`); hot-appliable from the dashboard |\n| `traffic_file` | `tlsvpn-traffic.json` beside the config | Persistent daily-traffic store. When omitted, a config-file launch resolves this path next to the JSON config |"),
+            ("| `auth` | (Required when enabled) | Basic Auth `user:pass`; known example credentials are rejected |",
+             "| `auth` | (Required when enabled) | Dashboard login credential as `user:pass`; known example credentials are rejected. Successful login creates a server-side session cookie rather than leaving credentials in every browser request |"),
+            ("The `feature/openwrt-netifd-proto` integration can expose a TLSVPN client as a native OpenWrt network interface.",
+             "The in-tree OpenWrt/netifd integration can expose a TLSVPN client as a native OpenWrt network interface."),
+            ("For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.",
+             "For ad-hoc SDK work the package template follows `main`; reproducible release builds do not rely on that moving ref. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`."),
+            ("Set `web.addr` to enable: live throughput chart, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it) and the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), zh-CN/en UI.",
+             "Set `web.addr` to enable: live throughput and daily-traffic views, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it), the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), the current frame-format visualizer, local OS/architecture icons, and zh-CN/zh-TW/en/de/fr/ja UI."),
+            ("Prometheus metrics at `/metrics` (authenticated like the rest of the panel). Security: Basic Auth, optional HTTPS, CSRF header guard on control actions.",
+             "Prometheus metrics at `/metrics` are protected by the Web UI authentication gate. Security: `web.auth` backs the login flow, successful browser login uses an HttpOnly SameSite session cookie, mutating API calls require the CSRF header, and HTTPS is available through `web.cert`/`web.key`."),
+            ("3. **Interop**: current Go and Rust builds share protocol v2 and byte-for-byte golden vectors (including data/FEC GCM domains). Upgrade both ends together — there is no backward compatibility by design: a server requires exactly protocol version 2, and a client rejects any other version in the handshake reply, so a mixed-version pair will not connect.",
+             "3. **Interop**: current Go and Rust builds share protocol v2 and byte-for-byte golden vectors (including frame headers and data/FEC AEAD-domain vectors). The wire protocol supports the same four inner AEADs on both implementations. Upgrade both ends together — there is no backward compatibility by design: a server requires exactly protocol version 2, and a client rejects any other version in the handshake reply, so a mixed-version pair will not connect.")
+          ]
+          for old, new in replacements:
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one README match, got {count}: {old[:100]!r}')
+              s = s.replace(old, new)
+          p.write_text(s)
+          PY
+          rm .github/workflows/readme-refresh.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add README.md .github/workflows/readme-refresh.yml
+          git commit -m 'docs: align README with current implementation'
+          git push origin HEAD:${{ github.head_ref }}
