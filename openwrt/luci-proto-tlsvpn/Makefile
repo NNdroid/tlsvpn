@@ -10,7 +10,7 @@ PKGARCH:=all
 LUCI_TITLE:=LuCI support for the TLSVPN netifd protocol
 LUCI_DEPENDS:=+tlsvpn-proto
 LUCI_PKGARCH:=all
-LUCI_LANG.en:=English
+# English is LuCI's source language and has no separate i18n package.
 LUCI_LANG.fr:=Français
 LUCI_LANG.de:=Deutsch
 LUCI_LANG.zh_Hans:=简体中文

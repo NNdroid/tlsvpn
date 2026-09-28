@@ -71,10 +71,15 @@ fi
 grep -Fq './scripts/feeds update packages luci' "${apk_builder}"
 grep -Fq './scripts/feeds install -p packages golang' "${apk_builder}"
 grep -Fq './scripts/feeds install -p luci luci-base' "${apk_builder}"
-for lang in en fr de zh-cn zh-tw ja; do
-	grep -Fq "CONFIG_PACKAGE_luci-i18n-tlsvpn-${lang}=m" "${apk_builder}"
-done
-grep -Fq 'expected 6 LuCI i18n APKs' "${apk_builder}"
+grep -Fq 'find openwrt/luci-proto-tlsvpn/po -mindepth 1 -maxdepth 1 -type d' "${apk_builder}"
+grep -Fq 'zh_Hans) suffix="zh-cn"' "${apk_builder}"
+grep -Fq 'zh_Hant) suffix="zh-tw"' "${apk_builder}"
+grep -Fq 'required_independent_packages=(tlsvpn-proto luci-proto-tlsvpn' "${apk_builder}"
+grep -Fq 'missing architecture-independent OpenWrt APK(s)' "${apk_builder}"
+if grep -Fq 'CONFIG_PACKAGE_luci-i18n-tlsvpn-en=m' "${apk_builder}"; then
+	echo "English is LuCI's source language and must not be requested as an i18n APK" >&2
+	exit 1
+fi
 
 grep -Fq 'EXTRA_DEPENDS:=kmod-tun (>=0), ca-bundle (>=0)' "${package_makefile}"
 grep -Fq 'EXTRA_DEPENDS:=resolveip (>=0)' "${package_makefile}"
@@ -89,7 +94,10 @@ fi
 
 grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' "${luci_makefile}"
 grep -Fq 'LUCI_DEPENDS:=+tlsvpn-proto' "${luci_makefile}"
-grep -Fq 'LUCI_LANG.en:=English' "${luci_makefile}"
+if grep -Fq 'LUCI_LANG.en:=English' "${luci_makefile}"; then
+	echo "English is the LuCI source language and must not be declared as a translation" >&2
+	exit 1
+fi
 grep -Fq 'LUCI_LANG.fr:=Français' "${luci_makefile}"
 grep -Fq 'LUCI_LANG.de:=Deutsch' "${luci_makefile}"
 grep -Fq 'LUCI_LANG.zh_Hans:=简体中文' "${luci_makefile}"
