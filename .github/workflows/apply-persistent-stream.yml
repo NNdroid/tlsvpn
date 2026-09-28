@@ -24,6 +24,26 @@ jobs:
           go-version-file: go.mod
       - name: Apply source patch
         run: python3 scripts/apply_persistent_stream_patch.py
+      - name: Remove invalid inner cancellation branches
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for name, marker in [('client.go', 'case <-c.ctx.Done():'), ('server.go', 'case <-ctx.Done():')]:
+              p = Path(name)
+              s = p.read_text()
+              pos = s.find(marker)
+              if pos < 0:
+                  raise SystemExit(f'{name}: cancellation marker not found')
+              line_start = s.rfind('\n', 0, pos) + 1
+              # Remove marker + the indented timer-stop block + return. The next line
+              # is the select-closing brace at one indentation level less.
+              end_marker = '\n\t\t\t\t\t\t}'
+              end = s.find(end_marker, pos)
+              if end < 0:
+                  raise SystemExit(f'{name}: cancellation block end not found')
+              s = s[:line_start] + s[end:]
+              p.write_text(s)
+          PY
       - name: Format
         run: gofmt -w client.go server.go stream_padding.go
       - name: Test
