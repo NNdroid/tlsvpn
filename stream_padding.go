@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	mathrand "math/rand/v2"
+	"time"
 )
 
 // streamTLSBatchSoftLimit keeps each application Write comfortably below the
@@ -10,6 +11,17 @@ import (
 // record whose ciphertext is close to an integer number of TCP MSS segments.
 const streamTLSBatchSoftLimit = 12 * 1024
 const maxTLSPlaintextRecord = 16 * 1024
+
+// MSS alignment is a traffic-shaping hint, not a reason to spend a large
+// fraction of the useful bandwidth on cover bytes. Tail padding is therefore
+// allowed only when it fits BOTH the relative and absolute budgets below.
+const streamPadRatioPercent = 10
+const streamPadAbsoluteLimit = 512
+
+// Sparse bursts get a bounded chance to accumulate more TAP frames before the
+// writer decides whether the remaining tail is worth padding. Sustained loads
+// already have queued frames and therefore do not sleep in the hot path.
+const streamCoalesceMax = 500 * time.Microsecond
 
 // appendUnpaddedFrame is the data-plane framing primitive for stream buckets.
 // Individual VPN frames are no longer bucket-padded; only the final frame in
@@ -64,8 +76,8 @@ func appendOwnedFrameBatchStream(buf []byte, frames []VPNFrame, ic *innerCipher)
 
 // streamAlignedTLSPlaintextTarget returns the smallest TLS plaintext length
 // whose conservative TLS ciphertext budget is an integer number of TCP MSS
-// segments. Padding is bounded to <1 MSS and never pushes plaintext above the
-// TLS 16KiB record limit.
+// segments. The caller still applies a cover-traffic budget before accepting
+// this target.
 func streamAlignedTLSPlaintextTarget(n, mss int) int {
 	if n <= 0 {
 		return n
@@ -81,9 +93,45 @@ func streamAlignedTLSPlaintextTarget(n, mss int) int {
 	return target
 }
 
+// streamPaddingBudget returns the maximum number of cover bytes worth spending
+// for this batch. A candidate must fit both limits: <=10% of useful plaintext
+// and <=512 bytes. In particular, a lone MTU-sized TAP frame will not be blown
+// up to two full MSS segments just to make the final segment look full.
+func streamPaddingBudget(batchLen int) int {
+	if batchLen <= 0 {
+		return 0
+	}
+	relative := batchLen * streamPadRatioPercent / 100
+	if relative > streamPadAbsoluteLimit {
+		return streamPadAbsoluteLimit
+	}
+	return relative
+}
+
+// streamCoalesceDelay is intentionally longest for tiny sparse bursts and
+// quickly drops to zero as a useful TLS batch forms. The caller only consults
+// it when the input queue is currently empty, so sustained bulk traffic takes
+// the zero-sleep path regardless of batch size.
+func streamCoalesceDelay(batchBytes int) time.Duration {
+	switch {
+	case batchBytes <= 0:
+		return 0
+	case batchBytes < 2*1024:
+		return streamCoalesceMax
+	case batchBytes < 4*1024:
+		return 350 * time.Microsecond
+	case batchBytes < 8*1024:
+		return 150 * time.Microsecond
+	default:
+		return 0
+	}
+}
+
 // padStreamBatchTail adds cover bytes only to the final TLSVPN frame in the
 // aggregated plaintext batch. Earlier frames naturally pack one another's
-// slack, so cover traffic is paid only for the final partial TCP segment.
+// slack. MSS alignment is applied only when the remaining tail fits the cover
+// traffic budget; otherwise the batch is sent as-is and TCP is allowed to carry
+// a partial final segment rather than wasting a large fraction of the link.
 func padStreamBatchTail(buf []byte, lastFrameStart, recordLimit int) ([]byte, int) {
 	if padModeCode.Load() == padCodeOff || len(buf) == 0 || lastFrameStart < 0 {
 		return buf, 0
@@ -92,6 +140,9 @@ func padStreamBatchTail(buf []byte, lastFrameStart, recordLimit int) ([]byte, in
 	target := streamAlignedTLSPlaintextTarget(len(buf), mss)
 	padLen := target - len(buf)
 	if padLen <= 0 || lastFrameStart+10 > len(buf) || padLen > 0xffff {
+		return buf, 0
+	}
+	if padLen > streamPaddingBudget(len(buf)) {
 		return buf, 0
 	}
 	oldPad := int(binary.BigEndian.Uint16(buf[lastFrameStart+4 : lastFrameStart+6]))
