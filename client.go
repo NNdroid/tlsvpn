@@ -1545,6 +1545,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
 	tcpConn := asTCPConn(rawConn)
+	padRecordLimit := paddingRecordLimit(tcpConn)
 
 	// 握手声明所有连接共享的总速率；服务端会按自己的配置裁剪，响应回来后再
 	// 用裁剪结果重新套用，避免多连接把总预算乘以连接数。
@@ -1614,7 +1615,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, fmt.Errorf("marshal handshake request: %w", err)
 	}
 	tlsConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	err = writeStreamFrame(tlsConn, reqData)
+	err = writeStreamFrame(tlsConn, reqData, padRecordLimit)
 	tlsConn.SetWriteDeadline(time.Time{})
 	if err != nil {
 		return 0, fmt.Errorf("write handshake request: %w", err)
@@ -1897,7 +1898,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				for {
 					var n int
 					var p uint64
-					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx)
+					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx, padRecordLimit)
 					txPackets += n
 					padTotal += p
 					if len(sendBuffer) >= maxTLSWriteBatchBytes {
@@ -1928,7 +1929,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
 				// 流量无关的地板上。
 				sendBuffer = sendBuffer[:0]
-				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, padRecordLimit)
 				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
 				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
 				// （约 15 分钟才放弃），期间心跳停发，服务端先在自己的读超时上判死

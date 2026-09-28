@@ -1320,6 +1320,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
+	padRecordLimit := paddingRecordLimit(tcpConn)
 
 	scanner := NewFrameScanner(conn)
 	// 首帧是握手 JSON（<2KB）：认证前用小上限，防 10 字节帧头声明 131070
@@ -1710,7 +1711,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch, tlsInfo)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -1783,7 +1784,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				for {
 					var n int
 					var p uint64
-					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx)
+					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx, padRecordLimit)
 					txPackets += n
 					padTotal += p
 					if len(sendBuffer) >= maxTLSWriteBatchBytes {
@@ -1815,7 +1816,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
 				// 流量无关的地板上。
 				sendBuffer = sendBuffer[:0]
-				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil)
+				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, padRecordLimit)
 				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
 				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
 				// （约 15 分钟才放弃），期间心跳停发，客户端先在自己的读超时上判死
@@ -2017,7 +2018,7 @@ func handshakeEncSalts(encAlgo int, saltA, saltB [encSaltSize]byte) (string, str
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
 	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
 	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64,
-	tlsInfo *TLSHandshakeInfo) error {
+	tlsInfo *TLSHandshakeInfo, padRecordLimit ...int) error {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
 		Success: ok, Message: msg, ClientID: clientID, SessionID: sessionID, IPv4: v4cidr, IPv6: v6cidr,
@@ -2038,7 +2039,7 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 	if err != nil {
 		return fmt.Errorf("marshal handshake response: %w", err)
 	}
-	if err := writeStreamFrame(w, d); err != nil {
+	if err := writeStreamFrame(w, d, padRecordLimit...); err != nil {
 		return fmt.Errorf("write handshake response: %w", err)
 	}
 	return nil

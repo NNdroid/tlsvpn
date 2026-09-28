@@ -7,7 +7,7 @@ import "net"
 // TLS record header + AEAD expansion. TLS 1.2 AES-GCM needs ~29 bytes and TLS
 // 1.3 AEAD ~22 bytes; 32 bytes is a conservative common reserve.
 const (
-	fallbackTCPMSS          = 1440 // conservative 1500-MTU IPv6 fallback
+	fallbackTCPMSS           = 1440 // conservative 1500-MTU IPv6 fallback
 	tlsRecordOverheadReserve = 32
 )
 

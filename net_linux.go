@@ -174,6 +174,25 @@ func getTCPRTT(conn *net.TCPConn) (uint32, error) {
 	return rtt, sysErr
 }
 
+func getTCPMSS(conn *net.TCPConn) (int, error) {
+	if conn == nil {
+		return 0, fmt.Errorf("no raw TCP connection available (proxied?)")
+	}
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var mss int
+	var sysErr error
+	err = raw.Control(func(fd uintptr) {
+		mss, sysErr = unix.GetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_MAXSEG)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return mss, sysErr
+}
+
 func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {
 	// 代理模式下无法读取内核 TCP_INFO，保持 rttCache 的默认估值即可
 	if conn == nil {
