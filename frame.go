@@ -164,12 +164,16 @@ const maxTLSWriteBatchBytes = 64 * 1024
 // appendOwnedFrameBatch 把一个 backend batch 成帧进 sendBuffer，并终结该
 // batch 的 payload/描述符所有权。返回帧数与其中填充字节数，供调用方在 Write
 // 成功之后批量累加统计。
-func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher) ([]byte, int, uint64) {
+func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher, recordLimit ...int) ([]byte, int, uint64) {
 	n := len(frames)
+	limit := 0
+	if len(recordLimit) > 0 {
+		limit = recordLimit[0]
+	}
 	var pad uint64
 	for _, vf := range frames {
 		var p int
-		sendBuffer, p = appendPaddedFrame(sendBuffer, vf, ic)
+		sendBuffer, p = appendPaddedFrame(sendBuffer, vf, ic, limit)
 		pad += uint64(p)
 	}
 	freeFrames(frames)
@@ -240,11 +244,15 @@ func padModeName() string {
 	return padModeBucket
 }
 
-func currentPadLength(wireLen int) int {
+func currentPadLength(wireLen int, recordLimit ...int) int {
 	if padModeCode.Load() == padCodeOff {
 		return 0
 	}
-	return padBucket(wireLen)
+	limit := 0
+	if len(recordLimit) > 0 {
+		limit = recordLimit[0]
+	}
+	return padBucket(wireLen, limit)
 }
 
 // padCounter 缓存行隔离的填充开销计数器。每条记录的线路字节与其中填充的字节
@@ -275,16 +283,33 @@ func padStatsSnapshot() (wire, pad uint64) {
 	return padWireC.v.Load(), padPadC.v.Load()
 }
 
-// padBucket 小帧填充到固定桶；超出最大桶的大帧（jumbo）只加小额随机填充，
-// 避免为抗流量分析付出过大带宽代价。
-func padBucket(wireLen int) int {
+// padBucket 小帧填充到固定桶。recordLimit>0 时启用 MSS-aware 上限：
+// 静态桶超过上限时把上限本身当作最后一个动态桶；记录已经达到/超过
+// 上限时不再追加 padding，避免混淆填充主动制造额外 TCP segmentation。
+// recordLimit==0 保留历史行为，供纯协议测试与无 socket 场景使用。
+func padBucket(wireLen int, recordLimit ...int) int {
 	recordLen := 10 + wireLen
+	limit := 0
+	if len(recordLimit) > 0 {
+		limit = recordLimit[0]
+	}
+	if limit > 0 && recordLen >= limit {
+		return 0
+	}
 	for _, b := range padBuckets {
-		// 使用严格小于保证 bucket 模式的每条记录都有非零 padding；off 是
-		// 唯一允许零填充的模式，测试和运维语义不再含糊。
-		if recordLen < b {
-			return b - recordLen
+		target := b
+		if limit > 0 && target > limit {
+			target = limit
 		}
+		if recordLen < target {
+			return target - recordLen
+		}
+		if limit > 0 && b >= limit {
+			return 0
+		}
+	}
+	if limit > 0 {
+		return 0
 	}
 	return 1 + mathrand.IntN(100)
 }
@@ -296,14 +321,14 @@ func padBucket(wireLen int) int {
 // dataLen = 明文长 + tagLen；ic.tagLen() 用于一次性预留缓冲，避免中途扩容。
 // 返回实际写入的填充字节数：记账由调用方在 Write 成功之后做，写入失败的字节
 // 不能算进填充开销。
-func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {
+func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher, recordLimit ...int) ([]byte, int) {
 	dataLen := len(vf.Data)
 	encTag := 0
 	if ic != nil && vf.Seq != 0 && dataLen > 0 {
 		encTag = ic.tagLen()
 	}
 	wireLen := dataLen + encTag
-	padLen := currentPadLength(wireLen)
+	padLen := currentPadLength(wireLen, recordLimit...)
 
 	// 1. 一次性算出需要的整包新增长度
 	needed := 10 + wireLen + padLen
@@ -349,9 +374,9 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {
 }
 
 // writeStreamFrame 发送无需去重的控制帧
-func writeStreamFrame(w io.Writer, frame []byte) error {
+func writeStreamFrame(w io.Writer, frame []byte, recordLimit ...int) error {
 	streamBuf := getFrame()[:0]
-	streamBuf, pad := appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil)
+	streamBuf, pad := appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil, recordLimit...)
 	_, err := w.Write(streamBuf)
 	if err == nil {
 		recordPadBytes(uint64(len(streamBuf)), uint64(pad))
