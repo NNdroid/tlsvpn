@@ -48,8 +48,8 @@ replace_once(
 # reset range back to MTU size while keeping the retained capacity for reuse.
 replace_once(
     "fec_test.go",
-    '''func TestFECEncoderReset''',
-    '''func TestFECEncoderActiveRangeShrinksAfterJumboGroup(t *testing.T) {\n\te := newFECEncoder(2, nil)\n\tjumbo := make([]byte, 64*1024)\n\tfor i := 0; i < 2; i++ {\n\t\tif par := e.add(VPNFrame{Seq: uint32(i + 1), Data: jumbo}); par != nil {\n\t\t\tputFrame(par)\n\t\t}\n\t}\n\tif e.activeLen != 0 {\n\t\tt.Fatalf("activeLen after jumbo flush = %d, want 0", e.activeLen)\n\t}\n\tif cap(e.acc) < len(jumbo) {\n\t\tt.Fatalf("acc capacity = %d, want retained jumbo capacity", cap(e.acc))\n\t}\n\n\tmtu := make([]byte, 1400)\n\tif par := e.add(VPNFrame{Seq: 3, Data: mtu}); par != nil {\n\t\tputFrame(par)\n\t}\n\tif e.activeLen != len(mtu) {\n\t\tt.Fatalf("activeLen after MTU frame = %d, want %d", e.activeLen, len(mtu))\n\t}\n\tif par := e.add(VPNFrame{Seq: 4, Data: mtu}); par != nil {\n\t\tputFrame(par)\n\t}\n\tif e.activeLen != 0 {\n\t\tt.Fatalf("activeLen after MTU flush = %d, want 0", e.activeLen)\n\t}\n}\n\nfunc TestFECEncoderReset''',
+    '''func TestFECEncoderParityLayout''',
+    '''func TestFECEncoderActiveRangeShrinksAfterJumboGroup(t *testing.T) {\n\te := newFECEncoder(2, nil)\n\tjumbo := make([]byte, 64*1024)\n\tfor i := 0; i < 2; i++ {\n\t\tif par := e.add(VPNFrame{Seq: uint32(i + 1), Data: jumbo}); par != nil {\n\t\t\tputFrame(par)\n\t\t}\n\t}\n\tif e.activeLen != 0 {\n\t\tt.Fatalf("activeLen after jumbo flush = %d, want 0", e.activeLen)\n\t}\n\tif cap(e.acc) < len(jumbo) {\n\t\tt.Fatalf("acc capacity = %d, want retained jumbo capacity", cap(e.acc))\n\t}\n\n\tmtu := make([]byte, 1400)\n\tif par := e.add(VPNFrame{Seq: 3, Data: mtu}); par != nil {\n\t\tputFrame(par)\n\t}\n\tif e.activeLen != len(mtu) {\n\t\tt.Fatalf("activeLen after MTU frame = %d, want %d", e.activeLen, len(mtu))\n\t}\n\tif par := e.add(VPNFrame{Seq: 4, Data: mtu}); par != nil {\n\t\tputFrame(par)\n\t}\n\tif e.activeLen != 0 {\n\t\tt.Fatalf("activeLen after MTU flush = %d, want 0", e.activeLen)\n\t}\n}\n\nfunc TestFECEncoderParityLayout''',
 )
 
 print("Go dataplane performance patch applied")
