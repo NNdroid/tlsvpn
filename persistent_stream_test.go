@@ -2,6 +2,9 @@ package main
 
 import "testing"
 
+// These tests lock the carry-tail invariant: transport boundaries are allowed
+// to cross logical VPN frames, while a lone MTU-sized frame is never expanded
+// with a large cover gap just to manufacture an MSS multiple.
 func TestPersistentStreamChunkMaySplitVPNFrame(t *testing.T) {
 	old := setPadMode(padModeBucket)
 	defer setPadMode(old)
