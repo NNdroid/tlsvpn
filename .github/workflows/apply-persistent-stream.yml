@@ -1,0 +1,41 @@
+name: Apply persistent stream patch
+
+on:
+  push:
+    branches:
+      - perf/persistent-stream-packing-20260929
+    paths:
+      - scripts/apply_persistent_stream_patch.py
+      - .github/workflows/apply-persistent-stream.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/persistent-stream-packing-20260929
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Apply source patch
+        run: python3 scripts/apply_persistent_stream_patch.py
+      - name: Format
+        run: gofmt -w client.go server.go stream_padding.go
+      - name: Test
+        run: |
+          go test ./...
+          go test -race ./... -run 'TestStream|TestFrame|TestOwned|TestWeb|TestStats'
+      - name: Remove temporary patch helpers
+        run: rm -f scripts/apply_persistent_stream_patch.py .github/workflows/apply-persistent-stream.yml
+      - name: Commit final source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'perf: pack TLSVPN stream across frame boundaries'
+          git push origin HEAD:perf/persistent-stream-packing-20260929
