@@ -118,12 +118,18 @@ func currentLogLevelName() string {
 }
 
 func main() {
-	// 配置唯一来源是 JSON 文件：-c 指定路径，-print-config 输出可编辑模板。
-	// 旧的命令行参数面已整体移除——两套入口必然漂移，且面板 save_apply 写回
-	// 的也是同一份 JSON（字段参考见 README）。
+	// 运行时配置唯一来源仍是 JSON 文件：-c 指定路径，-print-config 输出可编辑模板。
+	// -version/--version 只查询构建版本，不引入第二套配置入口。旧的调参命令行
+	// 面已整体移除——两套入口必然漂移，且面板 save_apply 写回的也是同一份 JSON。
 	configPath := flag.String("c", "", "Path to JSON config file (required)")
 	printConfig := flag.Bool("print-config", false, "Print an example JSON config and exit")
+	printVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Println(appVersion)
+		return
+	}
 
 	if *printConfig {
 		fmt.Println(exampleConfigJSON)
@@ -133,6 +139,7 @@ func main() {
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "tlsvpn: a JSON config file is required: tlsvpn -c config.json")
 		fmt.Fprintln(os.Stderr, "generate a template with: tlsvpn -print-config")
+		fmt.Fprintln(os.Stderr, "show build version with: tlsvpn -version")
 		os.Exit(2)
 	}
 
@@ -226,7 +233,7 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: tlsvpn -c config.json   (-print-config for a template)")
+		fmt.Fprintln(os.Stderr, "Usage: tlsvpn -c config.json   (-print-config template, -version build version)")
 		os.Exit(1)
 	}
 
