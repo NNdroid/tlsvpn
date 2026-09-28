@@ -15,7 +15,7 @@ A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over stan
 
 ## Quick Start
 
-Requires Go 1.26+ (build) and root + `/dev/net/tun` (run).
+Requires Go 1.26.1+ (build) and root + `/dev/net/tun` (run).
 
 ```bash
 git clone https://github.com/NNdroid/tlsvpn.git
@@ -32,10 +32,11 @@ sudo ./tlsvpn -c config.json
 
 ```bash
 tlsvpn -print-config > config.json       # generate the full template instead
-tlsvpn -h                                # shows only -c and -print-config
+tlsvpn -version                          # print the injected build/release version
+tlsvpn -h                                # shows -c, -print-config and -version
 ```
 
-The command-line interface is exactly that: `-c` and `-print-config`. All tuning lives in the config file, which the dashboard's *Save & apply* edits in place — one source of truth, nothing to drift.
+Runtime configuration remains JSON-only. The bootstrap/query flags are `-c`, `-print-config`, and `-version` (Go's flag parser also accepts `--version`). All tuning lives in the config file, which the dashboard's *Save & apply* edits in place — one source of truth, nothing to drift.
 
 Minimal examples (full files ship in the repo root):
 
