@@ -1,0 +1,24 @@
+name: Installer Tests
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "scripts/install.sh"
+      - "scripts/test_install.sh"
+      - ".github/workflows/installer.yml"
+  pull_request:
+    branches: [ "main", "master" ]
+    paths:
+      - "scripts/install.sh"
+      - "scripts/test_install.sh"
+      - ".github/workflows/installer.yml"
+  workflow_dispatch:
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate installer
+        run: bash scripts/test_install.sh

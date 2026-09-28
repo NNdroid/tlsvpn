@@ -1,0 +1,184 @@
+LE="$LEGO_HOME/certificates/$CERT_NAME.crt"
+  KEY_FILE="$LEGO_HOME/certificates/$CERT_NAME.key"
+  [[ "$DRY_RUN" == "yes" || ( -s "$CERT_FILE" && -s "$KEY_FILE" ) ]] ||
+    die "lego completed but certificate files were not found."
+}
+
+prepare_self_signed() {
+  [[ -n "$CERT_NAME" ]] || CERT_NAME="$(hostname -f 2>/dev/null || hostname)"
+  run mkdir -p "$CERT_DIR"
+  CERT_FILE="$CERT_DIR/server.crt"
+  KEY_FILE="$CERT_DIR/server.key"
+  local san
+  if is_ip_identifier "$CERT_NAME"; then san="IP:$CERT_NAME"; else san="DNS:$CERT_NAME"; fi
+  if [[ "$DRY_RUN" == "yes" ]]; then
+    run openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -keyout "$KEY_FILE" -out "$CERT_FILE" -subj "/CN=$CERT_NAME" -addext "subjectAltName=$san"
+  else
+    openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+      -keyout "$KEY_FILE" -out "$CERT_FILE" -subj "/CN=$CERT_NAME" \
+      -addext "subjectAltName=$san" >/dev/null 2>&1
+    chmod 600 "$KEY_FILE"
+  fi
+}
+
+prepare_existing_certificate() {
+  [[ -s "$CERT_FILE" && -s "$KEY_FILE" ]] || die "--cert-file and --key-file must point to existing non-empty files."
+  run mkdir -p "$CERT_DIR"
+  run install -m 644 "$CERT_FILE" "$CERT_DIR/server.crt"
+  run install -m 600 "$KEY_FILE" "$CERT_DIR/server.key"
+  CERT_FILE="$CERT_DIR/server.crt"
+  KEY_FILE="$CERT_DIR/server.key"
+}
+
+prepare_certificate() {
+  case "$CERT_MODE" in
+    lego) lego_run ;;
+    self-signed) prepare_self_signed ;;
+    existing) prepare_existing_certificate ;;
+    none|"") CERT_FILE=""; KEY_FILE="" ;;
+    *) die "--cert-mode must be lego, self-signed, existing or none" ;;
+  esac
+}
+
+write_config() {
+  [[ "$MODE" == "server" || "$MODE" == "client" ]] || die "--mode must be server or client"
+  [[ -n "$PSK" ]] || PSK="$(random_hex 32)"
+  [[ -n "$WEB_AUTH" ]] || WEB_AUTH="admin:$(random_hex 16)"
+  local addr="$LISTEN_ADDR"
+  [[ "$MODE" == "client" ]] && { [[ -n "$SERVER_ADDR" ]] || die "Client mode requires --server."; addr="$SERVER_ADDR"; }
+  local psk addrj wauth webaddr cert key brutal
+  psk="$(json_escape "$PSK")"; addrj="$(json_escape "$addr")"; wauth="$(json_escape "$WEB_AUTH")"; webaddr="$(json_escape "$WEB_ADDR")"
+  cert="$(json_escape "$CERT_FILE")"; key="$(json_escape "$KEY_FILE")"
+  brutal=false; [[ "$TCP_BRUTAL" == "yes" ]] && brutal=true
+  run mkdir -p "$CONFIG_DIR"
+  local tmp
+  tmp="$(mktemp)"
+  cat >"$tmp" <<EOF
+{
+  "mode": "$MODE",
+  "psk": "$psk",
+  "tap": "tap0",
+  "mac": "",
+  "addr": "$addrj",
+  "log_level": "info",
+  "up": "",
+  "down": "",
+  "encrypt": true,
+  "enc_algo": "gcm256",
+  "min_enc": "gcm",
+  "pad_mode": "bucket",
+  "socks5": "",
+  "brutal": $brutal,
+  "brutal_up": $BRUTAL_UP,
+  "brutal_down": $BRUTAL_DOWN,
+  "traffic_days": 30,
+  "traffic_file": "$(json_escape "$CONFIG_DIR/traffic.json")",
+  "web": {
+    "addr": "$webaddr",
+    "auth": "$wauth",
+    "bind": "$WEB_BIND",
+    "cert": "$cert",
+    "key": "$key"
+  },
+  "server": {
+    "v4_cidr": "10.0.0.0/24",
+    "v6_cidr": "fd00::/64",
+    "cert": "$cert",
+    "key": "$key",
+    "max_sessions": 1024,
+    "fec_group_min": 2,
+    "fec_group_max": 64
+  },
+  "client": {
+    "interface_manager": "self",
+    "req_v4": "",
+    "req_v6": "",
+    "sni": "www.cloudflare.com",
+    "insecure": false,
+    "cert_sha256": "",
+    "fwmark": 0,
+    "fwmark_priority": 0,
+    "extra_routes": [],
+    "source_rules": [],
+    "conns": 4,
+    "fec": true,
+    "fec_group": 4
+  }
+}
+EOF
+  run install -m 600 "$tmp" "$CONFIG_FILE"
+  rm -f "$tmp"
+}
+
+write_systemd() {
+  cat >"$SYSTEMD_SERVICE" <<EOF
+[Unit]
+Description=TLSVPN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_DIR/$PROGRAM -c $CONFIG_FILE
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+write_openrc() {
+  cat >"$OPENRC_SERVICE" <<EOF
+#!/sbin/openrc-run
+description="TLSVPN"
+command="$INSTALL_DIR/$PROGRAM"
+command_args="-c $CONFIG_FILE"
+command_background="yes"
+pidfile="/run/tlsvpn.pid"
+output_log="/var/log/tlsvpn.log"
+error_log="/var/log/tlsvpn.log"
+
+depend() {
+  need net
+  after firewall
+}
+EOF
+  chmod 755 "$OPENRC_SERVICE"
+}
+
+write_service() {
+  case "$INIT_SYSTEM" in
+    systemd) write_systemd ;;
+    openrc) write_openrc ;;
+  esac
+  reload_init
+}
+
+reload_init() {
+  case "${INIT_SYSTEM:-}" in
+    systemd) run systemctl daemon-reload ;;
+    openrc) : ;;
+  esac
+}
+
+start_service() {
+  [[ "$NO_START" == "yes" ]] && return 0
+  case "$INIT_SYSTEM" in
+    systemd) run systemctl enable --now tlsvpn ;;
+    openrc) run rc-update add tlsvpn default; run rc-service tlsvpn restart ;;
+  esac
+}
+
+restart_service() {
+  [[ "$NO_START" == "yes" ]] && return 0
+  case "$INIT_SYSTEM" in
+    systemd) run systemctl restart tlsvpn ;;
+    openrc) run rc-service tlsvpn restart ;;
+  esac
+}
+
+stop_service() {
+  case "${INIT_SYSTEM:-}" in
+    systemd) systemct

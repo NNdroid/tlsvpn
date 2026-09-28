@@ -1,0 +1,151 @@
+ "${pkgs[@]}" ;;
+  esac
+}
+
+install_base_dependencies() {
+  case "$PKG_MGR" in
+    apt) install_packages ca-certificates curl openssl tar gzip iproute2 ;;
+    dnf) install_packages ca-certificates curl openssl tar gzip iproute ;;
+    apk) install_packages ca-certificates curl openssl tar gzip iproute2 bash ;;
+  esac
+}
+
+confirm() {
+  local prompt="$1" answer
+  [[ "$ASSUME_YES" == "yes" ]] && return 0
+  [[ "$NON_INTERACTIVE" == "no" && -t 0 ]] || return 1
+  read -r -p "$prompt [y/N]: " answer || return 1
+  [[ "$answer" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+prompt_value() {
+  local label="$1" current="$2" secret="${3:-no}" answer
+  if [[ "$secret" == "yes" ]]; then
+    read -r -s -p "$label${current:+ [set]}: " answer; printf '\n'
+  else
+    read -r -p "$label${current:+ [$current]}: " answer
+  fi
+  if [[ "$answer" == "back" ]]; then printf '%s' "__BACK__"; return; fi
+  printf '%s' "${answer:-$current}"
+}
+
+interactive_wizard() {
+  [[ -t 0 ]] || die "No action specified and stdin is not interactive. Use install|upgrade|... and flags."
+  cat <<'EOF'
+TLSVPN Go Setup Wizard
+Type "back" at any prompt to return to the previous step.
+EOF
+  local step=1 v
+  while (( step <= 10 )); do
+    case "$step" in
+      1)
+        v="$(prompt_value "Action (install/upgrade/uninstall/rollback/status)" "${ACTION:-install}")"
+        [[ "$v" == "__BACK__" ]] && continue
+        ACTION="$v"; [[ "$ACTION" == "install" ]] || return 0; step=2
+        ;;
+      2)
+        v="$(prompt_value "Mode (server/client)" "${MODE:-server}")"
+        [[ "$v" == "__BACK__" ]] && { step=1; continue; }
+        MODE="$v"; step=3
+        ;;
+      3)
+        if [[ "$MODE" == "client" ]]; then
+          v="$(prompt_value "Server address (host:port)" "$SERVER_ADDR")"
+          [[ "$v" == "__BACK__" ]] && { step=2; continue; }
+          SERVER_ADDR="$v"
+        fi
+        step=4
+        ;;
+      4)
+        v="$(prompt_value "PSK (blank = generate random)" "$PSK" yes)"
+        [[ "$v" == "__BACK__" ]] && { step=3; continue; }
+        PSK="$v"; step=5
+        ;;
+      5)
+        v="$(prompt_value "Certificate mode (lego/self-signed/existing/none)" "${CERT_MODE:-self-signed}")"
+        [[ "$v" == "__BACK__" ]] && { step=4; continue; }
+        CERT_MODE="$v"; step=6
+        ;;
+      6)
+        if [[ "$CERT_MODE" == "lego" || "$CERT_MODE" == "self-signed" ]]; then
+          v="$(prompt_value "Certificate DNS name or IP" "$CERT_NAME")"
+          [[ "$v" == "__BACK__" ]] && { step=5; continue; }
+          CERT_NAME="$v"
+        fi
+        step=7
+        ;;
+      7)
+        if [[ "$CERT_MODE" == "lego" ]]; then
+          v="$(prompt_value "ACME account email" "$EMAIL")"
+          [[ "$v" == "__BACK__" ]] && { step=6; continue; }
+          EMAIL="$v"
+        fi
+        step=8
+        ;;
+      8)
+        v="$(prompt_value "Install TCP Brutal? (yes/no)" "$TCP_BRUTAL")"
+        [[ "$v" == "__BACK__" ]] && { step=7; continue; }
+        TCP_BRUTAL="$v"; step=9
+        ;;
+      9)
+        v="$(prompt_value "Install XanMod? (yes/no)" "$XANMOD")"
+        [[ "$v" == "__BACK__" ]] && { step=8; continue; }
+        XANMOD="$v"; step=10
+        ;;
+      10)
+        v="$(prompt_value "Enable kernel tuning? (yes/no)" "$KERNEL_TUNING")"
+        [[ "$v" == "__BACK__" ]] && { step=9; continue; }
+        KERNEL_TUNING="$v"; return 0
+        ;;
+    esac
+  done
+}
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+random_hex() { openssl rand -hex "${1:-32}"; }
+
+is_ip_identifier() {
+  local x="$1"
+  [[ "$x" == *:* ]] && return 0
+  [[ "$x" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+load_state() {
+  [[ -r "$STATE_FILE" ]] || return 0
+  # shellcheck disable=SC1090
+  . "$STATE_FILE"
+  INSTALL_DIR="${S_INSTALL_DIR:-$INSTALL_DIR}"
+  CONFIG_DIR="${S_CONFIG_DIR:-$CONFIG_DIR}"
+  CONFIG_FILE="${S_CONFIG_FILE:-$CONFIG_FILE}"
+  CERT_DIR="${S_CERT_DIR:-$CERT_DIR}"
+  CERT_MODE="${S_CERT_MODE:-$CERT_MODE}"
+  CERT_NAME="${S_CERT_NAME:-$CERT_NAME}"
+  EMAIL="${S_EMAIL:-$EMAIL}"
+  ACME_SERVER="${S_ACME_SERVER:-$ACME_SERVER}"
+  ACME_CHALLENGE="${S_ACME_CHALLENGE:-$ACME_CHALLENGE}"
+  ARCH="${S_ARCH:-$ARCH}"
+  DAILY_UPDATE="${S_DAILY_UPDATE:-$DAILY_UPDATE}"
+  TCP_BRUTAL="${S_TCP_BRUTAL:-$TCP_BRUTAL}"
+  XANMOD="${S_XANMOD:-$XANMOD}"
+  KERNEL_TUNING="${S_KERNEL_TUNING:-$KERNEL_TUNING}"
+  BRUTAL_UP="${S_BRUTAL_UP:-$BRUTAL_UP}"
+  BRUTAL_DOWN="${S_BRUTAL_DOWN:-$BRUTAL_DOWN}"
+  CERT_FILE="${S_CERT_FILE:-$CERT_FILE}"
+  KEY_FILE="${S_KEY_FILE:-$KEY_FILE}"
+  MODE="${S_MODE:-$MODE}"
+  INSTALLED_VERSION="${S_RELEASE_TAG:-$INSTALLED_VERSION}"
+}
+
+write_state() {
+  run mkdir -p "$STATE_DIR"
+  local tmp
+  tmp="$(mktemp)"
+  cat >"$tmp" <<EOF
+S_INSTALL_DIR=$(printf '%q' "$INSTALL_DIR")
+S_CONFIG_DIR=$(printf '%q' "$CONFIG_DIR")
+S_CONFIG_FILE=$(printf '%q' "$CONFIG_FILE")
+S_CERT_DIR=$(printf '%q' "$CERT_DIR")
+S_CERT_MODE=$(pri
