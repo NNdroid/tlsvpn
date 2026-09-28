@@ -43,7 +43,7 @@ grep -Fq 'HyNetworks/tcp-brutal/master/scripts/install_dkms.sh' scripts/install.
 grep -Fq 'http://deb.xanmod.org' scripts/install.sh
 grep -Fq '"traffic_days": 30' scripts/install.sh
 grep -Fq '"traffic_file": "$traffic"' scripts/install.sh
-grep -Fq '"interface_manager":"self"' scripts/install.sh
+grep -Fq '"interface_manager": "self"' scripts/install.sh
 grep -Fq 'web_addr_is_loopback' scripts/install.sh
 grep -Fq 'Would install daily TLSVPN maintenance task' scripts/install.sh
 grep -Fq 'mkdir -p "$INSTALL_DIR" "$STATE_DIR"' scripts/install.sh
