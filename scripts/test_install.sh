@@ -47,6 +47,13 @@ grep -Fq '"interface_manager":"self"' scripts/install.sh
 grep -Fq 'web_addr_is_loopback' scripts/install.sh
 grep -Fq 'Would install daily TLSVPN maintenance task' scripts/install.sh
 grep -Fq 'mkdir -p "$INSTALL_DIR" "$STATE_DIR"' scripts/install.sh
+grep -Fq 'os_id="$(. /etc/os-release; printf' scripts/install.sh
+grep -Fq 'Invalid TLSVPN release tag:' scripts/install.sh
+grep -Fq 'systemctl cat tlsvpn.service' scripts/install.sh
+if grep -Fxq '  . /etc/os-release' scripts/install.sh; then
+  echo "installer must not source /etc/os-release into its global namespace" >&2
+  exit 1
+fi
 
 for forbidden in 'NNdroid/tlsvpn-rs' 'unknown-linux-musl' '"workers"' '"mtu"'; do
   if grep -Fq "$forbidden" scripts/install.sh; then
