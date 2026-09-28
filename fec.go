@@ -90,7 +90,8 @@ type fecEncoder struct {
 	k          int
 	seqs       []uint32 // 当前组成员的 seq
 	lens       []int    // 当前组成员的负载长度
-	acc        []byte   // 成员负载的异或累加（按最大长度对齐）
+	acc        []byte   // 成员负载的异或累加（按历史最大长度复用）
+	activeLen  int      // 当前组实际触碰的最大长度；reset 只清这一段
 	ic         *innerCipher
 	paritySent uint64 // 已生成校验帧计数（面板/metrics）
 }
@@ -129,6 +130,9 @@ func (e *fecEncoder) add(vf VPNFrame) []byte {
 			e.acc = grown
 		}
 	}
+	if len(vf.Data) > e.activeLen {
+		e.activeLen = len(vf.Data)
+	}
 	subtle.XORBytes(e.acc[:len(vf.Data)], e.acc[:len(vf.Data)], vf.Data)
 	if len(e.seqs) < e.k {
 		return nil
@@ -147,11 +151,12 @@ func (e *fecEncoder) flushLocked() []byte {
 func (e *fecEncoder) reset() {
 	e.seqs = e.seqs[:0]
 	e.lens = e.lens[:0]
-	clear(e.acc)
+	clear(e.acc[:e.activeLen])
+	e.activeLen = 0
 }
 
 func (e *fecEncoder) buildParity() []byte {
-	maxLen := len(e.acc)
+	maxLen := e.activeLen
 	tagLen := 0
 	if e.ic != nil {
 		tagLen = e.ic.tagLen()
@@ -166,7 +171,7 @@ func (e *fecEncoder) buildParity() []byte {
 		binary.BigEndian.PutUint32(buf[off:off+4], uint32(l))
 		off += 4
 	}
-	copy(buf[off:], e.acc)
+	copy(buf[off:off+maxLen], e.acc[:maxLen])
 	if e.ic != nil {
 		// 校验帧线路负载 = 描述符 + 加密后的异或载荷（AEAD 附标签），
 		// 以 groupStart 为 AEAD 的 seq。接收端解码时用同方向盐。
