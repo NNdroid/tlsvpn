@@ -1,0 +1,41 @@
+name: Verify OpenWrt APK artifact fix
+
+on:
+  push:
+    branches:
+      - fix/openwrt-apk-artifact-validation
+
+jobs:
+  x86-64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenWrt SDK host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex gawk gettext git libncurses-dev \
+            libssl-dev python3 rsync unzip zlib1g-dev file curl zstd
+
+      - name: Validate script contract
+        run: |
+          bash -n scripts/build_openwrt_apk.sh
+          go test ./... -run TestOpenWrtAPKBuildTracksRealLuCITranslations -count=1
+
+      - name: Build x86/64 OpenWrt APKs including architecture-independent packages
+        env:
+          OPENWRT_VERSION: "25.12.5"
+          OPENWRT_TARGET: x86
+          OPENWRT_SUBTARGET: "64"
+          OPENWRT_INCLUDE_ARCH_INDEPENDENT: "1"
+          OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-sdk/25.12.5-x86-64
+          TLSVPN_SOURCE_VERSION: ${{ github.sha }}
+          TLSVPN_PKG_VERSION: ""
+          JOBS: "2"
+        run: ./scripts/build_openwrt_apk.sh
+
+      - name: Show produced APKs
+        run: find bin/openwrt/x86-64 -maxdepth 1 -type f -print | sort
