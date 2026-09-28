@@ -50,6 +50,9 @@ grep -Fq 'mkdir -p "$INSTALL_DIR" "$STATE_DIR"' scripts/install.sh
 grep -Fq 'os_id="$(. /etc/os-release; printf' scripts/install.sh
 grep -Fq 'Invalid TLSVPN release tag:' scripts/install.sh
 grep -Fq 'systemctl cat tlsvpn.service' scripts/install.sh
+grep -Fq 'AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE' scripts/install.sh
+grep -Fq 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE' scripts/install.sh
+grep -Fq 'systemctl is-active --quiet tlsvpn.service' scripts/install.sh
 if grep -Fxq '  . /etc/os-release' scripts/install.sh; then
   echo "installer must not source /etc/os-release into its global namespace" >&2
   exit 1
