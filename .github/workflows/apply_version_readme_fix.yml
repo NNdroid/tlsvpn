@@ -43,8 +43,11 @@ jobs:
           git diff --check
       - name: Commit product changes
         run: |
+          # The connected GitHub client updates go.yml separately; Actions tokens
+          # cannot push workflow-file mutations without workflows permission.
+          git checkout -- .github/workflows/go.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add main.go scripts/install.sh README.md .github/workflows/go.yml version_cli_test.go
+          git add main.go scripts/install.sh README.md version_cli_test.go
           git commit -m 'feat: add version CLI and refresh README' || exit 0
           git push origin HEAD:fix/version-readme-audit
