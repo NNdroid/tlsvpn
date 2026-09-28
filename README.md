@@ -44,6 +44,26 @@ Minimal examples (full files ship in the repo root):
 {"mode": "client", "psk": "GENERATE-A-UNIQUE-RANDOM-SECRET", "addr": "203.0.113.10:4000", "encrypt": true}
 ```
 
+
+## One-click installer
+
+`scripts/install.sh` provides an English interactive wizard and a fully flag-driven mode for Debian, Ubuntu, Rocky/RHEL-family and Alpine Linux. It can install, upgrade, uninstall, roll back, show status and run daily maintenance. Server certificates can be issued by lego/ACME for either a DNS name or a public IP identifier, generated locally as self-signed certificates, or copied from an existing pair. Optional components include XanMod on supported Debian/Ubuntu x86_64 hosts, tcp-brutal DKMS and conservative network sysctl tuning.
+
+```bash
+sudo bash scripts/install.sh
+sudo bash scripts/install.sh install --mode server --psk '...' --cert-mode lego \
+  --cert-name vpn.example.com --email admin@example.com --daily-update yes
+sudo bash scripts/install.sh install --mode server --psk '...' --cert-mode lego \
+  --cert-name 203.0.113.10 --email admin@example.com
+sudo bash scripts/install.sh install --mode client --server vpn.example.com:4000 --psk '...' \
+  --tcp-brutal yes --optimize-kernel yes
+sudo bash scripts/install.sh upgrade
+sudo bash scripts/install.sh rollback
+sudo bash scripts/install.sh uninstall --purge
+```
+
+The installer stores rollback snapshots under `/var/lib/tlsvpn-installer`, installs a systemd timer or Alpine daily periodic task when daily maintenance is enabled, and keeps optional kernel components non-fatal so a XanMod or tcp-brutal failure does not destroy an otherwise working TLSVPN installation. Use `scripts/install.sh help` for every flag.
+
 ## Configuration Reference
 
 Unknown fields are rejected (typo protection); omitted fields take the defaults below. `server.max_sessions` and `server.fec_group_min`/`fec_group_max` are JSON-only — there are no CLI flags at all.
