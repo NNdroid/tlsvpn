@@ -48,6 +48,36 @@ func randomIntN(n int) int {
 	return int(sha256.Sum256([]byte{byte(n)})[0]) % n
 }
 
+func TestFECEncoderActiveRangeShrinksAfterJumboGroup(t *testing.T) {
+	e := newFECEncoder(2, nil)
+	jumbo := make([]byte, 64*1024)
+	for i := 0; i < 2; i++ {
+		if par := e.add(VPNFrame{Seq: uint32(i + 1), Data: jumbo}); par != nil {
+			putFrame(par)
+		}
+	}
+	if e.activeLen != 0 {
+		t.Fatalf("activeLen after jumbo flush = %d, want 0", e.activeLen)
+	}
+	if cap(e.acc) < len(jumbo) {
+		t.Fatalf("acc capacity = %d, want retained jumbo capacity", cap(e.acc))
+	}
+
+	mtu := make([]byte, 1400)
+	if par := e.add(VPNFrame{Seq: 3, Data: mtu}); par != nil {
+		putFrame(par)
+	}
+	if e.activeLen != len(mtu) {
+		t.Fatalf("activeLen after MTU frame = %d, want %d", e.activeLen, len(mtu))
+	}
+	if par := e.add(VPNFrame{Seq: 4, Data: mtu}); par != nil {
+		putFrame(par)
+	}
+	if e.activeLen != 0 {
+		t.Fatalf("activeLen after MTU flush = %d, want 0", e.activeLen)
+	}
+}
+
 func TestFECEncoderParityLayout(t *testing.T) {
 	e := newFECEncoder(4, nil)
 	var par []byte

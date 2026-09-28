@@ -186,6 +186,12 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 		default:
 		}
 
+		// Fast path: dispatchBatch keeps the preferred backend in an atomic
+		// pointer. When that queue has room, no backend-list lock/scan is needed.
+		if b := p.preferred.Load(); b != nil && cap(b.ch) > 0 && len(b.ch) < cap(b.ch) {
+			return true
+		}
+
 		p.backendsMu.RLock()
 		n := len(p.backends)
 		ready := false
