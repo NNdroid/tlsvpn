@@ -11,6 +11,13 @@ import (
 const streamTLSBatchSoftLimit = 12 * 1024
 const maxTLSPlaintextRecord = 16 * 1024
 
+// MSS alignment is only a shaping hint. TCP itself is a continuous byte stream,
+// so the next TLS write can naturally fill the previous segment's remaining
+// space. Never spend a large share of useful traffic on cover bytes merely to
+// force one application batch to an MSS boundary.
+const streamPadRatioPercent = 10
+const streamPadAbsoluteLimit = 512
+
 // appendUnpaddedFrame is the data-plane framing primitive for stream buckets.
 // Individual VPN frames are no longer bucket-padded; only the final frame in
 // an aggregated TLS plaintext batch receives cover padding.
@@ -64,8 +71,8 @@ func appendOwnedFrameBatchStream(buf []byte, frames []VPNFrame, ic *innerCipher)
 
 // streamAlignedTLSPlaintextTarget returns the smallest TLS plaintext length
 // whose conservative TLS ciphertext budget is an integer number of TCP MSS
-// segments. Padding is bounded to <1 MSS and never pushes plaintext above the
-// TLS 16KiB record limit.
+// segments. Padding is bounded by streamPaddingBudget before this target is
+// accepted.
 func streamAlignedTLSPlaintextTarget(n, mss int) int {
 	if n <= 0 {
 		return n
@@ -81,9 +88,22 @@ func streamAlignedTLSPlaintextTarget(n, mss int) int {
 	return target
 }
 
+func streamPaddingBudget(batchLen int) int {
+	if batchLen <= 0 {
+		return 0
+	}
+	relative := batchLen * streamPadRatioPercent / 100
+	if relative > streamPadAbsoluteLimit {
+		return streamPadAbsoluteLimit
+	}
+	return relative
+}
+
 // padStreamBatchTail adds cover bytes only to the final TLSVPN frame in the
 // aggregated plaintext batch. Earlier frames naturally pack one another's
-// slack, so cover traffic is paid only for the final partial TCP segment.
+// slack. If closing the final MSS gap would cost more than 10% of useful bytes
+// or 512B, send the real bytes unchanged and let TCP combine the next write
+// into the same continuous stream.
 func padStreamBatchTail(buf []byte, lastFrameStart, recordLimit int) ([]byte, int) {
 	if padModeCode.Load() == padCodeOff || len(buf) == 0 || lastFrameStart < 0 {
 		return buf, 0
@@ -92,6 +112,9 @@ func padStreamBatchTail(buf []byte, lastFrameStart, recordLimit int) ([]byte, in
 	target := streamAlignedTLSPlaintextTarget(len(buf), mss)
 	padLen := target - len(buf)
 	if padLen <= 0 || lastFrameStart+10 > len(buf) || padLen > 0xffff {
+		return buf, 0
+	}
+	if padLen > streamPaddingBudget(len(buf)) {
 		return buf, 0
 	}
 	oldPad := int(binary.BigEndian.Uint16(buf[lastFrameStart+4 : lastFrameStart+6]))
