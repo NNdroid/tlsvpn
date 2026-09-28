@@ -1779,14 +1779,15 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
-				var padTotal uint64
+				lastFrameStart := -1
 			drainBatches:
 				for {
-					var n int
-					var p uint64
-					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx, padRecordLimit)
+					var n, last int
+					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
 					txPackets += n
-					padTotal += p
+					if last >= 0 {
+						lastFrameStart = last
+					}
 					if len(sendBuffer) >= maxTLSWriteBatchBytes {
 						break
 					}
@@ -1797,6 +1798,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						break drainBatches
 					}
 				}
+				var tailPad int
+				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
+				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
 				_, werr := conn.Write(sendBuffer)
 				if werr != nil {
