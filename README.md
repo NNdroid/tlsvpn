@@ -1,11 +1,11 @@
 # tlsvpn
 
-A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over standard TCP + TLS, with optional inner AES-256-GCM encryption, XOR FEC, multipath MinRTT load balancing and TCP Brutal — built for stability and throughput on lossy or restricted networks.
+A high-performance, stealthy Layer-2 VPN in Go. Ethernet frames travel over standard TCP + TLS, with optional authenticated inner AEAD, XOR FEC, multipath MinRTT load balancing and TCP Brutal — built for stability and throughput on lossy or restricted networks.
 
 ## Features
 
 - **HTTPS camouflage** — the tunnel looks like ordinary HTTPS (ALPN h2/http1.1). Non-VPN probes and bad PSKs land on a built-in Nginx-style page / tarpit.
-- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel (AES-GCM, ChaCha20-Poly1305 or XChaCha20-Poly1305): per-session/per-direction salts, separate data/FEC keys, `nonce = seq‖salt`, and AAD-bound integrity. `enc_algo: "gcm256"` remains the default; `"gcm128"` is an explicit performance mode. Peers must agree on the exact algorithm; there is no implicit key-size downgrade.
+- **Inner encryption** — `encrypt: true` adds authenticated AEAD inside the tunnel: AES-256-GCM (`gcm256`, default), AES-128-GCM (`gcm128`), ChaCha20-Poly1305 (`chacha20`) or XChaCha20-Poly1305 (`xchacha20`). Data and FEC use separate keys and per-session/per-direction salts. AES-GCM/ChaCha20 use `seq(4BE) || salt(8B)` nonces; XChaCha20 derives a 20-byte nonce prefix from the session salt and appends `seq(4BE)`. AAD binds `dataLen(4BE) || seq(4BE)`, and all current algorithms use a 16-byte authentication tag. Peers must agree on the exact algorithm; there is no implicit downgrade.
 - **XOR FEC** — one parity frame per K data frames reconstructs any single lost frame. The parity is sent once and rotated across healthy physical links, so redundancy is ≈1/K instead of N/K on N-link sessions.
 - **Multipath** — multiple TCP links (multi-IP round-robin) with MinRTT routing and backpressure-aware path selection.
 - **TCP Brutal** — maintains preset bandwidth under heavy packet loss (kernel `tcp_brutal` module required).
@@ -61,10 +61,12 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `up` / `down` | (Empty) | Absolute executable paths for process-level tunnel lifecycle hooks in self-managed mode; changing either requires restart |
 | `encrypt` | `true` when omitted in JSON | Enable inner authenticated AEAD |
 | `enc_algo` | `gcm256` | Inner AEAD: `gcm256` (AES-256-GCM, compatibility default), `gcm128`, `chacha20`, or `xchacha20`. Both peers must match exactly |
-| `min_enc` | (Empty) | Legacy floor value `gcm` now means any supported authenticated inner AEAD; `any`/empty sets no floor (needs `encrypt`) |
+| `min_enc` | `gcm` when `encrypt=true` | Minimum inner-encryption policy. Omitted/empty normalizes to `gcm`; legacy name `gcm` means require a supported authenticated inner AEAD, while explicit `any` removes the floor. Requires `encrypt=true` |
 | `pad_mode` | `bucket` | Full-record padding: `bucket` maps every record to a fixed size with positive padding, and only `off` permits zero padding |
 | `socks5` | (Empty) | Client: route all outbound sockets through a SOCKS5 proxy |
 | `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |
+| `traffic_days` | `30` | Daily traffic-accounting retention in local-calendar days (`1`–`3650`); hot-appliable from the dashboard |
+| `traffic_file` | `tlsvpn-traffic.json` beside the config | Persistent daily-traffic store. When omitted, a config-file launch resolves this path next to the JSON config |
 
 ### `web` (dashboard off unless `addr` is set)
 
@@ -72,7 +74,7 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | --- | --- | --- |
 | `addr` | (Empty) | e.g. `:8080` |
 | `bind` | `all` | `tunnel` = bind only the tunnel IPs (panel reachable exclusively from inside the VPN) |
-| `auth` | (Required when enabled) | Basic Auth `user:pass`; known example credentials are rejected |
+| `auth` | (Required when enabled) | Dashboard login credential as `user:pass`; known example credentials are rejected. Successful login creates a server-side session cookie rather than leaving credentials in every browser request |
 | `cert` / `key` | (Empty) | HTTPS pair; required when `bind=all` exposes a non-loopback listener |
 
 ### `server`
@@ -106,7 +108,7 @@ Session resume tokens are mandatory and always enabled. There is no `server.sess
 
 ## OpenWrt / netifd protocol mode
 
-The `feature/openwrt-netifd-proto` integration can expose a TLSVPN client as a native OpenWrt network interface. TLSVPN still creates the TAP and runs the TLS/FEC/multipath data plane, but it does **not** call `AddrReplace` or install policy-routing rules in this mode. Instead, fixed helpers under `/lib/netifd/` report the negotiated IPv4/IPv6 addresses and gateways to netifd.
+The in-tree OpenWrt/netifd integration can expose a TLSVPN client as a native OpenWrt network interface. TLSVPN still creates the TAP and runs the TLS/FEC/multipath data plane, but it does **not** call `AddrReplace` or install policy-routing rules in this mode. Instead, fixed helpers under `/lib/netifd/` report the negotiated IPv4/IPv6 addresses and gateways to netifd.
 
 The repository contains two OpenWrt package templates:
 
@@ -135,7 +137,7 @@ The protocol handler resolves every transport endpoint before starting TLSVPN, i
 
 The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
 
-For local SDK work the package template defaults to this development branch, but release builds do not use the moving branch. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
+For ad-hoc SDK work the package template follows `main`; reproducible release builds do not rely on that moving ref. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
 
 Example for the NanoPi R5S / Rockchip ARMv8 target:
 
@@ -168,17 +170,17 @@ When `client.interface_manager=netifd`, top-level `up`/`down` hooks are rejected
 
 ## Dashboard & Metrics
 
-Set `web.addr` to enable: live throughput chart, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it) and the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), zh-CN/en UI.
+Set `web.addr` to enable: live throughput and daily-traffic views, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it), the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), the current frame-format visualizer, local OS/architecture icons, and zh-CN/zh-TW/en/de/fr/ja UI.
 
 The **Runtime status** tab shows what the process is really doing rather than what the config file says: the host and build (`os`/`arch`/Go version/CPU count/hostname/config path/version+uptime); the negotiated protocol (version, inner cipher, FEC group, padding mode, cipher floor, session token, and — on clients — the key epoch, the per-direction rates the server granted, and whether policy routing actually took effect or the exact `ip` error it hit); a TCP Brutal breakdown that separates *configured* Mbps from *kernel support* (current and available congestion controllers) and *per-connection applied/total*, listing the failure reason when shaping was skipped; the effective config snapshot (including the fwmark, its rule priority, the route table number, any extra routes and any source rules); and a restart banner when a hot-applied change needs a process restart. The theme follows the OS light/dark preference and can be pinned to either with a persisted choice.
 
-Prometheus metrics at `/metrics` (authenticated like the rest of the panel). Security: Basic Auth, optional HTTPS, CSRF header guard on control actions.
+Prometheus metrics at `/metrics` are protected by the Web UI authentication gate. Security: `web.auth` backs the login flow, successful browser login uses an HttpOnly SameSite session cookie, mutating API calls require the CSRF header, and HTTPS is available through `web.cert`/`web.key`.
 
 ## Notes
 
 1. **Brutal** needs the `tcp_brutal` kernel module; **TAP** needs root (or `CAP_NET_ADMIN`).
 2. **Certificate pinning**: the persisted self-signed cert logs its SHA-256 fingerprint at startup — pin it with `client.cert_sha256` (colon/case tolerant).
-3. **Interop**: current Go and Rust builds share protocol v2 and byte-for-byte golden vectors (including data/FEC GCM domains). Upgrade both ends together — there is no backward compatibility by design: a server requires exactly protocol version 2, and a client rejects any other version in the handshake reply, so a mixed-version pair will not connect.
+3. **Interop**: current Go and Rust builds share protocol v2 and byte-for-byte golden vectors (including frame headers and data/FEC AEAD-domain vectors). The wire protocol supports the same four inner AEADs on both implementations. Upgrade both ends together — there is no backward compatibility by design: a server requires exactly protocol version 2, and a client rejects any other version in the handshake reply, so a mixed-version pair will not connect.
 4. **Client identity**: with `mac` empty the client generates and persists a non-zero unicast MAC, session token, and session epoch in `<config>.state` (mode `0600`). A restarted client proves ownership, rotates salts/keys, closes half-open old links, and keeps its assigned tunnel IP. Delete the file to force a fresh identity.
 
 ---
