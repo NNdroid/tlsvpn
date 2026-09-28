@@ -20,9 +20,10 @@ jobs:
         with:
           go-version: stable
 
-      - name: Generate Go installer
+      - name: Generate and polish Go installer
         run: |
           python3 .github/scripts/port_go_installer.py
+          python3 .github/scripts/polish_go_installer.py
           chmod +x scripts/install.sh
 
       - name: Validate installer
@@ -30,8 +31,12 @@ jobs:
           bash -n scripts/install.sh
           bash scripts/install.sh help | grep -Fq 'tlsvpn Go installer'
           bash scripts/install.sh help | grep -Fq -- '--arch auto|amd64|386|arm64|arm64-v8.2|arm|armv7|mipsle|mips'
+          bash scripts/install.sh help | grep -Fq -- '--cert-mode lego|self-signed|existing'
+          ! bash scripts/install.sh help | grep -Fq -- '--cert-mode lego|self-signed|existing|none'
           grep -Fq 'tlsvpn_linux_arm64_v8.2' scripts/install.sh
           grep -Fq '"traffic_days": 30' scripts/install.sh
+          grep -Fq 'web_addr_is_loopback' scripts/install.sh
+          grep -Fq 'Would install daily TLSVPN maintenance task' scripts/install.sh
           ! grep -Eq 'tlsvpn-rs|unknown-linux-musl|"workers"|"mtu"' scripts/install.sh
           git diff --check
           go test ./... -run TestInstallScriptContract -count=1
@@ -45,5 +50,5 @@ jobs:
             echo 'No generated changes.'
             exit 0
           fi
-          git commit -m 'feat: add one-click Go installer'
+          git commit -m 'feat: harden one-click Go installer'
           git push origin HEAD:feat/go-installer
