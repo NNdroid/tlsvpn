@@ -116,7 +116,7 @@ Core options:
   --web-auth USER:PASSWORD
 
 Certificate options:
-  --cert-mode lego|self-signed|existing|none
+  --cert-mode lego|self-signed|existing
   --cert-name DOMAIN_OR_IP      DNS name or public IPv4/IPv6 identifier.
   --email EMAIL                 Required for lego/ACME.
   --acme-challenge http|tls     HTTP-01 or TLS-ALPN-01 (default http).
@@ -206,9 +206,17 @@ parse_args() {
 }
 
 validate_yes_no() { [[ "$1" == "yes" || "$1" == "no" ]] || die "$2 must be yes or no"; }
+web_addr_is_loopback() {
+  local a="$1"
+  [[ -z "$a" || "$a" == 127.* || "$a" == localhost:* || "$a" == "[::1]:"* || "$a" == ::1:* ]]
+}
+
 validate_common() {
   [[ "$WEB_BIND" == "all" || "$WEB_BIND" == "tunnel" ]] || die "--web-bind must be all or tunnel"
   [[ "$ACME_CHALLENGE" == "http" || "$ACME_CHALLENGE" == "tls" ]] || die "--acme-challenge must be http or tls"
+  if [[ "$MODE" == "client" && "$WEB_BIND" == "all" ]] && ! web_addr_is_loopback "$WEB_ADDR"; then
+    die "Client --web-bind all is only supported with a loopback --web-addr; use --web-bind tunnel for a remotely reachable dashboard."
+  fi
   validate_yes_no "$DAILY_UPDATE" "--daily-update"
   validate_yes_no "$XANMOD" "--xanmod"
   validate_yes_no "$TCP_BRUTAL" "--tcp-brutal"
@@ -454,7 +462,7 @@ install_tlsvpn_binary() {
   curl -fL --retry 5 --connect-timeout 15 "$url" -o "$tmp"
   chmod 0755 "$tmp"
   "$tmp" --print-config >/dev/null || { rm -f "$tmp"; die "Downloaded binary failed its self-check."; }
-  mkdir -p "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR" "$STATE_DIR"
   install -m 0755 "$tmp" "$INSTALL_DIR/$PROGRAM.new"
   mv -f "$INSTALL_DIR/$PROGRAM.new" "$INSTALL_DIR/$PROGRAM"
   rm -f "$tmp"
@@ -558,7 +566,6 @@ prepare_certificate() {
     lego) issue_lego_certificate ;;
     self-signed) create_self_signed_certificate ;;
     existing) prepare_existing_certificate ;;
-    none) die "Server mode requires a TLS certificate; use lego, self-signed, or existing." ;;
     *) die "Unknown certificate mode: $CERT_MODE" ;;
   esac
 }
@@ -635,6 +642,7 @@ EOF
 }
 
 write_systemd_service() {
+  if [[ "$DRY_RUN" == "yes" ]]; then info "Would write $SYSTEMD_SERVICE"; return 0; fi
   cat >"$SYSTEMD_SERVICE.tmp" <<EOF
 [Unit]
 Description=TLSVPN Go Layer-2 VPN
@@ -658,6 +666,7 @@ EOF
 }
 
 write_openrc_service() {
+  if [[ "$DRY_RUN" == "yes" ]]; then info "Would write $OPENRC_SERVICE"; return 0; fi
   cat >"$OPENRC_SERVICE.tmp" <<EOF
 #!/sbin/openrc-run
 name="tlsvpn"
@@ -730,6 +739,7 @@ load_state() {
 
 write_daily_task() {
   if [[ "$DAILY_UPDATE" != "yes" ]]; then remove_daily_task; return; fi
+  if [[ "$DRY_RUN" == "yes" ]]; then info "Would install daily TLSVPN maintenance task"; return 0; fi
   if [[ "$INIT_SYSTEM" == "systemd" ]]; then
     cat >"$SYSTEMD_MAINT_SERVICE" <<EOF
 [Unit]
@@ -807,8 +817,8 @@ install_tcp_brutal() {
     return 0
   fi
   info "Installing tcp-brutal with the upstream DKMS installer"
+  if [[ "$DRY_RUN" == "yes" ]]; then printf '[DRY-RUN] upstream tcp-brutal installer\n'; return 0; fi
   local tmp; tmp="$(mktemp)"
-  if [[ "$DRY_RUN" == "yes" ]]; then printf '[DRY-RUN] upstream tcp-brutal installer\n'; rm -f "$tmp"; return 0; fi
   if curl -fsSL --retry 4 https://raw.githubusercontent.com/HyNetworks/tcp-brutal/master/scripts/install_dkms.sh -o "$tmp" \
      && bash "$tmp" install; then
     modprobe brutal >/dev/null 2>&1 || true
@@ -827,6 +837,7 @@ uninstall_tcp_brutal() {
 
 apply_kernel_tuning() {
   [[ "$KERNEL_TUNING" == "yes" ]] || return 0
+  if [[ "$DRY_RUN" == "yes" ]]; then info "Would write $SYSCTL_FILE and apply network kernel tuning"; return 0; fi
   local bbr=""
   modprobe tcp_bbr >/dev/null 2>&1 || true
   if [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] && grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control; then bbr='net.ipv4.tcp_congestion_control = bbr'; fi
