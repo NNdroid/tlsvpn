@@ -31,9 +31,13 @@ func TestWebUIFrameVisualizerIsInjected(t *testing.T) {
 		path string
 		want []string
 	}{
-		{"/frameviz.js", []string{"Frame format example", "帧格式示例", "Beispiel für Frame-Format", "Exemple de format de trame", "フレーム形式の例", "dataLen", "padLen", "1 MiB"}},
+		{"/frameviz.js", []string{
+			"Frame format example", "帧格式示例", "訊框格式範例", "Beispiel für Frame-Format", "Exemple de format de trame", "フレーム形式の例",
+			"AES-256-GCM", "AES-128-GCM", "ChaCha20-Poly1305", "XChaCha20-Poly1305",
+			"1514 B", "1530 B", "60 B → 1600 B", "dataLen", "padLen", "4 B BE", "seq=0", "1 MiB",
+		}},
 		{"/zh-tw.js", []string{"I18N['zh-TW']", "用戶端", "伺服器", "位址池", "工作階段", "金鑰"}},
-		{"/frameviz-zh-tw.js", []string{"訊框格式範例", "位元組", "驗證標籤"}},
+		{"/frameviz-zh-tw.js", []string{"native zh-TW", "compatibility asset", "framevizLocale"}},
 	} {
 		resp, err = ts.Client().Get(ts.URL + asset.path)
 		if err != nil {
