@@ -8,36 +8,52 @@ help="$(bash scripts/install.sh help)"
 for needle in \
   "install       Install TLSVPN" \
   "upgrade       Upgrade the TLSVPN binary" \
-  "uninstall     Remove installer-managed TLSVPN files" \
-  "rollback      Restore the newest backup" \
-  "maintenance   Renew lego certificates" \
+  "uninstall     Remove TLSVPN-managed files" \
+  "rollback      Restore the newest" \
+  "maintenance   Renew certificates" \
   "status        Show installation" \
-  "arm64-v8.2" \
-  "lego|self-signed|existing|none" \
+  "--arch auto|amd64|386|arm64|arm64-v8.2|arm|armv7|mipsle|mips" \
+  "--cert-mode lego|self-signed|existing" \
   "XanMod" \
-  "TCP Brutal" \
-  "optimize-kernel"; do
-  grep -Fq "$needle" <<<"$help"
+  "tcp-brutal" \
+  "--optimize-kernel yes|no"; do
+  grep -Fq -- "$needle" <<<"$help"
 done
 
-grep -Fq 'REPO="NNdroid/tlsvpn"' scripts/install.sh
-grep -Fq 'tlsvpn_linux_amd64' scripts/install.sh
-grep -Fq 'tlsvpn_linux_arm64_v8.2' scripts/install.sh
-grep -Fq 'tlsvpn_linux_arm' scripts/install.sh
-grep -Fq 'args=(run --accept-tos' scripts/install.sh
-grep -Fq -- '--profile shortlived' scripts/install.sh
-grep -Fq 'lego migrate --path' scripts/install.sh
-grep -Fq 'RandomizedDelaySec=1h' scripts/install.sh
-grep -Fq 'https://tcp.hy2.sh/' scripts/install.sh
-grep -Fq 'http://deb.xanmod.org' scripts/install.sh
-grep -Fq '"traffic_days": 30' scripts/install.sh
-grep -Fq '"interface_manager": "self"' scripts/install.sh
-grep -Fq 'S_RELEASE_TAG=' scripts/install.sh
-
-if grep -Fq -- '--workers' scripts/install.sh; then
-  echo "Go installer must not expose the Rust-only --workers option" >&2
+if grep -Fq -- "--cert-mode lego|self-signed|existing|none" <<<"$help"; then
+  echo "server help must not advertise the unusable cert-mode none" >&2
   exit 1
 fi
+
+grep -Fq 'REPO="NNdroid/tlsvpn"' scripts/install.sh
+for asset in \
+  tlsvpn_linux_amd64 tlsvpn_linux_386 tlsvpn_linux_arm64 \
+  tlsvpn_linux_arm64_v8.2 tlsvpn_linux_arm tlsvpn_linux_mipsle tlsvpn_linux_mips; do
+  grep -Fq "$asset" scripts/install.sh
+done
+
+grep -Fq 'LEGO_ARGS=(run --path' scripts/install.sh
+grep -Fq -- '--profile shortlived' scripts/install.sh
+grep -Fq -- '--renew-days 2' scripts/install.sh
+grep -Fq -- '--renew-days 30' scripts/install.sh
+grep -Fq 'lego migrate --path' scripts/install.sh
+grep -Fq 'OnCalendar=daily' scripts/install.sh
+grep -Fq 'RandomizedDelaySec=45m' scripts/install.sh
+grep -Fq 'HyNetworks/tcp-brutal/master/scripts/install_dkms.sh' scripts/install.sh
+grep -Fq 'http://deb.xanmod.org' scripts/install.sh
+grep -Fq '"traffic_days": 30' scripts/install.sh
+grep -Fq '"traffic_file": "$traffic"' scripts/install.sh
+grep -Fq '"interface_manager":"self"' scripts/install.sh
+grep -Fq 'web_addr_is_loopback' scripts/install.sh
+grep -Fq 'Would install daily TLSVPN maintenance task' scripts/install.sh
+grep -Fq 'mkdir -p "$INSTALL_DIR" "$STATE_DIR"' scripts/install.sh
+
+for forbidden in 'NNdroid/tlsvpn-rs' 'unknown-linux-musl' '"workers"' '"mtu"'; do
+  if grep -Fq "$forbidden" scripts/install.sh; then
+    echo "Go installer contains forbidden Rust-only marker: $forbidden" >&2
+    exit 1
+  fi
+done
 
 if bash scripts/install.sh help --definitely-invalid >/dev/null 2>&1; then
   echo "unknown flag unexpectedly succeeded" >&2
