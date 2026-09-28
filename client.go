@@ -258,10 +258,14 @@ func (p *AsyncPort) run() {
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
 
-			// Interactive bursts get one very short coalescing opportunity. Under
-			// sustained load p.ch is already non-empty, so the hot bulk path never sleeps.
+			// Sparse bursts get an adaptive coalescing opportunity before we snapshot
+			// and drain p.ch. Tiny one-frame bursts may wait up to 500us so later TAP
+			// frames can fill the batch naturally; medium batches wait less, while
+			// sustained traffic (queue already non-empty) never sleeps here.
 			if len(p.ch) == 0 && batchBytes < MaxBatchBytes {
-				time.Sleep(150 * time.Microsecond)
+				if delay := streamCoalesceDelay(batchBytes); delay > 0 {
+					time.Sleep(delay)
+				}
 			}
 
 			queueLen := len(p.ch)
