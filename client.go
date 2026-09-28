@@ -216,7 +216,7 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 }
 
 func (p *AsyncPort) run() {
-	const MaxBatchBytes = 64 * 1024
+	const MaxBatchBytes = streamTLSBatchSoftLimit
 	batch := make([]VPNFrame, 0, 128)
 	var batchBytes int
 
@@ -257,6 +257,12 @@ func (p *AsyncPort) run() {
 			}
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
+
+			// Interactive bursts get one very short coalescing opportunity. Under
+			// sustained load p.ch is already non-empty, so the hot bulk path never sleeps.
+			if len(p.ch) == 0 && batchBytes < MaxBatchBytes {
+				time.Sleep(150 * time.Microsecond)
+			}
 
 			queueLen := len(p.ch)
 			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
@@ -1893,14 +1899,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
-				var padTotal uint64
+				lastFrameStart := -1
 			drainBatches:
 				for {
-					var n int
-					var p uint64
-					sendBuffer, n, p = appendOwnedFrameBatch(sendBuffer, frames, icTx, padRecordLimit)
+					var n, last int
+					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
 					txPackets += n
-					padTotal += p
+					if last >= 0 {
+						lastFrameStart = last
+					}
 					if len(sendBuffer) >= maxTLSWriteBatchBytes {
 						break
 					}
@@ -1911,6 +1918,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						break drainBatches
 					}
 				}
+				var tailPad int
+				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
+				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
