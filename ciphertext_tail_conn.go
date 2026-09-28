@@ -24,14 +24,15 @@ const ciphertextTailCarryDelay = 300 * time.Microsecond
 type ciphertextTailConn struct {
 	net.Conn
 
-	mu      sync.Mutex
-	enabled bool
-	mss     int
-	tail    []byte
-	timer   *time.Timer
-	delay   time.Duration
-	asyncErr error
-	closed  bool
+	mu         sync.Mutex
+	enabled    bool
+	mss        int
+	tail       []byte
+	timer      *time.Timer
+	timerArmed bool
+	delay      time.Duration
+	asyncErr   error
+	closed     bool
 }
 
 func newCiphertextTailConn(conn net.Conn) *ciphertextTailConn {
@@ -70,19 +71,27 @@ func (c *ciphertextTailConn) pending() int {
 }
 
 func (c *ciphertextTailConn) stopTimerLocked() {
-	if c.timer == nil {
-		return
+	if c.timer != nil && c.timerArmed {
+		c.timer.Stop()
 	}
-	c.timer.Stop()
-	c.timer = nil
+	c.timerArmed = false
 }
 
 func (c *ciphertextTailConn) armTimerLocked() {
-	c.stopTimerLocked()
 	if len(c.tail) == 0 || c.closed || !c.enabled {
+		c.stopTimerLocked()
 		return
 	}
-	c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
+	if c.timer == nil {
+		c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
+		c.timerArmed = true
+		return
+	}
+	// Reuse the same runtime timer instead of allocating one per TLS record.
+	// Reset starts a fresh bounded wait from the newest carried real-data tail.
+	c.timer.Stop()
+	c.timer.Reset(c.delay)
+	c.timerArmed = true
 }
 
 func writeAllConn(conn net.Conn, p []byte) error {
@@ -127,7 +136,7 @@ func (c *ciphertextTailConn) flushTailLocked() error {
 func (c *ciphertextTailConn) flushFromTimer() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.timer = nil
+	c.timerArmed = false
 	if c.closed || !c.enabled || c.asyncErr != nil {
 		return
 	}
@@ -213,7 +222,7 @@ func (c *ciphertextTailConn) Close() error {
 	}
 	c.closed = true
 	c.stopTimerLocked()
-	flushErr := error(nil)
+	var flushErr error
 	if c.asyncErr == nil {
 		flushErr = c.flushTailLocked()
 	} else {
