@@ -1746,6 +1746,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		streamPacker := newTunnelStreamPacker(padRecordLimit)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1777,44 +1778,78 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					atomic.StoreUint32(rttCache, rtt)
 				}
 			case frames := <-connTxChan:
-				sendBuffer = sendBuffer[:0]
-				txPackets := 0
-				lastFrameStart := -1
-			drainBatches:
+				streamPacker.appendOwnedFrames(frames, icTx)
 				for {
-					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
-					txPackets += n
-					if last >= 0 {
-						lastFrameStart = last
+				drainReady:
+					for {
+						select {
+						case more := <-connTxChan:
+							streamPacker.appendOwnedFrames(more, icTx)
+						default:
+							break drainReady
+						}
 					}
-					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+					chunkSize := streamPacker.fullChunkSize()
+					for streamPacker.available() >= chunkSize {
+						chunk := streamPacker.peek(chunkSize)
+						refreshWriteDeadline()
+						if err := writeFull(conn, chunk); err != nil {
+							log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, err)
+							conn.Close()
+							return
+						}
+						completed := streamPacker.consume(chunkSize)
+						recordPadBytes(uint64(chunkSize), 0)
+						atomic.AddUint64(&session.TxBytes, uint64(chunkSize))
+						atomic.AddUint64(&session.TxPackets, uint64(completed))
+						atomic.AddUint64(&ci.txBytes, uint64(chunkSize))
+						atomic.AddUint64(&ci.txPackets, uint64(completed))
+						dailyTraffic.Add(0, uint64(chunkSize))
+					}
+					if streamPacker.available() == 0 {
 						break
 					}
-					select {
-					case frames = <-connTxChan:
-						continue
-					default:
-						break drainBatches
+					delay := streamCoalesceDelay(streamPacker.available())
+					if delay > 0 && len(connTxChan) == 0 {
+						timer := time.NewTimer(delay)
+						gotMore := false
+						select {
+						case more := <-connTxChan:
+							if !timer.Stop() {
+								select {
+								case <-timer.C:
+								default:
+								}
+							}
+							streamPacker.appendOwnedFrames(more, icTx)
+							gotMore = true
+						case <-timer.C:
+
+						}
+						if gotMore {
+							continue
+						}
 					}
+					cover := streamPacker.appendIdleCover()
+					n := streamPacker.available()
+					if n > 0 {
+						chunk := streamPacker.peek(n)
+						refreshWriteDeadline()
+						if err := writeFull(conn, chunk); err != nil {
+							log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, err)
+							conn.Close()
+							return
+						}
+						completed := streamPacker.consume(n)
+						recordPadBytes(uint64(n), uint64(cover))
+						atomic.AddUint64(&session.TxBytes, uint64(n))
+						atomic.AddUint64(&session.TxPackets, uint64(completed))
+						atomic.AddUint64(&ci.txBytes, uint64(n))
+						atomic.AddUint64(&ci.txPackets, uint64(completed))
+						dailyTraffic.Add(0, uint64(n))
+					}
+					break
 				}
-				var tailPad int
-				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
-				padTotal := uint64(tailPad)
-				refreshWriteDeadline()
-				_, werr := conn.Write(sendBuffer)
-				if werr != nil {
-					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
-					conn.Close()
-					return
-				}
-				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
-				recordPadBytes(uint64(len(sendBuffer)), padTotal)
-				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&session.TxPackets, uint64(txPackets))
-				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&ci.txPackets, uint64(txPackets))
-				dailyTraffic.Add(0, uint64(len(sendBuffer))) // 下行 = server→client
 			case <-keepAliveTicker.C:
 				// 空心跳帧不计入填充累计：bucket 模式会给它补 118B 填充，
 				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务

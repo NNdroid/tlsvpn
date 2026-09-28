@@ -258,16 +258,6 @@ func (p *AsyncPort) run() {
 			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
 			batchBytes += len(frame)
 
-			// Sparse bursts get an adaptive coalescing opportunity before we snapshot
-			// and drain p.ch. Tiny one-frame bursts may wait up to 500us so later TAP
-			// frames can fill the batch naturally; medium batches wait less, while
-			// sustained traffic (queue already non-empty) never sleeps here.
-			if len(p.ch) == 0 && batchBytes < MaxBatchBytes {
-				if delay := streamCoalesceDelay(batchBytes); delay > 0 {
-					time.Sleep(delay)
-				}
-			}
-
 			queueLen := len(p.ch)
 			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
 				f := <-p.ch
@@ -1866,6 +1856,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		streamPacker := newTunnelStreamPacker(padRecordLimit)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1901,43 +1892,89 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					atomic.StoreUint32(rttCache, rtt)
 				}
 			case frames := <-connTxChan:
-				sendBuffer = sendBuffer[:0]
-				txPackets := 0
-				lastFrameStart := -1
-			drainBatches:
+				streamPacker.appendOwnedFrames(frames, icTx)
 				for {
-					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
-					txPackets += n
-					if last >= 0 {
-						lastFrameStart = last
+					// Drain everything already queued before deciding whether this is a
+					// sparse tail. Multiple AsyncPort batches become one continuous
+					// TLSVPN byte stream; frame boundaries no longer constrain writes.
+				drainReady:
+					for {
+						select {
+						case more := <-connTxChan:
+							streamPacker.appendOwnedFrames(more, icTx)
+						default:
+							break drainReady
+						}
 					}
-					if len(sendBuffer) >= maxTLSWriteBatchBytes {
+
+					// Under sustained load emit the largest <=16KiB plaintext chunk
+					// whose conservative ciphertext size is N*TCP_MAXSEG. This slice
+					// may end in the middle of a VPN frame; FrameScanner reassembles it.
+					chunkSize := streamPacker.fullChunkSize()
+					for streamPacker.available() >= chunkSize {
+						chunk := streamPacker.peek(chunkSize)
+						refreshWriteDeadline()
+						if err := writeFull(tlsConn, chunk); err != nil {
+							errChan <- err
+							return
+						}
+						completed := streamPacker.consume(chunkSize)
+						recordPadBytes(uint64(chunkSize), 0)
+						atomic.AddUint64(&c.TxBytes, uint64(chunkSize))
+						atomic.AddUint64(&c.TxPackets, uint64(completed))
+						atomic.AddUint64(&ci.txBytes, uint64(chunkSize))
+						dailyTraffic.Add(uint64(chunkSize), 0)
+					}
+					if streamPacker.available() == 0 {
 						break
 					}
-					select {
-					case frames = <-connTxChan:
-						continue
-					default:
-						break drainBatches
+
+					// Only an actually sparse remainder waits. The deadline is bounded
+					// and is not reset repeatedly, so a single packet cannot be held
+					// indefinitely waiting for a perfect MSS multiple.
+					delay := streamCoalesceDelay(streamPacker.available())
+					if delay > 0 && len(connTxChan) == 0 {
+						timer := time.NewTimer(delay)
+						gotMore := false
+						select {
+						case more := <-connTxChan:
+							if !timer.Stop() {
+								select {
+								case <-timer.C:
+								default:
+								}
+							}
+							streamPacker.appendOwnedFrames(more, icTx)
+							gotMore = true
+						case <-timer.C:
+
+						}
+						if gotMore {
+							continue
+						}
 					}
+
+					// Deadline reached: preserve latency. A tiny explicit cover frame may
+					// close the MSS gap only when it fits the 10%/512B budget; otherwise
+					// flush the real bytes unchanged. This is where sparse traffic exits.
+					cover := streamPacker.appendIdleCover()
+					n := streamPacker.available()
+					if n > 0 {
+						chunk := streamPacker.peek(n)
+						refreshWriteDeadline()
+						if err := writeFull(tlsConn, chunk); err != nil {
+							errChan <- err
+							return
+						}
+						completed := streamPacker.consume(n)
+						recordPadBytes(uint64(n), uint64(cover))
+						atomic.AddUint64(&c.TxBytes, uint64(n))
+						atomic.AddUint64(&c.TxPackets, uint64(completed))
+						atomic.AddUint64(&ci.txBytes, uint64(n))
+						dailyTraffic.Add(uint64(n), 0)
+					}
+					break
 				}
-				var tailPad int
-				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
-				padTotal := uint64(tailPad)
-				refreshWriteDeadline()
-				if _, err := tlsConn.Write(sendBuffer); err != nil {
-					errChan <- err
-					return
-				}
-				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
-				recordPadBytes(uint64(len(sendBuffer)), padTotal)
-				// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline
-				// 可少一次 runtime_pollSetDeadline syscall。
-				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&c.TxPackets, uint64(txPackets))
-				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
-				dailyTraffic.Add(uint64(len(sendBuffer)), 0) // 上行 = client→server
 			case <-keepAliveTicker.C:
 				// 空心跳帧不计入填充累计：bucket 模式会给它补 118B 填充，
 				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
