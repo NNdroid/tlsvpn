@@ -14,21 +14,48 @@ func TestStreamAlignedTLSPlaintextTarget(t *testing.T) {
 	}
 }
 
-func TestStreamTailPaddingOnlyTouchesLastFrame(t *testing.T) {
+func TestStreamPaddingBudget(t *testing.T) {
+	if got := streamPaddingBudget(1500); got != 150 {
+		t.Fatalf("1500B budget=%d want 150", got)
+	}
+	if got := streamPaddingBudget(10000); got != streamPadAbsoluteLimit {
+		t.Fatalf("10000B budget=%d want %d", got, streamPadAbsoluteLimit)
+	}
+}
+
+func TestStreamTailPaddingSkipsWastefulSingleMTUBatch(t *testing.T) {
+	old := setPadMode(padModeBucket)
+	defer setPadMode(old)
+	frames := getVPNFrameBatch(1)
+	frames[0] = VPNFrame{Seq: 1, Data: cloneFrame(make([]byte, 1500))}
+	buf, _, last := appendOwnedFrameBatchStream(nil, frames, nil)
+	before := len(buf)
+	buf, pad := padStreamBatchTail(buf, last, paddingRecordLimitForMSS(1440))
+	if pad != 0 {
+		t.Fatalf("wasteful single-frame tail padding=%d, want 0", pad)
+	}
+	if len(buf) != before {
+		t.Fatalf("single-frame batch length changed: before=%d after=%d", before, len(buf))
+	}
+	if got := binary.BigEndian.Uint16(buf[last+4 : last+6]); got != 0 {
+		t.Fatalf("single-frame pad header=%d want 0", got)
+	}
+}
+
+func TestStreamTailPaddingAppliesWhenCheap(t *testing.T) {
 	old := setPadMode(padModeBucket)
 	defer setPadMode(old)
 	frames := getVPNFrameBatch(2)
-	frames[0] = VPNFrame{Seq: 1, Data: cloneFrame(make([]byte, 700))}
-	frames[1] = VPNFrame{Seq: 2, Data: cloneFrame(make([]byte, 700))}
+	frames[0] = VPNFrame{Seq: 1, Data: cloneFrame(make([]byte, 4990))}
+	frames[1] = VPNFrame{Seq: 2, Data: cloneFrame(make([]byte, 4990))}
 	buf, _, last := appendOwnedFrameBatchStream(nil, frames, nil)
-	firstPad := binary.BigEndian.Uint16(buf[4:6])
-	if firstPad != 0 {
+	if firstPad := binary.BigEndian.Uint16(buf[4:6]); firstPad != 0 {
 		t.Fatalf("first frame unexpectedly padded: %d", firstPad)
 	}
 	before := len(buf)
 	buf, pad := padStreamBatchTail(buf, last, paddingRecordLimitForMSS(1440))
-	if pad <= 0 || len(buf) <= before {
-		t.Fatalf("tail padding not added: pad=%d before=%d after=%d", pad, before, len(buf))
+	if pad <= 0 || pad > streamPaddingBudget(before) {
+		t.Fatalf("cheap tail padding=%d budget=%d", pad, streamPaddingBudget(before))
 	}
 	if got := binary.BigEndian.Uint16(buf[last+4 : last+6]); int(got) != pad {
 		t.Fatalf("last frame pad header=%d want %d", got, pad)
