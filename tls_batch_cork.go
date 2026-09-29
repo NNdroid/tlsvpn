@@ -43,6 +43,11 @@ type tlsBatchCork struct {
 	delay   time.Duration
 	mss     int
 
+	// noop is immutable after construction. RTT-gated/L2-only connections can
+	// return before touching the mutex, leaving the existing data-plane hot path
+	// effectively identical to main.
+	noop bool
+
 	enabled    bool
 	corked     bool
 	closed     bool
@@ -53,7 +58,7 @@ type tlsBatchCork struct {
 }
 
 func newTLSBatchCork(conn net.Conn) *tlsBatchCork {
-	c := &tlsBatchCork{delay: tlsBatchCorkMaxDelay, mss: fallbackTCPMSS}
+	c := &tlsBatchCork{delay: tlsBatchCorkMaxDelay, mss: fallbackTCPMSS, noop: true}
 	tcp := underlyingTCPConn(conn)
 	if tcp == nil {
 		return c
@@ -68,6 +73,7 @@ func newTLSBatchCork(conn net.Conn) *tlsBatchCork {
 	c.delay = delay
 	c.setCork = func(on bool) error { return setTCPCork(tcp, on) }
 	c.enabled = true
+	c.noop = false
 	return c
 }
 
@@ -78,7 +84,7 @@ func newTLSBatchCorkForTest(mss int, delay time.Duration, setter func(bool) erro
 	if delay <= 0 {
 		delay = tlsBatchCorkMaxDelay
 	}
-	return &tlsBatchCork{setCork: setter, delay: delay, mss: mss, enabled: setter != nil}
+	return &tlsBatchCork{setCork: setter, delay: delay, mss: mss, enabled: setter != nil, noop: setter == nil}
 }
 
 // BeforeWrite must be called exactly once for a data-plane TLSVPN batch, before
@@ -87,7 +93,7 @@ func newTLSBatchCorkForTest(mss int, delay time.Duration, setter func(bool) erro
 // has arrived, the previous partial TCP segment must have had enough real bytes
 // available to be completed, so a fresh short deadline may begin.
 func (c *tlsBatchCork) BeforeWrite(n int) {
-	if c == nil || n <= 0 {
+	if c == nil || n <= 0 || c.noop {
 		return
 	}
 	c.mu.Lock()
@@ -155,7 +161,7 @@ func (c *tlsBatchCork) flushTimer() {
 }
 
 func (c *tlsBatchCork) Close() {
-	if c == nil {
+	if c == nil || c.noop {
 		return
 	}
 	c.mu.Lock()
