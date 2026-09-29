@@ -26,6 +26,20 @@ import (
 type Backend struct {
 	ch       chan []VPNFrame
 	rttCache *uint32
+
+	// Adaptive scheduler observability. queuedBytes includes channel-resident
+	// batches plus the batch currently owned by the TLS writer until Write
+	// succeeds. The writer publishes delivery-rate EWMA; AsyncPort only reads it.
+	queuedBytes     atomic.Uint64
+	rateBytesPerSec atomic.Uint64
+	etaUsec         atomic.Uint64
+	active          atomic.Bool
+	carryPending    atomic.Bool
+	assignedBytes   atomic.Uint64 // actual data bytes accepted by this backend (after fallback)
+	assignedBatches atomic.Uint64 // actual data batches accepted by this backend
+	virtualFinishNS atomic.Int64  // scheduler-only service debt, published atomically for race safety
+	rateSampleBytes uint64
+	rateSampleStart time.Time
 }
 
 type AsyncPort struct {
@@ -45,7 +59,18 @@ type AsyncPort struct {
 	paritySent    atomic.Uint64
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
-	dataNext      uint32   // run goroutine 独占：高负载时在相近 RTT 后端间轮转
+	dataNext      uint32   // legacy/compatibility picker cursor
+
+	// Adaptive multipath state. Input bytes are accounted independently from
+	// frame count so 64 tiny packets no longer look like 64 full-MTU packets.
+	inputQueuedBytes     atomic.Uint64
+	inputTotalBytes      atomic.Uint64
+	inputRateBytesPerSec atomic.Uint64
+	activePaths          atomic.Int32
+	schedulerPressure    atomic.Uint64
+	schedulerScratch     []backendCandidate // run goroutine owned; reused per batch
+	demandSampleTotal    uint64             // run goroutine owned
+	demandSampleAt       time.Time          // run goroutine owned
 }
 
 type portEpochReset struct {
@@ -117,10 +142,12 @@ func (p *AsyncPort) nextSeq() (uint32, bool) {
 }
 
 func (p *AsyncPort) ID() string { return p.id }
-func (p *AsyncPort) RegisterBackend(ch chan []VPNFrame, rttCache *uint32) {
+func (p *AsyncPort) RegisterBackend(ch chan []VPNFrame, rttCache *uint32) *Backend {
 	p.backendsMu.Lock()
 	defer p.backendsMu.Unlock()
-	p.backends = append(p.backends, &Backend{ch: ch, rttCache: rttCache})
+	b := &Backend{ch: ch, rttCache: rttCache}
+	p.backends = append(p.backends, b)
+	return b
 }
 func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 	p.backendsMu.Lock()
@@ -159,9 +186,15 @@ func (p *AsyncPort) WriteOwnedFrame(frame []byte) error {
 		return fmt.Errorf("port closed")
 	default:
 	}
+	queuedInput := len(frame)
+	p.noteInputQueued(queuedInput)
+	if queuedInput > 0 {
+		p.inputTotalBytes.Add(uint64(queuedInput))
+	}
 	select {
 	case p.ch <- frame:
 	default:
+		p.noteInputDequeued(queuedInput)
 		log.Debugf("[AsyncPort %s] BACKPRESSURE! Queue full, dropping frame.", p.id)
 		p.dropN(1)
 		if frame != nil {
@@ -236,6 +269,7 @@ func (p *AsyncPort) run() {
 			}
 			close(reset.done)
 		case frame := <-p.ch:
+			p.noteInputDequeued(len(frame))
 			if len(frame) == 0 {
 				// 零长帧不携带数据：不消耗 seq、不参与 FEC 分组
 				// （否则接收端按算术分组会把该槽位视为永久缺失，毒化整组恢复）
@@ -267,6 +301,7 @@ func (p *AsyncPort) run() {
 			queueLen := len(p.ch)
 			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
 				f := <-p.ch
+				p.noteInputDequeued(len(f))
 				if len(f) == 0 {
 					putFrame(f)
 					continue
@@ -281,10 +316,9 @@ func (p *AsyncPort) run() {
 				batchBytes += len(f)
 			}
 
-			// queueLen 是 drain 前的积压快照；len(batch) 则保留‘这一轮已经聚成大批量’的事实。
-			// 旧实现只在 dispatch 时重新看 len(p.ch)，队列刚被 drain 空时会误判为交互流量。
-			bulk := queueLen >= multipathStripeBacklog || len(batch) >= multipathStripeBatchFrames
-			p.dispatchBatch(batch, bulk)
+			// Adaptive scheduling uses bytes, backend in-flight work and measured path
+			// delivery rate. queueLen remains only the bounded drain snapshot above.
+			p.dispatchBatch(batch, batchBytes)
 
 			batch = batch[:0]
 			batchBytes = 0
@@ -297,7 +331,7 @@ func (p *AsyncPort) run() {
 //   - 普通模式：MinRTT 单路发送。
 //
 // wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
-func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
+func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
 	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
 	p.backendsMu.RLock()
@@ -308,6 +342,8 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
 		freeFrames(batch)
 		return
 	}
+	pressure := p.schedulerPressureFor(backends, uint64(batchBytes))
+	dataBest := p.pickAdaptiveBackend(backends, pressure, uint64(batchBytes))
 
 	if p.encoder != nil {
 		parities := p.parityScratch[:0]
@@ -316,7 +352,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
 				parities = append(parities, par)
 			}
 		}
-		best := p.pickDataBackendFor(backends, bulk)
+		best := dataBest
 		// 低负载仍走 MinRTT；持续 backlog 时会在 RTT 接近的健康路径间主动 striping。
 		// 若目标连接瞬时满则继续尝试其它后端；全部满时
 		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
@@ -340,7 +376,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame, bulk bool) {
 		return
 	}
 
-	p.dropN(sendBatchToAny(backends, p.pickDataBackendFor(backends, bulk), batch))
+	p.dropN(sendBatchToAny(backends, dataBest, batch))
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -489,15 +525,20 @@ func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) i
 	for i := range batch {
 		batch[i].Data = nil
 	}
+	outBytes := vpnFrameBatchBytes(out)
 
 	trySend := func(b *Backend) bool {
 		if b == nil {
 			return false
 		}
+		b.addQueuedBytes(outBytes)
 		select {
 		case b.ch <- out:
+			b.assignedBytes.Add(outBytes)
+			b.assignedBatches.Add(1)
 			return true
 		default:
+			b.completeQueuedBytes(outBytes)
 			return false
 		}
 	}
@@ -549,10 +590,13 @@ func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
 	}
 	out := getVPNFrameBatch(1)
 	out[0] = vf
+	n := uint64(len(vf.Data))
+	b.addQueuedBytes(n)
 	select {
 	case b.ch <- out:
 		return 0
 	default:
+		b.completeQueuedBytes(n)
 		freeFrames(out)
 		putVPNFrameBatch(out)
 		return 1
@@ -563,10 +607,13 @@ func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
 func sendFrameTo(b *Backend, vf VPNFrame) int {
 	out := getVPNFrameBatch(1)
 	out[0] = VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
+	n := uint64(len(out[0].Data))
+	b.addQueuedBytes(n)
 	select {
 	case b.ch <- out:
 		return 0
 	default:
+		b.completeQueuedBytes(n)
 		freeFrames(out)
 		putVPNFrameBatch(out)
 		return 1
@@ -957,6 +1004,7 @@ type clientConnInfo struct {
 	state     atomic.Value // string：connecting / up / retrying
 	lastError atomic.Value // string：最近一次失败原因
 	rttCache  *uint32      // 微秒（200ms 刷新）
+	backend   atomic.Pointer[Backend]
 	conn      atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
 	txBytes   uint64
 	rxBytes   uint64
@@ -1365,16 +1413,17 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
-	Index     int    `json:"index"`
-	Target    string `json:"target"`
-	Remote    string `json:"remote"`
-	State     string `json:"state"`
-	LastError string `json:"last_error,omitempty"`
-	RttMs     uint32 `json:"rtt_ms"`
-	TxBytes   uint64 `json:"tx_bytes"`
-	RxBytes   uint64 `json:"rx_bytes"`
-	Retries   uint64 `json:"retries"`
-	AgeSec    uint64 `json:"age_sec"`
+	Index     int               `json:"index"`
+	Target    string            `json:"target"`
+	Remote    string            `json:"remote"`
+	State     string            `json:"state"`
+	LastError string            `json:"last_error,omitempty"`
+	RttMs     uint32            `json:"rtt_ms"`
+	Scheduler schedulerConnJSON `json:"scheduler"`
+	TxBytes   uint64            `json:"tx_bytes"`
+	RxBytes   uint64            `json:"rx_bytes"`
+	Retries   uint64            `json:"retries"`
+	AgeSec    uint64            `json:"age_sec"`
 	// TCP Brutal 生效结果（客户端本地整形）
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
@@ -1435,6 +1484,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			Index:        i,
 			Target:       ci.target,
 			RttMs:        atomic.LoadUint32(ci.rttCache) / 1000,
+			Scheduler:    schedulerSnapshot(ci.backend.Load()),
 			TxBytes:      atomic.LoadUint64(&ci.txBytes),
 			RxBytes:      atomic.LoadUint64(&ci.rxBytes),
 			Retries:      atomic.LoadUint64(&ci.retries),
@@ -1835,10 +1885,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	errChan := make(chan error, 2)
 	connTxChan := make(chan []VPNFrame, 32)
-	c.txPort.RegisterBackend(connTxChan, rttCache)
-	defer c.txPort.UnregisterBackend(connTxChan)
+	backend := c.txPort.RegisterBackend(connTxChan, rttCache)
+	ci.backend.Store(backend)
+	defer func() {
+		ci.backend.CompareAndSwap(backend, nil)
+		c.txPort.UnregisterBackend(connTxChan)
+	}()
 
 	batchCork := newTLSBatchCork(rawConn)
+	batchCork.BindCarryState(&backend.carryPending)
 	defer batchCork.Close()
 
 	// netifd represents the aggregate VPN session, not one TCP backend.
@@ -1902,9 +1957,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
+				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
+					queuedPayload += vpnFrameBatchBytes(frames)
 					var n, last int
 					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
 					txPackets += n
@@ -1930,6 +1987,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					errChan <- err
 					return
 				}
+				backend.completeQueuedBytes(queuedPayload)
+				backend.observeDelivered(queuedPayload)
 				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
 				recordPadBytes(uint64(len(sendBuffer)), padTotal)
 				// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline

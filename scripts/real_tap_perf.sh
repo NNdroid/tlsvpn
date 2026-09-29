@@ -16,6 +16,7 @@
 #   PERF_MIN_MBPS       hard minimum for each measured direction (default: 500)
 #   PERF_RESULT_FILE    append TSV results here (optional)
 #   PERF_PROFILE_DIR    enable CPU/heap profiles for both endpoints (optional)
+#   PERF_DIAG_FILE       append adaptive scheduler per-connection diagnostics (optional)
 #
 # When PERF_PROFILE_DIR is set the binary receives TLSVPN_CPU_PROFILE and
 # TLSVPN_HEAP_PROFILE. The processes are terminated with SIGTERM and awaited so
@@ -31,8 +32,11 @@ PERF_SECONDS="${PERF_SECONDS:-3}"
 PERF_MIN_MBPS="${PERF_MIN_MBPS:-500}"
 PERF_RESULT_FILE="${PERF_RESULT_FILE:-}"
 PERF_PROFILE_DIR="${PERF_PROFILE_DIR:-}"
+PERF_DIAG_FILE="${PERF_DIAG_FILE:-}"
 
 PORT="${PORT:-18600}"
+WEB_ADDR="127.0.0.1:18780"
+WEB_AUTH="perf:tlsvpn"
 GW_V4="10.77.0.1"
 CLI_V4="10.77.0.2"
 SUBNET_V4="10.77.0.0/24"
@@ -180,6 +184,7 @@ write_configs() {
   "enc_algo": "$PERF_ENC_ALGO",
   "pad_mode": "$PERF_PAD_MODE",
   "log_level": "warn",
+  "web": {"addr": "$WEB_ADDR", "bind": "all", "auth": "$WEB_AUTH"},
   "server": {
     "cert": "$TMP/cert.pem",
     "key": "$TMP/key.pem",
@@ -199,6 +204,7 @@ EOF
   "enc_algo": "$PERF_ENC_ALGO",
   "pad_mode": "$PERF_PAD_MODE",
   "log_level": "warn",
+  "web": {"addr": "$WEB_ADDR", "bind": "all", "auth": "$WEB_AUTH"},
   "client": {
     "conns": $PERF_CONNS,
     "cert_sha256": "$fp",
@@ -255,6 +261,71 @@ record_result() {
   fi
 }
 
+
+scheduler_diag() {
+  local direction="$1" ns role
+  if [[ "$direction" == "upload" ]]; then
+    ns="$NS_CLI"; role="client"
+  else
+    ns="$NS_SRV"; role="server"
+  fi
+  ip netns exec "$ns" python3 - "$WEB_ADDR" "$WEB_AUTH" "$PERF_DIAG_FILE" "$PERF_CONNS" "$PERF_ENC_ALGO" "$PERF_PAD_MODE" "$direction" "$role" <<'PY'
+import base64, json, sys, time, urllib.request
+addr, auth, out, conns, enc, pad, direction, role = sys.argv[1:]
+url = 'http://' + addr + '/api/stats'
+req = urllib.request.Request(url, headers={'Authorization': 'Basic ' + base64.b64encode(auth.encode()).decode()})
+last = None
+for _ in range(20):
+    try:
+        with urllib.request.urlopen(req, timeout=0.5) as r:
+            data = json.load(r)
+        break
+    except Exception as e:
+        last = e
+        time.sleep(0.05)
+else:
+    print(f'[real-tap-perf] scheduler diagnostic unavailable: {last}', file=sys.stderr)
+    raise SystemExit(0)
+rows = data.get('conns', []) if role == 'client' else data.get('server_conns', [])
+# Baseline main has no scheduler object. In that case diagnostics are a no-op.
+if not any(isinstance(c.get('scheduler'), dict) for c in rows):
+    raise SystemExit(0)
+reorder = data.get('reorder') or {}
+records = []
+assigned = []
+for i, c in enumerate(rows):
+    sched = c.get('scheduler') or {}
+    ident = c.get('index', i) if role == 'client' else c.get('remote', str(i))
+    n = int(sched.get('assigned_bytes', 0) or 0)
+    assigned.append(n)
+    records.append([
+        conns, enc, pad, direction, role, str(ident),
+        str(c.get('tx_bytes', 0)), str(c.get('rx_bytes', 0)),
+        str(n), str(sched.get('assigned_batches', 0)),
+        '1' if sched.get('active') else '0',
+        str(sched.get('queued_bytes', 0)), str(sched.get('rate_mbps', 0)), str(sched.get('eta_us', 0)),
+        '1' if sched.get('carry_pending') else '0',
+        str(reorder.get('gap_events', 0)), str(reorder.get('timeout_flushes', 0)),
+        str(reorder.get('skipped_frames', 0)), str(reorder.get('dropped_frames', 0)),
+    ])
+if out:
+    with open(out, 'a', encoding='utf-8') as f:
+        for vals in records:
+            f.write('\t'.join(vals) + '\n')
+total = sum(assigned)
+shares = [(n / total if total else 0.0) for n in assigned]
+print('[real-tap-perf] scheduler %s/%s assigned=%s shares=%s' % (
+    direction, role, assigned, [round(x, 4) for x in shares]))
+want = int(conns)
+if want > 1:
+    used = sum(n > 0 for n in assigned)
+    if len(assigned) < want or used < want:
+        raise SystemExit('adaptive scheduler used %d/%d paths: %s' % (used, want, assigned))
+    if total and max(shares) > 0.80:
+        raise SystemExit('adaptive scheduler path monopoly %.1f%%: %s' % (max(shares) * 100, shares))
+PY
+}
+
 iperf_direction() {
   local direction="$1" json mbps extra=""
   [[ "$direction" == "download" ]] && extra="-R"
@@ -265,6 +336,7 @@ iperf_direction() {
   mbps=$(printf '%s\n' "$json" | parse_mbps) || die "cannot parse iperf3 $direction result"
   log "$direction: ${mbps} Mbps (conns=$PERF_CONNS enc=$PERF_ENC_ALGO pad=$PERF_PAD_MODE)"
   record_result "$direction" "$mbps"
+  scheduler_diag "$direction" || die "adaptive scheduler utilization gate failed"
 }
 
 verify_profiles() {
