@@ -71,8 +71,8 @@ replace_once(
 )
 replace_once(
     'server.go',
-    '''\t\t\t\tpadTotal := uint64(tailPad)\n\t\t\t\trefreshWriteDeadline()\n\t\t\t\tif _, err := conn.Write(sendBuffer); err != nil {\n''',
-    '''\t\t\t\tpadTotal := uint64(tailPad)\n\t\t\t\trefreshWriteDeadline()\n\t\t\t\tbatchCork.BeforeWrite(len(sendBuffer))\n\t\t\t\tif _, err := conn.Write(sendBuffer); err != nil {\n''',
+    '''\t\t\t\tpadTotal := uint64(tailPad)\n\t\t\t\trefreshWriteDeadline()\n\t\t\t\t_, werr := conn.Write(sendBuffer)\n''',
+    '''\t\t\t\tpadTotal := uint64(tailPad)\n\t\t\t\trefreshWriteDeadline()\n\t\t\t\tbatchCork.BeforeWrite(len(sendBuffer))\n\t\t\t\t_, werr := conn.Write(sendBuffer)\n''',
 )
 
 # Restore direct internal handler tests to the pre-wrapper signature.
