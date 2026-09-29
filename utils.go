@@ -96,6 +96,10 @@ type PrefixConn struct {
 	prefix []byte
 }
 
+// Unwrap exposes the underlying transport so socket-level optimizations such
+// as TCP_MAXSEG/TCP_CORK can reach the real *net.TCPConn through PrefixConn.
+func (c *PrefixConn) Unwrap() net.Conn { return c.Conn }
+
 func (c *PrefixConn) Read(p []byte) (n int, err error) {
 	if len(c.prefix) > 0 {
 		n = copy(p, c.prefix)
