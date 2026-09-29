@@ -24,15 +24,16 @@ const ciphertextTailCarryDelay = 300 * time.Microsecond
 type ciphertextTailConn struct {
 	net.Conn
 
-	mu         sync.Mutex
-	enabled    bool
-	mss        int
-	tail       []byte
-	timer      *time.Timer
-	timerArmed bool
-	delay      time.Duration
-	asyncErr   error
-	closed     bool
+	mu           sync.Mutex
+	enabled      bool
+	mss          int
+	tail         []byte
+	timer        *time.Timer
+	timerArmed   bool
+	tailDeadline time.Time
+	delay        time.Duration
+	asyncErr     error
+	closed       bool
 }
 
 func newCiphertextTailConn(conn net.Conn) *ciphertextTailConn {
@@ -90,6 +91,7 @@ func (c *ciphertextTailConn) stopTimerLocked() {
 		c.timer.Stop()
 	}
 	c.timerArmed = false
+	c.tailDeadline = time.Time{}
 }
 
 func (c *ciphertextTailConn) armTimerLocked() {
@@ -102,6 +104,7 @@ func (c *ciphertextTailConn) armTimerLocked() {
 		// hard latency bound even if small TLS writes keep arriving.
 		return
 	}
+	c.tailDeadline = time.Now().Add(c.delay)
 	if c.timer == nil {
 		c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
 	} else {
@@ -152,10 +155,21 @@ func (c *ciphertextTailConn) flushTailLocked() error {
 func (c *ciphertextTailConn) flushFromTimer() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.timerArmed = false
-	if c.closed || !c.enabled || c.asyncErr != nil {
+
+	if !c.timerArmed || c.closed || !c.enabled || c.asyncErr != nil {
 		return
 	}
+	// A Stop/Reset can race with a callback that has already started and is
+	// waiting for c.mu. If a newer tail now owns a later deadline, the stale
+	// callback must not flush it early; simply re-arm for the remaining time.
+	if !c.tailDeadline.IsZero() {
+		if remaining := time.Until(c.tailDeadline); remaining > 0 {
+			c.timer.Reset(remaining)
+			return
+		}
+	}
+	c.timerArmed = false
+	c.tailDeadline = time.Time{}
 	_ = c.flushTailLocked()
 }
 
