@@ -1,0 +1,36 @@
+name: apply-batch-cork
+
+on:
+  push:
+    branches:
+      - perf/ciphertext-sub-mss-tail-carry-integrated-20260929
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Apply source integration
+        run: python3 .github/apply_batch_cork.py
+      - name: Format and focused validation
+        run: |
+          gofmt -w client.go server.go fec_policy_test.go tls_batch_cork.go tls_batch_cork_test.go ciphertext_cork_linux.go ciphertext_cork_other.go
+          go test ./... -run 'TestTLSBatchCork|TestStream|TestFrameScanner|TestFEC' -count=1 -timeout=3m
+          go test -race ./... -run 'TestTLSBatchCork|TestStream|TestFrameScanner' -count=1 -timeout=3m
+          go build ./...
+          git diff --check
+      - name: Commit final source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'perf: move TCP tail carry to TLSVPN batch boundary'
+          git push origin HEAD:perf/ciphertext-sub-mss-tail-carry-integrated-20260929
