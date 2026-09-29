@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -32,4 +33,13 @@ func setTCPCork(conn *net.TCPConn, enabled bool) error {
 		return err
 	}
 	return sockErr
+}
+
+// ciphertextTransportRTT returns the kernel TCP RTT estimate for choosing a
+// carry window. TCP_INFO exposes Rtt in microseconds.
+func ciphertextTransportRTT(conn *net.TCPConn) time.Duration {
+	if rtt, err := getTCPRTT(conn); err == nil && rtt > 0 {
+		return time.Duration(rtt) * time.Microsecond
+	}
+	return 0
 }
