@@ -220,7 +220,7 @@ func TestAsyncPortBackpressureDoesNotConsumeSequenceBeforeBackendSlot(t *testing
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // 明确超过旧 sendBatchToAny 的 5ms 丢弃窗口
-	<-ch                              // 释放 backend slot
+	<-ch                             // 释放 backend slot
 
 	select {
 	case batch := <-ch:
