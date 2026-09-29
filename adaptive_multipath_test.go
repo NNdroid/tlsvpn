@@ -80,12 +80,15 @@ func TestAdaptiveSchedulerExcludesMateriallySlowerRTT(t *testing.T) {
 	a := testAdaptiveBackend(20_000)
 	b := testAdaptiveBackend(21_000)
 	slow := testAdaptiveBackend(60_000)
+	for _, path := range []*Backend{a, b, slow} {
+		path.rateBytesPerSec.Store(100_000_000)
+	}
 	_ = p.pickAdaptiveBackend([]*Backend{a, b, slow}, adaptiveActive4Pressure, 12*1024)
 	if !a.active.Load() || !b.active.Load() {
 		t.Fatalf("near-RTT paths not active: a=%v b=%v", a.active.Load(), b.active.Load())
 	}
 	if slow.active.Load() {
-		t.Fatal("materially slower path entered active set")
+		t.Fatal("materially slower warmed path entered active set")
 	}
 	if got := p.activePaths.Load(); got != 2 {
 		t.Fatalf("activePaths=%d want 2 eligible paths", got)
@@ -96,6 +99,8 @@ func TestAdaptiveSchedulerCarryIsOnlyTieBreaker(t *testing.T) {
 	p := &AsyncPort{}
 	a := testAdaptiveBackend(20_000)
 	b := testAdaptiveBackend(20_000)
+	a.rateBytesPerSec.Store(100_000_000)
+	b.rateBytesPerSec.Store(100_000_000)
 	b.carryPending.Store(true)
 	got := p.pickAdaptiveBackend([]*Backend{a, b}, adaptiveActive2Pressure, 4*1024)
 	if got != b {
@@ -104,6 +109,7 @@ func TestAdaptiveSchedulerCarryIsOnlyTieBreaker(t *testing.T) {
 
 	p.preferred.Store(nil)
 	far := testAdaptiveBackend(40_000)
+	far.rateBytesPerSec.Store(100_000_000)
 	far.carryPending.Store(true)
 	got = p.pickAdaptiveBackend([]*Backend{a, far}, adaptiveActive2Pressure, 4*1024)
 	if got == far {
@@ -232,5 +238,46 @@ func TestAdaptiveSchedulerUnknownPathGetsFairStart(t *testing.T) {
 	}
 	if counts[hot] > counts[cold]*3 || counts[cold] > counts[hot]*3 {
 		t.Fatalf("fair-start distribution is badly skewed before cold path measurement: counts=%v", counts)
+	}
+}
+
+func TestAdaptiveSchedulerColdMeasuredRTTWarmsBeforeExclusion(t *testing.T) {
+	p := &AsyncPort{}
+	hot := testAdaptiveBackend(20_000)
+	coldSlow := testAdaptiveBackend(80_000)
+	warmedSlow := testAdaptiveBackend(80_000)
+	hot.rateBytesPerSec.Store(100_000_000)
+	warmedSlow.rateBytesPerSec.Store(100_000_000)
+	p.inputRateBytesPerSec.Store(adaptiveActive3RateBytesPerSec)
+
+	counts := map[*Backend]int{}
+	for i := 0; i < 12; i++ {
+		counts[p.pickAdaptiveBackend([]*Backend{hot, coldSlow, warmedSlow}, 0, 12*1024)]++
+	}
+	if counts[coldSlow] == 0 {
+		t.Fatalf("cold path with early high RTT was starved before delivery warm-up: counts=%v", counts)
+	}
+	if counts[warmedSlow] != 0 {
+		t.Fatalf("already-warmed slow path bypassed near-MinRTT exclusion: counts=%v", counts)
+	}
+	if got := p.activePaths.Load(); got != 2 {
+		t.Fatalf("activePaths=%d want hot+cold fair-start paths", got)
+	}
+
+	// Once the cold path has a real delivery-rate sample, its measured 80ms RTT
+	// becomes authoritative and it must leave the active set immediately.
+	coldSlow.rateBytesPerSec.Store(100_000_000)
+	before := counts[coldSlow]
+	for i := 0; i < 8; i++ {
+		counts[p.pickAdaptiveBackend([]*Backend{hot, coldSlow, warmedSlow}, 0, 12*1024)]++
+	}
+	if counts[coldSlow] != before {
+		t.Fatalf("warmed slow path kept receiving traffic after RTT exclusion: before=%d after=%d", before, counts[coldSlow])
+	}
+	if coldSlow.active.Load() {
+		t.Fatal("warmed slow path retained stale active membership")
+	}
+	if got := p.activePaths.Load(); got != 1 {
+		t.Fatalf("activePaths=%d want only near-MinRTT hot path after warm-up", got)
 	}
 }
