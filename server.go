@@ -429,6 +429,7 @@ type ClientSession struct {
 
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
 type connInfo struct {
+	connID    string
 	remote    string
 	tcpConn   *net.TCPConn
 	rttCache  *uint32 // 微秒（200ms 刷新）
@@ -895,6 +896,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 			}
 			out = append(out, serverConnSnapshot{
 				ClientID:  id,
+				ConnID:    ci.connID,
 				Remote:    ci.remote,
 				RttMs:     atomic.LoadUint32(ci.rttCache) / 1000,
 				Scheduler: schedulerSnapshot(ci.backend.Load()),
@@ -1345,8 +1347,19 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		return
 	}
 	putFrame(reqData)
-	log.Debugf("<= handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
-		req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
+	connID := strings.TrimSpace(req.ConnID)
+	if connID != "" {
+		if parsed, err := uuid.Parse(connID); err == nil {
+			connID = parsed.String()
+		} else {
+			// conn_id 只用于诊断关联，绝不能参与认证。第三方/旧实现给出非法值时
+			// 忽略该诊断字段，而不是把一次本可成功的认证升级变成协议不兼容。
+			log.Debugf("ignoring malformed conn_id from client %s", req.ClientID)
+			connID = ""
+		}
+	}
+	log.Debugf("<= handshake request conn_id=%s client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
+		connID, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
 
 	// 一次性快照鉴权参数（ApplyConfig 会在 s.mu 下改写，无锁读是数据竞争）
 	s.mu.RLock()
@@ -1633,6 +1646,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	sessionEpoch := session.Epoch
 	sessionEncrypt := session.Encrypt
 	ci := &connInfo{
+		connID:   connID,
 		remote:   tcpConn.RemoteAddr().String(),
 		tcpConn:  tcpConn,
 		linkedAt: time.Now().Unix(),

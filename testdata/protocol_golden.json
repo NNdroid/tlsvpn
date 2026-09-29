@@ -181,6 +181,7 @@
     "brutal_total_tx",
     "client_id",
     "client_instance",
+    "conn_id",
     "enc_algo",
     "encrypt",
     "fec",

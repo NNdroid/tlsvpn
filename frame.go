@@ -510,6 +510,7 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 type HandshakeReq struct {
 	ProtocolVersion int    `json:"protocol_version,omitempty"`
 	ClientInstance  string `json:"client_instance,omitempty"`
+	ConnID          string `json:"conn_id,omitempty"`
 	ClientID        string `json:"client_id"`
 	PSK             string `json:"psk"`
 	MAC             string `json:"mac,omitempty"`

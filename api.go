@@ -104,6 +104,7 @@ type WebStats struct {
 // serverConnSnapshot 服务端单条物理连接的明细快照
 type serverConnSnapshot struct {
 	ClientID  string            `json:"client_id"`
+	ConnID    string            `json:"conn_id,omitempty"`
 	Remote    string            `json:"remote"`
 	RttMs     uint32            `json:"rtt_ms"`
 	Scheduler schedulerConnJSON `json:"scheduler"`

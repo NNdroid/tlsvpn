@@ -180,7 +180,7 @@ func buildGoldenVectors() *GoldenVectors {
 	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
 	// 降级成单向子集）。
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "x",
+		ProtocolVersion: 2, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
@@ -322,7 +322,7 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		}
 	}
 	checkKeys("handshake_req_keys", gv.HandshakeReqKeys, jsonFieldNames(HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "x",
+		ProtocolVersion: 2, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
@@ -345,7 +345,7 @@ func TestGoldenSelfConsistency(t *testing.T) {
 func TestHandshakeJSONContract(t *testing.T) {
 	// 全字段填充，确保 omitempty 字段也出现
 	req := HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "instance-1",
+		ProtocolVersion: 2, ClientInstance: "instance-1", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
 		BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, BrutalConns: 4, BrutalConnIndex: 1,
@@ -353,7 +353,7 @@ func TestHandshakeJSONContract(t *testing.T) {
 		SessionToken: "tok",
 	}
 	wantReq := []string{
-		"brutal_conn_index", "brutal_conns", "brutal_groups", "brutal_total_rx", "brutal_total_tx", "client_id", "client_instance", "enc_algo", "encrypt", "fec",
+		"brutal_conn_index", "brutal_conns", "brutal_groups", "brutal_total_rx", "brutal_total_tx", "client_id", "client_instance", "conn_id", "enc_algo", "encrypt", "fec",
 		"fec_group", "ipv4", "ipv6", "mac", "padding", "protocol_version", "psk", "session_token",
 	}
 	if got := jsonFieldNames(req); !equalStrings(got, wantReq) {
@@ -388,7 +388,7 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 	json.Unmarshal(b, &m)
 
 	// 这些字段带 omitempty，零值时不出现
-	for _, k := range []string{"protocol_version", "client_instance", "mac", "ipv4", "ipv6", "padding", "brutal_groups", "brutal_total_tx", "brutal_total_rx", "brutal_conns", "brutal_conn_index", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
+	for _, k := range []string{"protocol_version", "client_instance", "conn_id", "mac", "ipv4", "ipv6", "padding", "brutal_groups", "brutal_total_tx", "brutal_total_rx", "brutal_conns", "brutal_conn_index", "fec", "fec_group", "encrypt", "enc_algo", "enc_salt", "enc_salt2", "session_token"} {
 		if _, ok := m[k]; ok {
 			t.Errorf("字段 %q 应因 omitempty 而省略，实际出现了", k)
 		}
