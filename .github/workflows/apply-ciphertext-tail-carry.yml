@@ -22,7 +22,7 @@ jobs:
         run: python3 .github/apply_ciphertext_tail_carry.py
       - name: Format and test
         run: |
-          gofmt -w client.go server.go ciphertext_tail_conn.go ciphertext_tail_conn_test.go *_test.go
+          gofmt -w client.go server.go ciphertext_tail_conn.go *_test.go
           go test ./... -run 'TestCiphertextTailConn|TestStream|TestFrameScanner|TestFEC' -count=1
           go test -race ./... -run 'TestCiphertextTailConn|TestStream|TestFrameScanner' -count=1
           go test ./... -count=1
