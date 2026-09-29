@@ -1,6 +1,9 @@
 name: apply-ciphertext-tail-carry
 
-on: [push]
+on:
+  push:
+    branches:
+      - perf/ciphertext-sub-mss-tail-carry-integrated-20260929
 
 permissions:
   contents: write
@@ -15,187 +18,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: patch-test-commit
-        shell: bash
+      - name: Apply source patch
+        run: python3 .github/apply_ciphertext_tail_carry.py
+      - name: Format and test
         run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          def replace_once(path, old, new):
-              p = Path(path)
-              s = p.read_text()
-              n = s.count(old)
-              if n != 1:
-                  raise SystemExit(f'{path}: expected one match, got {n}: {old[:100]!r}')
-              p.write_text(s.replace(old, new, 1))
-
-          replace_once('ciphertext_tail_conn.go', """\tif c.timer == nil {
-\t\tc.timer = time.AfterFunc(c.delay, c.flushFromTimer)
-\t\tc.timerArmed = true
-\t\treturn
-\t}
-\t// Reuse the same runtime timer instead of allocating one per TLS record.
-\t// Reset starts a fresh bounded wait from the newest carried real-data tail.
-\tc.timer.Stop()
-\tc.timer.Reset(c.delay)
-\tc.timerArmed = true
-""", """\tif c.timerArmed {
-\t\t// Do not slide the deadline forward: the oldest carried byte keeps a
-\t\t// hard latency bound even if small TLS writes keep arriving.
-\t\treturn
-\t}
-\tif c.timer == nil {
-\t\tc.timer = time.AfterFunc(c.delay, c.flushFromTimer)
-\t} else {
-\t\tc.timer.Reset(c.delay)
-\t}
-\tc.timerArmed = true
-""")
-
-          replace_once('ciphertext_tail_conn.go', """func newCiphertextTailConnWithDelay(conn net.Conn, delay time.Duration) *ciphertextTailConn {
-\tif delay <= 0 {
-\t\tdelay = ciphertextTailCarryDelay
-\t}
-\treturn &ciphertextTailConn{Conn: conn, delay: delay}
-}
-""", """func newCiphertextTailConnWithDelay(conn net.Conn, delay time.Duration) *ciphertextTailConn {
-\tif delay <= 0 {
-\t\tdelay = ciphertextTailCarryDelay
-\t}
-\treturn &ciphertextTailConn{Conn: conn, delay: delay}
-}
-
-func (c *ciphertextTailConn) Unwrap() net.Conn { return c.Conn }
-
-// ciphertextCarryMSS returns the MSS of the TCP socket that actually carries
-// these TLS ciphertext bytes. Under SOCKS5 this deliberately means the local
-// client-to-proxy TCP hop.
-func ciphertextCarryMSS(conn net.Conn) int {
-\ttcp := underlyingTCPConn(conn)
-\tif tcp != nil {
-\t\tif mss, err := getTCPMSS(tcp); err == nil && mss >= 256 {
-\t\t\treturn mss
-\t\t}
-\t}
-\treturn fallbackTCPMSS
-}
-""")
-
-          replace_once('client.go', """\ttcpConn := asTCPConn(rawConn)
-\tpadRecordLimit := paddingRecordLimit(tcpConn)
-""", """\ttcpConn := asTCPConn(rawConn)
-\tpadRecordLimit := paddingRecordLimit(tcpConn)
-\tcarryMSS := ciphertextCarryMSS(rawConn)
-\tcipherTail := newCiphertextTailConn(rawConn)
-""")
-          replace_once('client.go', """\ttlsConn, err := c.negotiateUTLS(runCtx, rawConn, lv)
-""", """\ttlsConn, err := c.negotiateUTLS(runCtx, cipherTail, lv)
-""")
-          replace_once('client.go', """\terrChan := make(chan error, 2)
-\tconnTxChan := make(chan []VPNFrame, 32)
-\tc.txPort.RegisterBackend(connTxChan, rttCache)
-""", """\t// Both TLS and TLSVPN authentication are complete. Enable carry only
-\t// before the data backend can receive real tunnel frames.
-\tcipherTail.Enable(carryMSS)
-
-\terrChan := make(chan error, 2)
-\tconnTxChan := make(chan []VPNFrame, 32)
-\tc.txPort.RegisterBackend(connTxChan, rttCache)
-""")
-
-          replace_once('server.go', """\t\t\ttlsConn := tls.Server(prefixConn, connTLSConfig)
-""", """\t\t\tcipherTail := newCiphertextTailConn(prefixConn)
-\t\t\ttlsConn := tls.Server(cipherTail, connTLSConfig)
-""")
-          replace_once('server.go', """\t\t\tsrv.handleConnection(ctx, prefixConn2, c, tlsInfo)
-""", """\t\t\tsrv.handleConnection(ctx, prefixConn2, c, tlsInfo, cipherTail)
-""")
-          replace_once('server.go', """func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo) {
-""", """func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo, cipherTail *ciphertextTailConn) {
-""")
-          replace_once('server.go', """\trttCache := new(uint32)
-\tatomic.StoreUint32(rttCache, 50000)
-\tci.rttCache = rttCache
-""", """\t// HandshakeResp has already been written. Enable carry now, before this
-\t// physical backend can receive data-plane frames.
-\tif cipherTail != nil {
-\t\tcipherTail.Enable(ciphertextCarryMSS(tcpConn))
-\t}
-
-\trttCache := new(uint32)
-\tatomic.StoreUint32(rttCache, 50000)
-\tci.rttCache = rttCache
-""")
-
-          for p in Path('.').glob('*_test.go'):
-              s = p.read_text()
-              s = s.replace('srv.handleConnection(ctx, srvConn, srvConn, nil)',
-                            'srv.handleConnection(ctx, srvConn, srvConn, nil, nil)')
-              p.write_text(s)
-
-          replace_once('ciphertext_tail_conn_test.go', """type captureNetConn struct {
-\tmu     sync.Mutex
-\tbuf    bytes.Buffer
-\tclosed bool
-}
-""", """type captureNetConn struct {
-\tmu     sync.Mutex
-\tbuf    bytes.Buffer
-\twrites []int
-\tclosed bool
-}
-""")
-          replace_once('ciphertext_tail_conn_test.go', """\tif c.closed {
-\t\treturn 0, net.ErrClosed
-\t}
-\treturn c.buf.Write(p)
-""", """\tif c.closed {
-\t\treturn 0, net.ErrClosed
-\t}
-\tc.writes = append(c.writes, len(p))
-\treturn c.buf.Write(p)
-""")
-          replace_once('ciphertext_tail_conn_test.go', """func (c *captureNetConn) Bytes() []byte {
-\tc.mu.Lock()
-\tdefer c.mu.Unlock()
-\treturn append([]byte(nil), c.buf.Bytes()...)
-}
-""", """func (c *captureNetConn) Bytes() []byte {
-\tc.mu.Lock()
-\tdefer c.mu.Unlock()
-\treturn append([]byte(nil), c.buf.Bytes()...)
-}
-func (c *captureNetConn) WriteSizes() []int {
-\tc.mu.Lock()
-\tdefer c.mu.Unlock()
-\treturn append([]int(nil), c.writes...)
-}
-""")
-          replace_once('ciphertext_tail_conn_test.go', """\tif got := c.pending(); got != 0 {
-\t\tt.Fatalf(\"second pending=%d want 0\", got)
-\t}
-
-\twant := append(append([]byte(nil), first...), second...)
-""", """\tif got := c.pending(); got != 0 {
-\t\tt.Fatalf(\"second pending=%d want 0\", got)
-\t}
-\tif got := under.WriteSizes(); len(got) != 2 || got[0] != 1440 || got[1] != 1440 {
-\t\tt.Fatalf(\"underlying writes=%v want [1440 1440]\", got)
-\t}
-
-\twant := append(append([]byte(nil), first...), second...)
-""")
-
-          Path('.github/workflows/apply-ciphertext-tail-carry.yml').unlink()
-          PY
-
           gofmt -w client.go server.go ciphertext_tail_conn.go ciphertext_tail_conn_test.go *_test.go
           go test ./... -run 'TestCiphertextTailConn|TestStream|TestFrameScanner|TestFEC' -count=1
           go test -race ./... -run 'TestCiphertextTailConn|TestStream|TestFrameScanner' -count=1
           go test ./... -count=1
           git diff --check
-
+      - name: Commit final source
+        run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
