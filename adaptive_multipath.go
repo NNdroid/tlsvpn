@@ -378,9 +378,10 @@ func adaptiveStickySlackUS(rtt uint32) uint64 {
 // pickAdaptiveBackend chooses the path with the earliest predicted delivery,
 // not simply the lowest RTT. The active set grows from 1 -> 4 only when real
 // byte pressure justifies it. Paths with measured RTT outside the near-MinRTT
-// envelope remain excluded to bound receive-side reordering. Bootstrap/unknown
-// RTT paths are temporarily fair-started so measurement order cannot starve a
-// healthy physical connection before it has a chance to establish its RTT.
+// envelope remain excluded to bound receive-side reordering. A path remains in
+// fair-start until it has both a usable RTT and a delivery-rate sample; this
+// prevents an early/delayed TCP_INFO sample from starving a cold socket before
+// it has carried the >=64 KiB needed to measure its own writer delivery rate.
 func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingBytes uint64) *Backend {
 	if len(backends) == 0 {
 		if p != nil {
@@ -395,10 +396,10 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		}
 	}
 
-	// Find the best *measured* RTT. The connection bootstrap value (50ms) is not
-	// a measurement; including it here used to make measurement order decide the
-	// candidate set. Keep a separate healthy count so "all RTTs unknown" still
-	// produces a multi-path candidate set under bulk demand.
+	// Build the RTT reference only from fully warmed paths. A socket that has an
+	// RTT sample but still has rateBytesPerSec==0 has not yet carried enough
+	// egress payload to validate that sample for multipath eligibility. Counting
+	// it here can let measurement order collapse the candidate set permanently.
 	var minMeasuredRTT uint32 = ^uint32(0)
 	healthy := 0
 	for _, b := range backends {
@@ -406,8 +407,9 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			continue
 		}
 		healthy++
-		rtt, unknown := adaptiveBackendRTT(b)
-		if unknown {
+		rtt, unknownRTT := adaptiveBackendRTT(b)
+		cold := b.rateBytesPerSec.Load() == 0
+		if unknownRTT || cold {
 			continue
 		}
 		if rtt < minMeasuredRTT {
@@ -440,14 +442,15 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		if b == nil {
 			continue
 		}
-		rtt, unknown := adaptiveBackendRTT(b)
-		if unknown {
-			// Fair-start unknown paths at the current best measured RTT. This affects
-			// only candidate ordering/eligibility; ETA telemetry keeps the 50ms
-			// conservative fallback until TCP_INFO publishes a real sample.
+		rtt, unknownRTT := adaptiveBackendRTT(b)
+		cold := b.rateBytesPerSec.Load() == 0
+		fairStart := unknownRTT || cold
+		if fairStart {
+			// Candidate ordering uses the best warmed RTT only during bootstrap.
+			// WebUI ETA keeps the real/conservative value via estimatedETAUS.
 			rtt = minRTT
 		}
-		if !unknown && uint64(rtt) > maxRTT {
+		if !fairStart && uint64(rtt) > maxRTT {
 			continue
 		}
 		if rate := b.rateBytesPerSec.Load(); rate > referenceRate {
@@ -457,13 +460,23 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	cands := p.schedulerScratch[:0]
 	for _, b := range backends {
 		if b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2 {
+			if b != nil {
+				b.active.Store(false)
+				b.virtualFinishNS.Store(0)
+			}
 			continue
 		}
-		rtt, unknown := adaptiveBackendRTT(b)
-		if unknown {
+		rtt, unknownRTT := adaptiveBackendRTT(b)
+		cold := b.rateBytesPerSec.Load() == 0
+		fairStart := unknownRTT || cold
+		if fairStart {
 			rtt = minRTT
 		}
-		if !unknown && uint64(rtt) > maxRTT {
+		if !fairStart && uint64(rtt) > maxRTT {
+			// Clear stale membership when a previously cold path finishes warm-up
+			// and is now genuinely outside the near-MinRTT envelope.
+			b.active.Store(false)
+			b.virtualFinishNS.Store(0)
 			continue
 		}
 		// Writer-drain EWMA is useful telemetry but tlsConn.Write completion only
