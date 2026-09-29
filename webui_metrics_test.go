@@ -18,7 +18,7 @@ func TestWebUIMetricFormulaContract(t *testing.T) {
 		"Math.ceil(v.length * 0.95) - 1",
 		"const reorder = data.reorder || {}",
 		"const dataTxPackets = Math.max(0, c.txPackets - parityTx)",
-		"const txAttempts = dataTxPackets + queueDropped",
+		"const txAttempts = c.txPackets + dropped",
 		"c.rxBytes / c.rxPackets",
 		"parityTx / dataTxPackets * 100",
 		"const missing = recovered + lost",
@@ -35,9 +35,10 @@ func TestWebUIMetricFormulaContract(t *testing.T) {
 		"recovered / parityTx",
 		"recovered / num(fec.parity_tx)",
 		"parityTx / c.txPackets",
+		"const txAttempts = dataTxPackets + dropped",
 	} {
 		if strings.Contains(js, wrong) {
-			t.Fatalf("mixed-domain FEC formula reintroduced: %q", wrong)
+			t.Fatalf("mixed-domain metric formula reintroduced: %q", wrong)
 		}
 	}
 }
