@@ -24,10 +24,17 @@ const ciphertextTailCarryDelay = 300 * time.Microsecond
 type ciphertextTailConn struct {
 	net.Conn
 
+	// writeConn is the real local TCP socket whenever it can be unwrapped. Using
+	// it directly lets net.Buffers use the standard library's writev fast path
+	// when a previous tail and bytes from the next TLS write must be emitted as
+	// one continuous MSS-aligned prefix.
+	writeConn net.Conn
+
 	mu           sync.Mutex
 	enabled      bool
 	mss          int
 	tail         []byte
+	scratch      []byte // fallback only when the transport cannot be unwrapped
 	timer        *time.Timer
 	timerArmed   bool
 	tailDeadline time.Time
@@ -44,7 +51,11 @@ func newCiphertextTailConnWithDelay(conn net.Conn, delay time.Duration) *ciphert
 	if delay <= 0 {
 		delay = ciphertextTailCarryDelay
 	}
-	return &ciphertextTailConn{Conn: conn, delay: delay}
+	writeConn := conn
+	if tcp := underlyingTCPConn(conn); tcp != nil {
+		writeConn = tcp
+	}
+	return &ciphertextTailConn{Conn: conn, writeConn: writeConn, delay: delay}
 }
 
 func (c *ciphertextTailConn) Unwrap() net.Conn { return c.Conn }
@@ -86,7 +97,10 @@ func (c *ciphertextTailConn) pending() int {
 	return len(c.tail)
 }
 
-func (c *ciphertextTailConn) stopTimerLocked() {
+// cancelTimerLocked is reserved for explicit flush/close/error paths. The hot
+// Write path deliberately does not Stop/Reset the runtime timer on every TLS
+// record; doing so was measurable at multi-gigabit rates.
+func (c *ciphertextTailConn) cancelTimerLocked() {
 	if c.timer != nil && c.timerArmed {
 		c.timer.Stop()
 	}
@@ -94,21 +108,27 @@ func (c *ciphertextTailConn) stopTimerLocked() {
 	c.tailDeadline = time.Time{}
 }
 
-func (c *ciphertextTailConn) armTimerLocked() {
+// ensureTimerLocked arms a timer only when none is already active. If a newer
+// carried tail replaces an older one while the old timer is still pending, the
+// callback observes tailDeadline and re-arms itself for the remaining time.
+func (c *ciphertextTailConn) ensureTimerLocked() {
 	if len(c.tail) == 0 || c.closed || !c.enabled {
-		c.stopTimerLocked()
 		return
+	}
+	if c.tailDeadline.IsZero() {
+		c.tailDeadline = time.Now().Add(c.delay)
 	}
 	if c.timerArmed {
-		// Do not slide the deadline forward: the oldest carried byte keeps a
-		// hard latency bound even if small TLS writes keep arriving.
 		return
 	}
-	c.tailDeadline = time.Now().Add(c.delay)
+	remaining := time.Until(c.tailDeadline)
+	if remaining < 0 {
+		remaining = 0
+	}
 	if c.timer == nil {
-		c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
+		c.timer = time.AfterFunc(remaining, c.flushFromTimer)
 	} else {
-		c.timer.Reset(c.delay)
+		c.timer.Reset(remaining)
 	}
 	c.timerArmed = true
 }
@@ -129,6 +149,36 @@ func writeAllConn(conn net.Conn, p []byte) error {
 	return nil
 }
 
+// writeJoinedPrefixLocked emits [oldTail][newPrefix] without turning the old
+// tail into its own socket write. On a real TCP socket net.Buffers.WriteTo uses
+// Go's writev fast path, so the pair normally costs one syscall. The scratch
+// fallback preserves the same single-Write semantics for unusual wrapped
+// transports that cannot expose their TCP socket.
+func (c *ciphertextTailConn) writeJoinedPrefixLocked(oldTail, newPrefix []byte) error {
+	want := len(oldTail) + len(newPrefix)
+	if want == 0 {
+		return nil
+	}
+	if len(oldTail) == 0 {
+		return writeAllConn(c.writeConn, newPrefix)
+	}
+	if _, ok := c.writeConn.(*net.TCPConn); ok {
+		bufs := net.Buffers{oldTail, newPrefix}
+		n, err := bufs.WriteTo(c.writeConn)
+		if err != nil {
+			return err
+		}
+		if n != int64(want) {
+			return io.ErrShortWrite
+		}
+		return nil
+	}
+
+	c.scratch = append(c.scratch[:0], oldTail...)
+	c.scratch = append(c.scratch, newPrefix...)
+	return writeAllConn(c.writeConn, c.scratch)
+}
+
 func (c *ciphertextTailConn) failLocked(err error) error {
 	if err == nil {
 		return nil
@@ -136,7 +186,7 @@ func (c *ciphertextTailConn) failLocked(err error) error {
 	if c.asyncErr == nil {
 		c.asyncErr = err
 	}
-	c.stopTimerLocked()
+	c.cancelTimerLocked()
 	_ = c.Conn.Close()
 	return err
 }
@@ -145,10 +195,11 @@ func (c *ciphertextTailConn) flushTailLocked() error {
 	if len(c.tail) == 0 {
 		return nil
 	}
-	if err := writeAllConn(c.Conn, c.tail); err != nil {
+	if err := writeAllConn(c.writeConn, c.tail); err != nil {
 		return c.failLocked(err)
 	}
 	c.tail = c.tail[:0]
+	c.tailDeadline = time.Time{}
 	return nil
 }
 
@@ -159,9 +210,13 @@ func (c *ciphertextTailConn) flushFromTimer() {
 	if !c.timerArmed || c.closed || !c.enabled || c.asyncErr != nil {
 		return
 	}
-	// A Stop/Reset can race with a callback that has already started and is
-	// waiting for c.mu. If a newer tail now owns a later deadline, the stale
-	// callback must not flush it early; simply re-arm for the remaining time.
+	if len(c.tail) == 0 {
+		c.timerArmed = false
+		c.tailDeadline = time.Time{}
+		return
+	}
+	// A newer tail may have replaced the one for which this callback was first
+	// armed. Do not flush that newer tail early; wait until its own deadline.
 	if !c.tailDeadline.IsZero() {
 		if remaining := time.Until(c.tailDeadline); remaining > 0 {
 			c.timer.Reset(remaining)
@@ -182,7 +237,7 @@ func (c *ciphertextTailConn) Flush() error {
 	if c.asyncErr != nil {
 		return c.asyncErr
 	}
-	c.stopTimerLocked()
+	c.cancelTimerLocked()
 	return c.flushTailLocked()
 }
 
@@ -207,39 +262,42 @@ func (c *ciphertextTailConn) Write(p []byte) (int, error) {
 	}
 
 	accepted := len(p)
-	c.stopTimerLocked()
+	oldTailLen := len(c.tail)
+	total := oldTailLen + len(p)
+	sendLen := total / c.mss * c.mss
 
-	// First complete a previously carried partial MSS using the beginning of
-	// this TLS ciphertext write.
-	if len(c.tail) > 0 {
-		need := c.mss - len(c.tail)
-		if len(p) < need {
-			c.tail = append(c.tail, p...)
-			c.armTimerLocked()
-			return accepted, nil
+	if sendLen == 0 {
+		// No full MSS is available yet. These bytes extend the existing tail;
+		// retain the original oldest-byte deadline rather than sliding it.
+		if oldTailLen == 0 {
+			c.tailDeadline = time.Now().Add(c.delay)
 		}
-		c.tail = append(c.tail, p[:need]...)
-		if err := c.flushTailLocked(); err != nil {
-			return 0, err
-		}
-		p = p[need:]
+		c.tail = append(c.tail, p...)
+		c.ensureTimerLocked()
+		return accepted, nil
 	}
 
-	// Preserve the TLS library's existing write cadence: full MSS multiples are
-	// passed straight through without copying into an application-sized buffer.
-	full := len(p) / c.mss * c.mss
-	if full > 0 {
-		if err := writeAllConn(c.Conn, p[:full]); err != nil {
-			return 0, c.failLocked(err)
-		}
-		p = p[full:]
+	// sendLen is a prefix of the logical concatenation [tail][p]. Because tail
+	// is always < MSS, at least one byte from p participates whenever sendLen>0.
+	fromP := sendLen - oldTailLen
+	if fromP < 0 || fromP > len(p) {
+		return 0, c.failLocked(io.ErrShortWrite)
 	}
+	if err := c.writeJoinedPrefixLocked(c.tail, p[:fromP]); err != nil {
+		return 0, c.failLocked(err)
+	}
+	c.tail = c.tail[:0]
+	p = p[fromP:]
 
-	// Copy at most MSS-1 bytes because the TLS caller may reuse p immediately
-	// after Write returns.
+	// p now contains strictly less than one MSS. It is a new carried tail, so
+	// give it a fresh bounded deadline. An already-active older timer is left
+	// alone; its callback will re-arm for this newer deadline if necessary.
 	if len(p) > 0 {
-		c.tail = append(c.tail[:0], p...)
-		c.armTimerLocked()
+		c.tail = append(c.tail, p...)
+		c.tailDeadline = time.Now().Add(c.delay)
+		c.ensureTimerLocked()
+	} else {
+		c.tailDeadline = time.Time{}
 	}
 	return accepted, nil
 }
@@ -251,7 +309,7 @@ func (c *ciphertextTailConn) Close() error {
 		return net.ErrClosed
 	}
 	c.closed = true
-	c.stopTimerLocked()
+	c.cancelTimerLocked()
 	var flushErr error
 	if c.asyncErr == nil {
 		flushErr = c.flushTailLocked()
