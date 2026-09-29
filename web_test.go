@@ -194,7 +194,8 @@ func TestWebUIServesEmbeddedAssets(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !strings.Contains(string(indexBody), `<script src="app.js"></script>`) ||
+	if !strings.Contains(string(indexBody), `<script src="i18n.js"></script>`) ||
+		!strings.Contains(string(indexBody), `<script src="app.js"></script>`) ||
 		!strings.Contains(string(indexBody), `style.css`) {
 		t.Fatal("index page must reference the external webui assets")
 	}
@@ -205,11 +206,21 @@ func TestWebUIServesEmbeddedAssets(t *testing.T) {
 	}
 	jsBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(jsBody), "const I18N={") {
-		t.Fatal("/app.js must serve the dashboard script")
+	if strings.Contains(string(jsBody), "const I18N={") {
+		t.Fatal("/app.js must not embed locale dictionaries")
 	}
 	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("/app.js Cache-Control = %q, want no-store", cc)
+	}
+
+	resp, err = client.Get(root + "i18n.js")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /i18n.js: status=%v err=%v", resp, err)
+	}
+	i18nBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(i18nBody), "const I18N={") || !strings.Contains(string(i18nBody), "const FRAMEVIZ_I18N=") {
+		t.Fatal("/i18n.js must contain all dashboard locale dictionaries")
 	}
 
 	resp, err = client.Get(root + "style.css")
