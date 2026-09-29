@@ -17,7 +17,10 @@ func TestWebUIMetricFormulaContract(t *testing.T) {
 	for _, want := range []string{
 		"Math.ceil(v.length * 0.95) - 1",
 		"const reorder = data.reorder || {}",
-		"const txAttempts = c.txPackets + queueDropped",
+		"const dataTxPackets = Math.max(0, c.txPackets - parityTx)",
+		"const txAttempts = dataTxPackets + queueDropped",
+		"c.rxBytes / c.rxPackets",
+		"parityTx / dataTxPackets * 100",
 		"const missing = recovered + lost",
 		"recovered / missing * 100",
 	} {
@@ -28,8 +31,14 @@ func TestWebUIMetricFormulaContract(t *testing.T) {
 	if strings.Contains(js, "data.quality") {
 		t.Fatal("metrics.js must derive quality values from real counters, not the nonexistent data.quality field")
 	}
-	if strings.Contains(js, "parity_tx") && strings.Contains(js, "fecRecoveryPct") {
-		t.Fatal("FEC recovery rate must not use locally transmitted parity as its denominator")
+	for _, wrong := range []string{
+		"recovered / parityTx",
+		"recovered / num(fec.parity_tx)",
+		"parityTx / c.txPackets",
+	} {
+		if strings.Contains(js, wrong) {
+			t.Fatalf("mixed-domain FEC formula reintroduced: %q", wrong)
+		}
 	}
 }
 
