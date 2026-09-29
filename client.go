@@ -1000,6 +1000,7 @@ func (c *Client) wakeAll() {
 // clientConnInfo 单条物理连接的运行明细（面板展示 + 强制重连句柄）
 type clientConnInfo struct {
 	target    string
+	connID    atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
 	remote    atomic.Value // string：对端地址（握手后可得）
 	state     atomic.Value // string：connecting / up / retrying
 	lastError atomic.Value // string：最近一次失败原因
@@ -1414,6 +1415,7 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
 	Index     int               `json:"index"`
+	ConnID    string            `json:"conn_id,omitempty"`
 	Target    string            `json:"target"`
 	Remote    string            `json:"remote"`
 	State     string            `json:"state"`
@@ -1494,6 +1496,9 @@ func (c *Client) snapshotConns() []connSnapshot {
 			TLSVersion:   tlsVer,
 			TLSCipher:    tlsCipher,
 			TLSALPN:      tlsAlpn,
+		}
+		if v, okv := ci.connID.Load().(string); okv {
+			snap.ConnID = v
 		}
 		if v, okv := ci.remote.Load().(string); okv {
 			snap.Remote = v
@@ -1638,9 +1643,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	sessionToken := c.sessionToken
 	c.sessionMu.Unlock()
 
+	// ConnID 只标识这一条物理连接/这一次握手。重连必须重新生成，不能沿用，
+	// 否则服务端与客户端 WebUI 无法区分旧连接和重建后的新连接。
+	connID := uuid.New().String()
+	ci.connID.Store(connID)
+
 	req := HandshakeReq{
 		ProtocolVersion: 2,
 		ClientInstance:  instanceID,
+		ConnID:          connID,
 		ClientID:        c.clientID,
 		PSK:             hashPSK(lv.psk),
 		MAC:             c.macAddr,
@@ -1664,8 +1675,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		SessionToken: sessionToken,
 		PeerInfo:     localPeerInfo(),
 	}
-	log.Debugf("[Conn %d] => handshake request client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
-		connIndex, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
+	log.Debugf("[Conn %d] => handshake request conn_id=%s client=%s proto=%d instance=%s fec=%v/%d enc=%v/%d token_present=%v",
+		connIndex, req.ConnID, req.ClientID, req.ProtocolVersion, req.ClientInstance, req.FEC, req.FecGroup, req.Encrypt, req.EncAlgo, req.SessionToken != "")
 	reqData, err := json.Marshal(req)
 	if err != nil {
 		return 0, fmt.Errorf("marshal handshake request: %w", err)
@@ -1690,8 +1701,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 	// 握手完成：后续数据帧恢复线路全量上限
 	scanner.SetMaxDataLen(maxWireDataLen)
-	log.Debugf("[Conn %d] <= handshake response session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
-		connIndex, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
+	log.Debugf("[Conn %d] <= handshake response conn_id=%s session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
+		connIndex, connID, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
 	if resp.ProtocolVersion != 2 {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
@@ -1900,7 +1911,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// The first live backend publishes UP; only the final backend loss publishes
 	// DOWN. notifyNetifdUp itself deduplicates identical address/gateway updates.
 	liveNow := atomic.AddInt32(&c.liveConns, 1)
-	evBus.emit("up", "info", "", fmt.Sprintf("conn %d linked", connIndex))
+	evBus.emit("up", "info", "", fmt.Sprintf("conn %d linked conn_id=%s", connIndex, connID))
 	if c.usesNetifd() {
 		if err := c.notifyNetifdUp(resp.IPv4, resp.IPv6, resp.GwV4, resp.GwV6); err != nil {
 			atomic.AddInt32(&c.liveConns, -1)
