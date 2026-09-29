@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,9 +40,10 @@ func tlsBatchCorkPolicyForRTT(rtt time.Duration) (time.Duration, bool) {
 type tlsBatchCork struct {
 	mu sync.Mutex
 
-	setCork func(bool) error
-	delay   time.Duration
-	mss     int
+	setCork    func(bool) error
+	carryState *atomic.Bool
+	delay      time.Duration
+	mss        int
 
 	// noop is immutable after construction. RTT-gated/L2-only connections can
 	// return before touching the mutex, leaving the existing data-plane hot path
@@ -87,6 +89,25 @@ func newTLSBatchCorkForTest(mss int, delay time.Duration, setter func(bool) erro
 	return &tlsBatchCork{setCork: setter, delay: delay, mss: mss, enabled: setter != nil, noop: setter == nil}
 }
 
+// BindCarryState exposes only a lock-free boolean to the multipath scheduler.
+// The pointer is bound before the writer goroutine starts; scheduler reads never
+// take the cork mutex.
+func (c *tlsBatchCork) BindCarryState(state *atomic.Bool) {
+	if c == nil || state == nil {
+		return
+	}
+	c.mu.Lock()
+	c.carryState = state
+	state.Store(c.corked)
+	c.mu.Unlock()
+}
+
+func (c *tlsBatchCork) publishCarryLocked(v bool) {
+	if c.carryState != nil {
+		c.carryState.Store(v)
+	}
+}
+
 // BeforeWrite must be called exactly once for a data-plane TLSVPN batch, before
 // tlsConn.Write. It does not see individual TLS records. progress is measured
 // conservatively in TLSVPN plaintext bytes: once at least one MSS of new data
@@ -107,9 +128,11 @@ func (c *tlsBatchCork) BeforeWrite(n int) {
 			// TCP_CORK is an optional optimization. Failure must never take the
 			// tunnel down; permanently fall back to the normal socket path.
 			c.enabled = false
+			c.publishCarryLocked(false)
 			return
 		}
 		c.corked = true
+		c.publishCarryLocked(true)
 		c.progress = 0
 		c.deadline = time.Now().Add(c.delay)
 	}
@@ -155,9 +178,11 @@ func (c *tlsBatchCork) flushTimer() {
 	c.progress = 0
 	if err := c.setCork(false); err != nil {
 		c.enabled = false
+		c.publishCarryLocked(false)
 		return
 	}
 	c.corked = false
+	c.publishCarryLocked(false)
 }
 
 func (c *tlsBatchCork) Close() {
@@ -178,6 +203,7 @@ func (c *tlsBatchCork) Close() {
 		_ = c.setCork(false)
 	}
 	c.corked = false
+	c.publishCarryLocked(false)
 	c.deadline = time.Time{}
 	c.progress = 0
 }

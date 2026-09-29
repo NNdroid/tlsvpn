@@ -103,14 +103,15 @@ type WebStats struct {
 
 // serverConnSnapshot 服务端单条物理连接的明细快照
 type serverConnSnapshot struct {
-	ClientID  string `json:"client_id"`
-	Remote    string `json:"remote"`
-	RttMs     uint32 `json:"rtt_ms"`
-	TxBytes   uint64 `json:"tx_bytes"`
-	RxBytes   uint64 `json:"rx_bytes"`
-	TxPackets uint64 `json:"tx_packets"`
-	RxPackets uint64 `json:"rx_packets"`
-	AgeSec    uint64 `json:"age_sec"`
+	ClientID  string            `json:"client_id"`
+	Remote    string            `json:"remote"`
+	RttMs     uint32            `json:"rtt_ms"`
+	Scheduler schedulerConnJSON `json:"scheduler"`
+	TxBytes   uint64            `json:"tx_bytes"`
+	RxBytes   uint64            `json:"rx_bytes"`
+	TxPackets uint64            `json:"tx_packets"`
+	RxPackets uint64            `json:"rx_packets"`
+	AgeSec    uint64            `json:"age_sec"`
 	// 本连接的协商结果：FEC 分组、内层加密、密钥代际
 	FEC        string `json:"fec"`
 	EncAlgo    int    `json:"enc_algo"`

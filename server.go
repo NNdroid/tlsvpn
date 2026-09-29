@@ -432,6 +432,7 @@ type connInfo struct {
 	remote    string
 	tcpConn   *net.TCPConn
 	rttCache  *uint32 // 微秒（200ms 刷新）
+	backend   atomic.Pointer[Backend]
 	txBytes   uint64
 	rxBytes   uint64
 	txPackets uint64
@@ -896,6 +897,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				ClientID:  id,
 				Remote:    ci.remote,
 				RttMs:     atomic.LoadUint32(ci.rttCache) / 1000,
+				Scheduler: schedulerSnapshot(ci.backend.Load()),
 				TxBytes:   atomic.LoadUint64(&ci.txBytes),
 				RxBytes:   atomic.LoadUint64(&ci.rxBytes),
 				TxPackets: atomic.LoadUint64(&ci.txPackets),
@@ -1741,10 +1743,15 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	ci.rttCache = rttCache
 
 	connTxChan := make(chan []VPNFrame, 32)
-	port.RegisterBackend(connTxChan, rttCache)
-	defer port.UnregisterBackend(connTxChan)
+	backend := port.RegisterBackend(connTxChan, rttCache)
+	ci.backend.Store(backend)
+	defer func() {
+		ci.backend.CompareAndSwap(backend, nil)
+		port.UnregisterBackend(connTxChan)
+	}()
 
 	batchCork := newTLSBatchCork(tcpConn)
+	batchCork.BindCarryState(&backend.carryPending)
 	defer batchCork.Close()
 
 	go func() {
@@ -1782,9 +1789,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case frames := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
+				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
+					queuedPayload += vpnFrameBatchBytes(frames)
 					var n, last int
 					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
 					txPackets += n
@@ -1812,6 +1821,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					conn.Close()
 					return
 				}
+				backend.completeQueuedBytes(queuedPayload)
+				backend.observeDelivered(queuedPayload)
 				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
 				recordPadBytes(uint64(len(sendBuffer)), padTotal)
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
