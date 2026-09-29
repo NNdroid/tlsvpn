@@ -46,6 +46,21 @@ func newCiphertextTailConnWithDelay(conn net.Conn, delay time.Duration) *ciphert
 	return &ciphertextTailConn{Conn: conn, delay: delay}
 }
 
+func (c *ciphertextTailConn) Unwrap() net.Conn { return c.Conn }
+
+// ciphertextCarryMSS returns the MSS of the TCP socket that actually carries
+// these TLS ciphertext bytes. Under SOCKS5 this deliberately means the local
+// client-to-proxy TCP hop.
+func ciphertextCarryMSS(conn net.Conn) int {
+	tcp := underlyingTCPConn(conn)
+	if tcp != nil {
+		if mss, err := getTCPMSS(tcp); err == nil && mss >= 256 {
+			return mss
+		}
+	}
+	return fallbackTCPMSS
+}
+
 func (c *ciphertextTailConn) Enable(mss int) {
 	if mss < 256 {
 		mss = fallbackTCPMSS
@@ -82,15 +97,16 @@ func (c *ciphertextTailConn) armTimerLocked() {
 		c.stopTimerLocked()
 		return
 	}
-	if c.timer == nil {
-		c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
-		c.timerArmed = true
+	if c.timerArmed {
+		// Do not slide the deadline forward: the oldest carried byte keeps a
+		// hard latency bound even if small TLS writes keep arriving.
 		return
 	}
-	// Reuse the same runtime timer instead of allocating one per TLS record.
-	// Reset starts a fresh bounded wait from the newest carried real-data tail.
-	c.timer.Stop()
-	c.timer.Reset(c.delay)
+	if c.timer == nil {
+		c.timer = time.AfterFunc(c.delay, c.flushFromTimer)
+	} else {
+		c.timer.Reset(c.delay)
+	}
 	c.timerArmed = true
 }
 

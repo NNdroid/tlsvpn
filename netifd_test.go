@@ -28,7 +28,7 @@ func TestNetifdLinkNotificationsAreAggregateAndIdempotent(t *testing.T) {
 	c := &Client{
 		interfaceManager: "netifd",
 		netifdInterface:  "vpn",
-		tapName:           "tvpn-vpn",
+		tapName:          "tvpn-vpn",
 	}
 
 	atomic.StoreInt32(&c.liveConns, 1)

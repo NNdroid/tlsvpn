@@ -1281,7 +1281,8 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 				}
 				return nil, nil
 			}
-			tlsConn := tls.Server(prefixConn, connTLSConfig)
+			cipherTail := newCiphertextTailConn(prefixConn)
+			tlsConn := tls.Server(cipherTail, connTLSConfig)
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
@@ -1311,12 +1312,12 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			}
 
 			tlsInfo := tlsHandshakeInfoFromState(tlsConn.ConnectionState(), helloObservation)
-			srv.handleConnection(ctx, prefixConn2, c, tlsInfo)
+			srv.handleConnection(ctx, prefixConn2, c, tlsInfo, cipherTail)
 		}(conn)
 	}
 }
 
-func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo) {
+func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo, cipherTail *ciphertextTailConn) {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
@@ -1734,6 +1735,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 	} else {
 		ci.brutal.Store((&brutalApplyResult{}).clone())
+	}
+
+	// HandshakeResp has already been written. Enable carry now, before this
+	// physical backend can receive data-plane frames.
+	if cipherTail != nil {
+		cipherTail.Enable(ciphertextCarryMSS(tcpConn))
 	}
 
 	rttCache := new(uint32)

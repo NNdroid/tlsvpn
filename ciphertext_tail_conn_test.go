@@ -12,6 +12,7 @@ import (
 type captureNetConn struct {
 	mu     sync.Mutex
 	buf    bytes.Buffer
+	writes []int
 	closed bool
 }
 
@@ -22,6 +23,7 @@ func (c *captureNetConn) Write(p []byte) (int, error) {
 	if c.closed {
 		return 0, net.ErrClosed
 	}
+	c.writes = append(c.writes, len(p))
 	return c.buf.Write(p)
 }
 func (c *captureNetConn) Close() error {
@@ -30,11 +32,11 @@ func (c *captureNetConn) Close() error {
 	c.mu.Unlock()
 	return nil
 }
-func (c *captureNetConn) LocalAddr() net.Addr                { return dummyNetAddr("local") }
-func (c *captureNetConn) RemoteAddr() net.Addr               { return dummyNetAddr("remote") }
-func (c *captureNetConn) SetDeadline(time.Time) error        { return nil }
-func (c *captureNetConn) SetReadDeadline(time.Time) error    { return nil }
-func (c *captureNetConn) SetWriteDeadline(time.Time) error   { return nil }
+func (c *captureNetConn) LocalAddr() net.Addr              { return dummyNetAddr("local") }
+func (c *captureNetConn) RemoteAddr() net.Addr             { return dummyNetAddr("remote") }
+func (c *captureNetConn) SetDeadline(time.Time) error      { return nil }
+func (c *captureNetConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *captureNetConn) SetWriteDeadline(time.Time) error { return nil }
 func (c *captureNetConn) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -46,7 +48,14 @@ func (c *captureNetConn) Bytes() []byte {
 	return append([]byte(nil), c.buf.Bytes()...)
 }
 
+func (c *captureNetConn) WriteSizes() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]int(nil), c.writes...)
+}
+
 type dummyNetAddr string
+
 func (a dummyNetAddr) Network() string { return string(a) }
 func (a dummyNetAddr) String() string  { return string(a) }
 
@@ -93,6 +102,9 @@ func TestCiphertextTailConnCarriesOnlySubMSSBytes(t *testing.T) {
 	}
 	if got := c.pending(); got != 0 {
 		t.Fatalf("second pending=%d want 0", got)
+	}
+	if got := under.WriteSizes(); len(got) != 2 || got[0] != 1440 || got[1] != 1440 {
+		t.Fatalf("underlying writes=%v want [1440 1440]", got)
 	}
 
 	want := append(append([]byte(nil), first...), second...)

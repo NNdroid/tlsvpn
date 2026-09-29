@@ -683,7 +683,6 @@ func TestReconnectBackoff(t *testing.T) {
 	}
 }
 
-
 func TestGCM128SealOpenRoundtrip(t *testing.T) {
 	salt := randomSalt()
 	tx, err := newGCMInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)

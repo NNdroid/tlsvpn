@@ -1552,6 +1552,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// tcpConn 仅用于端到端语义的内核调优（Brutal/RTT）；代理模式下为 nil 并自动跳过
 	tcpConn := asTCPConn(rawConn)
 	padRecordLimit := paddingRecordLimit(tcpConn)
+	carryMSS := ciphertextCarryMSS(rawConn)
+	cipherTail := newCiphertextTailConn(rawConn)
 
 	// 握手声明所有连接共享的总速率；服务端会按自己的配置裁剪，响应回来后再
 	// 用裁剪结果重新套用，避免多连接把总预算乘以连接数。
@@ -1564,7 +1566,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.brutal.Store((&brutalApplyResult{}).clone())
 
 	rawConn.SetDeadline(time.Now().Add(10 * time.Second)) // tls握手超时
-	tlsConn, err := c.negotiateUTLS(runCtx, rawConn, lv)
+	tlsConn, err := c.negotiateUTLS(runCtx, cipherTail, lv)
 	rawConn.SetDeadline(time.Time{})
 	if err != nil {
 		rawConn.Close()
@@ -1832,6 +1834,10 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.linkedAt = time.Now().Unix()
 	ci.state.Store("up")
 	ci.lastError.Store("")
+
+	// Both TLS and TLSVPN authentication are complete. Enable carry only
+	// before the data backend can receive real tunnel frames.
+	cipherTail.Enable(carryMSS)
 
 	errChan := make(chan error, 2)
 	connTxChan := make(chan []VPNFrame, 32)

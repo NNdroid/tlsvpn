@@ -106,8 +106,8 @@ func (p *stubPort) WriteFrame(frame []byte) error {
 
 type noopPort struct{ name string }
 
-func (p *noopPort) ID() string                { return p.name }
-func (p *noopPort) WriteFrame([]byte) error   { return nil }
+func (p *noopPort) ID() string              { return p.name }
+func (p *noopPort) WriteFrame([]byte) error { return nil }
 
 func macFrame(dst, src macKey) []byte {
 	f := make([]byte, 14)
