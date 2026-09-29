@@ -1744,6 +1744,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	port.RegisterBackend(connTxChan, rttCache)
 	defer port.UnregisterBackend(connTxChan)
 
+	batchCork := newTLSBatchCork(tcpConn)
+	defer batchCork.Close()
+
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		keepAliveTicker := time.NewTicker(4 * time.Second)
@@ -1802,6 +1805,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
 				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
+				batchCork.BeforeWrite(len(sendBuffer))
 				_, werr := conn.Write(sendBuffer)
 				if werr != nil {
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)

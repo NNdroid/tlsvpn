@@ -1838,6 +1838,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	c.txPort.RegisterBackend(connTxChan, rttCache)
 	defer c.txPort.UnregisterBackend(connTxChan)
 
+	batchCork := newTLSBatchCork(rawConn)
+	defer batchCork.Close()
+
 	// netifd represents the aggregate VPN session, not one TCP backend.
 	// The first live backend publishes UP; only the final backend loss publishes
 	// DOWN. notifyNetifdUp itself deduplicates identical address/gateway updates.
@@ -1922,6 +1925,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
 				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
+				batchCork.BeforeWrite(len(sendBuffer))
 				if _, err := tlsConn.Write(sendBuffer); err != nil {
 					errChan <- err
 					return
