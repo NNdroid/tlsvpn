@@ -21,13 +21,13 @@ type tlsBatchCork struct {
 	delay   time.Duration
 	mss     int
 
-	enabled      bool
-	corked       bool
-	closed       bool
-	progress     int
-	deadline     time.Time
-	timer        *time.Timer
-	timerArmed   bool
+	enabled    bool
+	corked     bool
+	closed     bool
+	progress   int
+	deadline   time.Time
+	timer      *time.Timer
+	timerArmed bool
 }
 
 func newTLSBatchCork(conn net.Conn) *tlsBatchCork {

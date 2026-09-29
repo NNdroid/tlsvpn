@@ -1281,8 +1281,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 				}
 				return nil, nil
 			}
-			cipherTail := newCiphertextTailConn(prefixConn)
-			tlsConn := tls.Server(cipherTail, connTLSConfig)
+			tlsConn := tls.Server(prefixConn, connTLSConfig)
 			tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 			err = tlsConn.Handshake()
 			tlsConn.SetDeadline(time.Time{})
@@ -1312,12 +1311,12 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			}
 
 			tlsInfo := tlsHandshakeInfoFromState(tlsConn.ConnectionState(), helloObservation)
-			srv.handleConnection(ctx, prefixConn2, c, tlsInfo, cipherTail)
+			srv.handleConnection(ctx, prefixConn2, c, tlsInfo)
 		}(conn)
 	}
 }
 
-func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo, cipherTail *ciphertextTailConn) {
+func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpConn *net.TCPConn, tlsInfo *TLSHandshakeInfo) {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	defer conn.Close()
@@ -1737,12 +1736,6 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		ci.brutal.Store((&brutalApplyResult{}).clone())
 	}
 
-	// HandshakeResp has already been written. Enable carry now, before this
-	// physical backend can receive data-plane frames.
-	if cipherTail != nil {
-		cipherTail.Enable(ciphertextCarryMSS(tcpConn))
-	}
-
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
 	ci.rttCache = rttCache
@@ -1750,6 +1743,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	connTxChan := make(chan []VPNFrame, 32)
 	port.RegisterBackend(connTxChan, rttCache)
 	defer port.UnregisterBackend(connTxChan)
+
+	batchCork := newTLSBatchCork(tcpConn)
+	defer batchCork.Close()
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
@@ -1809,6 +1805,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
 				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
+				batchCork.BeforeWrite(len(sendBuffer))
 				_, werr := conn.Write(sendBuffer)
 				if werr != nil {
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
