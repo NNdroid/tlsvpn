@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+func TestTLSBatchCorkDelayForRTT(t *testing.T) {
+	tests := []struct {
+		name string
+		rtt  time.Duration
+		want time.Duration
+	}{
+		{name: "unknown", rtt: 0, want: 150 * time.Microsecond},
+		{name: "very-low-rtt-clamped", rtt: 80 * time.Microsecond, want: 20 * time.Microsecond},
+		{name: "middle", rtt: 800 * time.Microsecond, want: 100 * time.Microsecond},
+		{name: "wan-clamped", rtt: 8 * time.Millisecond, want: 150 * time.Microsecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tlsBatchCorkDelayForRTT(tt.rtt); got != tt.want {
+				t.Fatalf("delay(%v)=%v want %v", tt.rtt, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTLSBatchCorkCoalescesBurstAndUncorksOnce(t *testing.T) {
 	var mu sync.Mutex
 	var calls []bool
