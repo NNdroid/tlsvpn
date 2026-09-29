@@ -21,6 +21,14 @@ const (
 	adaptiveRateSampleMaxInterval   = 2 * time.Second
 	adaptiveDemandSampleMinInterval = 500 * time.Microsecond
 
+	// Legacy client/server connection setup initializes every RTT cache to 50ms
+	// before TCP_INFO has produced a direction-specific sample. Treat that exact
+	// bootstrap value as "unknown" inside the adaptive scheduler. Otherwise one
+	// socket that obtains a sub-ms RTT first can exclude the other three from the
+	// near-MinRTT candidate set forever, so they never receive enough egress data
+	// to warm their own measurements.
+	adaptiveUnknownRTTUS uint32 = 50_000
+
 	// Queue pressure reacts to bursts; demand rate keeps a sustained high-rate
 	// stream expanded even when writers drain their channels faster than the
 	// scheduler can observe a deep queue. Values are payload bytes/second.
@@ -181,14 +189,25 @@ func serviceTimeNS(bytes, rate uint64) int64 {
 	return int64(bytes * 1_000_000_000 / rate)
 }
 
+// adaptiveBackendRTT returns the RTT used for ordinary telemetry plus whether
+// the value is still the connection bootstrap estimate. Zero is also unknown
+// for synthetic/TAP backends and proxy cases that cannot expose TCP_INFO.
+func adaptiveBackendRTT(b *Backend) (uint32, bool) {
+	if b == nil || b.rttCache == nil {
+		return adaptiveUnknownRTTUS, true
+	}
+	rtt := atomic.LoadUint32(b.rttCache)
+	if rtt == 0 || rtt == adaptiveUnknownRTTUS {
+		return adaptiveUnknownRTTUS, true
+	}
+	return rtt, false
+}
+
 func (b *Backend) baseQualityUS(incomingBytes uint64) uint64 {
 	if b == nil {
 		return ^uint64(0)
 	}
-	rtt := atomic.LoadUint32(b.rttCache)
-	if rtt == 0 {
-		rtt = 50_000
-	}
+	rtt, _ := adaptiveBackendRTT(b)
 	return uint64(rtt)/2 + serviceTimeUS(incomingBytes, b.effectiveRateBytesPerSec())
 }
 
@@ -200,10 +219,7 @@ func (b *Backend) schedulingETAUS(incomingBytes uint64) uint64 {
 	if b == nil {
 		return ^uint64(0)
 	}
-	rtt := atomic.LoadUint32(b.rttCache)
-	if rtt == 0 {
-		rtt = 50_000
-	}
+	rtt, _ := adaptiveBackendRTT(b)
 	eta := uint64(rtt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, b.effectiveRateBytesPerSec())
 	if b.carryPending.Load() && eta > adaptiveCarryBonusUS {
 		eta -= adaptiveCarryBonusUS
@@ -237,10 +253,7 @@ func (b *Backend) estimatedETAUS(incomingBytes uint64) uint64 {
 	if b == nil {
 		return ^uint64(0)
 	}
-	rtt := atomic.LoadUint32(b.rttCache)
-	if rtt == 0 {
-		rtt = 50_000
-	}
+	rtt, _ := adaptiveBackendRTT(b)
 	eta := uint64(rtt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, b.effectiveRateBytesPerSec())
 	if b.carryPending.Load() && eta > adaptiveCarryBonusUS {
 		eta -= adaptiveCarryBonusUS
@@ -364,8 +377,10 @@ func adaptiveStickySlackUS(rtt uint32) uint64 {
 
 // pickAdaptiveBackend chooses the path with the earliest predicted delivery,
 // not simply the lowest RTT. The active set grows from 1 -> 4 only when real
-// byte pressure justifies it. Paths outside the existing near-MinRTT envelope
-// remain excluded to bound receive-side reordering.
+// byte pressure justifies it. Paths with measured RTT outside the near-MinRTT
+// envelope remain excluded to bound receive-side reordering. Bootstrap/unknown
+// RTT paths are temporarily fair-started so measurement order cannot starve a
+// healthy physical connection before it has a chance to establish its RTT.
 func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingBytes uint64) *Backend {
 	if len(backends) == 0 {
 		if p != nil {
@@ -380,20 +395,26 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		}
 	}
 
-	var minRTT uint32 = ^uint32(0)
+	// Find the best *measured* RTT. The connection bootstrap value (50ms) is not
+	// a measurement; including it here used to make measurement order decide the
+	// candidate set. Keep a separate healthy count so "all RTTs unknown" still
+	// produces a multi-path candidate set under bulk demand.
+	var minMeasuredRTT uint32 = ^uint32(0)
+	healthy := 0
 	for _, b := range backends {
 		if b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2 {
 			continue
 		}
-		rtt := atomic.LoadUint32(b.rttCache)
-		if rtt == 0 {
-			rtt = 50_000
+		healthy++
+		rtt, unknown := adaptiveBackendRTT(b)
+		if unknown {
+			continue
 		}
-		if rtt < minRTT {
-			minRTT = rtt
+		if rtt < minMeasuredRTT {
+			minMeasuredRTT = rtt
 		}
 	}
-	if minRTT == ^uint32(0) {
+	if healthy == 0 {
 		b := backends[0]
 		if b != nil {
 			for _, x := range backends {
@@ -408,6 +429,10 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		return b
 	}
 
+	minRTT := minMeasuredRTT
+	if minRTT == ^uint32(0) {
+		minRTT = adaptiveUnknownRTTUS
+	}
 	rttSlack := max(uint32(backendRTTHysteresisMin), minRTT/4)
 	maxRTT := uint64(minRTT) + uint64(rttSlack)
 	referenceRate := uint64(adaptiveFallbackRateBytesPerSec)
@@ -415,11 +440,14 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		if b == nil {
 			continue
 		}
-		rtt := atomic.LoadUint32(b.rttCache)
-		if rtt == 0 {
-			rtt = 50_000
+		rtt, unknown := adaptiveBackendRTT(b)
+		if unknown {
+			// Fair-start unknown paths at the current best measured RTT. This affects
+			// only candidate ordering/eligibility; ETA telemetry keeps the 50ms
+			// conservative fallback until TCP_INFO publishes a real sample.
+			rtt = minRTT
 		}
-		if uint64(rtt) > maxRTT {
+		if !unknown && uint64(rtt) > maxRTT {
 			continue
 		}
 		if rate := b.rateBytesPerSec.Load(); rate > referenceRate {
@@ -431,11 +459,11 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		if b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2 {
 			continue
 		}
-		rtt := atomic.LoadUint32(b.rttCache)
-		if rtt == 0 {
-			rtt = 50_000
+		rtt, unknown := adaptiveBackendRTT(b)
+		if unknown {
+			rtt = minRTT
 		}
-		if uint64(rtt) > maxRTT {
+		if !unknown && uint64(rtt) > maxRTT {
 			continue
 		}
 		// Writer-drain EWMA is useful telemetry but tlsConn.Write completion only
