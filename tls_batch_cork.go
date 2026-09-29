@@ -6,9 +6,28 @@ import (
 	"time"
 )
 
-// tlsBatchCorkDelay is deliberately short: it only gives the next TLSVPN batch
-// a chance to fill the current TCP tail. Sparse traffic is uncorked promptly.
-const tlsBatchCorkDelay = 300 * time.Microsecond
+// Sub-MSS carry is deliberately bounded to a small fraction of the transport
+// RTT. A fixed hundreds-of-microseconds cork hurts a single low-RTT TCP flow by
+// delaying its ACK clock; WAN links can afford a longer window and get more
+// opportunity for the next TLSVPN batch to fill the real-data tail.
+const (
+	tlsBatchCorkMinDelay = 20 * time.Microsecond
+	tlsBatchCorkMaxDelay = 150 * time.Microsecond
+)
+
+func tlsBatchCorkDelayForRTT(rtt time.Duration) time.Duration {
+	if rtt <= 0 {
+		return tlsBatchCorkMaxDelay
+	}
+	d := rtt / 8
+	if d < tlsBatchCorkMinDelay {
+		return tlsBatchCorkMinDelay
+	}
+	if d > tlsBatchCorkMaxDelay {
+		return tlsBatchCorkMaxDelay
+	}
+	return d
+}
 
 // tlsBatchCork controls TCP_CORK once per TLSVPN batch instead of wrapping the
 // TLS transport's Write method. This keeps crypto/tls and uTLS on their normal
@@ -31,7 +50,7 @@ type tlsBatchCork struct {
 }
 
 func newTLSBatchCork(conn net.Conn) *tlsBatchCork {
-	c := &tlsBatchCork{delay: tlsBatchCorkDelay, mss: fallbackTCPMSS}
+	c := &tlsBatchCork{delay: tlsBatchCorkMaxDelay, mss: fallbackTCPMSS}
 	tcp := underlyingTCPConn(conn)
 	if tcp == nil {
 		return c
@@ -39,6 +58,7 @@ func newTLSBatchCork(conn net.Conn) *tlsBatchCork {
 	if mss, err := getTCPMSS(tcp); err == nil && mss >= 256 {
 		c.mss = mss
 	}
+	c.delay = tlsBatchCorkDelayForRTT(ciphertextTransportRTT(tcp))
 	c.setCork = func(on bool) error { return setTCPCork(tcp, on) }
 	c.enabled = true
 	return c
@@ -49,7 +69,7 @@ func newTLSBatchCorkForTest(mss int, delay time.Duration, setter func(bool) erro
 		mss = fallbackTCPMSS
 	}
 	if delay <= 0 {
-		delay = tlsBatchCorkDelay
+		delay = tlsBatchCorkMaxDelay
 	}
 	return &tlsBatchCork{setCork: setter, delay: delay, mss: mss, enabled: setter != nil}
 }
