@@ -180,7 +180,7 @@ func buildGoldenVectors() *GoldenVectors {
 	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
 	// 降级成单向子集）。
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "x",
+		ProtocolVersion: 2, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
