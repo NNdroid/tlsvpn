@@ -6,27 +6,30 @@ import (
 	"time"
 )
 
-// Sub-MSS carry is deliberately bounded to a small fraction of the transport
-// RTT. A fixed hundreds-of-microseconds cork hurts a single low-RTT TCP flow by
-// delaying its ACK clock; WAN links can afford a longer window and get more
-// opportunity for the next TLSVPN batch to fill the real-data tail.
+// Sub-MSS carry is intentionally disabled on sub-millisecond transport RTTs.
+// Holding even a very short partial segment on those links disturbs the ACK
+// clock more than it helps. On WAN-like RTTs, keep the window to a small
+// fraction of RTT so the next real TLSVPN batch can fill the tail without
+// adding synthetic padding.
 const (
-	tlsBatchCorkMinDelay = 20 * time.Microsecond
-	tlsBatchCorkMaxDelay = 150 * time.Microsecond
+	tlsBatchCorkRTTThreshold = time.Millisecond
+	tlsBatchCorkMaxDelay     = 150 * time.Microsecond
 )
 
-func tlsBatchCorkDelayForRTT(rtt time.Duration) time.Duration {
+func tlsBatchCorkPolicyForRTT(rtt time.Duration) (time.Duration, bool) {
 	if rtt <= 0 {
-		return tlsBatchCorkMaxDelay
+		// TCP_INFO should normally have an RTT after connect/accept. If it is
+		// unavailable, keep the feature enabled with the conservative cap.
+		return tlsBatchCorkMaxDelay, true
+	}
+	if rtt < tlsBatchCorkRTTThreshold {
+		return 0, false
 	}
 	d := rtt / 8
-	if d < tlsBatchCorkMinDelay {
-		return tlsBatchCorkMinDelay
-	}
 	if d > tlsBatchCorkMaxDelay {
-		return tlsBatchCorkMaxDelay
+		d = tlsBatchCorkMaxDelay
 	}
-	return d
+	return d, true
 }
 
 // tlsBatchCork controls TCP_CORK once per TLSVPN batch instead of wrapping the
@@ -58,7 +61,11 @@ func newTLSBatchCork(conn net.Conn) *tlsBatchCork {
 	if mss, err := getTCPMSS(tcp); err == nil && mss >= 256 {
 		c.mss = mss
 	}
-	c.delay = tlsBatchCorkDelayForRTT(ciphertextTransportRTT(tcp))
+	delay, enabled := tlsBatchCorkPolicyForRTT(ciphertextTransportRTT(tcp))
+	if !enabled {
+		return c
+	}
+	c.delay = delay
 	c.setCork = func(on bool) error { return setTCPCork(tcp, on) }
 	c.enabled = true
 	return c
