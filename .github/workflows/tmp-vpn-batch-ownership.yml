@@ -1,0 +1,73 @@
+name: Temporary VPN batch ownership P0
+
+on:
+  push:
+    branches:
+      - perf/single-path-fec-bypass
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-push:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/single-path-fec-bypass
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply ownership patch
+        run: python3 scripts/tmp_vpn_batch_ownership.py
+
+      - name: Format
+        run: gofmt -w frame.go client.go server.go stream_padding.go vpn_batch_ownership_test.go
+
+      - name: Verify hot-path ownership invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'type VPNFrameBatch struct' frame.go
+          grep -F 'dispatchBatch(batch *VPNFrameBatch)' client.go
+          grep -F 'sendOwnedBatchToAnyFenced(p, backends, dataBest, batch)' client.go
+          grep -F 'queuedPayload += batch.Bytes' client.go
+          grep -F 'queuedPayload += batch.Bytes' server.go
+          grep -F 'connTxChan := make(chan *VPNFrameBatch, 32)' client.go
+          grep -F 'connTxChan := make(chan *VPNFrameBatch, 32)' server.go
+          grep -F 'tapBackend := make(chan *VPNFrameBatch, 32)' server.go
+          ! grep -F 'queuedPayload += vpnFrameBatchBytes' client.go server.go
+          ! grep -F 'copy(out, batch)' client.go
+
+      - name: Targeted ownership and scheduler tests
+        run: go test ./... -run 'TestOwnedVPNFrameBatch|TestAsyncPortOwnedBackend|TestSendBatch|TestFEC|TestAdaptive|TestPick|TestVSwitchOwned' -count=1
+
+      - name: Race ownership scheduler FEC
+        run: go test -race ./... -run 'TestOwnedVPNFrameBatch|TestAsyncPortOwnedBackend|TestSendBatch|TestFEC|TestAdaptive|TestPick|TestVSwitchOwned' -count=1
+
+      - name: Full test suite
+        run: go test ./... -count=1
+
+      - name: Batch accounting benchmark
+        run: go test -run '^$' -bench '^BenchmarkVPNFrameBatchAccounting$' -benchmem -count=5
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          git add frame.go client.go server.go stream_padding.go vpn_batch_ownership_test.go
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf: transfer VPN batches as ownership objects'
+          git push origin HEAD:perf/single-path-fec-bypass
