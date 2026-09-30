@@ -1,0 +1,74 @@
+name: tmp-rx-session-batch-worker-fix
+
+on:
+  pull_request:
+    types: [reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  implement:
+    if: github.head_ref == 'perf/single-path-fec-bypass' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/single-path-fec-bypass
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Reuse staged patch and fix epoch barrier placement
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            /- name: Apply session RX batch worker/ { seen=1; next }
+            seen && /^        run: \|/ { capture=1; next }
+            capture && /^      - name:/ { exit }
+            capture { sub(/^          /, ""); print }
+          ' .github/workflows/tmp-rx-session-batch-worker.yml > /tmp/apply-rx-worker.sh
+          bash /tmp/apply-rx-worker.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('client.go')
+          s = p.read_text()
+          misplaced = '''\tif isNewSession && c.rxWorker != nil {\n\t\tc.rxWorker.AdvanceEpoch()\n\t}\n'''
+          if s.count(misplaced) != 1:
+              raise SystemExit(f'expected one misplaced epoch barrier, got {s.count(misplaced)}')
+          s = s.replace(misplaced, '', 1)
+          anchor = '''\tif c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {\n\t\tisNewSession = true\n\t\tc.serverSessionID = resp.SessionID\n\t\tc.sessionEpoch = resp.SessionEpoch\n\t}\n'''
+          if anchor not in s:
+              raise SystemExit('isNewSession anchor not found')
+          fixed = anchor + '''\tif isNewSession && c.rxWorker != nil {\n\t\tc.rxWorker.AdvanceEpoch()\n\t}\n'''
+          s = s.replace(anchor, fixed, 1)
+          p.write_text(s)
+          PY
+
+          gofmt -w client.go
+          git diff --check
+
+      - name: Validate RX batch worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./... -run 'TestRXSessionWorker|TestFEC|TestReorder|TestFrame' -count=1
+          go test -race ./... -run 'TestRXSessionWorker|TestFEC|TestReorder' -count=1
+          go test -run '^$' -bench 'BenchmarkFECDecoderData(Serial16|Batch16)$' -benchmem -count=5 . | tee /tmp/rx-batch-bench.txt
+
+      - name: Commit implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add rx_batch.go rx_batch_test.go frame.go buffer.go fec.go client.go server.go
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit'
+            exit 0
+          fi
+          git commit -m 'perf: batch multi-connection RX per session'
+          git push origin HEAD:perf/single-path-fec-bypass
