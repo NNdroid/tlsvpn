@@ -14,6 +14,22 @@ TLSVPN_SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 TLSVPN_PKG_VERSION="${TLSVPN_PKG_VERSION:-$(git describe --tags --long --always 2>/dev/null || true)}"
 JOBS="${JOBS:-2}"
 
+# On pull_request workflows GitHub checks out refs/pull/<n>/merge and github.sha
+# points at that synthetic merge commit. OpenWrt's GitHub source downloader and
+# fallback clone cannot fetch that SHA through normal repository refs. When the
+# requested source SHA is exactly the checked-out merge commit, use its second
+# parent instead: that is the real PR head commit and is fetchable from GitHub.
+if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+  checkout_sha="$(git rev-parse HEAD)"
+  if [[ "$TLSVPN_SOURCE_VERSION" == "$checkout_sha" ]]; then
+    if pr_head_sha="$(git rev-parse HEAD^2 2>/dev/null)" && [[ -n "$pr_head_sha" ]]; then
+      printf 'Pull request merge SHA %s is not a stable source ref; using PR head %s\n' \
+        "$TLSVPN_SOURCE_VERSION" "$pr_head_sha"
+      TLSVPN_SOURCE_VERSION="$pr_head_sha"
+    fi
+  fi
+fi
+
 [[ -n "$OPENWRT_FEED_SIGNING_KEY_FILE" ]] || {
   echo "error: OPENWRT_FEED_SIGNING_KEY_FILE is required" >&2
   exit 2
