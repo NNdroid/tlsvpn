@@ -159,8 +159,12 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 	}
 
 	if !multipath {
-		// 2 -> 1: a partially accumulated group is abandoned. The RX bypass fence
-		// must rewind to that group's arithmetic start, not merely firstSeq.
+		// The constructor defaults to multipath=true so direct encoder tests keep
+		// their historical immediate-encoding semantics. If the very first real
+		// dispatch has only one backend, however, no multipath traffic has existed
+		// yet and RX has no dynamic state to suspend. Enter suppressed mode without
+		// emitting a synthetic startup SUSPEND.
+		hadTraffic := e.lastSeq != 0 || len(e.seqs) != 0
 		boundary := fecGroupStart(firstSeq, e.k)
 		if len(e.seqs) != 0 {
 			boundary = e.seqs[0]
@@ -170,15 +174,21 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 			e.reset()
 		}
 		e.armed = false
-		e.publishModeControl(fecControlSuspend, boundary)
+		if hadTraffic {
+			e.publishModeControl(fecControlSuspend, boundary)
+		}
 		return
 	}
 
-	// 1 -> 2: sequence numbers advanced while XOR work was suppressed. Resume
-	// only at the next complete arithmetic group. A zero boundary means sequence
-	// exhaustion leaves no complete group in this epoch, so no RESUME is sent.
+	// A startup 1 -> 2 transition does not require RESUME if no SUSPEND was ever
+	// published: RX stayed conservatively active the whole time. Once a genuine
+	// multipath -> single-path SUSPEND exists, later 1 -> 2 transitions must close
+	// that bypass window at the next complete arithmetic group boundary.
 	e.multipath = true
 	e.armed = false
+	if e.controlGeneration == 0 {
+		return
+	}
 	if boundary := fecNextGroupStart(firstSeq, e.k); boundary != 0 {
 		e.publishModeControl(fecControlResume, boundary)
 	}
