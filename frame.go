@@ -465,6 +465,25 @@ func NewFrameScanner(r io.Reader) *FrameScanner {
 // SetMaxDataLen 调整帧负载上限（认证前收紧、认证后放开的配对使用）
 func (fs *FrameScanner) SetMaxDataLen(n int) { fs.maxDataLen = n }
 
+// BufferedFrameReady reports whether ReadFrame can consume one more complete
+// frame without another socket/TLS read. RX producers use this to flush a partial
+// session batch before they would block, preserving interactive latency.
+func (fs *FrameScanner) BufferedFrameReady() bool {
+	const headerSize = 10
+	available := len(fs.buf) - fs.offset
+	if available < headerSize {
+		return false
+	}
+	rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
+	if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+		// Let ReadFrame report the protocol error immediately rather than delaying
+		// the current batch in an attempt to coalesce with malformed input.
+		return false
+	}
+	padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+	return available >= headerSize+int(rawDataLen)+padLen
+}
+
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 	const HeaderSize = 10
 

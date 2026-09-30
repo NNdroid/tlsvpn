@@ -858,6 +858,7 @@ type Client struct {
 	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
 	txPort           *AsyncPort
 	rxReorder        *ReorderBuffer
+	rxWorker         *rxSessionWorker
 	fecDec           *fecDecoder
 	TxBytes          uint64
 	RxBytes          uint64
@@ -1337,6 +1338,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 				reportTapWriteErr(werr)
 			}
 		})
+		c.rxWorker = newRXSessionWorker(c.rxReorder)
 	}
 
 	// Web 面板（可选，web.addr 未指定时不启动）；携带完整配置供面板热更
@@ -1375,6 +1377,9 @@ func (c *Client) Run(ctx context.Context) {
 			[]policyRoutingSpec{policyRoutingSpecFor(c.live.Load(), c.gwV4, c.gwV6)})
 		for _, spec := range specs {
 			cleanPolicyRouting(c.tapName, spec)
+		}
+		if c.rxWorker != nil {
+			c.rxWorker.Close()
 		}
 		c.rxReorder.Close()
 		c.txPort.Close()
@@ -1950,6 +1955,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.serverSessionID = resp.SessionID
 		c.sessionEpoch = resp.SessionEpoch
 	}
+	if isNewSession && c.rxWorker != nil {
+		c.rxWorker.AdvanceEpoch()
+	}
 	// 记下服务端下发的会话令牌，供后续重连回带。服务端未开启 session_token
 	// 时该字段为空，行为与旧版一致。
 	c.sessionToken = resp.SessionToken
@@ -2169,6 +2177,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
 		var rxAEADScratch nonceAADScratch
+		var rxProducer *rxBatchProducer
+		if c.rxWorker != nil {
+			rxProducer = c.rxWorker.NewProducer(c.fecDec, func(cerr error) {
+				select {
+				case errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr):
+				default:
+				}
+				_ = tlsConn.Close()
+			})
+			defer rxProducer.Flush()
+		}
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -2225,12 +2244,26 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
 						return
 					}
+					if rxProducer != nil {
+						rxProducer.Push(0, frame)
+						if !scanner.BufferedFrameReady() {
+							rxProducer.Flush()
+						}
+						continue
+					}
 					if cerr := c.fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
 						return
 					}
 					putFrame(frame)
+					continue
+				}
+				if rxProducer != nil {
+					rxProducer.Push(seq, frame)
+					if !scanner.BufferedFrameReady() {
+						rxProducer.Flush()
+					}
 					continue
 				}
 				if useXorFec {

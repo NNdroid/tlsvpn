@@ -548,6 +548,59 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 	d.tryRecoverLocked(g)
 }
 
+// OnDataBatch records a contiguous run of decrypted data frames while taking
+// the shared decoder mutex once. Multi-connection readers never call this directly;
+// the session RX worker is the sole hot-path caller.
+func (d *fecDecoder) OnDataBatch(frames []VPNFrame) {
+	if len(frames) == 0 || d.staticSingle.Load() {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range frames {
+		seq, frame := frames[i].Seq, frames[i].Data
+		if len(frame) == 0 || seq == 0 {
+			continue
+		}
+		if d.staticSingle.Load() {
+			continue
+		}
+		if d.fence.BypassData(seq) {
+			if seq&0xff == 0 {
+				d.maybeRetireOldGroupsLocked()
+			}
+			continue
+		}
+		retired := d.retiredBefore.Load()
+		if retired != 0 && seq < retired {
+			continue
+		}
+		start := d.groupStartOf(seq)
+		if d.isDoneLocked(start) {
+			continue
+		}
+		g, ok := d.groups[start]
+		if !ok {
+			g = d.newGroupLocked(start)
+		}
+		bit := uint64(seq - start)
+		mask := uint64(1) << bit
+		if g.gotMask&mask != 0 {
+			continue
+		}
+		g.gotMask |= mask
+		if g.gotMask == d.fullMask {
+			d.finishGroupLocked(g)
+			continue
+		}
+		if len(frame) > len(g.acc) {
+			g.acc = d.growAccLocked(g.acc, len(frame))
+		}
+		subtle.XORBytes(g.acc[:len(frame)], g.acc[:len(frame)], frame)
+		d.tryRecoverLocked(g)
+	}
+}
+
 // OnParity 处理一个校验帧负载。payload 只读借用，不转移所有权。
 func (d *fecDecoder) OnParity(payload []byte) {
 	var scratch nonceAADScratch

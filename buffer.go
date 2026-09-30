@@ -235,6 +235,48 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	}
 }
 
+// InsertBatch consumes a reader-owned batch with one reorder critical section.
+// It is the multi-connection RX worker hot path; Insert remains for recovered frames
+// and compatibility callers. Every Data buffer is consumed regardless of outcome.
+func (rb *ReorderBuffer) InsertBatch(frames []VPNFrame) {
+	if len(frames) == 0 {
+		return
+	}
+	rb.mu.Lock()
+	if rb.shutting {
+		rb.mu.Unlock()
+		freeFrames(frames)
+		return
+	}
+	wake := false
+	for i := range frames {
+		frame := frames[i].Data
+		if frames[i].Seq == 0 {
+			if frame != nil {
+				putFrame(frame)
+			}
+			frames[i].Data = nil
+			continue
+		}
+		if rb.insertLocked(frames[i].Seq, frame) {
+			wake = true
+		}
+		frames[i].Data = nil
+	}
+	batch := rb.takePendingLocked()
+	if batch != nil {
+		rb.deliverMu.Lock()
+	}
+	rb.mu.Unlock()
+	if wake {
+		rb.signalGapWorker()
+	}
+	rb.deliver(batch)
+	if batch != nil {
+		rb.deliverMu.Unlock()
+	}
+}
+
 // insertLocked 单帧入槽 + 尝试按序输出（调用方须持锁）
 func (rb *ReorderBuffer) insertLocked(seq uint32, frame []byte) bool {
 	if rb.expectedSeq == 0 {

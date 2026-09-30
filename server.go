@@ -399,6 +399,7 @@ type ClientSession struct {
 	PeerInfo           PeerInfo // 客户端自报诊断元数据；不参与认证/授权
 	macBin             macKey   // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
 	RxReorder          *ReorderBuffer
+	RxWorker           *rxSessionWorker
 	FecDec             *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK            int               // 下行 XOR 分组大小（0 表示未启用）
 	FecMode            string            // 面板展示：xor K=d / off
@@ -652,6 +653,9 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	defer session.sessionMu.Unlock()
 	for ci := range session.conns {
 		ci.tcpConn.Close()
+	}
+	if session.RxWorker != nil {
+		session.RxWorker.AdvanceEpoch()
 	}
 	saltA, saltB := newRandomSalt(), newRandomSalt()
 	var icTx, icRx, fecTx, fecRx *innerCipher
@@ -1621,6 +1625,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				s.vswitch.ProcessOwnedFrame(clientID, orderedFrame)
 			}
 		})
+		if !isStaticSinglePathTopology(req.BrutalConns) {
+			session.RxWorker = newRXSessionWorker(session.RxReorder)
+		}
 		if fecEncK > 0 {
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
 			session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
@@ -1879,6 +1886,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	scanner.SetMaxDataLen(maxWireDataLen)
 	var rxBytesBatch, rxPacketsBatch uint64
 	var rxAEADScratch nonceAADScratch
+	session.sessionMu.RLock()
+	rxWorkerForConn := session.RxWorker
+	fecForConn := session.FecDec
+	session.sessionMu.RUnlock()
+	var rxProducer *rxBatchProducer
+	if rxWorkerForConn != nil {
+		rxProducer = rxWorkerForConn.NewProducer(fecForConn, func(cerr error) {
+			log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
+			_ = conn.Close()
+		})
+		defer rxProducer.Flush()
+	}
 	flushRxStats := func() {
 		if rxPacketsBatch == 0 {
 			return
@@ -1942,12 +1961,26 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
 					return
 				}
+				if rxProducer != nil {
+					rxProducer.Push(0, frame)
+					if !scanner.BufferedFrameReady() {
+						rxProducer.Flush()
+					}
+					continue
+				}
 				if cerr := fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
 					return
 				}
 				putFrame(frame)
+				continue
+			}
+			if rxProducer != nil {
+				rxProducer.Push(seq, frame)
+				if !scanner.BufferedFrameReady() {
+					rxProducer.Flush()
+				}
 				continue
 			}
 			if fecDec != nil {
@@ -1973,6 +2006,9 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 	evBus.emit("off", "warn", clientID, "session destroyed; IPs and MAC binding released")
 	s.macToIPCleanLocked(session.MAC, session.IPv4)
 	s.vswitch.RemovePort(clientID)
+	if session.RxWorker != nil {
+		session.RxWorker.Close()
+	}
 	if session.RxReorder != nil {
 		session.RxReorder.Close()
 	}
