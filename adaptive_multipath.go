@@ -387,6 +387,14 @@ func adaptiveStickySlackUS(rtt uint32) uint64 {
 // prevents an early/delayed TCP_INFO sample from starving a cold socket before
 // it has carried the >=64 KiB needed to measure its own writer delivery rate.
 func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingBytes uint64) *Backend {
+	// dispatchBatch calls the scheduler immediately before feeding the FEC encoder.
+	// Feed the encoder the *physical* backend count here rather than p.activePaths:
+	// low-load scheduling intentionally keeps activePaths==1 even when standby TCP
+	// paths exist and can carry useful parity.
+	if p != nil && p.encoder != nil {
+		p.encoder.setPhysicalPathCount(len(backends))
+	}
+
 	if len(backends) == 0 {
 		if p != nil {
 			p.activePaths.Store(0)
