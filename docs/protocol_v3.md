@@ -6,7 +6,7 @@ This document is the protocol source of truth. Code, tests and cross-language im
 
 ## 1. Transport and connection model
 
-TLSVPN runs over TCP protected by TLS. A logical VPN session may use multiple simultaneous physical TCP/TLS connections. Each physical connection performs the application handshake independently and then carries framed data/control records for the same logical session epoch.
+TLSVPN runs over TCP protected by TLS. One logical VPN session may use multiple simultaneous physical TCP/TLS connections. Every physical connection performs the application handshake independently and then joins the same logical session epoch.
 
 The application protocol version is exactly:
 
@@ -14,46 +14,52 @@ The application protocol version is exactly:
 protocol_version = 3
 ```
 
-A peer advertising any other version MUST be rejected. There is no v2 fallback or downgrade path.
+A peer advertising any other version MUST be rejected. There is no v2 fallback, downgrade path, legacy magic dispatch, or alternate interpretation of v3 bytes.
 
 The implementation currently advertises ALPN `h2`; TLS is still used as a byte-stream transport, not as HTTP/2 framing.
 
+### 1.1 Logical session versus physical connection
+
+A logical session owns the global data sequence, inner-AEAD epoch, FEC encoder/decoder state, reorder state, tunnel addresses and session token state.
+
+A physical TCP/TLS connection is only one transport path belonging to that logical session. Losing or replacing one physical path does **not** by itself create a new logical session epoch.
+
+A same-epoch replacement connection MUST authenticate with the same logical client/session identity and then joins the existing sequence/FEC/AEAD epoch. A connection from an older epoch MUST NOT inject traffic after a newer epoch has been established.
+
 ## 2. Stream frame format
 
-Every application record is encoded inside the TLS byte stream with a fixed 10-byte header:
+Every application record inside the TLS byte stream has a fixed 10-byte header:
 
 ```text
-0               4       6              10
-+---------------+-------+---------------+
-| data_len u32  | pad u16| seq u32      |
-+---------------+-------+---------------+
-| data_len bytes payload                 |
-+----------------------------------------+
-| pad_len bytes cover padding            |
-+----------------------------------------+
+0               4        6              10
++---------------+--------+---------------+
+| data_len u32  | pad u16| seq u32       |
++---------------+--------+---------------+
+| data_len bytes payload                  |
++-----------------------------------------+
+| pad_len bytes cover padding             |
++-----------------------------------------+
 ```
 
 All integers are big-endian.
 
-Fields:
-
-- `data_len`: payload bytes on the wire, excluding the 10-byte frame header and excluding padding. For encrypted data records this includes the AEAD tag.
+- `data_len`: payload bytes on the wire, excluding the 10-byte header and padding. For encrypted data records this includes the inner-AEAD tag.
 - `pad_len`: opaque cover-padding byte count.
-- `seq`: data sequence number. `seq=0` is reserved for handshake/control traffic; normal VPN data uses `1..0xffffffff`.
+- `seq`: global logical-session data sequence. `seq=0` is reserved for handshake/control traffic. VPN data uses `1..0xffffffff`.
 
-The authenticated post-handshake maximum `data_len` is `131070` bytes. The pre-authentication handshake frame limit is `16384` bytes.
+Authenticated post-handshake maximum `data_len` is `131070` bytes. The pre-authentication handshake-frame limit is `16384` bytes.
 
 Padding bytes are not interpreted by the receiver and are not included in inner-AEAD AAD.
 
-## 3. Connection state machine
+## 3. Physical connection state machine
 
-A physical connection has two protocol phases.
+A physical connection has two application phases.
 
 ### 3.1 Pre-handshake phase
 
-The first TLSVPN record uses `seq=0` and contains UTF-8 JSON for `HandshakeReq`. The server replies with one `seq=0` JSON `HandshakeResp` record.
+The first TLSVPN record uses `seq=0` and contains UTF-8 JSON `HandshakeReq`. The server replies with one `seq=0` JSON `HandshakeResp`.
 
-During this phase the `seq=0` payload is JSON, not a v3 typed control payload.
+During this phase `seq=0` payload is JSON, not a typed v3 control.
 
 ### 3.2 Post-handshake phase
 
@@ -61,9 +67,9 @@ After a successful handshake:
 
 - `seq > 0`: VPN data record.
 - `seq = 0`, `data_len = 0`: KEEPALIVE.
-- `seq = 0`, `data_len > 0`: typed v3 control record. The first payload byte is `control_kind`.
+- `seq = 0`, `data_len > 0`: typed v3 control record; payload byte 0 is `control_kind`.
 
-Unknown or malformed post-handshake control kinds are protocol errors. They MUST NOT be silently ignored for compatibility.
+Unknown or malformed post-handshake controls are protocol errors and MUST NOT be silently ignored.
 
 ## 4. Handshake request
 
@@ -72,60 +78,60 @@ The client sends a JSON object with these fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `protocol_version` | integer | MUST equal `3`. |
-| `client_instance` | string | Process-instance identity used to detect a new key/sequence epoch. |
-| `conn_id` | string | Diagnostic UUID for correlating client/server views of one physical connection. |
+| `client_instance` | string | Process-instance identity; a changed instance establishes a new session epoch. |
+| `conn_id` | string | Diagnostic UUID identifying one physical connection. |
 | `client_id` | string | Stable logical client UUID derived from authenticated identity inputs. |
 | `psk` | string | Hex SHA-256 of the configured PSK. |
 | `mac` | string | Client tunnel MAC address. |
 | `ipv4` | string | Requested/remembered IPv4 address, if any. |
 | `ipv6` | string | Requested/remembered IPv6 address, if any. |
 | `padding` | string | Random handshake camouflage material. |
-| `brutal_groups` | bool | Enables grouped/aggregate TCP Brutal rate semantics. |
+| `brutal_groups` | bool | Enables grouped/aggregate TCP Brutal semantics. |
 | `brutal_total_tx` | integer | Requested aggregate client→server Mbps budget. |
 | `brutal_total_rx` | integer | Requested aggregate server→client Mbps budget. |
-| `brutal_conns` | integer | Declared physical connection count. |
+| `brutal_conns` | integer | Declared configured physical connection count. |
 | `brutal_conn_index` | integer | Zero-based physical connection index. |
 | `fec` | bool | Requests XOR FEC. |
-| `fec_group` | integer | XOR FEC group size K; valid negotiated range is 2..64 and may be narrowed by server policy. |
+| `fec_group` | integer | XOR FEC group size K. Protocol range is 2..64; server policy may narrow it. |
 | `encrypt` | bool | Whether inner AEAD is enabled. |
-| `enc_algo` | integer | Inner AEAD algorithm identifier. |
-| `session_token` | string | 32-byte random session possession token encoded as 64 hex characters. |
-| `peer_info` | object | Diagnostic peer metadata only; never authorization input. |
+| `enc_algo` | integer | Exact inner-AEAD algorithm identifier. |
+| `session_token` | string | Random existing-session possession token, encoded as 64 hex characters. |
+| `peer_info` | object | Diagnostic peer metadata only. |
 
-The server MUST require exact v3 and exact configured inner-encryption compatibility. FEC requests outside server policy MUST be rejected rather than silently clamped to another wire value.
+The server MUST require exact v3 and exact configured inner-encryption compatibility. An invalid FEC request is rejected rather than silently clamped to another wire value.
 
 ## 5. Handshake response
 
-A successful server response contains:
+A successful response contains:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `protocol_version` | integer | MUST equal `3`. |
-| `session_epoch` | integer | Monotonic logical key/sequence epoch. |
+| `session_epoch` | integer | Logical key/sequence epoch. |
 | `success` | bool | Handshake result. |
 | `message` | string | Human-readable result. |
 | `session_id` | string | Logical session UUID. |
 | `client_id` | string | Accepted logical client identifier. |
 | `ipv4` / `ipv6` | string | Assigned tunnel addresses. |
 | `gw_v4` / `gw_v6` | string | Tunnel gateway addresses. |
-| `padding` | string | Handshake camouflage field. |
+| `padding` | string | Handshake camouflage material. |
 | `brutal_groups` | bool | Negotiated grouped rate semantics. |
 | `brutal_total_tx` / `brutal_total_rx` | integer | Negotiated aggregate Mbps budgets. |
 | `fec` | bool | Negotiated FEC enablement. |
 | `fec_group` | integer | Negotiated XOR group size K. |
 | `encrypt` | bool | Negotiated inner-AEAD enablement. |
-| `enc_algo` | integer | Exact selected inner AEAD algorithm. |
-| `enc_salt` | string | 8-byte c2s salt, hex encoded. |
-| `enc_salt2` | string | 8-byte s2c salt, hex encoded. |
-| `session_token` | string | Current/pending random reconnect token. |
-| `tls` | object | Server-observed TLS ClientHello/final TLS diagnostics. |
+| `enc_algo` | integer | Exact selected inner-AEAD algorithm. |
+| `enc_salt` | string | 8-byte client→server inner-AEAD salt, hex encoded. |
+| `enc_salt2` | string | 8-byte server→client inner-AEAD salt, hex encoded. |
+| `session_token` | string | Current/pending reconnect possession token. |
+| `tls` | object | Server-observed TLS diagnostics. |
 | `peer_info` | object | Authenticated peer diagnostics. |
 
-Fields carrying `omitempty` in the Go structs may be absent when their semantic value is empty. Absence does not change the protocol version or enable a legacy interpretation. `protocol_version=3` is mandatory on every handshake request and successful response.
+Fields using `omitempty` may be absent only when their semantic value is empty. Absence never enables a v2 interpretation. `protocol_version=3` is mandatory on every request and successful response.
 
-### 5.1 `peer_info` object
+### 5.1 `peer_info`
 
-`peer_info` is diagnostic only and MUST NOT participate in authentication or authorization. When present, its string fields are:
+`peer_info` is diagnostic only and MUST NOT participate in authorization. Its current string fields are:
 
 ```text
 implementation
@@ -139,11 +145,9 @@ git_commit
 build_time
 ```
 
-Each peer may omit the object or individual empty fields. Receivers bound stored field sizes at the trust boundary.
+### 5.2 `tls`
 
-### 5.2 `tls` object
-
-The successful server response may include a diagnostic summary of the TLS handshake actually observed by the server:
+The response may include:
 
 ```text
 fingerprint_kind          string
@@ -160,34 +164,36 @@ offered_groups            []uint16
 offered_alpn              []string
 ```
 
-The current fingerprint kind is `tls-clienthello-v1`. It is project-specific and is not JA3/JA4. TLS diagnostics MUST NOT be used as application-layer authentication input.
+The current fingerprint kind is `tls-clienthello-v1`. It is project-specific and MUST NOT be used as application authentication input.
 
-## 6. Session identity, token and epoch rules
+## 6. Session token and epoch rules
 
-The PSK hash authenticates membership in the VPN, while `session_token` proves possession of an existing logical session.
+The PSK hash authenticates VPN membership. `session_token` proves possession of an existing logical session.
 
-A session token is 32 random bytes encoded as 64 hex characters. The implementation uses a two-phase current/pending rollover so a lost handshake response does not permanently desynchronize the token.
+A session token is 32 random bytes encoded as 64 hex characters. The implementation uses current/pending rollover so loss of one handshake response does not permanently desynchronize reconnect state.
 
-A change of `client_instance` creates a new session epoch. A new epoch MUST reset:
+A changed `client_instance`, sequence exhaustion, or another explicit epoch-rotation event establishes a new session epoch. A new epoch MUST reset:
 
-- data sequence allocation;
+- data sequence allocation to 1;
 - FEC-mode transition generation;
-- backend remembered FEC fence generation;
+- every backend's remembered FEC fence generation;
 - RX reorder state;
-- RX FEC decoder state;
+- RX FEC decoder state and retirement horizon;
 - per-direction inner-AEAD salts/nonce domain.
 
-Old physical connections from a previous epoch must not continue injecting data into the new epoch.
+A mere physical-path failure/rejoin within the same logical session MUST NOT reset the sequence, FEC generation, reorder state, session epoch, or AEAD salts.
+
+Old physical connections belonging to a previous epoch MUST NOT continue injecting data into the new epoch.
 
 ## 7. Data sequencing
 
-Normal VPN data uses `seq=1..0xffffffff` and is globally allocated by the logical sending port across all physical backends.
+VPN data uses `seq=1..0xffffffff`, globally allocated by the logical sending port across all physical backends.
 
-`seq=0` is never a VPN data sequence.
+`seq=0` is never VPN data.
 
-When the uint32 data sequence space is exhausted, the implementation must force a fresh key/sequence epoch before sequence reuse. Reusing a sequence within an AEAD epoch is forbidden.
+Sequence values MUST NOT be reused inside one inner-AEAD epoch. When the uint32 sequence space is exhausted, the implementation must establish a fresh epoch before sending new data.
 
-The receiver uses a reorder buffer keyed by the global data sequence. Gaps are tolerated for a bounded interval; after the reorder deadline, missing sequence numbers may be skipped and later arrivals below the retired horizon no longer affect ordered output.
+The receiver maintains a global reorder buffer keyed by this sequence. A physical TCP path therefore does not own its own independent data sequence.
 
 ## 8. Post-handshake control plane
 
@@ -200,13 +206,13 @@ Current v3 kinds:
 0x02  FEC_MODE
 ```
 
-No other kind is valid in v3. Unknown kinds are protocol errors.
+No other kind is valid in protocol v3. Unknown kinds are protocol errors.
 
 An empty `seq=0` payload is KEEPALIVE and has no `control_kind` byte.
 
-## 9. FEC_PARITY control (`control_kind = 0x01`)
+## 9. FEC_PARITY (`control_kind = 0x01`)
 
-XOR FEC groups normal data into fixed arithmetic groups of K sequences. Group starts satisfy:
+XOR FEC groups data into fixed arithmetic groups of K data sequences. Group starts satisfy:
 
 ```text
 group_start ≡ 1 (mod K)
@@ -225,29 +231,29 @@ Payload layout:
 +-------------------------------+
 ```
 
-The parity payload is the bytewise XOR of the K **plaintext** member payloads, zero-extended to the longest member.
+The parity body is the bytewise XOR of the K **plaintext** member payloads, zero-extended to the longest member.
 
-When inner encryption is enabled, only the XOR parity body is encrypted with the FEC AEAD domain. The descriptor (`kind/start/K/lengths`) remains visible inside TLS.
+When inner encryption is enabled, only the parity body is encrypted with the FEC AEAD domain. The descriptor (`kind/start/K/lengths`) remains visible inside TLS.
 
 Parity AEAD uses:
 
 - sequence input: `group_start`;
-- wire length input: encrypted parity-body length including AEAD tag;
+- wire-length input: encrypted parity-body length including tag;
 - key domain: `fec`.
 
-A parity record is useful only when exactly one member of the group is missing.
+A parity record can recover exactly one missing member.
 
-## 10. Dynamic FEC mode control (`control_kind = 0x02`)
+## 10. FEC_MODE (`control_kind = 0x02`)
 
-Dynamic mode control exists to let RX safely skip decoder map/allocation/XOR work when TX temporarily has fewer than two useful physical paths.
+Dynamic FEC mode control lets RX bypass decoder map/allocation/XOR work while sender topology makes parity useless.
 
 Payload length is exactly 16 bytes:
 
 ```text
-0        1        2              4              12             16
-+--------+--------+--------------+---------------+--------------+
-| kind=2 | op u8  | flags u16 BE | generation u64| boundary u32 |
-+--------+--------+--------------+---------------+--------------+
+0        1        2              4               12             16
++--------+--------+--------------+----------------+--------------+
+| kind=2 | op u8  | flags u16 BE | generation u64 | boundary u32 |
++--------+--------+--------------+----------------+--------------+
 ```
 
 `flags` MUST be zero in v3.
@@ -259,57 +265,79 @@ Operations:
 2  RESUME
 ```
 
-`generation` starts at 1 for each session epoch and strictly increases for each real dynamic FEC mode transition. A receiver applies only a generation newer than the last accepted generation.
+`generation` starts at 1 for each session epoch and strictly increases for each real sender-side dynamic FEC transition. The receiver applies only a generation newer than the last accepted generation.
 
-`boundary` is always a non-zero arithmetic FEC group start.
+`boundary` MUST be a non-zero arithmetic FEC group start.
 
 ### 10.1 SUSPEND
 
-`SUSPEND(boundary)` means the sender will not produce useful parity for groups whose start is at or beyond `boundary` until a later RESUME.
+`SUSPEND(boundary)` means the sender will not generate useful parity for groups whose start is at or beyond `boundary` until a later RESUME.
 
-If a 2→1 transition abandons a partially accumulated group, the boundary rewinds to that partial group's arithmetic start.
+For a genuine `>=2 → 1` physical-backend transition, if the encoder has a partial group, the boundary rewinds to that partial group's start because the sender discards that partial XOR state.
 
-The receiver may immediately discard decoder state inside the declared bypass interval, but groups before the boundary remain eligible for already-in-flight old parity until reorder progress proves they can no longer affect output.
+The receiver may immediately discard decoder state inside the declared bypass interval. Groups before the boundary remain eligible for already-in-flight pre-collapse parity until reorder progress proves they can no longer affect ordered output.
 
 ### 10.2 RESUME
 
-After physical multipath becomes available again, TX does not resume from a partial arithmetic group. It resumes only at the next complete group start.
+For a genuine `1 → >=2` transition after a SUSPEND, FEC resumes only at the next complete arithmetic group start. TX does not resume halfway through a group.
 
-`RESUME(boundary)` closes the bypass interval at that boundary. Data with `seq >= boundary` is decoded normally again.
+`RESUME(boundary)` closes the bypass interval at `boundary`; data with `seq >= boundary` follows normal decoder processing.
 
-If no complete FEC group boundary remains before uint32 sequence exhaustion, TX MUST NOT emit a wrapped RESUME; it remains suppressed until a new session epoch.
+If no complete group boundary remains before uint32 exhaustion, TX MUST remain suppressed until a new epoch; the boundary MUST NOT wrap.
 
 ### 10.3 Startup semantics
 
-Starting with one physical backend is not a dynamic 2→1 transition. No synthetic SUSPEND is emitted. If a second backend later joins before any real SUSPEND existed, no RESUME is needed because RX never entered a bypass window.
+Starting a session with one physical backend is not a dynamic `2→1` transition. No synthetic SUSPEND is emitted.
+
+If an additional backend joins before any real SUSPEND has existed, no RESUME is emitted because RX never entered a dynamic bypass interval.
 
 ### 10.4 Ordering
 
-The current Go sender prepends the current FEC_MODE control descriptor to the same backend channel batch as the first governed data batch selected for that physical backend.
+FEC_MODE and the data it governs are ordered by sender authority, not by receiver-local connection count.
 
-The control boundary, not immediate byte adjacency, defines applicability. A control may precede older queued data whose sequence lies before the boundary.
+The sender prepends the current FEC_MODE descriptor to the same backend-channel batch as the first governed data batch actually accepted by that backend after scheduler fallback. The backend records that generation only after successful enqueue.
 
-Generation ordering resolves control reordering across independent TCP streams.
+The boundary, not immediate byte adjacency, defines applicability. A control may legally appear before already queued data whose sequence lies before the boundary.
+
+Independent TCP streams can reorder controls relative to each other. `generation` resolves that cross-stream ordering; a stale lower generation cannot regress a newer receiver state.
+
+### 10.5 Physical path failure and rejoin
+
+Physical path failure and rejoin are **same-session topology events**, not implicit epoch changes.
+
+For one logical sender:
+
+1. The actual registered/usable sender backend count is authoritative. Receiver-local `liveConns` MUST NOT be used to infer FEC mode.
+2. A genuine sender transition from at least two physical backends to one opens a SUSPEND interval as specified above.
+3. The surviving authenticated connection continues using the current global data sequence, session epoch and AEAD salts.
+4. A replacement physical connection that authenticates into the same epoch joins the existing logical sequence/FEC state. It does not reset sequence numbers or cryptographic state.
+5. A newly registered backend starts with no remembered FEC fence generation for that backend. Before it can carry data governed by an already-current FEC_MODE generation, that generation MUST be queued on the same backend ahead of the governed data.
+6. When sender topology returns from one backend to at least two after a real SUSPEND, the sender emits RESUME at the next complete group boundary.
+7. A path that belongs to an older session epoch is invalid and MUST NOT be treated as a same-epoch rejoin.
+
+These rules guarantee that temporary path loss can trigger RX CPU bypass without sacrificing in-flight pre-collapse recovery or reusing AEAD nonces.
 
 ## 11. FEC decoder cleanup and reorder interaction
 
-On SUSPEND, decoder groups inside the now-unrecoverable bypass interval may be released immediately without incrementing FEC-loss counters.
+On SUSPEND, groups wholly inside the now-unrecoverable bypass interval may be released immediately without incrementing FEC-loss counters.
 
-Groups before the SUSPEND boundary may still be useful to delayed old parity. They may be retired only after:
+Groups before the SUSPEND boundary can remain useful to delayed old parity. They may be retired only after:
 
 ```text
 reorder.expected_seq >= suspend_boundary
 ```
 
-After retirement, late data/parity below the retired boundary must not recreate decoder state.
+After retirement, late data/parity below the retired boundary MUST NOT recreate decoder state.
 
-The implementation deliberately keeps this cleanup off the normal active-data hot path. Progress is checked on control/parity paths and sparsely during long bypass intervals.
+Cleanup is deliberately kept off the normal active-data hot path. Progress is checked on control/parity paths and sparsely during a long bypass interval.
+
+Parity processing remains conservative during dynamic data bypass. This avoids requiring a RESUME arriving on one TCP stream to precede a parity record arriving on another stream. The higher-frequency per-data decoder work is what dynamic bypass removes.
 
 ## 12. Inner AEAD
 
-Inner AEAD is optional because TLS already authenticates/encrypts the transport. When enabled, both peers must use the same explicit `enc_algo`; there is no implicit downgrade.
+Inner AEAD is optional because TLS already authenticates/encrypts transport. When enabled, both peers MUST use exactly the negotiated/configured `enc_algo`; there is no implicit downgrade.
 
-Current algorithm IDs:
+Algorithm IDs:
 
 ```text
 0  none
@@ -323,15 +351,13 @@ All supported AEADs use a 16-byte tag.
 
 ### 12.1 Key derivation
 
-`psk` means the configured plaintext PSK here.
-
-Data-domain key material is:
+For configured plaintext `psk`:
 
 ```text
-SHA256(psk || algorithm_label)
+key_material = SHA256(psk || algorithm_label)
 ```
 
-FEC-domain key material uses the same algorithm label with `_fec` appended.
+The digest is truncated to the algorithm key size where required. The FEC domain appends `_fec` to the algorithm label.
 
 Labels:
 
@@ -342,17 +368,15 @@ ChaCha20          _enc_chacha20
 XChaCha20         _enc_xchacha20
 ```
 
-The digest is truncated to the algorithm key length where required.
-
 ### 12.2 Nonce
 
-AES-GCM and ChaCha20-Poly1305 use a 12-byte nonce:
+AES-GCM and ChaCha20-Poly1305 use:
 
 ```text
 seq_u32_be || salt_8B
 ```
 
-XChaCha20-Poly1305 uses a 24-byte nonce:
+XChaCha20-Poly1305 uses:
 
 ```text
 SHA256("tlsvpn-xchacha20-nonce-v1" || salt_8B)[0:20] || seq_u32_be
@@ -360,73 +384,81 @@ SHA256("tlsvpn-xchacha20-nonce-v1" || salt_8B)[0:20] || seq_u32_be
 
 ### 12.3 AAD
 
-For both data and FEC AEAD domains:
+For data and FEC AEAD domains:
 
 ```text
 AAD = wire_len_u32_be || seq_u32_be
 ```
 
-For normal data, `seq` is the data sequence. For FEC parity body encryption, `seq` is `group_start`.
+For normal data, `seq` is the data sequence. For parity-body encryption, `seq` is `group_start`.
 
-Post-handshake typed control payloads themselves are not inner-AEAD encrypted; they are already protected by TLS. FEC parity body encryption remains independently authenticated when inner encryption is enabled.
+Post-handshake typed control descriptors are not inner-AEAD encrypted; TLS authenticates them. The optional FEC parity body remains independently authenticated by the FEC AEAD domain.
 
 ## 13. Padding
 
-Padding mode is negotiated/configured out of band by implementation configuration, not as a separate v3 control exchange.
-
-The stream frame header carries `pad_len`; the receiver skips those bytes after reading `data_len` payload bytes.
+The frame header carries `pad_len`; the receiver skips those bytes after consuming `data_len` payload bytes.
 
 Current modes:
 
 - `off`: no cover padding.
-- `bucket`: pads records toward configured size buckets, bounded by the implementation's stream/TLS batching limits.
+- `bucket`: bounded cover padding toward configured record-size buckets.
 
 Padding is not part of inner-AEAD AAD.
 
 ## 14. Multipath scheduling and ownership
 
-Data is sent once on the selected backend; it is not replicated to every physical connection. Under load, the scheduler may stripe across eligible paths. FEC parity is generated once per full group and assigned according to the FEC path policy.
+Data is sent once on the selected physical backend; it is not copied to every path. Under load, the scheduler may stripe data across eligible paths.
 
-A physical backend channel owns the frame descriptors/payloads after successful enqueue. FEC_MODE fencing follows the backend that actually accepted the governed data after scheduler fallback.
+FEC parity is generated once per complete group and assigned according to the FEC path policy.
+
+After successful enqueue, a backend channel owns its frame descriptors/payloads. FEC_MODE fencing follows the actual backend that accepted the governed data after scheduler fallback.
+
+Sender backend registration/unregistration is the topology authority used by the dynamic FEC state machine.
 
 ## 15. Keepalive and failure detection
 
-A post-handshake KEEPALIVE is a stream frame with:
+A post-handshake KEEPALIVE is:
 
 ```text
 seq = 0
 data_len = 0
 ```
 
-It refreshes liveness/read deadlines but carries no typed control payload.
+It refreshes liveness/read deadlines and carries no typed-control byte.
 
-A malformed non-empty `seq=0` control payload is not a keepalive.
+A malformed non-empty `seq=0` payload is a protocol error, not a keepalive.
+
+A single physical connection failure may cause the corresponding connection handler to terminate while the logical session remains alive on other paths. Same-epoch replacement follows Section 10.5.
 
 ## 16. Protocol errors
 
 At minimum, these are protocol errors in v3:
 
-- application `protocol_version != 3`;
+- `protocol_version != 3`;
 - unknown non-empty post-handshake `control_kind`;
-- malformed FEC_MODE payload;
+- malformed FEC_MODE payload, non-zero reserved flags, zero generation or invalid boundary;
+- malformed FEC_PARITY descriptor;
 - FEC control traffic when FEC was not negotiated;
 - impossible/invalid negotiated FEC group parameters;
 - incompatible inner-encryption settings or algorithm;
-- sequence/key epoch misuse that would permit nonce reuse.
+- sequence/key epoch misuse that could permit nonce reuse;
+- accepting traffic from a physical connection whose epoch no longer matches the logical session.
 
-Protocol errors MUST terminate the affected physical connection rather than silently reinterpret the bytes using v2 semantics.
+Protocol errors MUST terminate the affected physical connection rather than reinterpret its bytes using previous protocol semantics.
 
 ## 17. Cross-language conformance
 
-`testdata/protocol_golden.json` is the machine-readable cross-language contract for deterministic wire components. It MUST carry `version: 3` and be regenerated whenever a deliberate v3 wire contract change is made.
+`testdata/protocol_golden.json` is the machine-readable deterministic wire contract. It MUST carry `version: 3` and be regenerated whenever a deliberate v3 wire change is made.
 
-Go and Rust implementations MUST both validate the same golden vectors for:
+Go and Rust implementations MUST validate the same golden vectors for:
 
 - PSK hashing;
-- frame header layout;
+- frame-header layout;
 - handshake JSON field names;
-- AEAD domains/nonces/AAD/ciphertext;
+- inner-AEAD domains, nonces, AAD and ciphertext;
 - TLS diagnostic normalization;
-- v3 control payload layouts.
+- FEC_PARITY and FEC_MODE control payloads.
 
-Any deliberate wire-incompatible change after this specification should increment the application protocol version again instead of adding compatibility ambiguity to v3.
+An implementation is not v3-compatible until it implements this contract exactly. No v2 compatibility shim is part of v3.
+
+Any future deliberate wire-incompatible semantic change MUST increment the application protocol version rather than adding ambiguous fallback behavior to v3.
