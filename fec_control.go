@@ -72,7 +72,8 @@ func fecGroupStart(seq uint32, k int) uint32 {
 
 // fecNextGroupStart returns the first complete arithmetic FEC group boundary
 // at or after seq. TX uses this when >=2 physical paths return after a period in
-// which FEC was suppressed.
+// which FEC was suppressed. Zero means no complete group boundary remains in the
+// current uint32 sequence epoch; TX must stay suppressed until the epoch resets.
 func fecNextGroupStart(seq uint32, k int) uint32 {
 	if seq == 0 {
 		return 0
@@ -82,7 +83,12 @@ func fecNextGroupStart(seq uint32, k int) uint32 {
 	if offset == 0 {
 		return seq
 	}
-	return seq + uint32(k) - offset
+	delta := uint32(k) - offset
+	next := uint64(seq) + uint64(delta)
+	if next > uint64(^uint32(0)) {
+		return 0
+	}
+	return uint32(next)
 }
 
 func packFECBypassWindow(from, until uint32) uint64 {
@@ -98,9 +104,10 @@ func unpackFECBypassWindow(v uint64) (from, until uint32) {
 // touched only by rare control frames.
 //
 // Window semantics:
-//   0,0       decoder active
-//   from,0    bypass seq >= from
-//   from,until bypass from <= seq < until
+//
+//	0,0        decoder active
+//	from,0     bypass seq >= from
+//	from,until bypass from <= seq < until
 //
 // A newer SUSPEND replaces any older historical window. Very late data from an
 // older interval may then take the conservative decoder path, which is safe; it
