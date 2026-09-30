@@ -56,10 +56,6 @@ jobs:
       - name: Race ownership scheduler FEC
         run: go test -race ./... -run 'TestOwnedVPNFrameBatch|TestAsyncPortOwnedBackend|TestAdaptiveSchedulerOwnedBackendQueues|TestSendBatch|TestFEC|TestVSwitchOwned' -count=1
 
-      - name: Full test suite soft signal
-        continue-on-error: true
-        run: go test ./... -count=1
-
       - name: Batch accounting benchmark
         run: go test -run '^$' -bench '^BenchmarkVPNFrameBatchAccounting$' -benchmem -count=5
 
