@@ -12,6 +12,8 @@ bash -n "$script"
 
 # Repository construction and signature verification.
 grep -Fq 'OPENWRT_FEED_SIGNING_KEY_FILE' "$script"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_FILE' "$script"
+grep -Fq 'configured OpenWrt feed public key does not match the signing private key' "$script"
 grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT=1' "$script"
 grep -Fq 'staging_dir/host/bin/apk' "$script"
 grep -Fq 'mkndx' "$script"
@@ -51,17 +53,25 @@ if grep -Fq 'feature/openwrt-customfeed' "$workflow"; then
   exit 1
 fi
 
-# Stable private key material must only come from Actions Secrets. Ephemeral
-# keys are allowed for validation jobs, never for publication.
+# Stable private key material must only come from Actions Secrets. The public
+# trust root is deliberately stored in an Actions Variable and must be checked
+# against the private key before any production feed can publish.
 grep -Fq 'secrets.OPENWRT_FEED_SIGNING_KEY_B64' "$workflow"
+grep -Fq 'vars.OPENWRT_FEED_PUBLIC_KEY_B64' "$workflow"
+grep -Fq "github.event_name != 'pull_request' && secrets.OPENWRT_FEED_SIGNING_KEY_B64" "$workflow"
 if grep -Fq 'vars.OPENWRT_FEED_SIGNING_KEY' "$workflow" || \
    grep -Fq 'vars.OPENWRT_FEED_SIGNING_KEY_B64' "$workflow"; then
   echo 'feed signing private key must not come from Actions Variables' >&2
   exit 1
 fi
-grep -Fq 'using an ephemeral CI-only key' "$workflow"
+grep -Fq 'using an ephemeral CI-only key pair' "$workflow"
 grep -Fq 'OPENWRT_FEED_SIGNING_KEY_B64 is required for main/tag/manual publication.' "$workflow"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64 Actions Variable is required for main/tag/manual publication.' "$workflow"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64 does not match OPENWRT_FEED_SIGNING_KEY_B64.' "$workflow"
+grep -Fq 'feed public key differs from OPENWRT_FEED_PUBLIC_KEY_B64' "$workflow"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_FILE: ${{ steps.signing.outputs.public_key_file }}' "$workflow"
 grep -Fq 'rm -f "${{ steps.signing.outputs.key_file }}"' "$workflow"
+grep -Fq 'rm -f "${{ steps.signing.outputs.public_key_file }}"' "$workflow"
 
 # openwrt-feed is a generated branch. Replacing only the selected OpenWrt
 # version prevents stale package versions while preserving older releases.
@@ -84,6 +94,7 @@ done
 # Documentation must describe main as the production source and the persistent
 # OpenWrt 25.12 customfeeds.list client configuration.
 grep -Fq 'main' "$doc"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64' "$doc"
 grep -Fq '/etc/apk/repositories.d/customfeeds.list' "$doc"
 grep -Fq 'openwrt-feed' "$doc"
 if grep -Fq 'next push to `feature/openwrt-customfeed`' "$doc"; then
