@@ -422,6 +422,11 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 	// 仪表盘静态资源（与 API 一致地受认证保护）；no-store 语义见 webuiHandler
 	mux.Handle("/", auth(webuiHandler().ServeHTTP))
 
+	// WebUI 单一 SSE 数据通道；兼容 JSON API 仍保留给脚本/测试。
+	mux.HandleFunc("/api/stream", auth(func(w http.ResponseWriter, r *http.Request) {
+		handleDashboardStream(w, r, srv, cli)
+	}))
+
 	// 状态统计 API
 	mux.HandleFunc("/api/stats", auth(func(w http.ResponseWriter, r *http.Request) {
 		startWebStatsHandler(w, r, srv, cli)
