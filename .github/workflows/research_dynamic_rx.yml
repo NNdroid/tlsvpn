@@ -20,7 +20,7 @@ jobs:
 
       - name: Format gate
         run: |
-          files='buffer.go client.go server.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go'
+          files='buffer.go client.go server.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go fec_dynamic_bypass_p2d_test.go fec_dynamic_bypass_bench_test.go'
           test -z "$(gofmt -l $files)" || { gofmt -d $files; exit 1; }
 
       - name: Build
@@ -28,6 +28,9 @@ jobs:
 
       - name: Dynamic RX FEC tests
         run: go test ./... -count=1 -run 'FEC|Dynamic|ReorderExpected'
+
+      - name: Dynamic RX FEC microbenchmark
+        run: go test -run '^$' -bench '^BenchmarkDynamicFECDecoderDataPath$' -benchmem -count=3
 
       - name: Dynamic RX FEC race gate
         run: go test -race ./... -count=1 -run 'FEC|Dynamic|ReorderExpected'
