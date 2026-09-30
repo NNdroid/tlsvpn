@@ -83,13 +83,14 @@ func clampFecGroup(k int) int {
 // ---------- 编码器（挂在 AsyncPort 上，端口级串行调用，无需加锁） ----------
 
 type fecEncoder struct {
-	k          int
-	seqs       []uint32 // 当前组成员的 seq
-	lens       []int    // 当前组成员的负载长度
-	acc        []byte   // 成员负载的异或累加（按历史最大长度复用）
-	activeLen  int      // 当前组实际触碰的最大长度；reset 只清这一段
-	ic         *innerCipher
-	paritySent uint64 // 已生成校验帧计数（面板/metrics）
+	k           int
+	seqs        []uint32 // 当前组成员的 seq
+	lens        []int    // 当前组成员的负载长度
+	acc         []byte   // 成员负载的异或累加（按历史最大长度复用）
+	activeLen   int      // 当前组实际触碰的最大长度；reset 只清这一段
+	ic          *innerCipher
+	aeadScratch nonceAADScratch
+	paritySent  uint64 // 已生成校验帧计数（面板/metrics）
 
 	// multipath/armed/lastSeq/control* 只由 AsyncPort.run goroutine 修改。
 	// 独立构造 encoder 的单元测试/benchmark 默认立即编码；
@@ -267,7 +268,7 @@ func (e *fecEncoder) buildParity() []byte {
 	if e.ic != nil {
 		// 校验帧线路负载 = 描述符 + 加密后的异或载荷（AEAD 附标签），
 		// 以 groupStart 为 AEAD 的 seq。接收端解码时用同方向盐。
-		e.ic.sealInPlace(buf[off:off+maxLen+tagLen], maxLen, e.seqs[0], uint32(maxLen+tagLen))
+		e.ic.sealInPlaceWithScratch(buf[off:off+maxLen+tagLen], maxLen, e.seqs[0], uint32(maxLen+tagLen), &e.aeadScratch)
 	}
 	return buf
 }
@@ -469,13 +470,18 @@ func (d *fecDecoder) cleanupByReorderProgress() {
 // Unknown kinds and malformed FEC_MODE payloads are protocol errors; callers
 // terminate the affected physical connection rather than reinterpret v2 bytes.
 func (d *fecDecoder) OnControl(payload []byte) error {
+	var scratch nonceAADScratch
+	return d.OnControlWithScratch(payload, &scratch)
+}
+
+func (d *fecDecoder) OnControlWithScratch(payload []byte, scratch *nonceAADScratch) error {
 	kind, err := parseControlKind(payload)
 	if err != nil {
 		return err
 	}
 	switch kind {
 	case controlKindFECParity:
-		d.OnParity(payload)
+		d.OnParityWithScratch(payload, scratch)
 		return nil
 	case controlKindFECMode:
 		ctrl, ok := parseFECModeControl(payload)
@@ -544,6 +550,11 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 
 // OnParity 处理一个校验帧负载。payload 只读借用，不转移所有权。
 func (d *fecDecoder) OnParity(payload []byte) {
+	var scratch nonceAADScratch
+	d.OnParityWithScratch(payload, &scratch)
+}
+
+func (d *fecDecoder) OnParityWithScratch(payload []byte, scratch *nonceAADScratch) {
 	if d.staticSingle.Load() || len(payload) < 7 || payload[0] != controlKindFECParity {
 		return
 	}
@@ -605,7 +616,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
 	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]。
 	wireLen := uint32(maxLen + tagLen)
-	if _, err := d.ic.openTo(pb, payload[descLen:descLen+maxLen+tagLen], start, wireLen); err != nil {
+	if _, err := d.ic.openToWithScratch(pb, payload[descLen:descLen+maxLen+tagLen], start, wireLen, scratch); err != nil {
 		putFrame(pb)
 		putFECLens(g.lens)
 		g.lens = nil

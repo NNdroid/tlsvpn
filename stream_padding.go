@@ -21,7 +21,7 @@ const streamPadAbsoluteLimit = 512
 // appendUnpaddedFrame is the data-plane framing primitive for stream buckets.
 // Individual VPN frames are no longer bucket-padded; only the final frame in
 // an aggregated TLS plaintext batch receives cover padding.
-func appendUnpaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {
+func appendUnpaddedFrameWithScratch(buf []byte, vf VPNFrame, ic *innerCipher, scratch *nonceAADScratch) ([]byte, int) {
 	dataLen := len(vf.Data)
 	encTag := 0
 	if ic != nil && vf.Seq != 0 && dataLen > 0 {
@@ -50,23 +50,33 @@ func appendUnpaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int)
 		payloadStart := startIdx + 10
 		copy(buf[payloadStart:payloadStart+dataLen], vf.Data)
 		if ic != nil && vf.Seq != 0 {
-			ic.sealInPlace(buf[payloadStart:payloadStart+wireLen], dataLen, vf.Seq, uint32(wireLen))
+			ic.sealInPlaceWithScratch(buf[payloadStart:payloadStart+wireLen], dataLen, vf.Seq, uint32(wireLen), scratch)
 		}
 	}
 	return buf, startIdx
 }
 
-func appendOwnedFrameBatchStream(buf []byte, frames []VPNFrame, ic *innerCipher) ([]byte, int, int) {
+func appendUnpaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {
+	var scratch nonceAADScratch
+	return appendUnpaddedFrameWithScratch(buf, vf, ic, &scratch)
+}
+
+func appendOwnedFrameBatchStreamWithScratch(buf []byte, frames []VPNFrame, ic *innerCipher, scratch *nonceAADScratch) ([]byte, int, int) {
 	n := len(frames)
 	last := -1
 	for _, vf := range frames {
 		var start int
-		buf, start = appendUnpaddedFrame(buf, vf, ic)
+		buf, start = appendUnpaddedFrameWithScratch(buf, vf, ic, scratch)
 		last = start
 	}
 	freeFrames(frames)
 	putVPNFrameBatch(frames)
 	return buf, n, last
+}
+
+func appendOwnedFrameBatchStream(buf []byte, frames []VPNFrame, ic *innerCipher) ([]byte, int, int) {
+	var scratch nonceAADScratch
+	return appendOwnedFrameBatchStreamWithScratch(buf, frames, ic, &scratch)
 }
 
 // streamAlignedTLSPlaintextTarget returns the smallest TLS plaintext length

@@ -1781,6 +1781,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1820,7 +1821,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				for {
 					queuedPayload += vpnFrameBatchBytes(frames)
 					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
+					sendBuffer, n, last = appendOwnedFrameBatchStreamWithScratch(sendBuffer, frames, icTx, &txAEADScratch)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -1879,6 +1880,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
 	var rxBytesBatch, rxPacketsBatch uint64
+	var rxAEADScratch nonceAADScratch
 	flushRxStats := func() {
 		if rxPacketsBatch == 0 {
 			return
@@ -1927,7 +1929,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				flushRxStats()
 			}
 			if seq != 0 && icRx != nil {
-				plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
+				plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
 				if derr != nil {
 					// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 					log.Debugf("[%s] dropped tampered/foreign frame (seq=%d): %v", clientID, seq, derr)
@@ -1942,7 +1944,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
 					return
 				}
-				if cerr := fecDec.OnControl(frame); cerr != nil {
+				if cerr := fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
 					return

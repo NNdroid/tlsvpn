@@ -16,7 +16,6 @@ import (
 	"math/big"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -252,8 +251,6 @@ func (ic *innerCipher) tagLen() int {
 // nonceAADScratch 同时容纳最大 24B nonce 与 8B AAD，避免热路径每帧分配。
 type nonceAADScratch [xNonceSize + 8]byte
 
-var aeadScratchPool = sync.Pool{New: func() any { return new(nonceAADScratch) }}
-
 func (ic *innerCipher) nonceAAD(seq uint32, wireLen uint32, buf *nonceAADScratch) (nonce, aad []byte) {
 	if ic.algo == encAlgoXChaCha20 {
 		copy(buf[0:20], ic.xnoncePrefix[:])
@@ -283,32 +280,41 @@ func gcmAAD(wireLen, seq uint32) []byte {
 	return aad[:]
 }
 
-func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen uint32) int {
+func (ic *innerCipher) sealInPlaceWithScratch(region []byte, ptLen int, seq uint32, wireLen uint32, scratch *nonceAADScratch) int {
 	if ptLen == 0 || ic == nil {
 		return ptLen
 	}
-	scratch := aeadScratchPool.Get().(*nonceAADScratch)
 	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
 	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
-	aeadScratchPool.Put(scratch)
 	return len(out)
 }
 
-func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]byte, error) {
+// sealInPlace is retained for tests/cold callers. The hot writer path passes a
+// goroutine-local scratch explicitly via sealInPlaceWithScratch.
+func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen uint32) int {
+	var scratch nonceAADScratch
+	return ic.sealInPlaceWithScratch(region, ptLen, seq, wireLen, &scratch)
+}
+
+func (ic *innerCipher) openInPlaceWithScratch(data []byte, seq uint32, wireLen uint32, scratch *nonceAADScratch) ([]byte, error) {
 	if len(data) == 0 || ic == nil {
 		return data, nil
 	}
 	if len(data) < ic.tagLen() {
 		return nil, fmt.Errorf("AEAD payload too short: %d", len(data))
 	}
-	scratch := aeadScratchPool.Get().(*nonceAADScratch)
 	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
-	plain, err := ic.aead.Open(data[:0], nonce, data, aad)
-	aeadScratchPool.Put(scratch)
-	return plain, err
+	return ic.aead.Open(data[:0], nonce, data, aad)
 }
 
-func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]byte, error) {
+// openInPlace is retained for tests/cold callers. The hot reader path passes a
+// goroutine-local scratch explicitly via openInPlaceWithScratch.
+func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]byte, error) {
+	var scratch nonceAADScratch
+	return ic.openInPlaceWithScratch(data, seq, wireLen, &scratch)
+}
+
+func (ic *innerCipher) openToWithScratch(dst, src []byte, seq uint32, wireLen uint32, scratch *nonceAADScratch) ([]byte, error) {
 	if ic == nil {
 		copy(dst, src)
 		return dst, nil
@@ -316,11 +322,15 @@ func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]by
 	if len(src) < ic.tagLen() {
 		return nil, fmt.Errorf("AEAD payload too short: %d", len(src))
 	}
-	scratch := aeadScratchPool.Get().(*nonceAADScratch)
 	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
-	plain, err := ic.aead.Open(dst[:0], nonce, src, aad)
-	aeadScratchPool.Put(scratch)
-	return plain, err
+	return ic.aead.Open(dst[:0], nonce, src, aad)
+}
+
+// openTo is retained for tests/cold callers. FEC RX passes its connection-local
+// scratch explicitly via openToWithScratch.
+func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]byte, error) {
+	var scratch nonceAADScratch
+	return ic.openToWithScratch(dst, src, seq, wireLen, &scratch)
 }
 
 // verifyCertHash 用服务器证书叶子证书的 SHA-256 指纹校验 -cert-sha256。

@@ -1991,6 +1991,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -2034,7 +2035,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				for {
 					queuedPayload += vpnFrameBatchBytes(frames)
 					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
+					sendBuffer, n, last = appendOwnedFrameBatchStreamWithScratch(sendBuffer, frames, icTx, &txAEADScratch)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -2090,6 +2091,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
+		var rxAEADScratch nonceAADScratch
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -2131,7 +2133,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					flushRxStats()
 				}
 				if seq != 0 && icRx != nil {
-					plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
+					plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
 					if derr != nil {
 						// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 						log.Debugf("[Conn %d] dropped tampered/foreign frame (seq=%d): %v", connIndex, seq, derr)
@@ -2146,7 +2148,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
 						return
 					}
-					if cerr := c.fecDec.OnControl(frame); cerr != nil {
+					if cerr := c.fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
 						return
