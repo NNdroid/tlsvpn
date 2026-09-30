@@ -1,6 +1,6 @@
 # Dynamic 2→1 RX FEC bypass research
 
-Status: research design, not yet data-plane implementation.
+Status: P2a state machine and P2b Go data-path integration implemented on the research branch. P2c decoder-state cleanup and P2d fault-injection/performance validation remain pending.
 
 Baseline: `perf/single-path-fec-bypass` / PR #68.
 
@@ -8,7 +8,7 @@ Baseline: `perf/single-path-fec-bypass` / PR #68.
 
 TX already suppresses XOR/FEC work when the physical backend count falls below two. RX cannot safely infer the same state from its local live-connection count because sender/receiver path-loss detection is asynchronous and old data/parity may still be in flight on either TCP stream.
 
-A receiver that simply disables FEC when `liveConns == 1` can discard a parity frame that was generated before the collapse and could still recover a missing pre-collapse data frame.
+A receiver that simply disables FEC when `liveConns == 1` can discard useful pre-collapse state or can resume too early after a path returns.
 
 ## Required invariant
 
@@ -16,33 +16,33 @@ RX may bypass a data sequence only after the sender has authoritatively stated t
 
 The sender, not the receiver's local connection count, owns that fact.
 
-## Proposed mechanism: sender-authoritative FEC mode fence
+## Sender-authoritative FEC mode fence
 
-Use a new optional `seq=0` control frame. Unknown `seq=0` frames are already discarded by both current Go and Rust reorder paths, so old peers can safely ignore the hint.
+P2b uses an optional `seq=0` control frame. Unknown `seq=0` frames are already discarded by old Go/Rust receive paths, so peers that do not understand the hint remain wire-compatible.
 
-Suggested payload (v1):
+Wire payload v1:
 
 ```
 [1B magic=0xFD]
 [1B version=1]
 [1B op]
-[1B reserved]
+[1B reserved=0]
 [8B generation, big endian]
 [4B boundary_seq, big endian]
 ```
 
 Operations:
 
-- `SUSPEND`: FEC has no recovery value for all groups whose start is `>= boundary_seq`.
+- `SUSPEND`: FEC has no recovery value for data groups whose start is `>= boundary_seq`.
 - `RESUME`: FEC may again be generated beginning at the complete group starting at `boundary_seq`.
 
-`generation` monotonically increases on every sender-side FEC mode transition. Receivers ignore controls with `generation <= last_generation`, preventing an old SUSPEND arriving from a slow TCP stream after a newer RESUME from disabling FEC incorrectly.
+`generation` monotonically increases on every sender-side FEC mode transition. RX ignores controls with `generation <= last_generation`, preventing an old SUSPEND arriving from a slow TCP stream after a newer RESUME from regressing the receiver.
 
-Generation is scoped to the current sequence/key epoch. A fresh epoch recreates decoder state and starts control generation from zero again; old physical connections are already rejected/closed by the existing epoch machinery.
+Generation is scoped to the sequence/key epoch. `AsyncPort.ResetEpoch` resets each surviving backend's remembered fence generation to zero because the replacement encoder restarts its control generation at one. Without this reset, a backend that had observed generation 9 in the old epoch could incorrectly suppress generation 1 in the new epoch.
 
-## Why the SUSPEND boundary is a group start, not merely the first single-path data seq
+## SUSPEND boundary
 
-When physical backends collapse from >=2 to 1, the current encoder resets any partial group. Therefore the partial group can never receive parity even if some members were transmitted while multiple paths still existed.
+When physical backends collapse from >=2 to 1, the encoder resets any partial group. The abandoned partial group can never receive parity even if some of its members were transmitted while multiple paths still existed.
 
 For K=4:
 
@@ -53,23 +53,23 @@ path collapses
 seq 7 is first batch observed with only 1 path
 ```
 
-The correct SUSPEND boundary is `5`, not `7`: group 5..8 can no longer produce parity because TX discarded its partial encoder state.
+The correct SUSPEND boundary is `5`, not `7`.
 
-General formula for first seq `S` observed in the single-path dispatch:
+General formula for the first single-path sequence `S` when there is no already-open partial encoder group:
 
 ```
 bypass_from = S - ((S - 1) % K)
 ```
 
-All decoder work for `seq >= bypass_from` is unnecessary until RESUME.
+If a partial encoder group already exists, its stored first sequence is the authoritative boundary.
 
-Because `dispatchBatch` holds `backendsMu.RLock`, backend register/unregister cannot change the physical-path snapshot in the middle of one dispatched batch. This makes the first sequence in the first single-path batch a stable transition observation point.
+`dispatchBatch` holds `backendsMu.RLock`, so backend register/unregister cannot change the physical-path snapshot in the middle of one dispatch. `pickAdaptiveBackend` updates encoder topology before the current batch is fed to the encoder, making `lastSeq + 1` the first sequence governed by that transition.
 
 ## RESUME boundary
 
-When a second backend returns, TX already waits until the next arithmetic group boundary before re-arming the encoder.
+When a second backend returns, TX waits until the next arithmetic group boundary before re-arming XOR accumulation.
 
-For first seq `S` observed after >=2 paths return:
+For the first sequence `S` governed by the restored multipath topology:
 
 ```
 offset = (S - 1) % K
@@ -77,17 +77,15 @@ resume_from = S                  if offset == 0
 resume_from = S + (K - offset)   otherwise
 ```
 
-The RESUME control may be sent before `resume_from`. RX must therefore keep bypassing `[bypass_from, resume_from)` and only decode sequences `>= resume_from`.
+RX therefore keeps bypassing `[bypass_from, resume_from)` and resumes data accumulation at `resume_from`.
 
 ### Sequence exhaustion
 
-The boundary calculation must be done without uint32 wraparound. If the next complete FEC group boundary would be greater than `MaxUint32`, there is no valid RESUME boundary in the current epoch. In that case TX stays FEC-suppressed until the existing sequence-exhaustion path forces a fresh epoch.
-
-A wrapped RESUME boundary such as `0xFFFFFFFE -> 1` would be incorrect and must never be emitted.
+The boundary calculation must not wrap uint32. If the next complete group start would exceed `MaxUint32`, there is no valid RESUME boundary in the current epoch. TX stays FEC-suppressed until the existing sequence-exhaustion path establishes a fresh epoch.
 
 ## Receiver hot-path representation
 
-Use one atomic 64-bit bypass window:
+The dynamic receive state is a packed atomic 64-bit bypass window:
 
 ```
 window = uint64(from) << 32 | uint64(until)
@@ -95,136 +93,121 @@ window = uint64(from) << 32 | uint64(until)
 
 Semantics:
 
-- `0`: decoder fully active
-- `from > 0, until == 0`: bypass all data `seq >= from`
-- `from > 0, until > from`: bypass `from <= seq < until`
+- `0,0`: dynamic decoder active
+- `from,0`: bypass data `seq >= from`
+- `from,until`: bypass data `from <= seq < until`
 
-This permits one atomic load in `OnData`.
+`OnData` performs an atomic window check before taking the FEC decoder mutex and repeats the check after locking to close the race where SUSPEND arrives between the fast-path check and group allocation/XOR.
 
-Static single-path mode is equivalent to `from=1, until=0`, though the existing `staticSingle` flag can remain initially to keep the patch small.
+The existing `staticSingle` fast bypass remains independent and still handles a topology configured with exactly one physical connection.
 
-For parity, parse `groupStart` first and drop parity only when its group lies in the active bypass window. Old parity for groups before `from` must remain accepted after SUSPEND.
+## P2b ordering implementation: fence travels in the actual data batch
 
-## Ordering rule
+The implemented P2b ordering primitive is simpler and stronger than the earlier writer-pending design.
 
-### Correctness asymmetry
+`sendBatchToAnyFenced` chooses the real writable backend exactly as normal scheduling/fallback does. If that backend has not yet carried the current control generation, it constructs one backend batch whose descriptors are:
 
-SUSPEND may arrive late without breaking correctness: RX merely wastes some decoder CPU until it sees the fence.
+```
+[seq=0 FEC control] [data frame] [data frame] ...
+```
 
-RESUME is different. If data at/after `resume_from` is processed while RX still believes the old open-ended SUSPEND window, RX will skip those members; a later parity frame can no longer recover a missing member because the decoder never accumulated the already-arrived members. Therefore RESUME must be visible before any backend can deliver data/parity governed by the resumed FEC interval.
+The batch is then sent through that backend's existing channel. The backend's `fecFenceGen` is advanced only after the channel send succeeds.
 
-### Refined implementation: per-backend pending fence consumed by the TLS writer
+This gives several useful properties:
 
-Do not write control frames directly to TLS from `AsyncPort`, and do not refactor `sendBatchToAny` into a target-specific control injector.
+1. The fence follows the **actual** backend selected after preferred-path fallback. A full preferred backend is never incorrectly marked fenced.
+2. Fence and governed data occupy the same channel batch, so the single TLS writer necessarily frames the control before those data records.
+3. No independent control queue slot can be dropped under backend-channel pressure.
+4. If the backend send fails, the fence generation is not advanced; another backend or retry still receives the fence.
+5. A newly registered backend starts with fence generation zero and receives the current generation before its first data batch.
+6. The control may precede older queued data. This is safe because applicability is determined by `boundary_seq`, not by physical adjacency on a TCP stream.
 
-A cleaner ordering primitive already exists: every physical `Backend` has exactly one TLS writer, while `AsyncPort` is the only producer of its batch channel.
+Example: SUSPEND has `boundary=21`, while the same TCP stream still has seq 11..20 queued. The control may appear before 11..20; RX continues decoding those sequences because they are `<21`.
 
-Recommended P2b design:
+Likewise RESUME may advertise `boundary=25` before seq 21..24; those sequences remain inside the bypass window while seq 25+ are decoded.
 
-1. `AsyncPort` detects the physical-path mode transition while holding the backend-list read lock for a dispatch.
-2. It increments the global FEC control generation and publishes the same pending control to every backend in that dispatch snapshot **before** enqueueing the current post-transition batch.
-3. Each backend writer checks/consumes its pending control immediately after it receives a channel batch and **before framing that batch**.
-4. The writer prepends the `seq=0` control record to its TLS plaintext, then frames the normal batch.
-5. The writer must repeat this pending-control check for every batch taken by its inner `drainBatches` loop, not merely once at the outer select. Otherwise a transition can occur while the writer is coalescing multiple channel batches and a resumed batch could slip out before its RESUME fence.
+## Why P2b dynamically bypasses data but keeps parity conservative
 
-The Go memory model helps here: `AsyncPort` publishes the pending fence before the channel send of the post-transition batch; that send/receive synchronization means the writer can observe the published fence when it receives that batch.
+P2b deliberately applies the dynamic window only to `fecDecoder.OnData`.
 
-This design has several useful properties:
+`OnParity` remains active except for the existing static-single-path bypass. This is intentional:
 
-- no separate control queue slot, so a full backend channel cannot drop the fence;
-- no payload ownership rewrite in `sendBatchToAny` or `sendOwnedFrameTo`;
-- fallback from preferred backend to another backend remains correct automatically;
-- data and parity writers share the same backend channel/fence mechanism;
-- a fence may be emitted before older already-queued sequences on that TCP stream, which is safe because the explicit boundary governs which sequences are affected;
-- on RESUME, every backend that can carry resumed traffic is guaranteed to write its own RESUME fence before its first affected batch.
+- parity frequency is only about 1/K of data frequency;
+- the expensive hot work targeted by this optimization is per-data group lookup/allocation/XOR;
+- keeping parity conservative removes a cross-TCP correctness dependency on a RESUME fence arriving before a parity frame on another stream;
+- an early resumed parity frame may create/hold a group and later data can complete it after RESUME becomes visible;
+- old parity for a group before SUSPEND continues to recover a missing pre-collapse member.
 
-For a backend added while the sender was in a single-path interval, the next dispatch observes >=2 paths, creates RESUME, and marks both the survivor and new backend pending before either can receive resumed traffic from that dispatch.
-
-## Why writer-side fence can legally precede old queued data
-
-Example: SUSPEND says `boundary=21`, but the surviving backend still has seq 11..20 queued. The writer may emit SUSPEND before 11..20; RX still decodes 11..20 because they are `<21`.
-
-Likewise RESUME may say `boundary=25` and be emitted before single-path seq 21..24; RX continues bypassing `[suspend_from,25)` and activates the decoder only at 25.
-
-Therefore the hard requirement is not “control immediately adjacent to boundary data”; it is:
-
-- the control boundary must be correct;
-- generation must reject cross-stream stale controls;
-- RESUME must be emitted before any `seq >= resume_from` traffic on every backend that can carry such traffic.
+This choice spends a small amount of cold parity work to make P2b ordering easier to audit. P2c can release provably useless parity/group state without changing this rule.
 
 ## Rapid 2→1→2 races
 
-Controls can arrive out of order across TCP streams. Example:
+Controls can arrive out of order across TCP streams:
 
 ```
-A: SUSPEND generation 10 is stuck behind old ciphertext
-B: new path joins and delivers RESUME generation 11 quickly
-A: old SUSPEND generation 10 arrives later
+A: SUSPEND generation 10 is delayed
+B: a restored path delivers RESUME generation 11
+A: SUSPEND generation 10 arrives later
 ```
 
-Without `generation`, RX would regress to bypass mode and miss valid new FEC groups. With generation ordering, generation 10 is ignored after 11 is applied.
+Generation ordering makes the final SUSPEND stale and it is ignored.
 
-If RESUME arrives before an earlier SUSPEND was ever observed, RX simply remains conservative (decoder active). This loses optimization only; correctness is preserved.
+If RESUME arrives before the receiver ever observed the earlier SUSPEND, RX remains conservative with the decoder active. That loses CPU optimization only; it cannot lose recoverability.
 
-A later SUSPEND can replace an older closed bypass window. Very late packets from the old interval may then take the decoder path again, but that is conservative CPU work rather than a correctness failure.
+If a later SUSPEND replaces an older closed bypass window, very late packets from an older interval may also take the decoder path again. This again costs CPU but is conservative for correctness.
 
-## Pending decoder state after SUSPEND
+## Pending decoder state after SUSPEND — P2c
 
-Groups with `start >= bypass_from` are provably unrecoverable and may be released immediately because the sender reset the partial group and will not emit parity for them.
+P2b stops creating/updating decoder groups for data inside the bypass interval, but it does not yet aggressively delete pre-existing group state.
 
-Groups with `start < bypass_from` must remain eligible for late parity. They cannot be cleared solely because the SUSPEND fence arrived: parity/data from the failed TCP path may still arrive later.
+Groups with `start >= bypass_from` are provably unrecoverable after the sender has discarded that partial encoder group and can be released on SUSPEND.
 
-Safe eventual cleanup condition:
+Groups with `start < bypass_from` must remain eligible for late parity/data from the old multipath interval. They cannot be discarded solely because the fence arrived.
+
+Safe eventual cleanup condition for the older groups is:
 
 ```
 reorder.expectedSeq >= bypass_from
 ```
 
-At that point all earlier sequences have either been delivered/recovered or the reorder timeout has already skipped them, so recovering an older frame can no longer affect output.
+At that point earlier sequences have either been delivered/recovered or skipped by reorder timeout, so a late recovery cannot affect ordered output.
 
-A future implementation should expose a cheap reorder progress snapshot or schedule cleanup from the cold transition path. Do not add a lock acquisition to every normal RX packet just for cleanup.
-
-P2b does not need to solve this immediately for correctness: keeping the bounded pre-fence decoder groups alive only costs memory. P2c should add the progress-based cleanup separately so the hot-path fence patch stays auditable.
+P2c should expose a cheap reorder progress snapshot and perform this cleanup from the cold control path rather than adding a mutex acquisition to every normal RX packet.
 
 ## Backward compatibility
 
 ### Old Go receiver
 
-Unknown `seq=0` payload:
-
-- does not match `fecMagic`
-- `fecDecoder.OnData(0, ...)` is a no-op
-- `ReorderBuffer.Insert(0, ...)` drops it
-
-Therefore it safely ignores the new fence.
+An unknown `seq=0` payload does not match `fecMagic`; old `fecDecoder.OnData(0, ...)` is a no-op and `ReorderBuffer.Insert(0, ...)` drops/frees it. The tunnel remains correct and simply misses the RX CPU optimization.
 
 ### Current Rust receiver
 
-Rust explicitly treats `seq==0` as control-class traffic and its reorder buffer drops sequence zero. Unknown fence payloads are therefore also safely ignored.
+Rust already treats `seq==0` as control-class traffic and drops unknown sequence-zero payloads. It is therefore wire-compatible without implementing the dynamic bypass state machine.
 
-No protocol-version bump is required for correctness. A future capability bit may still be useful for observability, but TX does not depend on receiver support: sender-side single-path FEC suppression already exists today.
+No protocol-version bump is required for correctness. A future capability bit may still be useful for observability.
 
-## Tests required before implementation can be considered safe
+## P2a/P2b validation coverage
 
-1. 2→1 mid-group: SUSPEND boundary rewinds to that group's arithmetic start.
-2. 2→1 exactly on boundary.
-3. Old parity before SUSPEND arrives after SUSPEND and still recovers an old missing member.
-4. Data in the bypass interval performs zero decoder group/map/XOR work.
-5. 1→2 mid-group: RESUME waits until next complete boundary.
-6. Near sequence exhaustion: RESUME boundary never wraps; no RESUME is emitted if no full group remains this epoch.
-7. RESUME fence is processed before the first resumed data/parity on each backend.
-8. Writer coalescing race: transition occurs between two batches drained in one TLS write; the second batch still gets fenced first.
-9. SUSPEND generation N arriving after RESUME generation N+1 is ignored.
-10. Multiple rapid 2→1→2→1 transitions with cross-stream control reordering.
-11. Failed control capability / old peer: tunnel remains correct, only optimization is absent.
-12. Go↔Rust interop with unknown control frames in both directions.
-13. Race detector with concurrent control application, parity arrival and data arrival.
-14. Real-TAP fault injection: kill one of two TCP connections under sustained FEC traffic, verify no added reorder loss and measure decoder CPU during the single-path interval.
+Current tests cover:
 
-## Recommended implementation split
+1. control codec and strict version/reserved-field parsing;
+2. 2→1 mid-group SUSPEND boundary rewind;
+3. 1→2 RESUME at the next complete group boundary;
+4. sequence exhaustion without uint32 boundary wrap;
+5. stale lower-generation SUSPEND after newer RESUME;
+6. rapid control transitions and concurrent receiver state access under `-race`;
+7. preferred backend full → fallback backend receives fence + data together;
+8. one fence per backend per generation;
+9. backend fence generation reset on sequence/key epoch change;
+10. bypass-interval data creates no decoder group;
+11. resumed data creates decoder state again at the declared boundary;
+12. old parity after SUSPEND still recovers a pre-boundary missing member;
+13. control is encoded as a normal TLSVPN frame with wire `seq=0`.
 
-- P2a: control payload codec + generation/window state machine unit tests only.
-- P2b: AsyncPort transition detection, per-backend writer fence ordering and Go RX integration.
-- P2c: reorder-progress cleanup of pre-fence groups.
-- P2d: fault-injection / Real-TAP benchmark.
-- P2e: optional Rust implementation for symmetric CPU savings; old Rust remains wire-compatible without it.
+The research CI runs build, focused FEC/dynamic tests, and the same set under the Go race detector.
+
+## Remaining stages
+
+- **P2c:** cleanup decoder groups using SUSPEND boundary + reorder progress.
+- **P2d:** sustained 2→1→2 path-kill fault injection, including Real-TAP CPU profile and loss/reorder checks.
+- **P2e:** optional Rust implementation for symmetric RX CPU savings; old Rust remains wire-compatible without it.
