@@ -30,12 +30,13 @@ jobs:
           python3 scripts/apply_protocol_v3.py
           python3 - <<'PY'
           from pathlib import Path
+          import re
           p = Path('fec.go')
           s = p.read_text()
-          old = '\tcontrolKindFECParity byte = 0xFE\n'
-          if s.count(old) != 1:
-              raise SystemExit(f'fec.go: expected one migrated legacy parity-kind declaration, got {s.count(old)}')
-          p.write_text(s.replace(old, '', 1))
+          s2, n = re.subn(r'^\s*controlKindFECParity\s+byte\s*=\s*0xFE\s*\n', '', s, count=1, flags=re.M)
+          if n != 1:
+              raise SystemExit(f'fec.go: expected one migrated legacy parity-kind declaration, got {n}')
+          p.write_text(s2)
           PY
 
       - name: Format
