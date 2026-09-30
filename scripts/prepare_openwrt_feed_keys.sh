@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  prepare_openwrt_feed_keys.sh pair <private-key-output> <public-key-output>
+  prepare_openwrt_feed_keys.sh public <public-key-output>
+
+The pair command reads OPENWRT_FEED_SIGNING_KEY_B64 and
+OPENWRT_FEED_PUBLIC_KEY_B64. The public command only reads the public-key
+variable. Values should be Base64-encoded PEM, although raw PEM and one
+accidental extra Base64 layer are normalized for recovery.
+EOF
+  exit 2
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+command -v openssl >/dev/null 2>&1 || die 'openssl is required to validate OpenWrt feed keys'
+command -v base64 >/dev/null 2>&1 || die 'base64 is required to decode OpenWrt feed keys'
+
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+pem_label() {
+  sed -n 's/^-----BEGIN \(.*\)-----\r\{0,1\}$/\1/p' "$1" | head -n 1
+}
+
+normalize_literal_newlines() {
+  local value="$1"
+  # Some secret-management UIs export multiline PEM as a single line with
+  # literal \n sequences. Expanding those sequences is safe here because the
+  # result is still parsed and normalized by OpenSSL before use.
+  value="${value//\\r\\n/$'\n'}"
+  value="${value//\\n/$'\n'}"
+  printf '%s' "$value"
+}
+
+decode_key_value() {
+  local setting="$1"
+  local value="$2"
+  local output="$3"
+  local first="$tmp_dir/${setting}.first"
+  local second="$tmp_dir/${setting}.second"
+  local compact=''
+  local label=''
+
+  [[ -n "$value" ]] || die "$setting is empty"
+
+  if [[ "$value" == *'-----BEGIN '* ]]; then
+    normalize_literal_newlines "$value" > "$output"
+    printf '[openwrt-feed-key] %s encoding=raw-pem bytes=%s\n' \
+      "$setting" "$(wc -c < "$output")"
+    return
+  fi
+
+  compact="$(printf '%s' "$value" | tr -d '[:space:]')"
+  if ! printf '%s' "$compact" | base64 --decode > "$first" 2>/dev/null; then
+    die "$setting is neither PEM nor valid Base64; encode the PEM file bytes, not its path"
+  fi
+
+  label="$(pem_label "$first")"
+  if [[ -n "$label" ]]; then
+    cp "$first" "$output"
+    printf '[openwrt-feed-key] %s encoding=base64 pem_label=%s bytes=%s\n' \
+      "$setting" "$label" "$(wc -c < "$output")"
+    return
+  fi
+
+  # Recover a common configuration mistake where a value that was already
+  # Base64 text was encoded a second time. Do not recurse beyond one extra
+  # layer: accepting arbitrary wrapping would conceal a genuinely wrong key.
+  compact="$(tr -d '[:space:]' < "$first")"
+  if [[ -n "$compact" && "$compact" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && \
+     (( ${#compact} % 4 == 0 )) && \
+     printf '%s' "$compact" | base64 --decode > "$second" 2>/dev/null && \
+     [[ -n "$(pem_label "$second")" ]]; then
+    cp "$second" "$output"
+    printf '[openwrt-feed-key] %s encoding=double-base64 pem_label=%s bytes=%s\n' \
+      "$setting" "$(pem_label "$output")" "$(wc -c < "$output")"
+    return
+  fi
+
+  cp "$first" "$output"
+  printf '[openwrt-feed-key] %s encoding=base64 pem_label=none bytes=%s\n' \
+    "$setting" "$(wc -c < "$output")"
+}
+
+diagnose_private_key() {
+  local input="$1"
+  local label
+  label="$(pem_label "$input")"
+  case "$label" in
+    PUBLIC\ KEY|EC\ PUBLIC\ KEY)
+      die 'OPENWRT_FEED_SIGNING_KEY_B64 contains a public key; it must contain the matching private key'
+      ;;
+    ENCRYPTED\ PRIVATE\ KEY)
+      die 'OPENWRT_FEED_SIGNING_KEY_B64 contains an encrypted private key; CI requires an unencrypted EC P-256 key'
+      ;;
+    '')
+      die 'OPENWRT_FEED_SIGNING_KEY_B64 decoded successfully but is not PEM; encode the private PEM file bytes, not its filename or existing Base64 text'
+      ;;
+    *)
+      die "OPENWRT_FEED_SIGNING_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an unencrypted private key"
+      ;;
+  esac
+}
+
+diagnose_public_key() {
+  local input="$1"
+  local label
+  label="$(pem_label "$input")"
+  case "$label" in
+    EC\ PRIVATE\ KEY|PRIVATE\ KEY|ENCRYPTED\ PRIVATE\ KEY)
+      die 'OPENWRT_FEED_PUBLIC_KEY_B64 contains a private key; store only the derived public key in the Actions Variable'
+      ;;
+    '')
+      die 'OPENWRT_FEED_PUBLIC_KEY_B64 decoded successfully but is not PEM; encode the public PEM file bytes, not its filename or existing Base64 text'
+      ;;
+    *)
+      die "OPENWRT_FEED_PUBLIC_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an EC public key"
+      ;;
+  esac
+}
+
+normalize_public_key() {
+  local output="$1"
+  local raw="$tmp_dir/public.raw.pem"
+  local normalized="$tmp_dir/public.normalized.pem"
+
+  decode_key_value OPENWRT_FEED_PUBLIC_KEY_B64 \
+    "${OPENWRT_FEED_PUBLIC_KEY_B64:-}" "$raw"
+  if ! openssl ec -pubin -in "$raw" -pubout -out "$normalized" >/dev/null 2>&1; then
+    diagnose_public_key "$raw"
+  fi
+  chmod 644 "$normalized"
+  mv -f "$normalized" "$output"
+  printf '[openwrt-feed-key] public_key_sha256=%s\n' \
+    "$(openssl pkey -pubin -in "$output" -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"
+}
+
+normalize_key_pair() {
+  local private_output="$1"
+  local public_output="$2"
+  local raw_private="$tmp_dir/private.raw.pem"
+  local normalized_private="$tmp_dir/private.normalized.pem"
+  local derived_public_der="$tmp_dir/private.public.der"
+  local configured_public_der="$tmp_dir/configured.public.der"
+  local curve=''
+
+  decode_key_value OPENWRT_FEED_SIGNING_KEY_B64 \
+    "${OPENWRT_FEED_SIGNING_KEY_B64:-}" "$raw_private"
+  if ! openssl pkey -in "$raw_private" -passin pass: -check -noout >/dev/null 2>&1; then
+    diagnose_private_key "$raw_private"
+  fi
+  if ! openssl ec -in "$raw_private" -passin pass: -out "$normalized_private" >/dev/null 2>&1; then
+    die 'OPENWRT_FEED_SIGNING_KEY_B64 is a private key, but it is not an EC key supported by the OpenWrt APK signer'
+  fi
+
+  curve="$(openssl ec -in "$normalized_private" -text -noout 2>/dev/null | sed -n 's/^[[:space:]]*ASN1 OID: //p' | head -n 1)"
+  [[ "$curve" == 'prime256v1' ]] || \
+    die "OPENWRT_FEED_SIGNING_KEY_B64 uses '${curve:-an unknown curve}'; OpenWrt feed signing requires EC P-256 (prime256v1)"
+
+  normalize_public_key "$public_output"
+  openssl ec -in "$normalized_private" -pubout -outform DER > "$derived_public_der" 2>/dev/null
+  openssl ec -pubin -in "$public_output" -pubout -outform DER > "$configured_public_der" 2>/dev/null
+  cmp -s "$derived_public_der" "$configured_public_der" || \
+    die 'OPENWRT_FEED_PUBLIC_KEY_B64 does not match OPENWRT_FEED_SIGNING_KEY_B64'
+
+  chmod 600 "$normalized_private"
+  mv -f "$normalized_private" "$private_output"
+  printf '[openwrt-feed-key] private_key_type=EC curve=%s pair_match=true\n' "$curve"
+}
+
+mode="${1:-}"
+case "$mode" in
+  pair)
+    [[ "$#" -eq 3 ]] || usage
+    normalize_key_pair "$2" "$3"
+    ;;
+  public)
+    [[ "$#" -eq 2 ]] || usage
+    normalize_public_key "$2"
+    ;;
+  *)
+    usage
+    ;;
+esac
