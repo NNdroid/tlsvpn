@@ -30,16 +30,18 @@ type Backend struct {
 	// Adaptive scheduler observability. queuedBytes includes channel-resident
 	// batches plus the batch currently owned by the TLS writer until Write
 	// succeeds. The writer publishes delivery-rate EWMA; AsyncPort only reads it.
-	queuedBytes     atomic.Uint64
-	rateBytesPerSec atomic.Uint64
-	etaUsec         atomic.Uint64
-	active          atomic.Bool
-	carryPending    atomic.Bool
-	assignedBytes   atomic.Uint64 // actual data bytes accepted by this backend (after fallback)
-	assignedBatches atomic.Uint64 // actual data batches accepted by this backend
-	virtualFinishNS atomic.Int64  // scheduler-only service debt, published atomically for race safety
-	rateSampleBytes uint64
-	rateSampleStart time.Time
+	queuedBytes        atomic.Uint64
+	rateBytesPerSec    atomic.Uint64
+	etaUsec            atomic.Uint64
+	active             atomic.Bool
+	carryPending       atomic.Bool
+	assignedBytes      atomic.Uint64 // actual data bytes accepted by this backend (after fallback)
+	assignedBatches    atomic.Uint64 // actual data batches accepted by this backend
+	fecAssignedBytes   atomic.Uint64 // FEC parity payload bytes accepted by this backend
+	fecAssignedBatches atomic.Uint64 // FEC parity batches accepted by this backend
+	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
+	rateSampleBytes    uint64
+	rateSampleStart    time.Time
 }
 
 type AsyncPort struct {
@@ -594,6 +596,8 @@ func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
 	b.addQueuedBytes(n)
 	select {
 	case b.ch <- out:
+		b.fecAssignedBytes.Add(n)
+		b.fecAssignedBatches.Add(1)
 		return 0
 	default:
 		b.completeQueuedBytes(n)
