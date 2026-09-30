@@ -1856,6 +1856,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			// client.conns 属于 restart-only 拓扑配置，因此 ==1 时可以安全使用
 			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
 			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
+			c.fecDec.SetReorderProgress(c.rxReorder.ExpectedSeqSnapshot)
 			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}

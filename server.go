@@ -685,6 +685,7 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	}
 	if session.FecEncK > 0 {
 		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, session.RxReorder.Insert)
+		session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
 		session.Port.ResetEpoch(session.FecEncK, fecTx)
 	} else {
 		session.Port.ResetEpoch(0, nil)
@@ -1624,6 +1625,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		if fecEncK > 0 {
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
+			session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
 			// Current Go clients always advertise BrutalGroups/BrutalConns as the
 			// authenticated physical-topology declaration even when shaping is off.
 			// Legacy/unknown peers (no group semantics) deliberately keep RX FEC on.

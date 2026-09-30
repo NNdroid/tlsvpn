@@ -288,20 +288,24 @@ type fecGroupState struct {
 }
 
 type fecDecoder struct {
-	mu           sync.Mutex
-	k            int
-	fullMask     uint64
-	staticSingle atomic.Bool // configured topology is exactly one physical path: RX FEC has no recovery value
-	fence        fecRXFenceState
-	ic           *innerCipher
-	out          func(seq uint32, frame []byte)
-	groups       map[uint32]*fecGroupState // 组起点 → 组状态
-	groupOrder   []uint32                  // group 创建顺序；已完成项 lazy skip
-	groupHead    int                       // groupOrder 首个可能仍活跃的位置
-	doneRing     [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
-	spares       []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
-	recovered    uint64                    // 异或恢复帧计数
-	lost         uint64                    // 确认丢失帧计数
+	mu              sync.Mutex
+	controlMu       sync.Mutex
+	k               int
+	fullMask        uint64
+	staticSingle    atomic.Bool // configured topology is exactly one physical path: RX FEC has no recovery value
+	fence           fecRXFenceState
+	cleanupBefore   atomic.Uint32 // highest SUSPEND boundary whose older groups may retire after reorder crosses it
+	retiredBefore   atomic.Uint32 // groups below this boundary can no longer affect ordered output
+	reorderProgress func() uint32 // write-once before decoder publication; cold-path callback
+	ic              *innerCipher
+	out             func(seq uint32, frame []byte)
+	groups          map[uint32]*fecGroupState // 组起点 → 组状态
+	groupOrder      []uint32                  // group 创建顺序；已完成项 lazy skip
+	groupHead       int                       // groupOrder 首个可能仍活跃的位置
+	doneRing        [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
+	spares          []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
+	recovered       uint64                    // 异或恢复帧计数
+	lost            uint64                    // 确认丢失帧计数
 }
 
 // NewFECDecoder 创建解码器。k 必须与对端编码分组大小一致（来自握手协商）；
@@ -322,6 +326,10 @@ func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *
 		spares:     make([]*fecGroupState, 0, fecMaxPendingGroups),
 	}
 }
+
+// SetReorderProgress installs a cold-path ordered-delivery progress probe. Call
+// this before publishing the decoder to connection RX goroutines.
+func (d *fecDecoder) SetReorderProgress(fn func() uint32) { d.reorderProgress = fn }
 
 // isStaticSinglePathTopology is deliberately strict: zero means "unknown", not
 // single-path. The client has an authoritative configured count; the server only
@@ -352,6 +360,7 @@ func (d *fecDecoder) groupStartOf(seq uint32) uint32 {
 
 // Reset 清空全部组状态（服务端会话重置/客户端换会话时调用）
 func (d *fecDecoder) Reset() {
+	d.controlMu.Lock()
 	d.mu.Lock()
 	for _, g := range d.groups {
 		d.releaseLocked(g)
@@ -362,10 +371,102 @@ func (d *fecDecoder) Reset() {
 	for i := range d.doneRing { // 数组不能用 clear()，显式归零
 		d.doneRing[i] = 0
 	}
+	d.cleanupBefore.Store(0)
+	d.retiredBefore.Store(0)
 	d.mu.Unlock()
-	// Epoch changes restart sender fence generations from one. Keep the old
-	// window until decoder groups are cleared, then atomically return to active.
+	// Epoch changes restart sender fence generations from one. Serialize reset
+	// with control apply so an old cleanup cannot run after the fresh epoch.
 	d.fence.Reset()
+	d.controlMu.Unlock()
+}
+
+func atomicMaxUint32(v *atomic.Uint32, next uint32) {
+	for next != 0 {
+		old := v.Load()
+		if next <= old || v.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+// handleModeControl serializes accepted generation changes with their group-map
+// cleanup. This prevents a slower old control goroutine from deleting groups
+// after a newer generation has already resumed FEC on another TCP stream.
+func (d *fecDecoder) handleModeControl(ctrl fecModeControl) {
+	d.controlMu.Lock()
+	defer d.controlMu.Unlock()
+	if !d.fence.Apply(ctrl) {
+		return
+	}
+	from, until := d.fence.Window()
+	if from == 0 {
+		return
+	}
+	atomicMaxUint32(&d.cleanupBefore, from)
+	d.mu.Lock()
+	d.dropGroupsInRangeLocked(from, until)
+	d.maybeRetireOldGroupsLocked()
+	d.mu.Unlock()
+}
+
+// dropGroupsInRangeLocked releases decoder bookkeeping only. These groups are
+// abandoned by sender topology, not confirmed packet loss: do not mark done and
+// do not increment the FEC lost counter.
+func (d *fecDecoder) dropGroupsInRangeLocked(from, until uint32) {
+	if from == 0 {
+		return
+	}
+	changed := false
+	for start, g := range d.groups {
+		if start < from || (until != 0 && start >= until) {
+			continue
+		}
+		d.releaseLocked(g)
+		delete(d.groups, start)
+		changed = true
+	}
+	if changed {
+		d.pruneGroupOrderLocked()
+	}
+}
+
+func (d *fecDecoder) maybeRetireOldGroupsLocked() {
+	boundary := d.cleanupBefore.Load()
+	if boundary == 0 || d.retiredBefore.Load() >= boundary || d.reorderProgress == nil {
+		return
+	}
+	expected := d.reorderProgress()
+	if expected == 0 || expected < boundary {
+		return
+	}
+	// Publish retirement while holding d.mu. OnData re-checks retiredBefore after
+	// taking the same mutex, so late old traffic cannot recreate removed state.
+	d.retiredBefore.Store(boundary)
+	changed := false
+	for start, g := range d.groups {
+		if start >= boundary {
+			continue
+		}
+		d.releaseLocked(g)
+		delete(d.groups, start)
+		changed = true
+	}
+	if changed {
+		d.pruneGroupOrderLocked()
+	}
+}
+
+// cleanupByReorderProgress is intentionally sparse. Normal active data never
+// calls the reorder callback; bypassed data probes only once per 256 sequence
+// numbers, while controls/parity may probe on their already-cold paths.
+func (d *fecDecoder) cleanupByReorderProgress() {
+	boundary := d.cleanupBefore.Load()
+	if boundary == 0 || d.retiredBefore.Load() >= boundary || d.reorderProgress == nil {
+		return
+	}
+	d.mu.Lock()
+	d.maybeRetireOldGroupsLocked()
+	d.mu.Unlock()
 }
 
 // OnData 记录一个已解密的数据帧。frame 只读借用，不转移所有权。
@@ -377,20 +478,29 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 		// Unknown seq=0 controls remain backward-compatible: old peers drop them
 		// in reorder, while new peers consume only the strict 0xFD/versioned form.
 		if ctrl, ok := parseFECModeControl(frame); ok {
-			d.fence.Apply(ctrl)
+			d.handleModeControl(ctrl)
 		}
 		return
 	}
-	if d.staticSingle.Load() || d.fence.BypassData(seq) {
+	if d.staticSingle.Load() {
+		return
+	}
+	if d.fence.BypassData(seq) {
+		if seq&0xff == 0 {
+			d.cleanupByReorderProgress()
+		}
+		return
+	}
+	if retired := d.retiredBefore.Load(); retired != 0 && seq < retired {
 		return
 	}
 	start := d.groupStartOf(seq)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// Re-check the atomic window after acquiring d.mu. A SUSPEND may have raced
-	// the first check; without this guard that frame could still allocate/XOR a
-	// group after the sender declared it permanently parity-less.
-	if d.staticSingle.Load() || d.fence.BypassData(seq) || d.isDoneLocked(start) {
+	// Re-check the atomic window/retirement boundary after acquiring d.mu. A
+	// SUSPEND cleanup may have raced the first fast-path check.
+	retired := d.retiredBefore.Load()
+	if d.staticSingle.Load() || d.fence.BypassData(seq) || (retired != 0 && seq < retired) || d.isDoneLocked(start) {
 		return
 	}
 	g, ok := d.groups[start]
@@ -433,6 +543,10 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	if start == 0 || k != d.k || (start-1)%uint32(d.k) != 0 {
 		return
 	}
+	d.cleanupByReorderProgress()
+	if retired := d.retiredBefore.Load(); retired != 0 && start < retired {
+		return
+	}
 	descLen := 6 + 4*k
 	tagLen := 0
 	if d.ic != nil {
@@ -457,7 +571,8 @@ func (d *fecDecoder) OnParity(payload []byte) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.staticSingle.Load() || d.isDoneLocked(start) {
+	retired := d.retiredBefore.Load()
+	if d.staticSingle.Load() || (retired != 0 && start < retired) || d.isDoneLocked(start) {
 		putFECLens(lens)
 		return
 	}
@@ -485,6 +600,10 @@ func (d *fecDecoder) OnParity(payload []byte) {
 	}
 	g.parity = pb
 	d.tryRecoverLocked(g)
+	// Recovery inserts into ReorderBuffer while d.mu is held and may advance the
+	// ordered horizon across cleanupBefore, so retire old groups immediately on
+	// this already-cold parity path when that happens.
+	d.maybeRetireOldGroupsLocked()
 }
 
 func (d *fecDecoder) newGroupLocked(start uint32) *fecGroupState {
