@@ -31,12 +31,20 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
+
           p = Path('fec.go')
           s = p.read_text()
           s2, n = re.subn(r'^\s*controlKindFECParity\s+byte\s*=\s*0xFE\s*\n', '', s, count=1, flags=re.M)
           if n != 1:
               raise SystemExit(f'fec.go: expected one migrated legacy parity-kind declaration, got {n}')
           p.write_text(s2)
+
+          p = Path('interop/probe.go')
+          s = p.read_text()
+          old = 'server lacks protocol-v2 key epochs'
+          if s.count(old) != 1:
+              raise SystemExit(f'interop/probe.go: expected one stale v2 diagnostic, got {s.count(old)}')
+          p.write_text(s.replace(old, 'server lacks protocol-v3 key epochs', 1))
           PY
 
       - name: Format
