@@ -1,0 +1,61 @@
+name: Apply Protocol v3 Migration
+
+on:
+  push:
+    branches:
+      - research/dynamic-rx-fec-bypass
+    paths:
+      - scripts/apply_protocol_v3.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Apply protocol v3 migration
+        run: python3 scripts/apply_protocol_v3.py
+
+      - name: Format
+        run: |
+          gofmt -w protocol_v3.go protocol_v3_control_test.go fec.go fec_control.go client.go server.go api.go protocol_conformance_test.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go fec_dynamic_bypass_p2d_test.go fec_policy_test.go
+          gofmt -w interop/probe.go
+
+      - name: Regenerate protocol golden vectors
+        run: go test ./... -run TestGenerateGoldenVectors -update-golden -count=1
+
+      - name: Reject stale v2 application semantics
+        run: |
+          if grep -R --line-number --include='*.go' -E 'ProtocolVersion:[[:space:]]*2|ProtocolVersion != 2|ProtocolVersion == 2|protocol-v2' .; then
+            echo 'stale protocol-v2 semantics remain'
+            exit 1
+          fi
+
+      - name: Validate protocol v3 and dynamic FEC
+        run: |
+          go build ./...
+          go test ./... -count=1
+          go test -race ./... -count=1 -run 'ProtocolV3|FEC|Dynamic|ReorderExpected'
+
+      - name: Commit applied migration
+        run: |
+          if git diff --quiet; then
+            echo 'protocol v3 migration already applied'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -m 'protocol: migrate data plane to v3 typed controls'
+          git push origin HEAD:research/dynamic-rx-fec-bypass
