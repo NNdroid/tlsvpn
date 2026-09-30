@@ -1102,18 +1102,16 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	}
 	srv.tap = tap
 
-	tapBackend := make(chan []VPNFrame, 32)
+	tapBackend := make(chan *VPNFrameBatch, 32)
 	tapPort := NewAsyncPort(ctx, tapPortID)
-	tapPort.RegisterBackend(tapBackend, new(uint32))
+	tapPort.RegisterOwnedBackend(tapBackend, new(uint32))
 	srv.vswitch.AddPort(tapPort)
 
 	go func() {
-		for frames := range tapBackend {
-			for _, vf := range frames {
+		for batch := range tapBackend {
+			for _, vf := range batch.Frames {
 				if len(vf.Data) > 0 {
 					if _, werr := srv.tap.Write(vf.Data); werr != nil {
-						// 旧实现把这里的错误直接丢掉，TAP 故障表现为"隧道在线但
-						// 客户端不通"。计数 + 限频日志让故障可观测。
 						n := srv.tapWriteErrs.Add(1)
 						if n == 1 || n%1000 == 0 {
 							log.Warnf("TAP write failed #%d: %v", n, werr)
@@ -1122,7 +1120,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 					putFrame(vf.Data)
 				}
 			}
-			putVPNFrameBatch(frames)
+			putOwnedVPNFrameBatch(batch)
 		}
 	}()
 
@@ -1767,12 +1765,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	atomic.StoreUint32(rttCache, 50000)
 	ci.rttCache = rttCache
 
-	connTxChan := make(chan []VPNFrame, 32)
-	backend := port.RegisterBackend(connTxChan, rttCache)
+	connTxChan := make(chan *VPNFrameBatch, 32)
+	backend := port.RegisterOwnedBackend(connTxChan, rttCache)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
-		port.UnregisterBackend(connTxChan)
+		port.UnregisterOwnedBackend(connTxChan)
 	}()
 
 	batchCork := newTLSBatchCork(tcpConn)
@@ -1812,16 +1810,16 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
 				}
-			case frames := <-connTxChan:
+			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
 				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
-					queuedPayload += vpnFrameBatchBytes(frames)
+					queuedPayload += batch.Bytes
 					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStreamWithScratch(sendBuffer, frames, icTx, &txAEADScratch)
+					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -1830,7 +1828,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						break
 					}
 					select {
-					case frames = <-connTxChan:
+					case batch = <-connTxChan:
 						continue
 					default:
 						break drainBatches

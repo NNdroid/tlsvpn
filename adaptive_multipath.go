@@ -415,7 +415,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	var minMeasuredRTT uint32 = ^uint32(0)
 	healthy := 0
 	for _, b := range backends {
-		if b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2 {
+		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 {
 			continue
 		}
 		healthy++
@@ -471,7 +471,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	}
 	cands := p.schedulerScratch[:0]
 	for _, b := range backends {
-		if b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2 {
+		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 {
 			if b != nil {
 				b.active.Store(false)
 				b.virtualFinishNS.Store(0)

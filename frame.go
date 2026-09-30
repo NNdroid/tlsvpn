@@ -45,6 +45,51 @@ func putVPNFrameBatch(b []VPNFrame) {
 	}
 }
 
+// VPNFrameBatch is the production ownership unit between AsyncPort and a
+// backend consumer. Frames and Bytes move together: AsyncPort computes Bytes
+// while building the batch, the scheduler transfers the pointer, and the TLS/TAP
+// consumer returns the object to the pool after consuming every payload.
+type VPNFrameBatch struct {
+	Frames []VPNFrame
+	Bytes  uint64
+}
+
+func newOwnedVPNFrameBatch() any {
+	return &VPNFrameBatch{Frames: make([]VPNFrame, 0, hotVPNBatchCap)}
+}
+
+var ownedVPNFrameBatchPool = sync.Pool{New: newOwnedVPNFrameBatch}
+
+func getOwnedVPNFrameBatch() *VPNFrameBatch {
+	b := ownedVPNFrameBatchPool.Get().(*VPNFrameBatch)
+	b.Frames = b.Frames[:0]
+	b.Bytes = 0
+	return b
+}
+
+func putOwnedVPNFrameBatch(b *VPNFrameBatch) {
+	if b == nil {
+		return
+	}
+	clear(b.Frames) // release payload references before the descriptor storage is pooled
+	b.Frames = b.Frames[:0]
+	b.Bytes = 0
+	ownedVPNFrameBatchPool.Put(b)
+}
+
+func freeOwnedVPNFrameBatch(b *VPNFrameBatch) {
+	if b == nil {
+		return
+	}
+	freeFrames(b.Frames)
+	putOwnedVPNFrameBatch(b)
+}
+
+func appendOwnedVPNFrame(b *VPNFrameBatch, vf VPNFrame) {
+	b.Frames = append(b.Frames, vf)
+	b.Bytes += uint64(len(vf.Data))
+}
+
 // framePoolSizes 帧缓冲尺寸分档。保留该表供测试/文档核对；真正池对象使用
 // *[N]byte，而不是 []byte。把 slice 直接放进 sync.Pool 会在 interface 装箱时
 // 让 slice header 逃逸，高 PPS 下这本身会制造显著 GC 压力。
