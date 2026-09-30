@@ -1,0 +1,45 @@
+name: Apply RX FEC fast path
+
+on:
+  push:
+    branches:
+      - perf/single-path-fec-bypass
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Apply RX P0/P1 patch
+        run: python3 scripts/apply_rx_fastpath.py
+
+      - name: Format
+        run: gofmt -w fec.go client.go server.go bench_test.go fec_rx_fastpath_test.go
+
+      - name: Targeted correctness tests
+        run: go test ./... -run 'TestFEC|TestStaticSinglePath' -count=1
+
+      - name: FEC race gate
+        run: go test -race ./... -run 'TestFEC|TestStaticSinglePath' -count=1
+
+      - name: Remove one-shot patch machinery and push result
+        run: |
+          rm -f scripts/apply_rx_fastpath.py .github/workflows/apply_rx_fastpath.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: bypass RX FEC on static single-path sessions'
+          git push origin HEAD:perf/single-path-fec-bypass
