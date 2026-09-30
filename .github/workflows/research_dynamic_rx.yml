@@ -1,0 +1,33 @@
+name: Dynamic RX FEC Research
+
+on:
+  push:
+    branches:
+      - research/dynamic-rx-fec-bypass
+  workflow_dispatch:
+
+jobs:
+  p2a-state-machine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Format gate
+        run: |
+          files='fec_control.go fec_control_test.go'
+          test -z "$(gofmt -l $files)" || { gofmt -d $files; exit 1; }
+
+      - name: Build
+        run: go build ./...
+
+      - name: Dynamic fence state-machine tests
+        run: go test ./... -count=1 -run 'TestFECModeControl|TestFECFence|TestFECControl'
+
+      - name: Dynamic fence race gate
+        run: go test -race ./... -count=1 -run 'TestFECModeControl|TestFECFence|TestFECControl'
