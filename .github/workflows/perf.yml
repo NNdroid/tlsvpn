@@ -6,10 +6,15 @@ on:
       - 'perf/**'
   workflow_dispatch:
 
+# This workflow may promote a freshly validated profile to default.pgo on the
+# canonical performance branch. It never writes on pull_request events.
+permissions:
+  contents: write
+
 jobs:
   real-tap-perf:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -32,21 +37,24 @@ jobs:
 
       - name: Validate profiler and harness
         run: |
-          go test -count=1 ./... -run 'TestRuntimeProfile|TestCreateProfileFile'
+          go test -count=1 ./... -run 'TestRuntimeProfile|TestCreateProfileFile|TestPGO'
           bash -n scripts/real_tap_perf.sh
+          bash -n scripts/build.sh
 
-      - name: Build candidate and main baseline
+      - name: Build unprofiled candidate and main baseline
         run: |
           mkdir -p perf-bin perf-artifacts
-          go build -trimpath -o "$PWD/perf-bin/tlsvpn-candidate" .
-          (cd baseline && go build -trimpath -o "$OLDPWD/perf-bin/tlsvpn-main" .)
+          # The training binary must never inherit a previously committed
+          # default.pgo; otherwise the A/B training cycle is not reproducible.
+          go build -pgo=off -trimpath -o "$PWD/perf-bin/tlsvpn-candidate-off" .
+          (cd baseline && go build -pgo=off -trimpath -o "$OLDPWD/perf-bin/tlsvpn-main" .)
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/main.tsv
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/candidate.tsv
           printf 'profile\tconns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/profile-throughput.tsv
 
       - name: Profile candidate server RX / client TX
         env:
-          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate-off
           PERF_CONNS: '1'
           PERF_ENC_ALGO: gcm256
           PERF_PAD_MODE: bucket
@@ -64,7 +72,7 @@ jobs:
 
       - name: Profile candidate server TX / client RX
         env:
-          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate-off
           PERF_CONNS: '1'
           PERF_ENC_ALGO: gcm256
           PERF_PAD_MODE: bucket
@@ -80,22 +88,70 @@ jobs:
           sudo chown -R "$USER:$USER" perf-artifacts
           awk -F '\t' 'BEGIN{OFS="\t"} {print "download", $0}' perf-artifacts/profile-download.tsv >> perf-artifacts/profile-throughput.tsv
 
+      - name: Merge representative CPU profiles into default.pgo
+        run: |
+          set -euo pipefail
+          # Equal-duration upload/download × server/client samples give one
+          # fleet-wide profile covering TX, RX, TLS, AEAD, framing and scheduler.
+          go tool pprof -proto \
+            perf-artifacts/profile-upload/server.cpu.prof \
+            perf-artifacts/profile-upload/client.cpu.prof \
+            perf-artifacts/profile-download/server.cpu.prof \
+            perf-artifacts/profile-download/client.cpu.prof \
+            > perf-artifacts/default.pgo
+          test -s perf-artifacts/default.pgo
+          go tool pprof -top -nodecount=40 \
+            perf-bin/tlsvpn-candidate-off perf-artifacts/default.pgo \
+            > perf-artifacts/default-pgo-top.txt
+
+      - name: Build PGO candidate
+        run: |
+          set -euo pipefail
+          go build -pgo="$PWD/perf-artifacts/default.pgo" -trimpath \
+            -o "$PWD/perf-bin/tlsvpn-candidate" .
+          go version -m "$PWD/perf-bin/tlsvpn-candidate" \
+            > perf-artifacts/candidate-buildinfo.txt
+          cat perf-artifacts/candidate-buildinfo.txt
+
       - name: Render real-TAP pprof summaries
         run: |
           for direction in upload download; do
             for side in server client; do
               go tool pprof -top -nodecount=40 \
-                perf-bin/tlsvpn-candidate \
+                perf-bin/tlsvpn-candidate-off \
                 "perf-artifacts/profile-${direction}/${side}.cpu.prof" \
                 > "perf-artifacts/${direction}-${side}-cpu-top.txt"
               go tool pprof -top -alloc_space -nodecount=40 \
-                perf-bin/tlsvpn-candidate \
+                perf-bin/tlsvpn-candidate-off \
                 "perf-artifacts/profile-${direction}/${side}.heap.prof" \
                 > "perf-artifacts/${direction}-${side}-alloc-top.txt"
             done
           done
 
-      - name: Run paired main/candidate throughput matrix
+      - name: Run isolated paired PGO A/B
+        env:
+          OFF_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate-off
+          PGO_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+        run: |
+          set -euo pipefail
+          # Two rounds with reversed ordering reduce hosted-runner temporal bias.
+          for round in 1 2; do
+            if [ "$round" = 1 ]; then modes='off pgo'; else modes='pgo off'; fi
+            for mode in $modes; do
+              if [ "$mode" = off ]; then bin="$OFF_BIN"; else bin="$PGO_BIN"; fi
+              out="$PWD/perf-artifacts/pgo-${mode}-${round}.tsv"
+              printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$out"
+              echo "=== PGO A/B round=$round mode=$mode ==="
+              sudo -E env \
+                BIN="$bin" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
+                PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
+                PERF_MIN_MBPS=500 PERF_RESULT_FILE="$out" \
+                bash scripts/real_tap_perf.sh
+            done
+          done
+          sudo chown -R "$USER:$USER" perf-artifacts
+
+      - name: Run paired main-off/candidate-PGO throughput matrix
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -106,14 +162,14 @@ jobs:
           for conns in 1 2 4; do
             for enc in gcm256 gcm128; do
               for pad in bucket off; do
-                echo "=== main: conns=$conns enc=$enc pad=$pad ==="
+                echo "=== main -pgo=off: conns=$conns enc=$enc pad=$pad ==="
                 sudo -E env \
                   BIN="$MAIN_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
                   PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
                   PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
                   bash scripts/real_tap_perf.sh
 
-                echo "=== candidate: conns=$conns enc=$enc pad=$pad ==="
+                echo "=== candidate -pgo=default.pgo: conns=$conns enc=$enc pad=$pad ==="
                 sudo -E env \
                   BIN="$CANDIDATE_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
                   PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
@@ -124,7 +180,7 @@ jobs:
           done
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Run paired single-path FEC throughput
+      - name: Run paired single-path FEC main-off/candidate-PGO throughput
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -135,14 +191,14 @@ jobs:
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$MAIN_RESULTS"
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$CANDIDATE_RESULTS"
 
-          echo "=== main: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+          echo "=== main -pgo=off: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
           sudo -E env \
             BIN="$MAIN_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
             PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
             PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
             bash scripts/real_tap_perf.sh
 
-          echo "=== candidate: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+          echo "=== candidate -pgo=default.pgo: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
           sudo -E env \
             BIN="$CANDIDATE_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
             PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
@@ -150,49 +206,11 @@ jobs:
             bash scripts/real_tap_perf.sh
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Compare candidate against main on the same runner
+      - name: Compare PGO candidate and enforce promotion gate
         run: |
           python3 - <<'PY'
           import csv
-          from pathlib import Path
-
-          root = Path('perf-artifacts')
-          key_fields = ('conns', 'enc_algo', 'pad_mode', 'direction')
-
-          def load(path):
-              out = {}
-              with path.open(newline='') as f:
-                  for row in csv.DictReader(f, delimiter='\t'):
-                      key = tuple(row[k] for k in key_fields)
-                      out[key] = float(row['mbps'])
-              return out
-
-          base = load(root / 'main.tsv')
-          cand = load(root / 'candidate.tsv')
-          missing = sorted(set(base) ^ set(cand))
-          if missing:
-              raise SystemExit(f'matrix mismatch: {missing}')
-
-          rows = []
-          for key in sorted(base, key=lambda k: (int(k[0]), k[1], k[2], k[3])):
-              b = base[key]
-              c = cand[key]
-              delta = ((c / b) - 1.0) * 100.0 if b else 0.0
-              rows.append((*key, b, c, delta))
-
-          with (root / 'comparison.tsv').open('w', newline='') as f:
-              w = csv.writer(f, delimiter='\t')
-              w.writerow((*key_fields, 'main_mbps', 'candidate_mbps', 'delta_pct'))
-              for row in rows:
-                  w.writerow((*row[:4], f'{row[4]:.1f}', f'{row[5]:.1f}', f'{row[6]:+.2f}'))
-
-          print((root / 'comparison.tsv').read_text())
-          PY
-
-      - name: Compare single-path FEC candidate against main
-        run: |
-          python3 - <<'PY'
-          import csv
+          import math
           from pathlib import Path
 
           root = Path('perf-artifacts')
@@ -205,26 +223,89 @@ jobs:
                       out[tuple(row[k] for k in key_fields)] = float(row['mbps'])
               return out
 
-          base = load(root / 'fec-main.tsv')
-          cand = load(root / 'fec-candidate.tsv')
-          if set(base) != set(cand):
-              raise SystemExit(f'FEC matrix mismatch: {sorted(set(base) ^ set(cand))}')
+          def compare(base_path, cand_path, out_path):
+              base = load(base_path)
+              cand = load(cand_path)
+              if set(base) != set(cand):
+                  raise SystemExit(f'matrix mismatch: {sorted(set(base) ^ set(cand))}')
+              rows = []
+              for key in sorted(base, key=lambda k: (int(k[0]), k[1], k[2], k[3])):
+                  b, c = base[key], cand[key]
+                  ratio = c / b if b else 1.0
+                  rows.append((*key, b, c, (ratio - 1.0) * 100.0, ratio))
+              with out_path.open('w', newline='') as f:
+                  w = csv.writer(f, delimiter='\t')
+                  w.writerow((*key_fields, 'main_mbps', 'candidate_mbps', 'delta_pct'))
+                  for r in rows:
+                      w.writerow((*r[:4], f'{r[4]:.1f}', f'{r[5]:.1f}', f'{r[6]:+.2f}'))
+              geo = math.exp(sum(math.log(r[7]) for r in rows) / len(rows))
+              return rows, (geo - 1.0) * 100.0
 
-          rows = []
-          for key in sorted(base):
-              b = base[key]
-              c = cand[key]
-              delta = ((c / b) - 1.0) * 100.0 if b else 0.0
-              rows.append((*key, b, c, delta))
+          rows, main_geo = compare(root/'main.tsv', root/'candidate.tsv', root/'comparison.tsv')
+          fec_rows, fec_geo = compare(root/'fec-main.tsv', root/'fec-candidate.tsv', root/'fec-comparison.tsv')
 
-          with (root / 'fec-comparison.tsv').open('w', newline='') as f:
+          pgo_rows = []
+          for round_no in (1, 2):
+              off = load(root/f'pgo-off-{round_no}.tsv')
+              pgo = load(root/f'pgo-pgo-{round_no}.tsv')
+              if set(off) != set(pgo):
+                  raise SystemExit(f'PGO A/B matrix mismatch in round {round_no}')
+              for key in sorted(off):
+                  b, c = off[key], pgo[key]
+                  ratio = c / b if b else 1.0
+                  pgo_rows.append((round_no, key[-1], b, c, (ratio-1.0)*100.0, ratio))
+
+          with (root/'pgo-comparison.tsv').open('w', newline='') as f:
               w = csv.writer(f, delimiter='\t')
-              w.writerow((*key_fields, 'main_mbps', 'candidate_mbps', 'delta_pct'))
-              for row in rows:
-                  w.writerow((*row[:4], f'{row[4]:.1f}', f'{row[5]:.1f}', f'{row[6]:+.2f}'))
+              w.writerow(('round', 'direction', 'pgo_off_mbps', 'pgo_on_mbps', 'delta_pct'))
+              for r in pgo_rows:
+                  w.writerow((r[0], r[1], f'{r[2]:.1f}', f'{r[3]:.1f}', f'{r[4]:+.2f}'))
 
-          print((root / 'fec-comparison.tsv').read_text())
+          pgo_geo = (math.exp(sum(math.log(r[5]) for r in pgo_rows) / len(pgo_rows)) - 1.0) * 100.0
+          worst_main = min(r[6] for r in rows)
+          worst_pgo = min(r[4] for r in pgo_rows)
+          summary = (
+              f'main-off -> candidate-PGO geomean: {main_geo:+.2f}%\n'
+              f'FEC main-off -> candidate-PGO geomean: {fec_geo:+.2f}%\n'
+              f'candidate PGO-off -> PGO-on geomean: {pgo_geo:+.2f}%\n'
+              f'worst main/candidate cell: {worst_main:+.2f}%\n'
+              f'worst isolated PGO pair: {worst_pgo:+.2f}%\n'
+          )
+          (root/'pgo-gate.txt').write_text(summary)
+          print((root/'comparison.tsv').read_text())
+          print((root/'fec-comparison.tsv').read_text())
+          print((root/'pgo-comparison.tsv').read_text())
+          print(summary)
+
+          failures = []
+          if main_geo < 0.0:
+              failures.append(f'aggregate candidate PGO regression vs main: {main_geo:+.2f}%')
+          if fec_geo < -3.0:
+              failures.append(f'FEC regression vs main exceeds 3%: {fec_geo:+.2f}%')
+          if pgo_geo < 0.5:
+              failures.append(f'isolated PGO gain below 0.5%: {pgo_geo:+.2f}%')
+          if worst_main < -10.0:
+              failures.append(f'one main/candidate cell regressed >10%: {worst_main:+.2f}%')
+          if worst_pgo < -5.0:
+              failures.append(f'one isolated PGO pair regressed >5%: {worst_pgo:+.2f}%')
+          if failures:
+              raise SystemExit('PGO promotion gate failed:\n  - ' + '\n  - '.join(failures))
           PY
+
+      - name: Promote validated profile to default.pgo
+        if: github.ref == 'refs/heads/perf/single-path-fec-bypass'
+        run: |
+          set -euo pipefail
+          cp perf-artifacts/default.pgo default.pgo
+          git add default.pgo
+          if git diff --cached --quiet; then
+            echo 'default.pgo already matches the validated profile'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'perf: refresh Go PGO profile'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
       - name: Upload real-TAP performance artifacts
         if: always()
