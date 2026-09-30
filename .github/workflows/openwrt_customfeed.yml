@@ -1,0 +1,285 @@
+name: OpenWrt Custom Feed
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: OpenWrt release used to build the APK feed
+        required: true
+        default: '25.12.5'
+        type: string
+      publish:
+        description: Publish the generated repository to the openwrt-feed branch
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openwrt-customfeed-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+
+jobs:
+  contract:
+    name: Custom feed contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate scripts and workflow contract
+        run: |
+          bash -n scripts/build_openwrt_customfeed.sh
+          bash tests/test_openwrt_customfeed.sh
+
+  build-feed:
+    name: Feed - ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86-64
+            target: x86
+            subtarget: '64'
+          - name: armsr-armv8
+            target: armsr
+            subtarget: armv8
+          - name: armsr-armv7
+            target: armsr
+            subtarget: armv7
+          - name: rockchip-armv8
+            target: rockchip
+            subtarget: armv8
+          - name: mediatek-filogic
+            target: mediatek
+            subtarget: filogic
+          - name: ramips-mt7621
+            target: ramips
+            subtarget: mt7621
+          - name: ath79-generic
+            target: ath79
+            subtarget: generic
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenWrt SDK host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex gawk gettext git libncurses-dev \
+            libssl-dev python3 rsync unzip zlib1g-dev file curl zstd
+
+      - name: Prepare feed signing key
+        id: signing
+        env:
+          STABLE_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
+        run: |
+          set -Eeuo pipefail
+          key="$RUNNER_TEMP/tlsvpn-openwrt-feed-key.pem"
+          if [[ -n "$STABLE_KEY_B64" ]]; then
+            printf '%s' "$STABLE_KEY_B64" | base64 --decode > "$key"
+            echo 'stable=true' >> "$GITHUB_OUTPUT"
+            echo 'Using the configured stable feed signing key.'
+          else
+            openssl ecparam -name prime256v1 -genkey -noout -out "$key"
+            echo 'stable=false' >> "$GITHUB_OUTPUT"
+            echo 'No stable feed key is available; using an ephemeral CI-only key.'
+          fi
+          chmod 600 "$key"
+          echo "key_file=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve package version
+        id: version
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            value="$GITHUB_REF_NAME"
+          else
+            value="$(git describe --tags --long --always 2>/dev/null || true)"
+          fi
+          if [[ -z "$value" ]]; then
+            value="$(git rev-parse --short HEAD)"
+          fi
+          printf 'value=%s\n' "$value" >> "$GITHUB_OUTPUT"
+          printf 'OpenWrt package source version: %s\n' "$value"
+
+      - name: Build signed custom feed
+        env:
+          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+          OPENWRT_TARGET: ${{ matrix.target }}
+          OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
+          OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-customfeed/${{ inputs.openwrt_version || '25.12.5' }}-${{ matrix.target }}-${{ matrix.subtarget }}
+          OPENWRT_FEED_OUTPUT_DIR: ${{ github.workspace }}/artifact-root
+          OPENWRT_FEED_SIGNING_KEY_FILE: ${{ steps.signing.outputs.key_file }}
+          TLSVPN_SOURCE_VERSION: ${{ github.sha }}
+          TLSVPN_PKG_VERSION: ${{ steps.version.outputs.value }}
+          JOBS: '2'
+        run: |
+          chmod +x scripts/build_openwrt_apk.sh scripts/build_openwrt_customfeed.sh
+          ./scripts/build_openwrt_customfeed.sh
+
+      - name: Verify repository payload
+        env:
+          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+        run: |
+          set -Eeuo pipefail
+          feed="artifact-root/releases/$OPENWRT_VERSION/${{ matrix.target }}/${{ matrix.subtarget }}"
+          test -s "$feed/packages.adb"
+          test -s "$feed/index.json"
+          test -s "$feed/tlsvpn-feed.pem"
+          test -s "$feed/SHA256SUMS"
+          test -s "$feed/feed-info.json"
+          find "$feed" -maxdepth 1 -name 'tlsvpn-*.apk' -print -quit | grep -q .
+          (cd "$feed" && sha256sum -c SHA256SUMS)
+
+      - name: Upload custom feed payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-customfeed-${{ matrix.name }}
+          path: artifact-root/**
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "${{ steps.signing.outputs.key_file }}"
+
+  publish:
+    name: Publish openwrt-feed branch
+    runs-on: ubuntu-latest
+    needs: build-feed
+    if: needs.build-feed.result == 'success' && github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    concurrency:
+      group: openwrt-feed-publish
+      cancel-in-progress: false
+
+    steps:
+      - name: Decide whether to publish
+        id: gate
+        env:
+          STABLE_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
+          MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          TAG_PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          MANUAL_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+        run: |
+          set -Eeuo pipefail
+          requested=false
+          if [[ "$MAIN_PUSH" == 'true' || "$TAG_PUSH" == 'true' || "$MANUAL_PUBLISH" == 'true' ]]; then
+            requested=true
+          fi
+
+          if [[ "$requested" != 'true' ]]; then
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Feed publication was not requested for this event.'
+            exit 0
+          fi
+
+          if [[ -z "$STABLE_KEY_B64" ]]; then
+            echo 'OPENWRT_FEED_SIGNING_KEY_B64 is required for main/tag/manual publication.' >&2
+            exit 1
+          fi
+
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+
+      - name: Download all feed payloads
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openwrt-customfeed-*
+          path: feed-dist
+          merge-multiple: true
+
+      - name: Verify one stable public key across every target
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+        run: |
+          set -Eeuo pipefail
+          mapfile -t keys < <(find "feed-dist/releases/$OPENWRT_VERSION" -type f -name tlsvpn-feed.pem | sort)
+          [[ "${#keys[@]}" -eq 7 ]] || {
+            echo "expected 7 feed public keys, found ${#keys[@]}" >&2
+            exit 1
+          }
+          first="${keys[0]}"
+          for key in "${keys[@]:1}"; do
+            cmp -s "$first" "$key" || {
+              echo "feed signing public keys differ: $first vs $key" >&2
+              exit 1
+            }
+          done
+          cp "$first" feed-dist/tlsvpn-feed.pem
+
+      - name: Publish repository tree
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+        run: |
+          set -Eeuo pipefail
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf publish-tree
+          mkdir publish-tree
+          cd publish-tree
+          git init -q
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          if git fetch -q --depth=1 "$remote" openwrt-feed; then
+            git checkout -q -B openwrt-feed FETCH_HEAD
+          else
+            git checkout -q --orphan openwrt-feed
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p releases
+          rm -rf "releases/$OPENWRT_VERSION"
+          mkdir -p "releases/$OPENWRT_VERSION"
+          rsync -a "$GITHUB_WORKSPACE/feed-dist/releases/$OPENWRT_VERSION/" "releases/$OPENWRT_VERSION/"
+          cp "$GITHUB_WORKSPACE/feed-dist/tlsvpn-feed.pem" ./tlsvpn-feed.pem
+          touch .nojekyll
+
+          cat > README.md <<EOF
+          # TLSVPN OpenWrt APK feed
+
+          This branch is generated automatically from the repository main branch and release tags. Do not edit it by hand.
+
+          OpenWrt release: ${OPENWRT_VERSION}
+
+          Feed layout:
+
+          \`releases/${OPENWRT_VERSION}/<target>/<subtarget>/packages.adb\`
+
+          Example for x86/64:
+
+          \`https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed/releases/${OPENWRT_VERSION}/x86/64/packages.adb\`
+
+          Stable public key:
+
+          \`https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed/tlsvpn-feed.pem\`
+          EOF
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'Feed branch is already up to date.'
+            exit 0
+          fi
+          git commit -q -m "feed: publish OpenWrt ${OPENWRT_VERSION} packages from ${GITHUB_SHA::12}"
+          git push -q "$remote" HEAD:openwrt-feed
+          echo "Published openwrt-feed for OpenWrt ${OPENWRT_VERSION}."
