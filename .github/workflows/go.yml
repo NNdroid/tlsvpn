@@ -115,8 +115,10 @@ jobs:
         retention-days: 14
 
   e2e:
-    # Run e2e independently of the unit-test job so a pre-existing
-    # linux-only/network test failure does not block the integration run.
-    # The Go side is built from this repo's checkout; the Rust side is cloned
-    # from its default branch and built as well.
+    # Run e2e independently of the unit-test job. Pin both implementations to
+    # the protocol-v3 development branches so CI validates the actual v3 pair
+    # rather than either repository's older default branch.
     uses: ./.github/workflows/e2e.yml
+    with:
+      go_ref: perf/single-path-fec-bypass
+      rs_ref: protocol/v3-dynamic-fec
