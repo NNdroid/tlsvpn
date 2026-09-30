@@ -249,6 +249,28 @@ grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log
 grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log"
 grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-double-der.log"
 
+inner_private_der_b64="$(base64 < "$private_der" | tr -d '\r\n')"
+inner_public_der_b64="$(base64 < "$public_der" | tr -d '\r\n')"
+literal_newline_private="${inner_private_der_b64:0:76}\\n${inner_private_der_b64:76}"
+literal_newline_public="${inner_public_der_b64:0:76}\\n${inner_public_der_b64:76}"
+OPENWRT_FEED_SIGNING_KEY_B64="$(printf '%s' "$literal_newline_private" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(printf '%s' "$literal_newline_public" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/literal-newline-private.pem" "$tmp/literal-newline-public.pem" > "$tmp/key-import-literal-newline.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-literal-newline.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-literal-newline.log"
+
+private_der_b64url="${inner_private_der_b64//+/-}"
+private_der_b64url="${private_der_b64url//\//_}"
+private_der_b64url="${private_der_b64url%%=*}"
+public_der_b64url="${inner_public_der_b64//+/-}"
+public_der_b64url="${public_der_b64url//\//_}"
+public_der_b64url="${public_der_b64url%%=*}"
+OPENWRT_FEED_SIGNING_KEY_B64="$(printf '%s' "$private_der_b64url" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(printf '%s' "$public_der_b64url" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/base64url-private.pem" "$tmp/base64url-public.pem" > "$tmp/key-import-base64url.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-base64url.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-base64url.log"
+
 set +e
 OPENWRT_FEED_SIGNING_KEY_B64="$public_b64" \
 OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \

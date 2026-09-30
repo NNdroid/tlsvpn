@@ -52,6 +52,7 @@ decode_key_value() {
   local second="$tmp_dir/${setting}.second"
   local compact=''
   local label=''
+  local padding=0
 
   [[ -n "$value" ]] || die "$setting is empty"
 
@@ -80,8 +81,16 @@ decode_key_value() {
   # DER, and the caller still requires OpenSSL to parse and validate the result.
   # Do not recurse beyond one extra layer: accepting arbitrary wrapping would
   # conceal a genuinely wrong key.
-  if ! LC_ALL=C grep -a -q '[^A-Za-z0-9+/=[:space:]]' "$first"; then
+  if ! LC_ALL=C grep -a -q '[^[:print:][:space:]]' "$first"; then
     compact="$(tr -d '[:space:]' < "$first")"
+    compact="${compact//\\r\\n/}"
+    compact="${compact//\\n/}"
+    if [[ "$compact" =~ ^[A-Za-z0-9_-]+={0,2}$ ]]; then
+      compact="${compact//-/+}"
+      compact="${compact//_/\/}"
+      padding=$(( (4 - ${#compact} % 4) % 4 ))
+      if (( padding == 1 )); then compact+='='; elif (( padding == 2 )); then compact+='=='; fi
+    fi
     if [[ -n "$compact" && "$compact" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && \
        (( ${#compact} % 4 == 0 )) && \
        printf '%s' "$compact" | base64 --decode > "$second" 2>/dev/null && \
@@ -99,6 +108,30 @@ decode_key_value() {
     "$setting" "$(wc -c < "$output")"
 }
 
+content_class() {
+  local input="$1"
+  local compact=''
+  if LC_ALL=C grep -a -q '[^[:print:][:space:]]' "$input"; then
+    printf 'unrecognized-binary'
+    return
+  fi
+  compact="$(tr -d '[:space:]' < "$input")"
+  case "$compact" in
+    ssh-*) printf 'openssh-public-text' ;;
+    \{*) printf 'json-text' ;;
+    /*|./*|../*) printf 'path-text' ;;
+    *)
+      if [[ "$compact" =~ ^[0-9A-Fa-f]+$ ]]; then
+        printf 'hex-text'
+      elif [[ "$compact" =~ ^[A-Za-z0-9_-]+={0,2}$ ]]; then
+        printf 'base64url-text'
+      else
+        printf 'unrecognized-text'
+      fi
+      ;;
+  esac
+}
+
 diagnose_private_key() {
   local input="$1"
   local label
@@ -111,7 +144,7 @@ diagnose_private_key() {
       die 'OPENWRT_FEED_SIGNING_KEY_B64 contains an encrypted private key; CI requires an unencrypted EC P-256 key'
       ;;
     '')
-      die 'OPENWRT_FEED_SIGNING_KEY_B64 decoded successfully but is not PEM; encode the private PEM file bytes, not its filename or existing Base64 text'
+      die "OPENWRT_FEED_SIGNING_KEY_B64 decoded successfully but is not a readable PEM/DER private key (content_class=$(content_class "$input")); encode the private key file bytes, not its filename"
       ;;
     *)
       die "OPENWRT_FEED_SIGNING_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an unencrypted private key"
@@ -128,7 +161,7 @@ diagnose_public_key() {
       die 'OPENWRT_FEED_PUBLIC_KEY_B64 contains a private key; store only the derived public key in the Actions Variable'
       ;;
     '')
-      die 'OPENWRT_FEED_PUBLIC_KEY_B64 decoded successfully but is not PEM; encode the public PEM file bytes, not its filename or existing Base64 text'
+      die "OPENWRT_FEED_PUBLIC_KEY_B64 decoded successfully but is not a readable PEM/DER public key (content_class=$(content_class "$input")); encode the public key file bytes, not its filename"
       ;;
     *)
       die "OPENWRT_FEED_PUBLIC_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an EC public key"
