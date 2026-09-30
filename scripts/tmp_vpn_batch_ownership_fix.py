@@ -21,6 +21,44 @@ wrapper = '''// dispatchBatch retains the historical raw-slice API for tests/col
 if t.count(marker) != 1:
     raise SystemExit(f"compat wrapper marker: expected 1 match, got {t.count(marker)}")
 t = t.replace(marker, wrapper + marker, 1)
-
 p.write_text(t)
-print("dispatchBatch compatibility wrapper applied")
+
+# Adaptive scheduling must inspect whichever queue the backend actually owns.
+p = Path("adaptive_multipath.go")
+t = p.read_text()
+old = "b == nil || cap(b.ch) == 0 || len(b.ch) >= cap(b.ch)-2"
+count = t.count(old)
+if count != 2:
+    raise SystemExit(f"adaptive queue checks: expected 2 matches, got {count}")
+t = t.replace(old, "b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2")
+p.write_text(t)
+
+# Add a focused regression test proving the adaptive scheduler sees production
+# owned queues; use warmed paths so this test is independent of existing RTT
+# fair-start policy tests.
+p = Path("vpn_batch_ownership_test.go")
+t = p.read_text()
+extra = r'''
+func TestAdaptiveSchedulerOwnedBackendQueues(t *testing.T) {
+	p := &AsyncPort{}
+	fastRTT := uint32(800)
+	slowRTT := uint32(900)
+	fast := &Backend{ownedCh: make(chan *VPNFrameBatch, 32), rttCache: &fastRTT}
+	slow := &Backend{ownedCh: make(chan *VPNFrameBatch, 32), rttCache: &slowRTT}
+	fast.rateBytesPerSec.Store(25_000_000)
+	slow.rateBytesPerSec.Store(25_000_000)
+
+	got := p.pickAdaptiveBackend([]*Backend{fast, slow}, 0, 12*1024)
+	if got != fast {
+		t.Fatalf("owned backend scheduler picked %p, want fast %p", got, fast)
+	}
+	if !fast.active.Load() || p.activePaths.Load() != 1 {
+		t.Fatalf("owned backend was not admitted to active set: active=%v paths=%d", fast.active.Load(), p.activePaths.Load())
+	}
+}
+'''
+if "func TestAdaptiveSchedulerOwnedBackendQueues" not in t:
+    t += extra
+p.write_text(t)
+
+print("dispatch compatibility and owned-queue scheduler fixes applied")
