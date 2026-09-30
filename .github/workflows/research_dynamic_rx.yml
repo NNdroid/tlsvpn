@@ -9,7 +9,7 @@ on:
 jobs:
   dynamic-rx-fec:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -20,14 +20,14 @@ jobs:
 
       - name: Format gate
         run: |
-          files='client.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go'
+          files='buffer.go client.go server.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go'
           test -z "$(gofmt -l $files)" || { gofmt -d $files; exit 1; }
 
       - name: Build
         run: go build ./...
 
       - name: Dynamic RX FEC tests
-        run: go test ./... -count=1 -run 'FEC|Dynamic'
+        run: go test ./... -count=1 -run 'FEC|Dynamic|ReorderExpected'
 
       - name: Dynamic RX FEC race gate
-        run: go test -race ./... -count=1 -run 'FEC|Dynamic'
+        run: go test -race ./... -count=1 -run 'FEC|Dynamic|ReorderExpected'
