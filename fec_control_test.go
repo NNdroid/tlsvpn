@@ -59,6 +59,17 @@ func TestFECFenceBoundaries(t *testing.T) {
 	}
 }
 
+func TestFECFenceResumeBoundaryDoesNotWrapEpoch(t *testing.T) {
+	const maxSeq = ^uint32(0)
+	// K=4 boundaries are 1 mod 4. maxSeq is 3 mod 4, so no complete group
+	// boundary remains after maxSeq-1 or maxSeq in this sequence epoch.
+	for _, seq := range []uint32{maxSeq - 1, maxSeq} {
+		if got := fecNextGroupStart(seq, 4); got != 0 {
+			t.Fatalf("nextGroupStart(%d)=0x%x want 0 (epoch exhausted)", seq, got)
+		}
+	}
+}
+
 func TestFECFenceSuspendRewindsPartialGroup(t *testing.T) {
 	// K=4, seq 5/6 may have been sent while two paths existed, but if collapse
 	// is observed at seq 7 the encoder discards that partial group. Therefore
