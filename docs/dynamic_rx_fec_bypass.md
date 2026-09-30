@@ -1,246 +1,252 @@
-# Dynamic 2→1 RX FEC bypass research
+# Dynamic 2→1 RX FEC bypass
 
-Normative wire specification: [`protocol_v3.md`](protocol_v3.md). This file records design rationale and implementation staging only.
+Normative wire specification: [`protocol_v3.md`](protocol_v3.md).
 
-Status: P2a state machine, P2b Go data-path integration, and P2c decoder-state cleanup are implemented on the research branch. P2d fault-injection/performance validation remains pending.
+This document records the design rationale, implementation stages and validation evidence for dynamic RX FEC bypass. It is not an alternate wire specification; where wording differs, `protocol_v3.md` is authoritative.
+
+Status: **P2a, P2b, P2c and P2d are implemented and validated in Go.** Rust protocol-v3 migration remains separate work.
 
 Baseline: `perf/single-path-fec-bypass` / PR #68.
 
-## Problem
+## 1. Problem
 
-TX already suppresses XOR/FEC work when the physical backend count falls below two. RX cannot safely infer the same state from its local live-connection count because sender/receiver path-loss detection is asynchronous and old data/parity may still be in flight on either TCP stream.
+TX has no reason to build XOR parity while fewer than two useful physical backends exist. RX should likewise avoid per-data decoder work during that interval, but RX cannot infer the interval from its own physical connection count.
 
-A receiver that simply disables FEC when `liveConns == 1` can discard useful pre-collapse state or can resume too early after a path returns.
+Path-loss detection is asynchronous. When one TCP stream fails, data/parity sent before the collapse can still arrive on another stream. A receiver that immediately disables FEC when local `liveConns == 1` can discard the exact pre-collapse state needed to recover a missing frame.
 
-## Required invariant
+The governing invariant is therefore:
 
-RX may bypass a data sequence only after the sender has authoritatively stated that no parity can be generated for the FEC group containing that sequence.
+> RX may bypass a data sequence only after the sender has authoritatively declared that the group containing that sequence will not receive useful parity.
 
-The sender, not the receiver's local connection count, owns that fact.
+## 2. Protocol-v3 control model
 
-## Sender-authoritative FEC mode fence
+Protocol v3 reserves non-empty post-handshake `seq=0` records for typed controls.
 
-Protocol v3 reserves every non-empty post-handshake `seq=0` record for the typed control plane. Dynamic RX bypass uses `control_kind=0x02` (`FEC_MODE`); this is a required v3 wire semantic, not an optional compatibility hint.
+Dynamic FEC uses `control_kind=0x02` (`FEC_MODE`):
 
-FEC_MODE payload (exactly 16 bytes):
-
-```
-[1B control_kind=0x02]
+```text
+[1B kind=0x02]
 [1B op]
 [2B flags=0, big endian]
 [8B generation, big endian]
-[4B boundary_seq, big endian]
+[4B boundary, big endian]
 ```
-
-Unknown control kinds or malformed FEC_MODE payloads are protocol errors and terminate the affected physical connection.
 
 Operations:
 
-- `SUSPEND`: FEC has no recovery value for data groups whose start is `>= boundary_seq`.
-- `RESUME`: FEC may again be generated beginning at the complete group starting at `boundary_seq`.
+```text
+1  SUSPEND
+2  RESUME
+```
 
-`generation` monotonically increases on every sender-side FEC mode transition. RX ignores controls with `generation <= last_generation`, preventing an old SUSPEND arriving from a slow TCP stream after a newer RESUME from regressing the receiver.
+There is no v2 compatibility interpretation. Unknown or malformed post-handshake controls are protocol errors.
 
-Generation is scoped to the sequence/key epoch. `AsyncPort.ResetEpoch` resets each surviving backend's remembered fence generation to zero because the replacement encoder restarts its control generation at one. Without this reset, a backend that had observed generation 9 in the old epoch could incorrectly suppress generation 1 in the new epoch.
+`generation` is monotonic inside one sequence/key epoch. Controls with `generation <= last_generation` are stale and cannot regress receiver state after cross-TCP reordering.
 
-### Startup is not a dynamic transition
+## 3. Sender transition rules
 
-The encoder constructor defaults to multipath semantics so standalone encoder tests/benchmarks begin in an immediately armed state. Runtime topology detection is stricter: if the first real dispatch sees only one physical backend, TX enters single-path suppression without publishing SUSPEND because no multipath group has ever existed. If a second backend subsequently appears and no SUSPEND generation has ever been published, no RESUME is needed either—the receiver stayed conservatively active throughout startup.
+### 3.1 Startup
 
-Only a genuine `>=2 -> 1` transition opens a dynamic bypass interval; only a later `1 -> >=2` transition closes it.
+Starting with one physical backend is not a dynamic collapse. TX suppresses FEC work but sends no synthetic SUSPEND. If a second backend joins before any real SUSPEND, no RESUME is required because RX never entered a dynamic bypass window.
 
-## SUSPEND boundary
+### 3.2 Genuine >=2 → 1 collapse
 
-When physical backends collapse from >=2 to 1, the encoder resets any partial group. The abandoned partial group can never receive parity even if some of its members were transmitted while multiple paths still existed.
+A genuine physical backend collapse publishes SUSPEND.
+
+If an incomplete encoder group exists, TX discards it. The SUSPEND boundary is therefore the arithmetic start of that abandoned group, not simply the first sequence observed after path loss.
 
 For K=4:
 
-```
-... group 1..4 complete
-seq 5,6 sent while 2 paths exist (partial group)
+```text
+1..4  complete
+5,6   partial while multipath
 path collapses
-seq 7 is first batch observed with only 1 path
+7     first newly dispatched data after collapse
+
+SUSPEND boundary = 5
 ```
 
-The correct SUSPEND boundary is `5`, not `7`.
+General group start:
 
-General formula for the first single-path sequence `S` when there is no already-open partial encoder group:
-
-```
-bypass_from = S - ((S - 1) % K)
+```text
+group_start(seq) = seq - ((seq - 1) % K)
 ```
 
-If a partial encoder group already exists, its stored first sequence is the authoritative boundary.
+### 3.3 Genuine 1 → >=2 restore
 
-`dispatchBatch` holds `backendsMu.RLock`, so backend register/unregister cannot change the physical-path snapshot in the middle of one dispatch. `pickAdaptiveBackend` updates encoder topology before the current batch is fed to the encoder, making `lastSeq + 1` the first sequence governed by that transition.
+After a real SUSPEND, FEC does not restart halfway through an arithmetic group. RESUME uses the next complete group start at or after the first restored-multipath sequence.
 
-## RESUME boundary
+If the next boundary would overflow uint32, TX remains suppressed until epoch rotation.
 
-When a second backend returns, TX waits until the next arithmetic group boundary before re-arming XOR accumulation.
+## 4. Fence ordering
 
-For the first sequence `S` governed by the restored multipath topology:
+`sendBatchToAnyFenced` attaches the current FEC_MODE descriptor to the same backend batch as the governed data that was actually accepted after scheduler fallback:
 
-```
-offset = (S - 1) % K
-resume_from = S                  if offset == 0
-resume_from = S + (K - offset)   otherwise
+```text
+[seq=0 FEC_MODE] [data] [data] ...
 ```
 
-RX therefore keeps bypassing `[bypass_from, resume_from)` and resumes data accumulation at `resume_from`.
+The backend's remembered generation advances only after successful channel enqueue.
 
-### Sequence exhaustion
+This provides four important properties:
 
-The boundary calculation must not wrap uint32. If the next complete group start would exceed `MaxUint32`, there is no valid RESUME boundary in the current epoch. TX stays FEC-suppressed until the existing sequence-exhaustion path establishes a fresh epoch.
+1. the fence follows the backend that actually accepted the data;
+2. fence and governed data share one backend queue/TLS writer ordering domain;
+3. backend-channel pressure cannot independently drop a control queue entry;
+4. a newly registered backend receives the current generation before its first governed data batch.
 
-## Receiver hot-path representation
+The boundary, not physical adjacency, defines applicability. A fence may legally precede older queued data whose sequence is below the boundary.
 
-The dynamic receive state is a packed atomic 64-bit bypass window:
+## 5. Receiver hot path
 
-```
-window = uint64(from) << 32 | uint64(until)
-```
+RX stores the sender-declared dynamic bypass interval in one packed atomic 64-bit window:
 
-Semantics:
-
-- `0,0`: dynamic decoder active
-- `from,0`: bypass data `seq >= from`
-- `from,until`: bypass data `from <= seq < until`
-
-`OnData` performs an atomic window check before taking the FEC decoder mutex and repeats the check after locking to close the race where SUSPEND arrives between the fast-path check and group allocation/XOR.
-
-P2c adds one monotonic `retiredBefore` atomic load to active data. It does **not** query ReorderBuffer or acquire a cleanup mutex on each normal packet. Once ordered delivery proves sequences below a boundary can no longer affect output, very late data below `retiredBefore` is rejected before group allocation.
-
-The existing `staticSingle` fast bypass remains independent and still handles a topology configured with exactly one physical connection.
-
-## P2b ordering implementation: fence travels in the actual data batch
-
-The implemented P2b ordering primitive is simpler and stronger than the earlier writer-pending design.
-
-`sendBatchToAnyFenced` chooses the real writable backend exactly as normal scheduling/fallback does. If that backend has not yet carried the current control generation, it constructs one backend batch whose descriptors are:
-
-```
-[seq=0 FEC control] [data frame] [data frame] ...
+```text
+0,0        decoder active
+from,0     bypass seq >= from
+from,until bypass from <= seq < until
 ```
 
-The batch is then sent through that backend's existing channel. The backend's `fecFenceGen` is advanced only after the channel send succeeds.
+`OnData` checks this window before taking the decoder mutex and rechecks it after locking, closing the race where SUSPEND arrives between the fast-path check and group allocation/XOR.
 
-This gives several useful properties:
+Static configured-single-path bypass remains a separate faster path.
 
-1. The fence follows the **actual** backend selected after preferred-path fallback. A full preferred backend is never incorrectly marked fenced.
-2. Fence and governed data occupy the same channel batch, so the single TLS writer necessarily frames the control before those data records.
-3. No independent control queue slot can be dropped under backend-channel pressure.
-4. If the backend send fails, the fence generation is not advanced; another backend or retry still receives the fence.
-5. A newly registered backend starts with fence generation zero and receives the current generation before its first data batch.
-6. The control may precede older queued data. This is safe because applicability is determined by `boundary_seq`, not by physical adjacency on a TCP stream.
+Dynamic parity handling remains conservative: parity is still parsed while data is bypassed. At roughly 1/K of data frequency this costs much less than per-data map/mutex/XOR work and avoids requiring a RESUME on one TCP stream to precede parity arriving on another.
 
-Example: SUSPEND has `boundary=21`, while the same TCP stream still has seq 11..20 queued. The control may appear before 11..20; RX continues decoding those sequences because they are `<21`.
+## 6. Decoder-state cleanup
 
-Likewise RESUME may advertise `boundary=25` before seq 21..24; those sequences remain inside the bypass window while seq 25+ are decoded.
+P2c separates state into two classes.
 
-## Why dynamic bypass keeps parity conservative
+### 6.1 Groups inside the bypass interval
 
-The dynamic window applies to `fecDecoder.OnData`; `OnParity` remains active except for the existing static-single-path bypass.
+These groups are sender-declared unrecoverable and can be released immediately. Releasing them:
 
-This is intentional:
+- does not mark them `done`;
+- does not increment `fec_lost`;
+- releases parity/lens/accumulator storage;
+- prevents parity-only buildup during a long bypass interval.
 
-- parity frequency is only about 1/K of data frequency;
-- the expensive hot work targeted by the optimization is per-data group lookup/allocation/XOR;
-- keeping parity conservative removes a cross-TCP correctness dependency on a RESUME fence arriving before a parity frame on another stream;
-- an early resumed parity frame may create/hold a group and later data can complete it after RESUME becomes visible;
-- old parity for a group before SUSPEND continues to recover a missing pre-collapse member.
+### 6.2 Groups before SUSPEND
 
-P2c makes this conservative choice cheap by deleting parity-only groups as soon as a control proves their interval has no recoverable data.
+Older groups may still be recoverable by delayed pre-collapse parity. They remain until ordered output proves they are obsolete:
 
-## Rapid 2→1→2 races
-
-Controls can arrive out of order across TCP streams:
-
-```
-A: SUSPEND generation 10 is delayed
-B: a restored path delivers RESUME generation 11
-A: SUSPEND generation 10 arrives later
+```text
+reorder.expected_seq >= suspend_boundary
 ```
 
-Generation ordering makes the final SUSPEND stale and it is ignored.
+After that point `retiredBefore` blocks late data/parity from recreating obsolete decoder state.
 
-`fecDecoder.controlMu` serializes accepted control application and its group cleanup as one cold operation. This matters even though `fecRXFenceState` already serializes generation updates: without the outer serialization, cleanup belonging to an older control goroutine could run after a newer RESUME had already created valid groups.
+`ReorderBuffer.ExpectedSeqSnapshot()` is intentionally a cold mutex-protected read. Normal active data does not acquire the reorder mutex for cleanup. During a long parity-free bypass interval, data probes progress only once per 256 sequence numbers.
 
-If RESUME arrives before the receiver ever observed the earlier SUSPEND, RX remains conservative with the decoder active. That loses CPU optimization only; it cannot lose recoverability.
+`controlMu` serializes accepted generation application with its cleanup so a slower old-control goroutine cannot delete groups after a newer generation has already resumed FEC.
 
-## P2c decoder-state retirement
+## 7. Epoch rules
 
-P2c separates two classes of state.
+FEC transition generations are scoped to the logical sequence/key epoch.
 
-### 1. Groups inside the declared bypass interval
+`AsyncPort.ResetEpoch` resets every surviving backend's remembered fence generation because the replacement encoder starts generation numbering from one.
 
-These can be released immediately on control processing:
+A physical TCP path dropping and rejoining the same logical session is **not** an epoch reset. It keeps:
 
-- SUSPEND `[from, infinity)`: sender reset the partial encoder state and will not emit parity for these groups.
-- RESUME `[from, until)`: data in this single-path interval was deliberately bypassed, so a parity-only decoder group in the same interval cannot become useful later.
+- the global data sequence;
+- current FEC transition generation;
+- reorder state;
+- inner-AEAD salts and nonce domain.
 
-This cleanup only releases buffers/map entries. It does **not** mark the group done and does **not** increment `fec_lost`, because topology suppression is not packet loss.
+This distinction is normative in `protocol_v3.md`.
 
-### 2. Older groups before `bypass_from`
+## 8. Validation stages
 
-These may still be recoverable from delayed pre-collapse data/parity and therefore survive the fence until ordered delivery proves they are obsolete.
+### P2a — state machine and codec
 
-The safe retirement condition is:
+Validated:
 
+- strict FEC_MODE codec;
+- arithmetic SUSPEND/RESUME boundaries;
+- uint32 exhaustion without wrap;
+- stale-generation rejection;
+- rapid transition ordering;
+- concurrent state access under `-race`.
+
+### P2b — Go data-path integration
+
+Validated:
+
+- actual backend fallback receives fence + governed data together;
+- one fence per backend generation;
+- newly joined backend fencing;
+- backend generation reset on epoch reset;
+- bypassed data performs no decoder group/XOR work;
+- resumed data re-enters normal decoder processing.
+
+### P2c — stale decoder-state retirement
+
+Validated:
+
+- immediate SUSPEND interval cleanup;
+- RESUME cleanup of parity-only bypass groups;
+- preservation of pre-boundary recoverable groups;
+- reorder-gated retirement;
+- prevention of late retired-state recreation;
+- sparse cleanup probing;
+- race-safe locking.
+
+### P2d — real physical-path fault injection
+
+The in-process P2d test runs the real Go client/server transport stack:
+
+```text
+TCP
+→ TLS
+→ protocol-v3 handshake/control
+→ AsyncPort multipath
+→ XOR FEC
+→ inner AEAD
+→ reorder
+→ VSwitch
+→ mem TAP
 ```
-reorder.expectedSeq >= cleanup_boundary
+
+The test establishes two authenticated physical TCP connections, warms multipath FEC, prevents replacement handshakes, closes one real server-side TCP connection, sustains one-path traffic, restores replacement authentication, waits for the second physical connection to rejoin, then resumes multipath traffic.
+
+The hard assertions are:
+
+- physical topology reaches 2 → 1 → 2;
+- SUSPEND opens an RX bypass interval;
+- parity generation stops during the one-path interval;
+- no decoder groups remain inside the bypass range;
+- RESUME closes the interval at a valid complete group boundary;
+- parity generation resumes after multipath returns;
+- all injected application frames are delivered exactly once and in order;
+- `fec_lost == 0`;
+- the complete protocol/FEC suite passes under the Go race detector.
+
+CI result on 2026-09-30:
+
+```text
+SUSPEND boundary: 33
+RESUME boundary:  97
+Parity count:      8 -> 24
+FEC recovered:     20
+FEC lost:          0
+Live fault test:   PASS (2.20s)
+Race gate:         PASS
 ```
 
-At that point every earlier sequence has already been delivered/recovered or skipped by reorder timeout. A later recovered frame below the boundary cannot affect output.
+## 9. Decoder microbenchmark
 
-`ReorderBuffer.ExpectedSeqSnapshot()` is a cold mutex-protected read. P2c deliberately does not publish `expectedSeq` atomically from every Insert/drain, avoiding another write in the RX hot path.
+Same CI runner, AMD EPYC 7763, 1400-byte data frames, zero allocations:
 
-The decoder tracks:
+```text
+active decoder:    ~92.7–94.3 ns/frame
+dynamic bypass:    ~3.46–3.49 ns/frame
+static single:     ~2.79–2.82 ns/frame
+```
 
-- `cleanupBefore`: highest accepted SUSPEND boundary that may retire old groups once reorder reaches it.
-- `retiredBefore`: highest boundary already proven obsolete by reorder progress.
+Dynamic bypass removes roughly **96.3%** of the active decoder per-data-frame CPU cost while retaining sender-authoritative recovery safety.
 
-After retirement, late data/parity below `retiredBefore` is rejected so removed decoder state cannot be recreated.
+## 10. Remaining work
 
-### Sparse progress checks
+The Go protocol-v3 dynamic RX design is validated through P2d.
 
-Reorder progress is checked on already-cold control/parity paths. During a long single-path interval where no parity exists, bypassed data performs one progress probe only when `seq & 0xff == 0`—at most once per 256 sequence numbers. Normal active data never calls the reorder progress callback.
-
-The existing lock direction remains `fecDecoder.mu -> ReorderBuffer.mu`, the same direction already used by FEC recovery callbacks. No reverse lock order is introduced.
-
-## Protocol v3 interoperability rule
-
-There is no v2 compatibility path. The application handshake requires `protocol_version=3`, and post-handshake non-empty `seq=0` records use the typed control plane defined in `docs/protocol_v3.md`.
-
-Go and Rust implementations must implement the same v3 control kinds, FEC layouts, handshake fields and golden vectors before they are considered interoperable. An implementation that only understands the earlier magic-dispatch `seq=0` semantics must be upgraded rather than silently ignored or downgraded around.
-
-## P2a/P2b/P2c validation coverage
-
-Current tests cover:
-
-1. v3 control codec and strict kind/flags/op/length parsing;
-2. 2→1 mid-group SUSPEND boundary rewind;
-3. startup single-path suppression without a synthetic dynamic transition;
-4. 1→2 RESUME at the next complete group boundary after a real SUSPEND;
-5. sequence exhaustion without uint32 boundary wrap;
-6. stale lower-generation SUSPEND after newer RESUME;
-7. rapid control transitions and concurrent receiver state access under `-race`;
-8. preferred backend full → fallback backend receives fence + data together;
-9. one fence per backend per generation;
-10. backend fence generation reset on sequence/key epoch change;
-11. bypass-interval data creates no decoder group;
-12. resumed data creates decoder state again at the declared boundary;
-13. late old parity after SUSPEND still recovers a pre-boundary missing member;
-14. SUSPEND immediately drops only bypass-range groups and preserves older recoverable groups;
-15. RESUME removes parity-only groups from the closed bypass interval while preserving the first resumed group;
-16. old groups retire only after reorder progress reaches the fence;
-17. late retired data/parity cannot recreate obsolete groups;
-18. bypass data progress probing is sparse (one per 256 sequence numbers);
-19. ReorderBuffer cold expected-sequence snapshot semantics;
-20. control is encoded as a normal TLSVPN frame with wire `seq=0`.
-
-The research CI runs format, build, focused `FEC|Dynamic|ReorderExpected` tests, and the same set under the Go race detector.
-
-## Remaining stages
-
-- **P2d:** sustained 2→1→2 path-kill fault injection, including Real-TAP CPU profile and loss/reorder checks.
-- **P2e:** migrate the Rust implementation to the exact protocol-v3 control plane and golden contract; v2 Rust is intentionally not wire-compatible with v3.
+Remaining interoperability work is to migrate `NNdroid/tlsvpn-rs` to the same exact protocol-v3 handshake, typed control plane, golden vectors, dynamic FEC state machine and path-transition semantics. No v2 shim should be retained in that implementation.
