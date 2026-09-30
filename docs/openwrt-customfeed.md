@@ -15,7 +15,7 @@ main / v* tag
     -> OpenWrt /etc/apk/repositories.d/customfeeds.list
 ```
 
-Pull requests targeting `main` build and validate the complete feed matrix but never publish. A push to `main`, a `v*` tag, or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64`.
+Pull requests targeting `main` build and validate the complete feed matrix but never publish. A push to `main`, a `v*` tag, or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64` and the stable public-key Actions Variable `OPENWRT_FEED_PUBLIC_KEY_B64`.
 
 The generated `openwrt-feed` branch is machine-owned. Do not edit it by hand.
 
@@ -67,7 +67,7 @@ For non-tagged `main` builds the workflow derives the source version with `git d
 
 ## Stable repository signing key
 
-A production feed must use one stable signing key. The private key must never be committed to Git, uploaded as an artifact, or stored in GitHub Actions Variables.
+A production feed must use one stable signing key pair. The private key must never be committed to Git, uploaded as an artifact, or stored in GitHub Actions Variables. The public key is not secret and is intentionally stored as an Actions Variable so the workflow has an explicit, stable client trust root.
 
 Generate an EC P-256 private key once:
 
@@ -75,7 +75,13 @@ Generate an EC P-256 private key once:
 openssl ecparam -name prime256v1 -genkey -noout -out tlsvpn-openwrt-feed-key.pem
 ```
 
-Encode it:
+Derive the matching public key:
+
+```sh
+openssl pkey -in tlsvpn-openwrt-feed-key.pem -pubout -out tlsvpn-openwrt-feed-public.pem
+```
+
+Encode the private key:
 
 ```sh
 base64 -w0 tlsvpn-openwrt-feed-key.pem
@@ -87,9 +93,21 @@ Store the result as a GitHub Actions **Secret** named:
 OPENWRT_FEED_SIGNING_KEY_B64
 ```
 
-The workflow restores the key only inside `$RUNNER_TEMP`, sets mode `0600`, signs the repository, publishes only the derived public key, and removes the temporary private-key file after the build step.
+Encode the public key:
 
-When the secret is unavailable on a pull request, CI generates an ephemeral EC key only to validate the repository-generation path. `main`, tag, and explicit production publication fail instead of publishing an unstable trust root.
+```sh
+base64 -w0 tlsvpn-openwrt-feed-public.pem
+```
+
+Store that result as a GitHub Actions **Variable** named:
+
+```text
+OPENWRT_FEED_PUBLIC_KEY_B64
+```
+
+For production builds the workflow decodes both values and verifies with OpenSSL that `OPENWRT_FEED_PUBLIC_KEY_B64` belongs to `OPENWRT_FEED_SIGNING_KEY_B64`. A mismatch is a hard failure. The configured public key is then used as `tlsvpn-feed.pem` and is also used to verify the generated `packages.adb` before publication.
+
+Pull-request jobs never receive the production private key. They generate an ephemeral EC private/public key pair only to validate the repository-generation and signature-verification path. `main`, tag, and explicit production publication fail instead of publishing if either stable key setting is missing or if the configured key pair does not match.
 
 ## OpenWrt client configuration
 
@@ -137,9 +155,10 @@ Install and update TLSVPN by package name from the repository rather than by dow
 
 `.github/workflows/openwrt_customfeed.yml` behaves as follows:
 
-1. Pull requests to `main` run the contract test and build every supported target with an ephemeral key when the stable secret is unavailable. They never publish.
-2. Pushes to `main` build every target and publish/update `openwrt-feed`. A missing stable signing secret is an error.
-3. `v*` tag pushes also publish the feed with the stable key.
-4. `workflow_dispatch` always supports validation; setting `publish=true` turns it into a production publication and requires the stable key.
-5. The publish job is serialized with the `openwrt-feed-publish` concurrency group so concurrent runs cannot race when updating the generated branch.
-6. Existing GitHub Release assets and `build_and_release.yml` remain independent and unchanged.
+1. Pull requests to `main` run the contract test and build every supported target with an ephemeral key pair. They never receive the production private key and never publish.
+2. Pushes to `main` build every target and publish/update `openwrt-feed`. A missing stable signing secret or public-key variable is an error.
+3. `v*` tag pushes also publish the feed with the stable configured key pair.
+4. `workflow_dispatch` always supports validation; setting `publish=true` turns it into a production publication and requires the stable configured key pair.
+5. Before production publication the workflow verifies that all target feeds contain the public key from `OPENWRT_FEED_PUBLIC_KEY_B64`.
+6. The publish job is serialized with the `openwrt-feed-publish` concurrency group so concurrent runs cannot race when updating the generated branch.
+7. Existing GitHub Release assets and `build_and_release.yml` remain independent and unchanged.
