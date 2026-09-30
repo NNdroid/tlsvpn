@@ -2,12 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
 func TestFECDecoderFullDataGroupReleasedWithoutParity(t *testing.T) {
 	for _, k := range []int{2, 4, 64} {
-		t.Run(string(rune('A'+k%26)), func(t *testing.T) {
+		t.Run(fmt.Sprintf("K=%d", k), func(t *testing.T) {
 			d := NewFECDecoder(k, nil, nil)
 			frame := bytes.Repeat([]byte{0x5a}, 256)
 			for i := 0; i < k; i++ {
