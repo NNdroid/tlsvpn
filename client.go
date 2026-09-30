@@ -1922,6 +1922,20 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			log.Warnf("[Conn %d] FEC requested but server negotiated fec_group=%d, FEC disabled", connIndex, resp.FecGroup)
 		}
 	}
+	// Resolve the receive epoch before touching decoder state. Multi-connection
+	// readers may still own partial batches from the old key/session generation;
+	// AdvanceEpoch invalidates them and waits for all already-queued work before
+	// FEC/reorder are reset or rebound below.
+	isNewSession := false
+	if c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {
+		isNewSession = true
+		c.serverSessionID = resp.SessionID
+		c.sessionEpoch = resp.SessionEpoch
+	}
+	if isNewSession && c.rxWorker != nil {
+		c.rxWorker.AdvanceEpoch()
+	}
+
 	fecRebuild := false
 	useXorFec := lv.fecMode && c.fecNegotiated > 0
 	if useXorFec {
@@ -1948,15 +1962,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.encAlgo = encAlgo
 		c.icTx = icTx
 		c.icRx = icRx
-	}
-	isNewSession := false
-	if c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {
-		isNewSession = true
-		c.serverSessionID = resp.SessionID
-		c.sessionEpoch = resp.SessionEpoch
-	}
-	if isNewSession && c.rxWorker != nil {
-		c.rxWorker.AdvanceEpoch()
 	}
 	// 记下服务端下发的会话令牌，供后续重连回带。服务端未开启 session_token
 	// 时该字段为空，行为与旧版一致。
