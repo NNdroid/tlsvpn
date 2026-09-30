@@ -83,24 +83,47 @@ jobs:
             build-essential bison flex gawk gettext git libncurses-dev \
             libssl-dev python3 rsync unzip zlib1g-dev file curl zstd
 
-      - name: Prepare feed signing key
+      - name: Prepare feed signing material
         id: signing
         env:
-          STABLE_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
+          # Never expose the production private key to pull_request jobs.
+          STABLE_KEY_B64: ${{ github.event_name != 'pull_request' && secrets.OPENWRT_FEED_SIGNING_KEY_B64 || '' }}
+          CONFIGURED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
         run: |
           set -Eeuo pipefail
           key="$RUNNER_TEMP/tlsvpn-openwrt-feed-key.pem"
+          public_key="$RUNNER_TEMP/tlsvpn-openwrt-feed-public.pem"
+
           if [[ -n "$STABLE_KEY_B64" ]]; then
+            [[ -n "$CONFIGURED_PUBLIC_KEY_B64" ]] || {
+              echo 'OPENWRT_FEED_PUBLIC_KEY_B64 Actions Variable is required when the stable signing key is used.' >&2
+              exit 1
+            }
+
             printf '%s' "$STABLE_KEY_B64" | base64 --decode > "$key"
+            printf '%s' "$CONFIGURED_PUBLIC_KEY_B64" | base64 --decode > "$public_key.raw"
+
+            openssl pkey -in "$key" -check -noout >/dev/null
+            openssl pkey -pubin -in "$public_key.raw" -pubout > "$public_key"
+            openssl pkey -in "$key" -pubout > "$public_key.derived"
+            cmp -s "$public_key.derived" "$public_key" || {
+              echo 'OPENWRT_FEED_PUBLIC_KEY_B64 does not match OPENWRT_FEED_SIGNING_KEY_B64.' >&2
+              exit 1
+            }
+            rm -f "$public_key.raw" "$public_key.derived"
             echo 'stable=true' >> "$GITHUB_OUTPUT"
-            echo 'Using the configured stable feed signing key.'
+            echo 'Using the configured stable feed private/public key pair.'
           else
             openssl ecparam -name prime256v1 -genkey -noout -out "$key"
+            openssl pkey -in "$key" -pubout > "$public_key"
             echo 'stable=false' >> "$GITHUB_OUTPUT"
-            echo 'No stable feed key is available; using an ephemeral CI-only key.'
+            echo 'No production private key is available to this job; using an ephemeral CI-only key pair.'
           fi
+
           chmod 600 "$key"
+          chmod 644 "$public_key"
           echo "key_file=$key" >> "$GITHUB_OUTPUT"
+          echo "public_key_file=$public_key" >> "$GITHUB_OUTPUT"
 
       - name: Resolve package version
         id: version
@@ -126,6 +149,7 @@ jobs:
           OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-customfeed/${{ inputs.openwrt_version || '25.12.5' }}-${{ matrix.target }}-${{ matrix.subtarget }}
           OPENWRT_FEED_OUTPUT_DIR: ${{ github.workspace }}/artifact-root
           OPENWRT_FEED_SIGNING_KEY_FILE: ${{ steps.signing.outputs.key_file }}
+          OPENWRT_FEED_PUBLIC_KEY_FILE: ${{ steps.signing.outputs.public_key_file }}
           TLSVPN_SOURCE_VERSION: ${{ github.sha }}
           TLSVPN_PKG_VERSION: ${{ steps.version.outputs.value }}
           JOBS: '2'
@@ -155,9 +179,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Remove signing key
+      - name: Remove signing material
         if: always()
-        run: rm -f "${{ steps.signing.outputs.key_file }}"
+        run: |
+          rm -f "${{ steps.signing.outputs.key_file }}"
+          rm -f "${{ steps.signing.outputs.public_key_file }}"
 
   publish:
     name: Publish openwrt-feed branch
@@ -175,6 +201,7 @@ jobs:
         id: gate
         env:
           STABLE_KEY_B64: ${{ secrets.OPENWRT_FEED_SIGNING_KEY_B64 }}
+          CONFIGURED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
           MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           TAG_PUSH: ${{ startsWith(github.ref, 'refs/tags/v') }}
           MANUAL_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
@@ -195,6 +222,10 @@ jobs:
             echo 'OPENWRT_FEED_SIGNING_KEY_B64 is required for main/tag/manual publication.' >&2
             exit 1
           fi
+          if [[ -z "$CONFIGURED_PUBLIC_KEY_B64" ]]; then
+            echo 'OPENWRT_FEED_PUBLIC_KEY_B64 Actions Variable is required for main/tag/manual publication.' >&2
+            exit 1
+          fi
 
           echo 'enabled=true' >> "$GITHUB_OUTPUT"
 
@@ -206,25 +237,30 @@ jobs:
           path: feed-dist
           merge-multiple: true
 
-      - name: Verify one stable public key across every target
+      - name: Verify configured public key across every target
         if: steps.gate.outputs.enabled == 'true'
         env:
           OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+          CONFIGURED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
         run: |
           set -Eeuo pipefail
+          expected_raw="$RUNNER_TEMP/openwrt-feed-public.raw.pem"
+          expected="$RUNNER_TEMP/openwrt-feed-public.pem"
+          printf '%s' "$CONFIGURED_PUBLIC_KEY_B64" | base64 --decode > "$expected_raw"
+          openssl pkey -pubin -in "$expected_raw" -pubout > "$expected"
+
           mapfile -t keys < <(find "feed-dist/releases/$OPENWRT_VERSION" -type f -name tlsvpn-feed.pem | sort)
           [[ "${#keys[@]}" -eq 7 ]] || {
             echo "expected 7 feed public keys, found ${#keys[@]}" >&2
             exit 1
           }
-          first="${keys[0]}"
-          for key in "${keys[@]:1}"; do
-            cmp -s "$first" "$key" || {
-              echo "feed signing public keys differ: $first vs $key" >&2
+          for key in "${keys[@]}"; do
+            cmp -s "$expected" "$key" || {
+              echo "feed public key differs from OPENWRT_FEED_PUBLIC_KEY_B64: $key" >&2
               exit 1
             }
           done
-          cp "$first" feed-dist/tlsvpn-feed.pem
+          cp "$expected" feed-dist/tlsvpn-feed.pem
 
       - name: Publish repository tree
         if: steps.gate.outputs.enabled == 'true'
