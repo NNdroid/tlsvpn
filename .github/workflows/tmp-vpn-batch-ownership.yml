@@ -25,7 +25,9 @@ jobs:
           cache: true
 
       - name: Apply ownership patch
-        run: python3 scripts/tmp_vpn_batch_ownership.py
+        run: |
+          python3 scripts/tmp_vpn_batch_ownership.py
+          python3 scripts/tmp_vpn_batch_ownership_fix.py
 
       - name: Format
         run: gofmt -w frame.go client.go server.go stream_padding.go vpn_batch_ownership_test.go
@@ -35,7 +37,8 @@ jobs:
         run: |
           set -euo pipefail
           grep -F 'type VPNFrameBatch struct' frame.go
-          grep -F 'dispatchBatch(batch *VPNFrameBatch)' client.go
+          grep -F 'dispatchOwnedBatch(batch *VPNFrameBatch)' client.go
+          grep -F 'p.dispatchOwnedBatch(batch)' client.go
           grep -F 'sendOwnedBatchToAnyFenced(p, backends, dataBest, batch)' client.go
           grep -F 'queuedPayload += batch.Bytes' client.go
           grep -F 'queuedPayload += batch.Bytes' server.go
