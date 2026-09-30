@@ -211,7 +211,7 @@ func buildGoldenVectors() *GoldenVectors {
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
 		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
-		SessionToken: "x",
+		SessionToken: "x", PeerInfo: &PeerInfo{Implementation: "go"},
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: 1,
@@ -220,6 +220,7 @@ func buildGoldenVectors() *GoldenVectors {
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
+		PeerInfo: &PeerInfo{Implementation: "go"},
 	})
 	gv.TLSInfoKeys = jsonFieldNames(*fullTLSInfoSample())
 
@@ -353,7 +354,7 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
 		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
-		SessionToken: "x",
+		SessionToken: "x", PeerInfo: &PeerInfo{Implementation: "go"},
 	}))
 	checkKeys("handshake_resp_keys", gv.HandshakeRespKeys, jsonFieldNames(HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: 1,
@@ -362,6 +363,7 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
+		PeerInfo: &PeerInfo{Implementation: "go"},
 	}))
 	checkKeys("tls_info_keys", gv.TLSInfoKeys, jsonFieldNames(*fullTLSInfoSample()))
 }

@@ -20,18 +20,19 @@ The sender, not the receiver's local connection count, owns that fact.
 
 ## Sender-authoritative FEC mode fence
 
-P2b uses an optional `seq=0` control frame. Unknown `seq=0` frames are already discarded by old Go/Rust receive paths, so peers that do not understand the hint remain wire-compatible.
+Protocol v3 reserves every non-empty post-handshake `seq=0` record for the typed control plane. Dynamic RX bypass uses `control_kind=0x02` (`FEC_MODE`); this is a required v3 wire semantic, not an optional compatibility hint.
 
-Wire payload v1:
+FEC_MODE payload (exactly 16 bytes):
 
 ```
-[1B magic=0xFD]
-[1B version=1]
+[1B control_kind=0x02]
 [1B op]
-[1B reserved=0]
+[2B flags=0, big endian]
 [8B generation, big endian]
 [4B boundary_seq, big endian]
 ```
+
+Unknown control kinds or malformed FEC_MODE payloads are protocol errors and terminate the affected physical connection.
 
 Operations:
 
@@ -44,7 +45,7 @@ Generation is scoped to the sequence/key epoch. `AsyncPort.ResetEpoch` resets ea
 
 ### Startup is not a dynamic transition
 
-The encoder constructor defaults to multipath semantics so direct unit tests/benchmarks keep their historical behavior. Runtime topology detection is stricter: if the first real dispatch sees only one physical backend, TX enters single-path suppression without publishing SUSPEND because no multipath group has ever existed. If a second backend subsequently appears and no SUSPEND generation has ever been published, no RESUME is needed either—the receiver stayed conservatively active throughout startup.
+The encoder constructor defaults to multipath semantics so standalone encoder tests/benchmarks begin in an immediately armed state. Runtime topology detection is stricter: if the first real dispatch sees only one physical backend, TX enters single-path suppression without publishing SUSPEND because no multipath group has ever existed. If a second backend subsequently appears and no SUSPEND generation has ever been published, no RESUME is needed either—the receiver stayed conservatively active throughout startup.
 
 Only a genuine `>=2 -> 1` transition opens a dynamic bypass interval; only a later `1 -> >=2` transition closes it.
 
@@ -206,23 +207,17 @@ Reorder progress is checked on already-cold control/parity paths. During a long 
 
 The existing lock direction remains `fecDecoder.mu -> ReorderBuffer.mu`, the same direction already used by FEC recovery callbacks. No reverse lock order is introduced.
 
-## Backward compatibility
+## Protocol v3 interoperability rule
 
-### Old Go receiver
+There is no v2 compatibility path. The application handshake requires `protocol_version=3`, and post-handshake non-empty `seq=0` records use the typed control plane defined in `docs/protocol_v3.md`.
 
-An unknown `seq=0` payload does not match `fecMagic`; old `fecDecoder.OnData(0, ...)` is a no-op and `ReorderBuffer.Insert(0, ...)` drops/frees it. The tunnel remains correct and simply misses the RX CPU optimization.
-
-### Current Rust receiver
-
-Rust already treats `seq==0` as control-class traffic and drops unknown sequence-zero payloads. It is therefore wire-compatible without implementing the dynamic bypass state machine.
-
-No protocol-version bump is required for correctness. A future capability bit may still be useful for observability.
+Go and Rust implementations must implement the same v3 control kinds, FEC layouts, handshake fields and golden vectors before they are considered interoperable. An implementation that only understands the earlier magic-dispatch `seq=0` semantics must be upgraded rather than silently ignored or downgraded around.
 
 ## P2a/P2b/P2c validation coverage
 
 Current tests cover:
 
-1. control codec and strict version/reserved-field parsing;
+1. v3 control codec and strict kind/flags/op/length parsing;
 2. 2→1 mid-group SUSPEND boundary rewind;
 3. startup single-path suppression without a synthetic dynamic transition;
 4. 1→2 RESUME at the next complete group boundary after a real SUSPEND;
@@ -248,4 +243,4 @@ The research CI runs format, build, focused `FEC|Dynamic|ReorderExpected` tests,
 ## Remaining stages
 
 - **P2d:** sustained 2→1→2 path-kill fault injection, including Real-TAP CPU profile and loss/reorder checks.
-- **P2e:** optional Rust implementation for symmetric RX CPU savings; old Rust remains wire-compatible without it.
+- **P2e:** migrate the Rust implementation to the exact protocol-v3 control plane and golden contract; v2 Rust is intentionally not wire-compatible with v3.

@@ -17,11 +17,11 @@ import (
 // 协商：协议 v3 中客户端 -fec -fec-group K 时握手请求带 fec_group=K，
 // 服务端必须明确接受并回带同一 K；不支持/不匹配时拒绝握手，不做旧协议回退。
 //
-// 编码（端口级，按全局 seq 分组，跨所有物理连接）：数据帧仍按 MinRTT
-// 单路分发，组满时生成校验帧并向所有连接各广播一份副本——任何单条连接
-// 失效，只要其余连接存活就能收到校验帧完成恢复。会话内数据帧 seq 从 1
-// 起连续编号（0 保留给心跳），分组起点固定 ≡ 1 (mod K)，两端无需额外
-// 同步即可算出任一帧所属的组。
+// 编码（端口级，按全局 seq 分组，跨所有物理连接）：数据帧按调度器
+// 单路发送；组满时只生成一份 parity，并优先投递到与当前数据路径不同的健康
+// backend。会话级 decoder 汇聚所有物理连接，因此任意健康连接收到该 parity
+// 即可用于恢复。会话内数据帧 seq 从 1 起连续编号；0 专用于握手/控制平面。
+// 分组起点固定 ≡ 1 (mod K)，两端独立按算术规则确定组边界。
 //
 // 协议 v3 校验帧是 seq=0 的 typed control：
 //
@@ -92,7 +92,7 @@ type fecEncoder struct {
 	paritySent uint64 // 已生成校验帧计数（面板/metrics）
 
 	// multipath/armed/lastSeq/control* 只由 AsyncPort.run goroutine 修改。
-	// 直接构造 encoder 的单元测试/benchmark 默认保持旧语义（立即编码）；
+	// 独立构造 encoder 的单元测试/benchmark 默认立即编码；
 	// 数据面在只有一个物理 backend 时显式切到 suppressed，恢复多路径后再
 	// 等待下一个完整 K 组边界。control 是最新 sender-authoritative RX fence。
 	multipath         bool

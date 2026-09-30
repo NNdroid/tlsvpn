@@ -200,6 +200,7 @@
     "ipv6",
     "mac",
     "padding",
+    "peer_info",
     "protocol_version",
     "psk",
     "session_token"
@@ -221,6 +222,7 @@
     "ipv6",
     "message",
     "padding",
+    "peer_info",
     "protocol_version",
     "session_epoch",
     "session_id",

@@ -121,6 +121,47 @@ A successful server response contains:
 | `tls` | object | Server-observed TLS ClientHello/final TLS diagnostics. |
 | `peer_info` | object | Authenticated peer diagnostics. |
 
+Fields carrying `omitempty` in the Go structs may be absent when their semantic value is empty. Absence does not change the protocol version or enable a legacy interpretation. `protocol_version=3` is mandatory on every handshake request and successful response.
+
+### 5.1 `peer_info` object
+
+`peer_info` is diagnostic only and MUST NOT participate in authentication or authorization. When present, its string fields are:
+
+```text
+implementation
+hostname
+os
+os_version
+kernel
+arch
+version
+git_commit
+build_time
+```
+
+Each peer may omit the object or individual empty fields. Receivers bound stored field sizes at the trust boundary.
+
+### 5.2 `tls` object
+
+The successful server response may include a diagnostic summary of the TLS handshake actually observed by the server:
+
+```text
+fingerprint_kind          string
+fingerprint_sha256        string
+version_id                uint16
+version                   string
+cipher_suite_id           uint16
+cipher_suite              string
+alpn                      string
+sni                       string
+offered_cipher_suites     []uint16
+offered_signature_schemes []uint16
+offered_groups            []uint16
+offered_alpn              []string
+```
+
+The current fingerprint kind is `tls-clienthello-v1`. It is project-specific and is not JA3/JA4. TLS diagnostics MUST NOT be used as application-layer authentication input.
+
 ## 6. Session identity, token and epoch rules
 
 The PSK hash authenticates membership in the VPN, while `session_token` proves possession of an existing logical session.
@@ -373,13 +414,13 @@ At minimum, these are protocol errors in v3:
 - incompatible inner-encryption settings or algorithm;
 - sequence/key epoch misuse that would permit nonce reuse.
 
-Protocol errors should terminate the affected physical connection rather than silently reinterpret the bytes using v2 semantics.
+Protocol errors MUST terminate the affected physical connection rather than silently reinterpret the bytes using v2 semantics.
 
 ## 17. Cross-language conformance
 
 `testdata/protocol_golden.json` is the machine-readable cross-language contract for deterministic wire components. It MUST carry `version: 3` and be regenerated whenever a deliberate v3 wire contract change is made.
 
-Go and Rust implementations should both validate the same golden vectors for:
+Go and Rust implementations MUST both validate the same golden vectors for:
 
 - PSK hashing;
 - frame header layout;

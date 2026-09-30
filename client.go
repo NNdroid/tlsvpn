@@ -344,7 +344,8 @@ func (p *AsyncPort) run() {
 //   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
 //   - 普通模式：MinRTT 单路发送。
 //
-// wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
+// 协议 v3 的 data/control wire semantics 以 docs/protocol_v3.md 为准；
+// 每个完整 FEC group 只发送一份 parity。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
 	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。

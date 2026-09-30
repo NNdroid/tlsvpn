@@ -67,7 +67,7 @@ func collectPeerInfo() PeerInfo {
 }
 
 // normalizePeerInfo 在信任边界裁剪对端自报字段，避免异常大的字符串长期挂在
-// logical session 上。nil 表示旧版本对端未提供 metadata。
+// logical session 上。nil 表示本次 v3 握手省略了可选诊断 metadata。
 func normalizePeerInfo(in *PeerInfo) PeerInfo {
 	if in == nil {
 		return PeerInfo{}
