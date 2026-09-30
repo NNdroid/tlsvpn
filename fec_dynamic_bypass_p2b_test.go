@@ -111,10 +111,8 @@ func TestDynamicFECEncoderPublishesSuspendAndResumeBoundaries(t *testing.T) {
 	}
 
 	// Single-path data must still advance lastSeq even though no XOR work occurs.
-	for seq := uint32(7); seq <= 7; seq++ {
-		if par := e.add(VPNFrame{Seq: seq, Data: []byte{byte(seq)}}); par != nil {
-			t.Fatal("single-path encoder unexpectedly emitted parity")
-		}
+	if par := e.add(VPNFrame{Seq: 7, Data: []byte{7}}); par != nil {
+		t.Fatal("single-path encoder unexpectedly emitted parity")
 	}
 
 	e.setPhysicalPathCount(2)
@@ -173,13 +171,6 @@ func TestDynamicRXStillAcceptsOldParityAfterSuspend(t *testing.T) {
 	if recoveredSeq != 3 || len(recovered) != 2 || recovered[0] != 3 || recovered[1] != 3 {
 		t.Fatalf("old parity recovery seq=%d data=%v", recoveredSeq, recovered)
 	}
-}
-
-func TestDynamicControlWireRemainsSeqZeroCompatible(t *testing.T) {
-	payload := appendFECModeControl(nil, fecModeControl{Generation: 7, Op: fecControlSuspend, Boundary: 13})
-	buf := appendUnpaddedFrame(nil, VPNFrame{Seq: 0, Data: payload}, nil)
-	wire, _ := buf.([]byte)
-	_ = wire
 }
 
 func TestDynamicControlFrameHeaderUsesSeqZero(t *testing.T) {
