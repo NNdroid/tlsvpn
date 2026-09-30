@@ -59,13 +59,15 @@ type backendCandidate struct {
 // fields are observational only; changing the scheduler does not change the
 // TLSVPN wire format.
 type schedulerConnJSON struct {
-	QueuedBytes     uint64  `json:"queued_bytes"`
-	RateMbps        float64 `json:"rate_mbps"`
-	ETAUs           uint64  `json:"eta_us"`
-	Active          bool    `json:"active"`
-	CarryPending    bool    `json:"carry_pending"`
-	AssignedBytes   uint64  `json:"assigned_bytes"`
-	AssignedBatches uint64  `json:"assigned_batches"`
+	QueuedBytes        uint64  `json:"queued_bytes"`
+	RateMbps           float64 `json:"rate_mbps"`
+	ETAUs              uint64  `json:"eta_us"`
+	Active             bool    `json:"active"`
+	CarryPending       bool    `json:"carry_pending"`
+	AssignedBytes      uint64  `json:"assigned_bytes"`
+	AssignedBatches    uint64  `json:"assigned_batches"`
+	FECAssignedBytes   uint64  `json:"fec_assigned_bytes"`
+	FECAssignedBatches uint64  `json:"fec_assigned_batches"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -267,13 +269,15 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 	}
 	rate := b.rateBytesPerSec.Load()
 	return schedulerConnJSON{
-		QueuedBytes:     b.queuedBytes.Load(),
-		RateMbps:        float64(rate) * 8 / 1_000_000,
-		ETAUs:           b.etaUsec.Load(),
-		Active:          b.active.Load(),
-		CarryPending:    b.carryPending.Load(),
-		AssignedBytes:   b.assignedBytes.Load(),
-		AssignedBatches: b.assignedBatches.Load(),
+		QueuedBytes:        b.queuedBytes.Load(),
+		RateMbps:           float64(rate) * 8 / 1_000_000,
+		ETAUs:              b.etaUsec.Load(),
+		Active:             b.active.Load(),
+		CarryPending:       b.carryPending.Load(),
+		AssignedBytes:      b.assignedBytes.Load(),
+		AssignedBatches:    b.assignedBatches.Load(),
+		FECAssignedBytes:   b.fecAssignedBytes.Load(),
+		FECAssignedBatches: b.fecAssignedBatches.Load(),
 	}
 }
 
