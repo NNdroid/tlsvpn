@@ -6,6 +6,7 @@ on:
       - research/dynamic-rx-fec-bypass
     paths:
       - scripts/apply_protocol_v3.py
+      - .github/workflows/apply_protocol_v3.yml
 
 permissions:
   contents: write
