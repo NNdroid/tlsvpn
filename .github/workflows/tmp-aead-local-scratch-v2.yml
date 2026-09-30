@@ -1,0 +1,72 @@
+name: Temporary AEAD local scratch P0
+
+on:
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  p0-aead-local-scratch:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'perf/single-path-fec-bypass'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/single-path-fec-bypass
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Baseline AEAD microbench
+        run: |
+          go test -run '^$' -bench 'Benchmark(GCMSealOpen|GCM128SealOpen|ChaCha20Poly1305SealOpen|XChaCha20Poly1305SealOpen)$' -benchmem -count=5 . | tee /tmp/aead-before.txt
+
+      - name: Apply P0 patch
+        run: |
+          python3 scripts/tmp_apply_aead_local_scratch.py
+          gofmt -w crypto.go stream_padding.go client.go server.go fec.go aead_local_scratch_bench_test.go
+
+      - name: Verify hot path
+        run: |
+          ! grep -R --line-number --exclude-dir=.git --exclude='tmp_apply_aead_local_scratch.py' 'aeadScratchPool' .
+          grep -q 'sealInPlaceWithScratch' crypto.go
+          grep -q 'openInPlaceWithScratch' crypto.go
+          grep -q 'appendOwnedFrameBatchStreamWithScratch' stream_padding.go
+          grep -q 'var txAEADScratch nonceAADScratch' client.go
+          grep -q 'var rxAEADScratch nonceAADScratch' client.go
+          grep -q 'var txAEADScratch nonceAADScratch' server.go
+          grep -q 'var rxAEADScratch nonceAADScratch' server.go
+
+      - name: Targeted tests and race
+        run: |
+          go test -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM|TestChaCha|TestXChaCha|TestEncAlgo|TestProtocol'
+          go test -race -count=1 ./... -run 'TestFEC|TestGCM|TestFrameGCM|TestChaCha|TestXChaCha|TestEncAlgo'
+
+      - name: Benchmark P0
+        run: |
+          go test -run '^$' -bench 'Benchmark(GCM256|GCM128|ChaCha20|XChaCha20)SealOpenLocalScratch$' -benchmem -count=5 . | tee /tmp/aead-local.txt
+          go test -run '^$' -bench 'Benchmark(GCMSealOpen|GCM128SealOpen|ChaCha20Poly1305SealOpen|XChaCha20Poly1305SealOpen)$' -benchmem -count=5 . | tee /tmp/aead-after.txt
+          echo '=== BASELINE POOL ==='
+          cat /tmp/aead-before.txt
+          echo '=== GOROUTINE LOCAL SCRATCH ==='
+          cat /tmp/aead-local.txt
+          echo '=== STACK WRAPPER AFTER ==='
+          cat /tmp/aead-after.txt
+
+      - name: Commit P0 source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crypto.go stream_padding.go client.go server.go fec.go aead_local_scratch_bench_test.go
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m 'perf: use goroutine-local AEAD nonce scratch'
+          git push origin HEAD:perf/single-path-fec-bypass
