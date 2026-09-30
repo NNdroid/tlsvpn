@@ -21,12 +21,11 @@ name: Cross-Implementation E2E
 
 on:
   # Allow manual / API dispatch so the e2e result can be inspected on its own,
-  # independent of the unit-test job in go.yml (which currently fails on CI
-  # for linux-only/network reasons). This does NOT auto-trigger on push.
+  # independent of the unit-test job in go.yml.
   workflow_dispatch:
     inputs:
       go_ref:
-        description: "tlsvpn ref to build (branch/tag/SHA; default: default branch)"
+        description: "tlsvpn ref to build (branch/tag/SHA; default: current checkout)"
         type: string
         required: false
         default: ""
@@ -38,7 +37,7 @@ on:
   workflow_call:
     inputs:
       go_ref:
-        description: "tlsvpn ref to build (branch/tag/SHA; default: default branch)"
+        description: "tlsvpn ref to build (branch/tag/SHA; default: current checkout)"
         type: string
         required: false
         default: ""
@@ -54,11 +53,13 @@ jobs:
     steps:
       - name: Checkout (Go repo)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.go_ref || github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'   # go.mod 声明 go 1.26；stable 避免隐式 toolchain 下载
+          go-version: 'stable'
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -74,13 +75,8 @@ jobs:
 
       - name: Run e2e control groups (build both implementations from source)
         env:
-          # No *_SRC override: Go is built from this checkout's own tree
-          # (cloned at go_ref only when go_ref is given), Rust is cloned at
-          # rs_ref. Pointing E2E_GO_SRC / E2E_RS_SRC at an existing directory
-          # would skip the clone AND ignore the matching ref, so do not set it
-          # here while the inputs are meant to be honoured.
-          E2E_GO_REF: "${{ github.event.inputs.go_ref || '' }}"
-          E2E_RS_REF: "${{ github.event.inputs.rs_ref || '' }}"
+          E2E_GO_REF: "${{ inputs.go_ref }}"
+          E2E_RS_REF: "${{ inputs.rs_ref }}"
         run: |
           chmod +x scripts/*.sh
           bash scripts/e2e_test.sh
