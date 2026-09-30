@@ -95,11 +95,15 @@ type fecEncoder struct {
 	ic         *innerCipher
 	paritySent uint64 // 已生成校验帧计数（面板/metrics）
 
-	// multipath/armed 只由 AsyncPort.run goroutine 修改。直接构造 encoder 的
-	// 单元测试/benchmark 默认保持旧语义（立即编码）；数据面在只有一个物理
-	// backend 时显式切到 suppressed，恢复多路径后再等待下一个完整 K 组边界。
-	multipath bool
-	armed     bool
+	// multipath/armed/lastSeq/control* 只由 AsyncPort.run goroutine 修改。
+	// 直接构造 encoder 的单元测试/benchmark 默认保持旧语义（立即编码）；
+	// 数据面在只有一个物理 backend 时显式切到 suppressed，恢复多路径后再
+	// 等待下一个完整 K 组边界。control 是最新 sender-authoritative RX fence。
+	multipath         bool
+	armed             bool
+	lastSeq           uint32
+	controlGeneration uint64
+	control           fecModeControl
 }
 
 func newFECEncoder(k int, ic *innerCipher) *fecEncoder {
@@ -118,6 +122,24 @@ func newFECEncoder(k int, ic *innerCipher) *fecEncoder {
 // ParitySent 已生成的校验帧总数
 func (e *fecEncoder) ParitySent() uint64 { return atomic.LoadUint64(&e.paritySent) }
 
+func (e *fecEncoder) publishModeControl(op byte, boundary uint32) {
+	if boundary == 0 || (op != fecControlSuspend && op != fecControlResume) {
+		return
+	}
+	e.controlGeneration++
+	if e.controlGeneration == 0 { // practically unreachable uint64 wrap guard
+		e.controlGeneration = 1
+	}
+	e.control = fecModeControl{Generation: e.controlGeneration, Op: op, Boundary: boundary}
+}
+
+func (e *fecEncoder) currentModeControl() (fecModeControl, bool) {
+	if e.control.Generation == 0 || e.control.Boundary == 0 {
+		return fecModeControl{}, false
+	}
+	return e.control, true
+}
+
 // setPhysicalPathCount 根据实际注册的物理 backend 数量启停 FEC 热路径。
 // 单 TCP 是严格有序流：同一路径后面的 parity 不可能越过前面丢失/阻塞的数据，
 // 因此计算 XOR/parity 没有恢复价值。切回多路径时不能从半组继续，必须等到
@@ -127,18 +149,39 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 	if multipath == e.multipath {
 		return
 	}
-	e.multipath = multipath
+
+	// The scheduler calls this before feeding the current dispatch into add(), so
+	// lastSeq is the previous dispatch's final data sequence. Therefore lastSeq+1
+	// is the exact first sequence governed by this topology transition.
+	firstSeq := uint32(0)
+	if e.lastSeq != ^uint32(0) {
+		firstSeq = e.lastSeq + 1
+	}
+
 	if !multipath {
-		// 2 -> 1：任何未完成组都不能跨过 single-path 区间继续累计。
+		// 2 -> 1: a partially accumulated group is abandoned. The RX bypass fence
+		// must rewind to that group's arithmetic start, not merely firstSeq.
+		boundary := fecGroupStart(firstSeq, e.k)
+		if len(e.seqs) != 0 {
+			boundary = e.seqs[0]
+		}
+		e.multipath = false
 		if len(e.seqs) != 0 || e.activeLen != 0 {
 			e.reset()
 		}
 		e.armed = false
+		e.publishModeControl(fecControlSuspend, boundary)
 		return
 	}
 
-	// 1 -> 2：全局数据 seq 已经继续前进；只在下一个固定 K 边界恢复。
+	// 1 -> 2: sequence numbers advanced while XOR work was suppressed. Resume
+	// only at the next complete arithmetic group. A zero boundary means sequence
+	// exhaustion leaves no complete group in this epoch, so no RESUME is sent.
+	e.multipath = true
 	e.armed = false
+	if boundary := fecNextGroupStart(firstSeq, e.k); boundary != 0 {
+		e.publishModeControl(fecControlResume, boundary)
+	}
 }
 
 // add 把一个数据帧计入当前分组；凑满 K 帧时生成校验帧并立即开启新分组。
@@ -147,6 +190,9 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 func (e *fecEncoder) add(vf VPNFrame) []byte {
 	if len(vf.Data) == 0 {
 		return nil
+	}
+	if vf.Seq != 0 {
+		e.lastSeq = vf.Seq
 	}
 	if !e.multipath {
 		return nil
@@ -236,6 +282,7 @@ type fecDecoder struct {
 	k            int
 	fullMask     uint64
 	staticSingle atomic.Bool // configured topology is exactly one physical path: RX FEC has no recovery value
+	fence        fecRXFenceState
 	ic           *innerCipher
 	out          func(seq uint32, frame []byte)
 	groups       map[uint32]*fecGroupState // 组起点 → 组状态
@@ -296,7 +343,6 @@ func (d *fecDecoder) groupStartOf(seq uint32) uint32 {
 // Reset 清空全部组状态（服务端会话重置/客户端换会话时调用）
 func (d *fecDecoder) Reset() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	for _, g := range d.groups {
 		d.releaseLocked(g)
 	}
@@ -306,17 +352,35 @@ func (d *fecDecoder) Reset() {
 	for i := range d.doneRing { // 数组不能用 clear()，显式归零
 		d.doneRing[i] = 0
 	}
+	d.mu.Unlock()
+	// Epoch changes restart sender fence generations from one. Keep the old
+	// window until decoder groups are cleared, then atomically return to active.
+	d.fence.Reset()
 }
 
 // OnData 记录一个已解密的数据帧。frame 只读借用，不转移所有权。
 func (d *fecDecoder) OnData(seq uint32, frame []byte) {
-	if len(frame) == 0 || seq == 0 || d.staticSingle.Load() {
+	if len(frame) == 0 {
+		return
+	}
+	if seq == 0 {
+		// Unknown seq=0 controls remain backward-compatible: old peers drop them
+		// in reorder, while new peers consume only the strict 0xFD/versioned form.
+		if ctrl, ok := parseFECModeControl(frame); ok {
+			d.fence.Apply(ctrl)
+		}
+		return
+	}
+	if d.staticSingle.Load() || d.fence.BypassData(seq) {
 		return
 	}
 	start := d.groupStartOf(seq)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.staticSingle.Load() || d.isDoneLocked(start) {
+	// Re-check the atomic window after acquiring d.mu. A SUSPEND may have raced
+	// the first check; without this guard that frame could still allocate/XOR a
+	// group after the sender declared it permanently parity-less.
+	if d.staticSingle.Load() || d.fence.BypassData(seq) || d.isDoneLocked(start) {
 		return
 	}
 	g, ok := d.groups[start]

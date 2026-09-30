@@ -158,6 +158,13 @@ func (s *fecRXFenceState) Generation() uint64 {
 	return s.generation
 }
 
+func (s *fecRXFenceState) Reset() {
+	s.mu.Lock()
+	s.generation = 0
+	s.window.Store(0)
+	s.mu.Unlock()
+}
+
 func (s *fecRXFenceState) BypassData(seq uint32) bool {
 	if seq == 0 {
 		return false
