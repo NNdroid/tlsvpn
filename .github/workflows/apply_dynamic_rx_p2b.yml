@@ -1,0 +1,49 @@
+name: Apply Dynamic RX P2b Patch
+
+on:
+  push:
+    branches:
+      - research/dynamic-rx-fec-bypass
+    paths:
+      - scripts/apply_dynamic_rx_p2b.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Apply P2b source patch
+        run: python3 scripts/apply_dynamic_rx_p2b.py
+
+      - name: Format
+        run: gofmt -w fec.go fec_control.go client.go fec_dynamic_bypass_p2b_test.go
+
+      - name: Build and targeted tests
+        run: |
+          go build ./...
+          go test ./... -count=1 -run 'TestDynamic|TestFECFence|TestFECModeControl|TestFECControl'
+          go test -race ./... -count=1 -run 'TestDynamic|TestFECFence|TestFECModeControl|TestFECControl'
+
+      - name: Commit applied patch
+        run: |
+          if git diff --quiet; then
+            echo 'P2b patch already applied; nothing to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add fec.go fec_control.go client.go fec_dynamic_bypass_p2b_test.go
+          git commit -m 'feat: wire dynamic RX FEC bypass fences'
+          git push origin HEAD:research/dynamic-rx-fec-bypass
