@@ -34,8 +34,8 @@ fi
 # validate the whole feed matrix but cannot publish.
 grep -Fq 'pull_request:' "$workflow"
 grep -Fq -- '- main' "$workflow"
-grep -Fq "tags:" "$workflow"
-grep -Fq "- 'v*'" "$workflow"
+grep -Fq 'tags:' "$workflow"
+grep -Fq -- "- 'v*'" "$workflow"
 grep -Fq "github.event_name != 'pull_request'" "$workflow"
 grep -Fq "github.ref == 'refs/heads/main'" "$workflow"
 if grep -Fq 'feature/openwrt-customfeed' "$workflow"; then
