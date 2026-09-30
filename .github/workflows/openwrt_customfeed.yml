@@ -154,8 +154,37 @@ jobs:
           TLSVPN_PKG_VERSION: ${{ steps.version.outputs.value }}
           JOBS: '2'
         run: |
+          set -Eeuo pipefail
           chmod +x scripts/build_openwrt_apk.sh scripts/build_openwrt_customfeed.sh
+          printf 'Build context: event=%s ref=%s sha=%s target=%s/%s OpenWrt=%s\n' \
+            "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA" \
+            "$OPENWRT_TARGET" "$OPENWRT_SUBTARGET" "$OPENWRT_VERSION"
+          set +e
           ./scripts/build_openwrt_customfeed.sh
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 ]]; then
+            echo '::group::OpenWrt custom feed failure diagnostics'
+            printf 'builder_exit=%s\n' "$status"
+            df -h || true
+            sdk="$OPENWRT_WORK_DIR/sdk"
+            if [[ -d "$sdk" ]]; then
+              du -sh "$sdk" "$sdk/bin" 2>/dev/null || true
+              find "$sdk/bin" -type f -name '*.apk' -printf 'sdk-apk %p %s bytes\n' 2>/dev/null | sort || true
+              for tool in "$sdk/staging_dir/host/bin/apk" "$sdk/staging_dir/host/bin/openssl"; do
+                if [[ -e "$tool" ]]; then
+                  file "$tool" || true
+                  ls -l "$tool" || true
+                else
+                  printf 'missing SDK host tool: %s\n' "$tool"
+                fi
+              done
+            else
+              printf 'missing SDK directory: %s\n' "$sdk"
+            fi
+            echo '::endgroup::'
+            exit "$status"
+          fi
 
       - name: Verify repository payload
         env:
