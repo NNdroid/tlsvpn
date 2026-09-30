@@ -9,8 +9,8 @@ Usage:
 
 The pair command reads OPENWRT_FEED_SIGNING_KEY_B64 and
 OPENWRT_FEED_PUBLIC_KEY_B64. The public command only reads the public-key
-variable. Values should be Base64-encoded PEM, although raw PEM and one
-accidental extra Base64 layer are normalized for recovery.
+variable. Base64-encoded PEM and DER are accepted. Raw PEM and one accidental
+extra Base64 layer around PEM are also normalized for recovery.
 EOF
   exit 2
 }
@@ -30,7 +30,8 @@ cleanup() {
 trap cleanup EXIT
 
 pem_label() {
-  sed -n 's/^-----BEGIN \(.*\)-----\r\{0,1\}$/\1/p' "$1" | head -n 1
+  LC_ALL=C tr -d '\r' < "$1" | \
+    sed -n 's/^-----BEGIN \(.*\)-----$/\1/p' | sed -n '1p'
 }
 
 normalize_literal_newlines() {
@@ -77,15 +78,17 @@ decode_key_value() {
   # Recover a common configuration mistake where a value that was already
   # Base64 text was encoded a second time. Do not recurse beyond one extra
   # layer: accepting arbitrary wrapping would conceal a genuinely wrong key.
-  compact="$(tr -d '[:space:]' < "$first")"
-  if [[ -n "$compact" && "$compact" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && \
-     (( ${#compact} % 4 == 0 )) && \
-     printf '%s' "$compact" | base64 --decode > "$second" 2>/dev/null && \
-     [[ -n "$(pem_label "$second")" ]]; then
-    cp "$second" "$output"
-    printf '[openwrt-feed-key] %s encoding=double-base64 pem_label=%s bytes=%s\n' \
-      "$setting" "$(pem_label "$output")" "$(wc -c < "$output")"
-    return
+  if ! LC_ALL=C grep -a -q '[^A-Za-z0-9+/=[:space:]]' "$first"; then
+    compact="$(tr -d '[:space:]' < "$first")"
+    if [[ -n "$compact" && "$compact" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && \
+       (( ${#compact} % 4 == 0 )) && \
+       printf '%s' "$compact" | base64 --decode > "$second" 2>/dev/null && \
+       [[ -n "$(pem_label "$second")" ]]; then
+      cp "$second" "$output"
+      printf '[openwrt-feed-key] %s encoding=double-base64 pem_label=%s bytes=%s\n' \
+        "$setting" "$(pem_label "$output")" "$(wc -c < "$output")"
+      return
+    fi
   fi
 
   cp "$first" "$output"
@@ -137,7 +140,11 @@ normalize_public_key() {
 
   decode_key_value OPENWRT_FEED_PUBLIC_KEY_B64 \
     "${OPENWRT_FEED_PUBLIC_KEY_B64:-}" "$raw"
-  if ! openssl ec -pubin -in "$raw" -pubout -out "$normalized" >/dev/null 2>&1; then
+  if openssl ec -pubin -inform PEM -in "$raw" -pubout -out "$normalized" >/dev/null 2>&1; then
+    printf '[openwrt-feed-key] public_key_format=PEM\n'
+  elif openssl ec -pubin -inform DER -in "$raw" -pubout -out "$normalized" >/dev/null 2>&1; then
+    printf '[openwrt-feed-key] public_key_format=DER normalized=PEM\n'
+  else
     diagnose_public_key "$raw"
   fi
   chmod 644 "$normalized"
@@ -150,19 +157,27 @@ normalize_key_pair() {
   local private_output="$1"
   local public_output="$2"
   local raw_private="$tmp_dir/private.raw.pem"
+  local generic_private="$tmp_dir/private.generic.pem"
   local normalized_private="$tmp_dir/private.normalized.pem"
   local derived_public_der="$tmp_dir/private.public.der"
   local configured_public_der="$tmp_dir/configured.public.der"
   local curve=''
+  local private_format='PEM'
 
   decode_key_value OPENWRT_FEED_SIGNING_KEY_B64 \
     "${OPENWRT_FEED_SIGNING_KEY_B64:-}" "$raw_private"
-  if ! openssl pkey -in "$raw_private" -passin pass: -check -noout >/dev/null 2>&1; then
+  if openssl pkey -inform PEM -in "$raw_private" -passin pass: -check -noout >/dev/null 2>&1; then
+    private_format='PEM'
+  elif openssl pkey -inform DER -in "$raw_private" -passin pass: -check -noout >/dev/null 2>&1; then
+    private_format='DER'
+  else
     diagnose_private_key "$raw_private"
   fi
-  if ! openssl ec -in "$raw_private" -passin pass: -out "$normalized_private" >/dev/null 2>&1; then
+  openssl pkey -inform "$private_format" -in "$raw_private" -passin pass: -out "$generic_private" >/dev/null 2>&1
+  if ! openssl ec -in "$generic_private" -out "$normalized_private" >/dev/null 2>&1; then
     die 'OPENWRT_FEED_SIGNING_KEY_B64 is a private key, but it is not an EC key supported by the OpenWrt APK signer'
   fi
+  printf '[openwrt-feed-key] private_key_format=%s normalized=PEM\n' "$private_format"
 
   curve="$(openssl ec -in "$normalized_private" -text -noout 2>/dev/null | sed -n 's/^[[:space:]]*ASN1 OID: //p' | head -n 1)"
   [[ "$curve" == 'prime256v1' ]] || \

@@ -229,6 +229,18 @@ OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \
 grep -Fq 'pem_label=PRIVATE KEY' "$tmp/key-import-pkcs8.log"
 grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-pkcs8.log"
 
+private_der="$tmp/feed-private.der"
+public_der="$tmp/feed-public.der"
+openssl pkey -in "$private_key" -outform DER -out "$private_der"
+openssl pkey -pubin -in "$public_key" -outform DER -out "$public_der"
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$private_der" | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$public_der" | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/der-private.pem" "$tmp/der-public.pem" > "$tmp/key-import-der.log"
+grep -Fq 'pem_label=none' "$tmp/key-import-der.log"
+grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
+grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-der.log"
+
 set +e
 OPENWRT_FEED_SIGNING_KEY_B64="$public_b64" \
 OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \

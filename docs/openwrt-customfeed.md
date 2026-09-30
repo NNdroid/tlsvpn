@@ -107,7 +107,7 @@ OPENWRT_FEED_PUBLIC_KEY_B64
 
 For production builds the workflow decodes both values and verifies with OpenSSL that `OPENWRT_FEED_PUBLIC_KEY_B64` belongs to `OPENWRT_FEED_SIGNING_KEY_B64`. A mismatch is a hard failure. The configured public key is then used as `tlsvpn-feed.pem` and is also used to verify the generated `packages.adb` before publication.
 
-The private value must decode to an **unencrypted EC P-256 private key**, not a public key, filename, or passphrase-protected key. The workflow normalizes SEC1 and PKCS#8 PEM, accepts raw PEM for recovery, and repairs one accidental extra Base64 layer. It logs only safe metadata (encoding, PEM label, byte count, curve, and the public-key SHA-256 fingerprint); private-key contents and fingerprints are never printed. You can validate the exact values locally before updating GitHub:
+The private value must decode to an **unencrypted EC P-256 private key**, not a public key, filename, or passphrase-protected key. The workflow accepts PEM or DER, normalizes SEC1 and PKCS#8 into the PEM form required by the OpenWrt SDK, accepts raw PEM for recovery, and repairs one accidental extra Base64 layer around PEM. It logs only safe metadata (encoding, PEM label, byte count, key format, curve, and the public-key SHA-256 fingerprint); private-key contents and fingerprints are never printed. You can validate the exact values locally before updating GitHub:
 
 ```sh
 OPENWRT_FEED_SIGNING_KEY_B64="$(base64 -w0 tlsvpn-openwrt-feed-key.pem)" \
