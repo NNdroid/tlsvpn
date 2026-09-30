@@ -28,10 +28,14 @@ grep -Fq 'trap fail_with_context ERR' "$script"
 grep -Fq 'stage=%s line=%s exit=%s command=%q' "$script"
 grep -Fq 'set_stage validate-signing-keys' "$script"
 grep -Fq 'derived_public_key_sha256=' "$script"
-grep -Fq '"$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -check -noout' "$script"
+grep -Fq '"$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -pubout' "$script"
 grep -Fq '"$OPENSSL_TOOL" ec -pubin -in "$OPENWRT_FEED_PUBLIC_KEY_FILE" -pubout' "$script"
 if grep -Fq '"$OPENSSL_TOOL" pkey' "$script"; then
   echo 'SDK OpenSSL must use the EC command supported by the OpenWrt build path' >&2
+  exit 1
+fi
+if grep -Eq '"\$OPENSSL_TOOL" ec .* -check([[:space:]]|$)' "$script"; then
+  echo 'SDK LibreSSL EC command does not support the OpenSSL-only -check flag' >&2
   exit 1
 fi
 
@@ -141,6 +145,12 @@ if [[ "${1:-}" == 'pkey' ]]; then
   echo 'mock SDK OpenSSL intentionally has no pkey command' >&2
   exit 65
 fi
+for arg in "$@"; do
+  if [[ "$arg" == '-check' ]]; then
+    echo 'mock SDK LibreSSL intentionally has no ec -check flag' >&2
+    exit 66
+  fi
+done
 exec openssl "$@"
 WRAPPER
 cat > "$sdk/staging_dir/host/bin/apk" <<'WRAPPER'

@@ -163,8 +163,9 @@ chmod 600 "$OPENWRT_FEED_SIGNING_KEY_FILE"
 canonical_private_public="$OPENWRT_WORK_DIR/signing-key-derived-public.pem"
 # OpenWrt's host OpenSSL is intentionally minimal. Match OpenWrt's own APK
 # signing path and use the EC command instead of assuming the generic `pkey`
-# command is compiled into the SDK tool.
-"$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -check -noout
+# command or OpenSSL-only `ec -check` flag is compiled into the SDK's LibreSSL.
+# Successfully deriving the public key proves that the private EC key parses;
+# the byte-for-byte comparison below then proves it matches the configured key.
 "$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -pubout > "$canonical_private_public"
 "$OPENSSL_TOOL" ec -pubin -in "$OPENWRT_FEED_PUBLIC_KEY_FILE" -pubout > "$FEED_DIR/tlsvpn-feed.pem"
 derived_public_sha256="$(sha256sum "$canonical_private_public" | awk '{print $1}')"
