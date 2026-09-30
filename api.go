@@ -598,7 +598,6 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 // mergeAndValidateConfig 解析面板提交的新配置，校验并计算需重启字段。
 // apply=false 时仅校验不落盘不生效。
 func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv *Server, cli *Client) (*Config, []string, error) {
-	posted = stripDeprecatedSessionTokenConfig(posted)
 	dec := json.NewDecoder(strings.NewReader(string(posted)))
 	dec.DisallowUnknownFields()
 	newCfg := &Config{}

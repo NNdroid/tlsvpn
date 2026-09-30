@@ -202,39 +202,6 @@ const exampleConfigJSON = `{
   }
 }`
 
-// stripDeprecatedSessionTokenConfig removes the former server.session_token
-// configuration switch before strict decoding. Session resume tokens are now a
-// mandatory protocol property; the legacy key is accepted only so upgrades do
-// not brick existing config files. Its value is intentionally ignored.
-func stripDeprecatedSessionTokenConfig(data []byte) []byte {
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return data
-	}
-	rawServer, ok := root["server"]
-	if !ok {
-		return data
-	}
-	var server map[string]json.RawMessage
-	if err := json.Unmarshal(rawServer, &server); err != nil {
-		return data
-	}
-	if _, ok := server["session_token"]; !ok {
-		return data
-	}
-	delete(server, "session_token")
-	cleanServer, err := json.Marshal(server)
-	if err != nil {
-		return data
-	}
-	root["server"] = cleanServer
-	clean, err := json.Marshal(root)
-	if err != nil {
-		return data
-	}
-	return clean
-}
-
 // loadConfigFile 读取并解析 JSON 配置（未知字段报错），不包含默认值填充。
 // 唯一例外是 encrypt：bool 无法自辨"字段缺失"与"显式 false"，而这里
 // 是唯一还能看到原始 JSON 的地方，所以"未写按开启处理"的默认放在这里，
@@ -244,8 +211,7 @@ func loadConfigFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %v", err)
 	}
-	decodeData := stripDeprecatedSessionTokenConfig(data)
-	dec := json.NewDecoder(bytes.NewReader(decodeData))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	cfg := &Config{}
 	if err := dec.Decode(cfg); err != nil {
@@ -254,7 +220,7 @@ func loadConfigFile(path string) (*Config, error) {
 	var probe struct {
 		Encrypt *bool `json:"encrypt"`
 	}
-	if json.Unmarshal(decodeData, &probe) == nil {
+	if json.Unmarshal(data, &probe) == nil {
 		cfg.EncryptPresent = probe.Encrypt != nil
 		// 未写 encrypt 按开启处理：-print-config 模板一直输出 true，省略字段若仍
 		// 按 bool 零值 false 处理，整条链路会静默跑明文，与模板读起来完全相反。
