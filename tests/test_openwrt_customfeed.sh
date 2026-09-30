@@ -5,10 +5,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 script="scripts/build_openwrt_customfeed.sh"
+key_script="scripts/prepare_openwrt_feed_keys.sh"
 workflow=".github/workflows/openwrt_customfeed.yml"
 doc="docs/openwrt-customfeed.md"
+readme="README.md"
 
 bash -n "$script"
+bash -n "$key_script"
 
 # Repository construction and signature verification.
 grep -Fq 'OPENWRT_FEED_SIGNING_KEY_FILE' "$script"
@@ -81,11 +84,12 @@ fi
 grep -Fq 'using an ephemeral CI-only key pair' "$workflow"
 grep -Fq 'OPENWRT_FEED_SIGNING_KEY_B64 is required for main/tag/manual publication.' "$workflow"
 grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64 Actions Variable is required for main/tag/manual publication.' "$workflow"
-grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64 does not match OPENWRT_FEED_SIGNING_KEY_B64.' "$workflow"
+grep -Fq 'scripts/prepare_openwrt_feed_keys.sh pair "$key" "$public_key"' "$workflow"
+grep -Fq 'scripts/prepare_openwrt_feed_keys.sh public "$expected"' "$workflow"
 grep -Fq 'feed public key differs from OPENWRT_FEED_PUBLIC_KEY_B64' "$workflow"
 grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_FILE: ${{ steps.signing.outputs.public_key_file }}' "$workflow"
-grep -Fq 'rm -f "${{ steps.signing.outputs.key_file }}"' "$workflow"
-grep -Fq 'rm -f "${{ steps.signing.outputs.public_key_file }}"' "$workflow"
+grep -Fq 'rm -f "$RUNNER_TEMP/tlsvpn-openwrt-feed-key.pem"' "$workflow"
+grep -Fq 'rm -f "$RUNNER_TEMP/tlsvpn-openwrt-feed-public.pem"' "$workflow"
 grep -Fq 'OpenWrt custom feed failure diagnostics' "$workflow"
 grep -Fq 'builder_exit=' "$workflow"
 grep -Fq 'missing SDK host tool:' "$workflow"
@@ -118,6 +122,15 @@ if grep -Fq 'next push to `feature/openwrt-customfeed`' "$doc"; then
   echo 'documentation still describes the obsolete feature-branch publisher' >&2
   exit 1
 fi
+
+# Keep the main README self-contained for maintainers configuring the stable
+# APK feed trust root.
+grep -Fq 'openssl ecparam \' "$readme"
+grep -Fq -- '-name prime256v1' "$readme"
+grep -Fq 'OPENWRT_FEED_SIGNING_KEY_B64' "$readme"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64' "$readme"
+grep -Fq 'Do **not** use keys created by `minisign -G`' "$readme"
+grep -Fq 'publish=false' "$readme"
 
 # Exercise the repository assembly and SDK-OpenSSL compatibility path without
 # downloading a full SDK. The fake builder leaves canonical APKs and wrappers
@@ -197,6 +210,119 @@ private_key="$tmp/feed-private.pem"
 public_key="$tmp/feed-public.pem"
 openssl ecparam -name prime256v1 -genkey -noout -out "$private_key"
 openssl ec -in "$private_key" -pubout -out "$public_key" 2>/dev/null
+
+# Exercise the production secret importer with the documented encoding, raw
+# PEM recovery, one accidental extra Base64 layer, and actionable rejection of
+# a public key placed in the private-key secret.
+private_b64="$(base64 < "$private_key" | tr -d '\r\n')"
+public_b64="$(base64 < "$public_key" | tr -d '\r\n')"
+imported_private="$tmp/imported-private.pem"
+imported_public="$tmp/imported-public.pem"
+OPENWRT_FEED_SIGNING_KEY_B64="$private_b64" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \
+  bash "$key_script" pair "$imported_private" "$imported_public" > "$tmp/key-import.log"
+openssl ec -in "$imported_private" -check -noout >/dev/null 2>&1
+cmp -s "$public_key" "$imported_public"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import.log"
+
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$private_key" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(< "$public_key")" \
+  bash "$key_script" pair "$tmp/double-private.pem" "$tmp/raw-public.pem" > "$tmp/key-import-recovery.log"
+grep -Fq 'encoding=double-base64' "$tmp/key-import-recovery.log"
+grep -Fq 'encoding=raw-pem' "$tmp/key-import-recovery.log"
+
+pkcs8_key="$tmp/feed-private-pkcs8.pem"
+openssl pkcs8 -topk8 -nocrypt -in "$private_key" -out "$pkcs8_key"
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$pkcs8_key" | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \
+  bash "$key_script" pair "$tmp/pkcs8-private.pem" "$tmp/pkcs8-public.pem" > "$tmp/key-import-pkcs8.log"
+grep -Fq 'pem_label=PRIVATE KEY' "$tmp/key-import-pkcs8.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-pkcs8.log"
+
+private_der="$tmp/feed-private.der"
+public_der="$tmp/feed-public.der"
+openssl pkey -in "$private_key" -outform DER -out "$private_der"
+openssl pkey -pubin -in "$public_key" -outform DER -out "$public_der"
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$private_der" | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$public_der" | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/der-private.pem" "$tmp/der-public.pem" > "$tmp/key-import-der.log"
+grep -Fq 'pem_label=none' "$tmp/key-import-der.log"
+grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
+grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-der.log"
+
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$private_der" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$public_der" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/double-der-private.pem" "$tmp/double-der-public.pem" > "$tmp/key-import-double-der.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-double-der.log"
+grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log"
+grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-double-der.log"
+
+inner_private_der_b64="$(base64 < "$private_der" | tr -d '\r\n')"
+inner_public_der_b64="$(base64 < "$public_der" | tr -d '\r\n')"
+literal_newline_private="${inner_private_der_b64:0:76}\\n${inner_private_der_b64:76}"
+literal_newline_public="${inner_public_der_b64:0:76}\\n${inner_public_der_b64:76}"
+OPENWRT_FEED_SIGNING_KEY_B64="$(printf '%s' "$literal_newline_private" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(printf '%s' "$literal_newline_public" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/literal-newline-private.pem" "$tmp/literal-newline-public.pem" > "$tmp/key-import-literal-newline.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-literal-newline.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-literal-newline.log"
+
+private_der_b64url="${inner_private_der_b64//+/-}"
+private_der_b64url="${private_der_b64url//\//_}"
+private_der_b64url="${private_der_b64url%%=*}"
+public_der_b64url="${inner_public_der_b64//+/-}"
+public_der_b64url="${public_der_b64url//\//_}"
+public_der_b64url="${public_der_b64url%%=*}"
+OPENWRT_FEED_SIGNING_KEY_B64="$(printf '%s' "$private_der_b64url" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(printf '%s' "$public_der_b64url" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/base64url-private.pem" "$tmp/base64url-public.pem" > "$tmp/key-import-base64url.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-base64url.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-base64url.log"
+
+set +e
+OPENWRT_FEED_SIGNING_KEY_B64="$public_b64" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \
+  bash "$key_script" pair "$tmp/wrong-private.pem" "$tmp/wrong-public.pem" > "$tmp/key-import-failure.log" 2>&1
+key_import_status=$?
+set -e
+[[ "$key_import_status" -ne 0 ]]
+grep -Fq 'contains a public key' "$tmp/key-import-failure.log"
+test ! -e "$tmp/wrong-private.pem"
+
+minisign_private="$tmp/minisign-private.key"
+minisign_public="$tmp/minisign-public.key"
+printf '%s\n%s\n' \
+  'untrusted comment: minisign encrypted secret key' \
+  'RWRTY0Zha2VNaW5pc2lnblByaXZhdGVLZXlGb3JUZXN0aW5nT25seQ==' > "$minisign_private"
+printf '%s\n%s\n' \
+  'untrusted comment: minisign public key 0000000000000000' \
+  'RWRGYWtlTWluaXNpZ25QdWJsaWNLZXlGb3JUZXN0aW5nT25seQ==' > "$minisign_public"
+set +e
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$minisign_private" | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$minisign_public" | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/minisign-private.pem" "$tmp/minisign-public.pem" > "$tmp/key-import-minisign.log" 2>&1
+minisign_status=$?
+set -e
+[[ "$minisign_status" -ne 0 ]]
+grep -Fq 'contains a Minisign/Ed25519 key' "$tmp/key-import-minisign.log"
+grep -Fq 'requires an unencrypted OpenSSL EC P-256 private key' "$tmp/key-import-minisign.log"
+test ! -e "$tmp/minisign-private.pem"
+
+other_private="$tmp/other-private.pem"
+other_public="$tmp/other-public.pem"
+openssl ecparam -name prime256v1 -genkey -noout -out "$other_private"
+openssl ec -in "$other_private" -pubout -out "$other_public" 2>/dev/null
+set +e
+OPENWRT_FEED_SIGNING_KEY_B64="$private_b64" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$other_public" | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/mismatch-private.pem" "$tmp/mismatch-public.pem" > "$tmp/key-import-mismatch.log" 2>&1
+key_mismatch_status=$?
+set -e
+[[ "$key_mismatch_status" -ne 0 ]]
+grep -Fq 'does not match OPENWRT_FEED_SIGNING_KEY_B64' "$tmp/key-import-mismatch.log"
+test ! -e "$tmp/mismatch-private.pem"
 
 mock_log="$tmp/customfeed.log"
 OPENWRT_APK_BUILD_SCRIPT="$mock_builder" \

@@ -87,30 +87,23 @@ jobs:
         id: signing
         env:
           # Never expose the production private key to pull_request jobs.
-          STABLE_KEY_B64: ${{ github.event_name != 'pull_request' && secrets.OPENWRT_FEED_SIGNING_KEY_B64 || '' }}
-          CONFIGURED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
+          OPENWRT_FEED_SIGNING_KEY_B64: ${{ github.event_name != 'pull_request' && secrets.OPENWRT_FEED_SIGNING_KEY_B64 || '' }}
+          OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
         run: |
           set -Eeuo pipefail
           key="$RUNNER_TEMP/tlsvpn-openwrt-feed-key.pem"
           public_key="$RUNNER_TEMP/tlsvpn-openwrt-feed-public.pem"
+          echo "key_file=$key" >> "$GITHUB_OUTPUT"
+          echo "public_key_file=$public_key" >> "$GITHUB_OUTPUT"
 
-          if [[ -n "$STABLE_KEY_B64" ]]; then
-            [[ -n "$CONFIGURED_PUBLIC_KEY_B64" ]] || {
+          if [[ -n "$OPENWRT_FEED_SIGNING_KEY_B64" ]]; then
+            [[ -n "$OPENWRT_FEED_PUBLIC_KEY_B64" ]] || {
               echo 'OPENWRT_FEED_PUBLIC_KEY_B64 Actions Variable is required when the stable signing key is used.' >&2
               exit 1
             }
 
-            printf '%s' "$STABLE_KEY_B64" | base64 --decode > "$key"
-            printf '%s' "$CONFIGURED_PUBLIC_KEY_B64" | base64 --decode > "$public_key.raw"
-
-            openssl pkey -in "$key" -check -noout >/dev/null
-            openssl pkey -pubin -in "$public_key.raw" -pubout > "$public_key"
-            openssl pkey -in "$key" -pubout > "$public_key.derived"
-            cmp -s "$public_key.derived" "$public_key" || {
-              echo 'OPENWRT_FEED_PUBLIC_KEY_B64 does not match OPENWRT_FEED_SIGNING_KEY_B64.' >&2
-              exit 1
-            }
-            rm -f "$public_key.raw" "$public_key.derived"
+            chmod +x scripts/prepare_openwrt_feed_keys.sh
+            scripts/prepare_openwrt_feed_keys.sh pair "$key" "$public_key"
             echo 'stable=true' >> "$GITHUB_OUTPUT"
             echo 'Using the configured stable feed private/public key pair.'
           else
@@ -122,8 +115,6 @@ jobs:
 
           chmod 600 "$key"
           chmod 644 "$public_key"
-          echo "key_file=$key" >> "$GITHUB_OUTPUT"
-          echo "public_key_file=$public_key" >> "$GITHUB_OUTPUT"
 
       - name: Resolve package version
         id: version
@@ -211,8 +202,8 @@ jobs:
       - name: Remove signing material
         if: always()
         run: |
-          rm -f "${{ steps.signing.outputs.key_file }}"
-          rm -f "${{ steps.signing.outputs.public_key_file }}"
+          rm -f "$RUNNER_TEMP/tlsvpn-openwrt-feed-key.pem"
+          rm -f "$RUNNER_TEMP/tlsvpn-openwrt-feed-public.pem"
 
   publish:
     name: Publish openwrt-feed branch
@@ -226,6 +217,9 @@ jobs:
       cancel-in-progress: false
 
     steps:
+      - name: Checkout workflow helpers
+        uses: actions/checkout@v4
+
       - name: Decide whether to publish
         id: gate
         env:
@@ -270,13 +264,12 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
-          CONFIGURED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
+          OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
         run: |
           set -Eeuo pipefail
-          expected_raw="$RUNNER_TEMP/openwrt-feed-public.raw.pem"
           expected="$RUNNER_TEMP/openwrt-feed-public.pem"
-          printf '%s' "$CONFIGURED_PUBLIC_KEY_B64" | base64 --decode > "$expected_raw"
-          openssl pkey -pubin -in "$expected_raw" -pubout > "$expected"
+          chmod +x scripts/prepare_openwrt_feed_keys.sh
+          scripts/prepare_openwrt_feed_keys.sh public "$expected"
 
           mapfile -t keys < <(find "feed-dist/releases/$OPENWRT_VERSION" -type f -name tlsvpn-feed.pem | sort)
           [[ "${#keys[@]}" -eq 7 ]] || {
