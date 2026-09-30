@@ -26,7 +26,17 @@ jobs:
           cache: true
 
       - name: Apply protocol v3 migration
-        run: python3 scripts/apply_protocol_v3.py
+        run: |
+          python3 scripts/apply_protocol_v3.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('fec.go')
+          s = p.read_text()
+          old = '\tcontrolKindFECParity byte = 0xFE\n'
+          if s.count(old) != 1:
+              raise SystemExit(f'fec.go: expected one migrated legacy parity-kind declaration, got {s.count(old)}')
+          p.write_text(s.replace(old, '', 1))
+          PY
 
       - name: Format
         run: |
