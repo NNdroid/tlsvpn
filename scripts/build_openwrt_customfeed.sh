@@ -10,6 +10,7 @@ OPENWRT_SUBTARGET="${OPENWRT_SUBTARGET:-64}"
 OPENWRT_FEED_OUTPUT_DIR="${OPENWRT_FEED_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt-customfeed}"
 OPENWRT_WORK_DIR="${OPENWRT_WORK_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tlsvpn-openwrt-customfeed/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
 OPENWRT_FEED_SIGNING_KEY_FILE="${OPENWRT_FEED_SIGNING_KEY_FILE:-}"
+OPENWRT_FEED_PUBLIC_KEY_FILE="${OPENWRT_FEED_PUBLIC_KEY_FILE:-}"
 TLSVPN_SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 TLSVPN_PKG_VERSION="${TLSVPN_PKG_VERSION:-$(git describe --tags --long --always 2>/dev/null || true)}"
 JOBS="${JOBS:-2}"
@@ -36,6 +37,14 @@ fi
 }
 [[ -s "$OPENWRT_FEED_SIGNING_KEY_FILE" ]] || {
   echo "error: signing key not found: $OPENWRT_FEED_SIGNING_KEY_FILE" >&2
+  exit 2
+}
+[[ -n "$OPENWRT_FEED_PUBLIC_KEY_FILE" ]] || {
+  echo "error: OPENWRT_FEED_PUBLIC_KEY_FILE is required" >&2
+  exit 2
+}
+[[ -s "$OPENWRT_FEED_PUBLIC_KEY_FILE" ]] || {
+  echo "error: public key not found: $OPENWRT_FEED_PUBLIC_KEY_FILE" >&2
   exit 2
 }
 
@@ -98,11 +107,19 @@ done < <(find "$SDK_DIR/bin" -type f -name '*.apk' | sort)
 [[ "$main_count" -ge 1 ]] || { echo "error: canonical tlsvpn APK was not found" >&2; exit 1; }
 [[ "$package_count" -ge 4 ]] || { echo "error: custom feed package set is incomplete ($package_count APKs)" >&2; exit 1; }
 
-# Validate the EC private key with the SDK OpenSSL build and publish only the
-# corresponding public key. The private key remains outside FEED_DIR.
+# Canonicalize both keys with the SDK OpenSSL build and prove that the public
+# key configured for clients belongs to the private key used to sign the feed.
+# The configured public key, never a separately derived trust root, is what gets
+# published as tlsvpn-feed.pem.
 chmod 600 "$OPENWRT_FEED_SIGNING_KEY_FILE"
-"$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -check -noout >/dev/null 2>&1
-"$OPENSSL_TOOL" ec -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -pubout > "$FEED_DIR/tlsvpn-feed.pem" 2>/dev/null
+"$OPENSSL_TOOL" pkey -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -check -noout >/dev/null 2>&1
+canonical_private_public="$OPENWRT_WORK_DIR/signing-key-derived-public.pem"
+"$OPENSSL_TOOL" pkey -in "$OPENWRT_FEED_SIGNING_KEY_FILE" -pubout > "$canonical_private_public" 2>/dev/null
+"$OPENSSL_TOOL" pkey -pubin -in "$OPENWRT_FEED_PUBLIC_KEY_FILE" -pubout > "$FEED_DIR/tlsvpn-feed.pem" 2>/dev/null
+cmp -s "$canonical_private_public" "$FEED_DIR/tlsvpn-feed.pem" || {
+  echo "error: configured OpenWrt feed public key does not match the signing private key" >&2
+  exit 1
+}
 
 (
   cd "$FEED_DIR"
@@ -119,7 +136,8 @@ chmod 600 "$OPENWRT_FEED_SIGNING_KEY_FILE"
   "$APK_TOOL" adbdump --format json packages.adb > index.json
 )
 
-# Verify the signed repository using only the public key that clients receive.
+# Verify the signed repository using only the configured public key that clients
+# receive. This catches a wrong Actions Variable before anything can publish.
 VERIFY_ROOT="$OPENWRT_WORK_DIR/feed-verify-root"
 rm -rf "$VERIFY_ROOT"
 mkdir -p "$VERIFY_ROOT/etc/apk/keys"
