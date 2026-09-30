@@ -50,6 +50,8 @@ jobs:
           PERF_CONNS: '1'
           PERF_ENC_ALGO: gcm256
           PERF_PAD_MODE: bucket
+          PERF_FEC: 'true'
+          PERF_FEC_GROUP: '4'
           PERF_DIRECTION: upload
           PERF_SECONDS: '5'
           PERF_MIN_MBPS: '500'
@@ -66,6 +68,8 @@ jobs:
           PERF_CONNS: '1'
           PERF_ENC_ALGO: gcm256
           PERF_PAD_MODE: bucket
+          PERF_FEC: 'true'
+          PERF_FEC_GROUP: '4'
           PERF_DIRECTION: download
           PERF_SECONDS: '5'
           PERF_MIN_MBPS: '500'
@@ -120,6 +124,32 @@ jobs:
           done
           sudo chown -R "$USER:$USER" perf-artifacts
 
+      - name: Run paired single-path FEC throughput
+        env:
+          MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
+          CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          MAIN_RESULTS: ${{ github.workspace }}/perf-artifacts/fec-main.tsv
+          CANDIDATE_RESULTS: ${{ github.workspace }}/perf-artifacts/fec-candidate.tsv
+        run: |
+          set -euo pipefail
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$MAIN_RESULTS"
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$CANDIDATE_RESULTS"
+
+          echo "=== main: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+          sudo -E env \
+            BIN="$MAIN_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
+            PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
+            PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
+            bash scripts/real_tap_perf.sh
+
+          echo "=== candidate: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+          sudo -E env \
+            BIN="$CANDIDATE_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
+            PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
+            PERF_MIN_MBPS=500 PERF_RESULT_FILE="$CANDIDATE_RESULTS" \
+            bash scripts/real_tap_perf.sh
+          sudo chown -R "$USER:$USER" perf-artifacts
+
       - name: Compare candidate against main on the same runner
         run: |
           python3 - <<'PY'
@@ -157,6 +187,43 @@ jobs:
                   w.writerow((*row[:4], f'{row[4]:.1f}', f'{row[5]:.1f}', f'{row[6]:+.2f}'))
 
           print((root / 'comparison.tsv').read_text())
+          PY
+
+      - name: Compare single-path FEC candidate against main
+        run: |
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+
+          root = Path('perf-artifacts')
+          key_fields = ('conns', 'enc_algo', 'pad_mode', 'direction')
+
+          def load(path):
+              out = {}
+              with path.open(newline='') as f:
+                  for row in csv.DictReader(f, delimiter='\t'):
+                      out[tuple(row[k] for k in key_fields)] = float(row['mbps'])
+              return out
+
+          base = load(root / 'fec-main.tsv')
+          cand = load(root / 'fec-candidate.tsv')
+          if set(base) != set(cand):
+              raise SystemExit(f'FEC matrix mismatch: {sorted(set(base) ^ set(cand))}')
+
+          rows = []
+          for key in sorted(base):
+              b = base[key]
+              c = cand[key]
+              delta = ((c / b) - 1.0) * 100.0 if b else 0.0
+              rows.append((*key, b, c, delta))
+
+          with (root / 'fec-comparison.tsv').open('w', newline='') as f:
+              w = csv.writer(f, delimiter='\t')
+              w.writerow((*key_fields, 'main_mbps', 'candidate_mbps', 'delta_pct'))
+              for row in rows:
+                  w.writerow((*row[:4], f'{row[4]:.1f}', f'{row[5]:.1f}', f'{row[6]:+.2f}'))
+
+          print((root / 'fec-comparison.tsv').read_text())
           PY
 
       - name: Upload real-TAP performance artifacts
