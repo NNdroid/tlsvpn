@@ -270,6 +270,17 @@ func (p *AsyncPort) run() {
 			} else {
 				p.encoder = nil
 			}
+			// Fence generations are scoped to the sequence/key epoch because a new
+			// encoder starts generation numbering from one. Backends can survive an
+			// epoch reset, so clear their remembered generation or the first new
+			// SUSPEND/RESUME could be mistaken for an already-queued old fence.
+			p.backendsMu.RLock()
+			for _, b := range p.backends {
+				if b != nil {
+					b.fecFenceGen.Store(0)
+				}
+			}
+			p.backendsMu.RUnlock()
 			close(reset.done)
 		case frame := <-p.ch:
 			p.noteInputDequeued(len(frame))
