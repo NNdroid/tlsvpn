@@ -281,6 +281,25 @@ set -e
 grep -Fq 'contains a public key' "$tmp/key-import-failure.log"
 test ! -e "$tmp/wrong-private.pem"
 
+minisign_private="$tmp/minisign-private.key"
+minisign_public="$tmp/minisign-public.key"
+printf '%s\n%s\n' \
+  'untrusted comment: minisign encrypted secret key' \
+  'RWRTY0Zha2VNaW5pc2lnblByaXZhdGVLZXlGb3JUZXN0aW5nT25seQ==' > "$minisign_private"
+printf '%s\n%s\n' \
+  'untrusted comment: minisign public key 0000000000000000' \
+  'RWRGYWtlTWluaXNpZ25QdWJsaWNLZXlGb3JUZXN0aW5nT25seQ==' > "$minisign_public"
+set +e
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$minisign_private" | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$minisign_public" | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/minisign-private.pem" "$tmp/minisign-public.pem" > "$tmp/key-import-minisign.log" 2>&1
+minisign_status=$?
+set -e
+[[ "$minisign_status" -ne 0 ]]
+grep -Fq 'contains a Minisign/Ed25519 key' "$tmp/key-import-minisign.log"
+grep -Fq 'requires an unencrypted OpenSSL EC P-256 private key' "$tmp/key-import-minisign.log"
+test ! -e "$tmp/minisign-private.pem"
+
 other_private="$tmp/other-private.pem"
 other_public="$tmp/other-public.pem"
 openssl ecparam -name prime256v1 -genkey -noout -out "$other_private"

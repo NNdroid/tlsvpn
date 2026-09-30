@@ -111,6 +111,10 @@ decode_key_value() {
 content_class() {
   local input="$1"
   local compact=''
+  if LC_ALL=C grep -a -q '^untrusted comment: minisign' "$input"; then
+    printf 'minisign-key'
+    return
+  fi
   if LC_ALL=C grep -a -q '[^[:print:][:space:]]' "$input"; then
     printf 'unrecognized-binary'
     return
@@ -135,7 +139,9 @@ content_class() {
 diagnose_private_key() {
   local input="$1"
   local label
+  local class
   label="$(pem_label "$input")"
+  class="$(content_class "$input")"
   case "$label" in
     PUBLIC\ KEY|EC\ PUBLIC\ KEY)
       die 'OPENWRT_FEED_SIGNING_KEY_B64 contains a public key; it must contain the matching private key'
@@ -144,7 +150,10 @@ diagnose_private_key() {
       die 'OPENWRT_FEED_SIGNING_KEY_B64 contains an encrypted private key; CI requires an unencrypted EC P-256 key'
       ;;
     '')
-      die "OPENWRT_FEED_SIGNING_KEY_B64 decoded successfully but is not a readable PEM/DER private key (content_class=$(content_class "$input")); encode the private key file bytes, not its filename"
+      if [[ "$class" == 'minisign-key' ]]; then
+        die 'OPENWRT_FEED_SIGNING_KEY_B64 contains a Minisign/Ed25519 key; OpenWrt APK repository signing requires an unencrypted OpenSSL EC P-256 private key'
+      fi
+      die "OPENWRT_FEED_SIGNING_KEY_B64 decoded successfully but is not a readable PEM/DER private key (content_class=$class); encode the private key file bytes, not its filename"
       ;;
     *)
       die "OPENWRT_FEED_SIGNING_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an unencrypted private key"
@@ -155,13 +164,18 @@ diagnose_private_key() {
 diagnose_public_key() {
   local input="$1"
   local label
+  local class
   label="$(pem_label "$input")"
+  class="$(content_class "$input")"
   case "$label" in
     EC\ PRIVATE\ KEY|PRIVATE\ KEY|ENCRYPTED\ PRIVATE\ KEY)
       die 'OPENWRT_FEED_PUBLIC_KEY_B64 contains a private key; store only the derived public key in the Actions Variable'
       ;;
     '')
-      die "OPENWRT_FEED_PUBLIC_KEY_B64 decoded successfully but is not a readable PEM/DER public key (content_class=$(content_class "$input")); encode the public key file bytes, not its filename"
+      if [[ "$class" == 'minisign-key' ]]; then
+        die 'OPENWRT_FEED_PUBLIC_KEY_B64 contains a Minisign/Ed25519 key; OpenWrt APK clients require the matching OpenSSL EC P-256 public key'
+      fi
+      die "OPENWRT_FEED_PUBLIC_KEY_B64 decoded successfully but is not a readable PEM/DER public key (content_class=$class); encode the public key file bytes, not its filename"
       ;;
     *)
       die "OPENWRT_FEED_PUBLIC_KEY_B64 has PEM label '$label' but OpenSSL cannot read it as an EC public key"
