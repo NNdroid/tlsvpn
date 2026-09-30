@@ -36,6 +36,13 @@ jobs:
               raise SystemExit('deprecated session_token compatibility remains in config.go')
           p.write_text(s2)
 
+          p = Path('api.go')
+          s = p.read_text()
+          old = '\tposted = stripDeprecatedSessionTokenConfig(posted)\n'
+          if old not in s:
+              raise SystemExit('api.go deprecated config caller not found')
+          p.write_text(s.replace(old, '', 1))
+
           p = Path('config_test.go')
           s = p.read_text()
           pat = r'func TestLoadConfigIgnoresDeprecatedSessionToken\(t \*testing\.T\) \{.*?\n}\n\nfunc TestLoadConfigUnknownField'
@@ -60,10 +67,14 @@ jobs:
               raise SystemExit(f'config_test.go legacy test replacement matched {n}, want 1')
           p.write_text(s2)
           PY
-          gofmt -w config.go config_test.go
+          gofmt -w config.go config_test.go api.go
       - name: Reject TLSVPN protocol-v2 remnants
+        shell: bash
         run: |
-          ! grep -R --line-number --include='*.go' -E 'ProtocolVersion:[[:space:]]*2|ProtocolVersion[[:space:]]*[!=]=[[:space:]]*2|protocol-v2|stripDeprecatedSessionTokenConfig' .
+          if grep -R --line-number --include='*.go' -E 'ProtocolVersion:[[:space:]]*2|ProtocolVersion[[:space:]]*[!=]=[[:space:]]*2|protocol-v2|stripDeprecatedSessionTokenConfig' .; then
+            echo 'TLSVPN protocol-v2 compatibility remnants remain'
+            exit 1
+          fi
           python3 - <<'PY'
           import json
           g=json.load(open('testdata/protocol_golden.json'))
