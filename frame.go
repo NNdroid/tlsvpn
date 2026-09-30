@@ -532,8 +532,8 @@ type HandshakeReq struct {
 	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
 	// SessionToken：客户端回带上一次收到的会话令牌（hex）。
-	// 服务端开启 session_token 时，重连既有会话必须携带正确令牌，
-	// 仅持有共享 PSK 的第三方无法冒充既有会话（见 computeSessionToken）。
+	// 重连既有会话必须携带正确令牌；仅持有共享 PSK 的第三方无法冒充
+	// 既有会话。
 	SessionToken string `json:"session_token,omitempty"`
 	// PeerInfo is diagnostic metadata only; never use it for authentication/authorization.
 	PeerInfo *PeerInfo `json:"peer_info,omitempty"`
@@ -569,10 +569,10 @@ type HandshakeResp struct {
 	EncSalt  string `json:"enc_salt,omitempty"`  // hex(8B)：客户端→服务端方向
 	EncSalt2 string `json:"enc_salt2,omitempty"` // hex(8B)：服务端→客户端方向
 	// SessionToken：本次会话的重连接入令牌（hex），客户端须在下一次握手回带。
-	// 仅在服务端开启 session_token 时下发。
+	// 协议 v3 始终使用该令牌进行既有会话接续。
 	SessionToken string `json:"session_token,omitempty"`
-	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要。新增客户端接受
-	// 字段缺失，旧客户端会忽略该可选字段，支持滚动升级与回滚。
+	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要，仅用于诊断，
+	// 不参与认证或授权。
 	TLS *TLSHandshakeInfo `json:"tls,omitempty"`
 	// PeerInfo is returned only after application-layer authentication succeeds.
 	PeerInfo *PeerInfo `json:"peer_info,omitempty"`

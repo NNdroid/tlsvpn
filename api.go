@@ -1115,7 +1115,7 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 	minEnc := s.minEnc
 	s.mu.RUnlock()
 
-	n := runtimeNegJSON{ProtocolVersion: 2, SessionToken: true, PadMode: padModeName()}
+	n := runtimeNegJSON{ProtocolVersion: protocolVersion, SessionToken: true, PadMode: padModeName()}
 	if cfg != nil {
 		n.FEC = cfg.Client.FEC
 		n.FecGroup = cfg.Client.FecGroup

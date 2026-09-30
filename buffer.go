@@ -194,6 +194,17 @@ func (rb *ReorderBuffer) Stats() ReorderBufferStats {
 	}
 }
 
+// ExpectedSeqSnapshot is a cold-path progress probe for FEC cleanup. Keep the
+// existing mutex as the source of truth rather than publishing expectedSeq on
+// every Insert/drain: dynamic topology transitions and parity are sparse, while
+// normal RX data must not pay another atomic store per packet.
+func (rb *ReorderBuffer) ExpectedSeqSnapshot() uint32 {
+	rb.mu.Lock()
+	seq := rb.expectedSeq
+	rb.mu.Unlock()
+	return seq
+}
+
 // Insert 将收到的包推入缓冲区
 func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	if seq == 0 {

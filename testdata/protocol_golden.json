@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "psk_hashes": [
     {
       "psk": "",
@@ -140,6 +140,16 @@
       "header_hex": "0000ffffffffffffffff"
     }
   ],
+  "control_frames": [
+    {
+      "name": "fec_mode_suspend",
+      "payload_hex": "02010000010203040506070800000009"
+    },
+    {
+      "name": "fec_parity_k2",
+      "payload_hex": "01000000010200000002000000020206"
+    }
+  ],
   "tls_fingerprint_vectors": [
     {
       "cipher_suites": [
@@ -190,6 +200,7 @@
     "ipv6",
     "mac",
     "padding",
+    "peer_info",
     "protocol_version",
     "psk",
     "session_token"
@@ -211,6 +222,7 @@
     "ipv6",
     "message",
     "padding",
+    "peer_info",
     "protocol_version",
     "session_epoch",
     "session_id",

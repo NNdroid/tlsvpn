@@ -39,6 +39,7 @@ type Backend struct {
 	assignedBatches    atomic.Uint64 // actual data batches accepted by this backend
 	fecAssignedBytes   atomic.Uint64 // FEC parity payload bytes accepted by this backend
 	fecAssignedBatches atomic.Uint64 // FEC parity batches accepted by this backend
+	fecFenceGen        atomic.Uint64 // latest dynamic RX fence generation queued before data on this backend
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
 	rateSampleBytes    uint64
 	rateSampleStart    time.Time
@@ -269,6 +270,17 @@ func (p *AsyncPort) run() {
 			} else {
 				p.encoder = nil
 			}
+			// Fence generations are scoped to the sequence/key epoch because a new
+			// encoder starts generation numbering from one. Backends can survive an
+			// epoch reset, so clear their remembered generation or the first new
+			// SUSPEND/RESUME could be mistaken for an already-queued old fence.
+			p.backendsMu.RLock()
+			for _, b := range p.backends {
+				if b != nil {
+					b.fecFenceGen.Store(0)
+				}
+			}
+			p.backendsMu.RUnlock()
 			close(reset.done)
 		case frame := <-p.ch:
 			p.noteInputDequeued(len(frame))
@@ -332,7 +344,8 @@ func (p *AsyncPort) run() {
 //   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
 //   - 普通模式：MinRTT 单路发送。
 //
-// wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
+// 协议 v3 的 data/control wire semantics 以 docs/protocol_v3.md 为准；
+// 每个完整 FEC group 只发送一份 parity。
 func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
 	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
 	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
@@ -358,7 +371,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
 		// 低负载仍走 MinRTT；持续 backlog 时会在 RTT 接近的健康路径间主动 striping。
 		// 若目标连接瞬时满则继续尝试其它后端；全部满时
 		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
-		p.dropN(sendBatchToAny(backends, best, batch))
+		p.dropN(sendBatchToAnyFenced(p, backends, best, batch))
 		for _, par := range parities {
 			if len(backends) < 2 {
 				// 单条 TCP 是严格有序流：原始数据若因 TCP 丢包/HOL 尚未到达，
@@ -378,7 +391,7 @@ func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
 		return
 	}
 
-	p.dropN(sendBatchToAny(backends, dataBest, batch))
+	p.dropN(sendBatchToAnyFenced(p, backends, dataBest, batch))
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
@@ -517,11 +530,11 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 	return backends[start]
 }
 
-// sendBatchToAny 把数据 batch 的 payload 所有权转移给某个可写后端。
-// 热路径先无阻塞尝试 preferred/其它连接；只有所有连接都满时才进入最多 5ms
-// 的短退让。这样可以显著减少“分配 seq 后再丢 batch”造成的重排序号洞。
-// 成功或最终失败后，调用方 batch 中的 Data 都会被置 nil。
-func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) int {
+// sendBatchToAnyFenced 把数据 batch 的 payload 所有权转移给实际可写后端。
+// 当动态 FEC 模式刚发生切换时，目标 backend 的第一批 data 会在同一个 channel
+// batch 前部 prepend 一个 seq=0 fence。这样 preferred 满后回退到其它 backend 时
+// fence 会跟随真正承载数据的 TCP 流，且 channel FIFO 保证 fence 严格先于 data。
+func sendBatchToAnyFenced(p *AsyncPort, backends []*Backend, preferred *Backend, batch []VPNFrame) int {
 	out := getVPNFrameBatch(len(batch))
 	copy(out, batch)
 	for i := range batch {
@@ -533,14 +546,47 @@ func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) i
 		if b == nil {
 			return false
 		}
-		b.addQueuedBytes(outBytes)
+
+		sendBatch := out
+		queuedBytes := outBytes
+		var ctrl fecModeControl
+		fenced := false
+		if p != nil && p.encoder != nil {
+			if current, ok := p.encoder.currentModeControl(); ok && b.fecFenceGen.Load() < current.Generation {
+				ctrl = current
+				payload := getFrameAtLeast(fecControlWireLen)[:0]
+				payload = appendFECModeControl(payload, current)
+				withFence := getVPNFrameBatch(len(out) + 1)
+				withFence[0] = VPNFrame{Seq: 0, Data: payload}
+				copy(withFence[1:], out)
+				sendBatch = withFence
+				queuedBytes += uint64(len(payload))
+				fenced = true
+			}
+		}
+
+		b.addQueuedBytes(queuedBytes)
 		select {
-		case b.ch <- out:
+		case b.ch <- sendBatch:
+			if fenced {
+				b.fecFenceGen.Store(ctrl.Generation)
+				// Descriptors were copied into sendBatch; payload ownership moved with
+				// those descriptors. Return only the original descriptor container.
+				putVPNFrameBatch(out)
+				out = nil
+			}
 			b.assignedBytes.Add(outBytes)
 			b.assignedBatches.Add(1)
 			return true
 		default:
-			b.completeQueuedBytes(outBytes)
+			b.completeQueuedBytes(queuedBytes)
+			if fenced {
+				// sendBatch copied data descriptors from out, so only the fence owns
+				// a unique payload here. Clear descriptors without freeing data twice.
+				putFrame(sendBatch[0].Data)
+				sendBatch[0].Data = nil
+				putVPNFrameBatch(sendBatch)
+			}
 			return false
 		}
 	}
@@ -574,6 +620,12 @@ func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) i
 	freeFrames(out)
 	putVPNFrameBatch(out)
 	return len(out)
+}
+
+// sendBatchToAny 保留旧的无 fence helper 供单元测试/兼容调用；生产 AsyncPort
+// dispatch 走 sendBatchToAnyFenced，因此只有真实协商 FEC 的数据面会携带控制帧。
+func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) int {
+	return sendBatchToAnyFenced(nil, backends, preferred, batch)
 }
 
 // sendBatchTo 保留给单后端测试/兼容调用；内部仍走同一所有权转移路径。
@@ -1653,7 +1705,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.connID.Store(connID)
 
 	req := HandshakeReq{
-		ProtocolVersion: 2,
+		ProtocolVersion: protocolVersion,
 		ClientInstance:  instanceID,
 		ConnID:          connID,
 		ClientID:        c.clientID,
@@ -1707,7 +1759,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	scanner.SetMaxDataLen(maxWireDataLen)
 	log.Debugf("[Conn %d] <= handshake response conn_id=%s session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, connID, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
-	if resp.ProtocolVersion != 2 {
+	if resp.ProtocolVersion != protocolVersion {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
 	c.sessionMu.Lock()
@@ -1805,6 +1857,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			// client.conns 属于 restart-only 拓扑配置，因此 ==1 时可以安全使用
 			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
 			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
+			c.fecDec.SetReorderProgress(c.rxReorder.ExpectedSeqSnapshot)
 			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}
@@ -2087,9 +2140,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					}
 					frame = plain
 				}
-				if seq == 0 && useXorFec && c.isParityFrame(frame) {
-					// XOR 校验帧：交给 FEC 解码器，恢复出的帧由其回调写 TAP
-					c.fecDec.OnParity(frame)
+				if seq == 0 {
+					if !useXorFec || c.fecDec == nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
+						return
+					}
+					if cerr := c.fecDec.OnControl(frame); cerr != nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
+						return
+					}
 					putFrame(frame)
 					continue
 				}
@@ -2108,12 +2169,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	case <-runCtx.Done():
 		return 0, nil
 	}
-}
-
-// isParityFrame 识别 XOR 校验帧：线路帧 seq=0（不加密），负载首字节为魔数
-// 0xFE；普通控制/心跳帧负载为空，握手帧以 '{' 开头，均不会误判。
-func (c *Client) isParityFrame(frame []byte) bool {
-	return len(frame) >= 7 && frame[0] == fecMagic
 }
 
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {

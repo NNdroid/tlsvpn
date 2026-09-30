@@ -685,6 +685,7 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	}
 	if session.FecEncK > 0 {
 		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, session.RxReorder.Insert)
+		session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
 		session.Port.ResetEpoch(session.FecEncK, fecTx)
 	} else {
 		session.Port.ResetEpoch(0, nil)
@@ -1421,7 +1422,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Warnf("[%s] connection refused: MAC must be a non-zero unicast address", clientID)
 		return
 	}
-	if req.ProtocolVersion != 2 {
+	if req.ProtocolVersion != protocolVersion {
 		log.Warnf("[%s] connection refused: unsupported protocol_version=%d", clientID, req.ProtocolVersion)
 		return
 	}
@@ -1624,6 +1625,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		if fecEncK > 0 {
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
+			session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
 			// Current Go clients always advertise BrutalGroups/BrutalConns as the
 			// authenticated physical-topology declaration even when shaping is off.
 			// Legacy/unknown peers (no group semantics) deliberately keep RX FEC on.
@@ -1736,7 +1738,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -1934,9 +1936,17 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 				frame = plain
 			}
-			if seq == 0 && fecDec != nil && len(frame) >= 7 && frame[0] == fecMagic {
-				// XOR 校验帧：交给会话级 FEC 解码器
-				fecDec.OnParity(frame)
+			if seq == 0 {
+				if fecDec == nil {
+					putFrame(frame)
+					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
+					return
+				}
+				if cerr := fecDec.OnControl(frame); cerr != nil {
+					putFrame(frame)
+					log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
+					return
+				}
 				putFrame(frame)
 				continue
 			}

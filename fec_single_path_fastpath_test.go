@@ -10,7 +10,7 @@ import (
 
 func fecParityStart(t *testing.T, parity []byte) uint32 {
 	t.Helper()
-	if len(parity) < 6 || parity[0] != fecMagic {
+	if len(parity) < 6 || parity[0] != controlKindFECParity {
 		t.Fatalf("invalid FEC parity payload: len=%d", len(parity))
 	}
 	return binary.BigEndian.Uint32(parity[1:5])

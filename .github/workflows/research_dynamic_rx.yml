@@ -1,0 +1,63 @@
+name: Dynamic RX FEC Research
+
+on:
+  push:
+    branches:
+      - research/dynamic-rx-fec-bypass
+  workflow_dispatch:
+
+jobs:
+  dynamic-rx-fec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Format gate
+        run: |
+          files='buffer.go client.go server.go frame.go peer_info.go protocol_v3.go protocol_v3_control_test.go protocol_conformance_test.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go fec_dynamic_bypass_p2d_test.go fec_dynamic_bypass_p2d_e2e_test.go fec_dynamic_bypass_bench_test.go'
+          test -z "$(gofmt -l $files)" || { gofmt -d $files; exit 1; }
+
+      - name: Protocol v3 source-of-truth gate
+        run: |
+          test -s docs/protocol_v3.md
+          grep -Fq 'protocol_version = 3' docs/protocol_v3.md
+          grep -Fq '0x01  FEC_PARITY' docs/protocol_v3.md
+          grep -Fq '0x02  FEC_MODE' docs/protocol_v3.md
+          grep -Fq 'Physical path failure and rejoin' docs/protocol_v3.md
+          grep -Fq 'intentionally does **not** preserve wire compatibility with v2' docs/protocol_v3.md
+          python3 -c "import json; g=json.load(open('testdata/protocol_golden.json')); assert g['version']==3; c={x['name']:x['payload_hex'] for x in g['control_frames']}; assert c['fec_mode_suspend']=='02010000010203040506070800000009'; assert c['fec_parity_k2'].startswith('01'); assert 'peer_info' in g['handshake_req_keys']; assert 'peer_info' in g['handshake_resp_keys']"
+
+      - name: Reject legacy protocol semantics
+        run: |
+          if grep -R --line-number --include='*.go' -E 'ProtocolVersion:[[:space:]]*2|ProtocolVersion != 2|ProtocolVersion == 2|protocol-v2|OnData\(0,|fecMagic|fecControlMagic' .; then
+            echo 'legacy application-protocol semantics remain in Go sources'
+            exit 1
+          fi
+          if grep -n -E 'magic=0xFD|0xFE|Backward compatibility|wire-compatible without|old Go/Rust|旧客户端|旧端/新端' docs/dynamic_rx_fec_bypass.md fec.go client.go frame.go; then
+            echo 'legacy compatibility/broadcast description remains'
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Protocol v3 golden contract
+        run: go test ./... -count=1 -run 'TestGenerateGoldenVectors|TestGoldenSelfConsistency|TestProtocolV3'
+
+      - name: Dynamic RX FEC tests
+        run: go test ./... -count=1 -run 'FEC|Dynamic|ReorderExpected|ProtocolV3'
+
+      - name: Live 2-to-1-to-2 physical path fault
+        run: go test -count=1 -v -run '^TestDynamicFECPhysicalPathKill2To1To2$'
+
+      - name: Dynamic RX FEC microbenchmark
+        run: go test -run '^$' -bench '^BenchmarkDynamicFECDecoderDataPath$' -benchmem -count=3
+
+      - name: Protocol/FEC race gate
+        run: go test -race ./... -count=1 -run 'ProtocolV3|FEC|Dynamic|ReorderExpected|Handshake|SessionEpoch'

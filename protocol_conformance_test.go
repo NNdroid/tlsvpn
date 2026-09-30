@@ -44,6 +44,8 @@ type GoldenVectors struct {
 
 	// 帧头布局：10 字节头 [4B dataLen][2B padLen][4B seq]
 	FrameHeaders []FrameHeaderVec `json:"frame_headers"`
+	// v3 seq=0 typed-control payload contract.
+	ControlFrames []ControlFrameVec `json:"control_frames"`
 	// 服务端观测 ClientHello 的跨语言规范化摘要
 	TLSFingerprintVectors []TLSFingerprintVec `json:"tls_fingerprint_vectors"`
 
@@ -84,6 +86,11 @@ type FrameHeaderVec struct {
 	HeaderHex string `json:"header_hex"`
 }
 
+type ControlFrameVec struct {
+	Name       string `json:"name"`
+	PayloadHex string `json:"payload_hex"`
+}
+
 type TLSFingerprintVec struct {
 	CipherSuites     []uint16 `json:"cipher_suites"`
 	SignatureSchemes []uint16 `json:"signature_schemes"`
@@ -105,7 +112,7 @@ func fullTLSInfoSample() *TLSHandshakeInfo {
 
 // buildGoldenVectors 用当前 Go 实现计算出全部向量
 func buildGoldenVectors() *GoldenVectors {
-	gv := &GoldenVectors{Version: 2}
+	gv := &GoldenVectors{Version: protocolVersion}
 
 	for _, psk := range []string{"", "test_psk", "my_super_secret_test_key", "中文密钥🔑", "a"} {
 		gv.PSKHashes = append(gv.PSKHashes, PSKHashVec{PSK: psk, Hash: hashPSK(psk)})
@@ -168,6 +175,25 @@ func buildGoldenVectors() *GoldenVectors {
 			HeaderHex: hex.EncodeToString(hdr[:]),
 		})
 	}
+
+	mode := appendFECModeControl(nil, fecModeControl{
+		Generation: 0x0102030405060708,
+		Op:         fecControlSuspend,
+		Boundary:   9,
+	})
+	gv.ControlFrames = append(gv.ControlFrames, ControlFrameVec{
+		Name: "fec_mode_suspend", PayloadHex: hex.EncodeToString(mode),
+	})
+	e := newFECEncoder(2, nil)
+	_ = e.add(VPNFrame{Seq: 1, Data: []byte{0x01, 0x02}})
+	parity := e.add(VPNFrame{Seq: 2, Data: []byte{0x03, 0x04}})
+	if parity == nil {
+		panic("golden FEC parity was not generated")
+	}
+	gv.ControlFrames = append(gv.ControlFrames, ControlFrameVec{
+		Name: "fec_parity_k2", PayloadHex: hex.EncodeToString(parity),
+	})
+	putFrame(parity)
 	for _, v := range []TLSFingerprintVec{
 		{CipherSuites: []uint16{0x0a0a, 0x1301, 0x1302, 0xc02f}, SignatureSchemes: []uint16{0x0804, 0x0403}, Groups: []uint16{0x1a1a, 0x001d, 0x0017}, ALPN: []string{"h2", "http/1.1"}},
 		{CipherSuites: []uint16{0x1303}, SignatureSchemes: []uint16{}, Groups: []uint16{}, ALPN: []string{}},
@@ -180,20 +206,21 @@ func buildGoldenVectors() *GoldenVectors {
 	// 写出的键列表会静默漏字段（曾漏掉 session_token，Rust 侧被迫把契约测试
 	// 降级成单向子集）。
 	gv.HandshakeReqKeys = jsonFieldNames(HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
+		ProtocolVersion: protocolVersion, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
 		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
-		SessionToken: "x",
+		SessionToken: "x", PeerInfo: &PeerInfo{Implementation: "go"},
 	})
 	gv.HandshakeRespKeys = jsonFieldNames(HandshakeResp{
-		ProtocolVersion: 2, SessionEpoch: 1,
+		ProtocolVersion: protocolVersion, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
+		PeerInfo: &PeerInfo{Implementation: "go"},
 	})
 	gv.TLSInfoKeys = jsonFieldNames(*fullTLSInfoSample())
 
@@ -322,20 +349,21 @@ func TestGoldenSelfConsistency(t *testing.T) {
 		}
 	}
 	checkKeys("handshake_req_keys", gv.HandshakeReqKeys, jsonFieldNames(HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
+		ProtocolVersion: protocolVersion, ClientInstance: "x", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "x", PSK: "x", MAC: "x", IPv4: "x", IPv6: "x",
 		Padding: "x", BrutalGroups: true,
 		BrutalTotalTx: 30, BrutalTotalRx: 500, BrutalConns: 4, BrutalConnIndex: 1,
 		FEC: true, FecGroup: 4, Encrypt: true, EncAlgo: 2,
-		SessionToken: "x",
+		SessionToken: "x", PeerInfo: &PeerInfo{Implementation: "go"},
 	}))
 	checkKeys("handshake_resp_keys", gv.HandshakeRespKeys, jsonFieldNames(HandshakeResp{
-		ProtocolVersion: 2, SessionEpoch: 1,
+		ProtocolVersion: protocolVersion, SessionEpoch: 1,
 		Success: true, Message: "x", SessionID: "x", ClientID: "x",
 		IPv4: "x", IPv6: "x", GwV4: "x", GwV6: "x", Padding: "x",
 		BrutalGroups: true, BrutalTotalTx: 30, BrutalTotalRx: 500,
 		FEC: true, FecGroup: 4, Encrypt: true,
 		EncAlgo: 2, EncSalt: "x", EncSalt2: "x", SessionToken: "x", TLS: fullTLSInfoSample(),
+		PeerInfo: &PeerInfo{Implementation: "go"},
 	}))
 	checkKeys("tls_info_keys", gv.TLSInfoKeys, jsonFieldNames(*fullTLSInfoSample()))
 }
@@ -345,7 +373,7 @@ func TestGoldenSelfConsistency(t *testing.T) {
 func TestHandshakeJSONContract(t *testing.T) {
 	// 全字段填充，确保 omitempty 字段也出现
 	req := HandshakeReq{
-		ProtocolVersion: 2, ClientInstance: "instance-1", ConnID: "00000000-0000-4000-8000-000000000001",
+		ProtocolVersion: protocolVersion, ClientInstance: "instance-1", ConnID: "00000000-0000-4000-8000-000000000001",
 		ClientID: "c1", PSK: "p", MAC: "00:11:22:33:44:55",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", Padding: "ab",
 		BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, BrutalConns: 4, BrutalConnIndex: 1,
@@ -361,7 +389,7 @@ func TestHandshakeJSONContract(t *testing.T) {
 	}
 
 	resp := HandshakeResp{
-		ProtocolVersion: 2, SessionEpoch: 1,
+		ProtocolVersion: protocolVersion, SessionEpoch: 1,
 		Success: true, Message: "ok", SessionID: "s1", ClientID: "c1",
 		IPv4: "10.0.0.2", IPv6: "fd00::2", GwV4: "10.0.0.1", GwV6: "fd00::1",
 		Padding: "ab", BrutalGroups: true, BrutalTotalTx: 400, BrutalTotalRx: 800, FEC: true, FecGroup: 4, Encrypt: true,
