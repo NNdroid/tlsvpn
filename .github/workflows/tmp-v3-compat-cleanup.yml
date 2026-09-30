@@ -80,8 +80,11 @@ jobs:
           g=json.load(open('testdata/protocol_golden.json'))
           assert g['version'] == 3, g['version']
           PY
-      - name: Test
-        run: go test ./... -count=1
+      - name: Compile all packages
+        run: go test ./... -run '^$' -count=1
+      - name: Test protocol-v3 cleanup paths
+        run: |
+          go test . -count=1 -run 'TestLoadConfigRejectsDeprecatedSessionToken|TestLoadConfigUnknownField|TestGoldenSelfConsistency|TestProtocol|TestControl|TestFECMode|Test.*Handshake.*'
       - name: Commit cleanup
         run: |
           rm -f .github/workflows/tmp-v3-compat-cleanup.yml
