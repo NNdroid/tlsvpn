@@ -241,6 +241,14 @@ grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
 grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-der.log"
 grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-der.log"
 
+OPENWRT_FEED_SIGNING_KEY_B64="$(base64 < "$private_der" | base64 | tr -d '\r\n')" \
+OPENWRT_FEED_PUBLIC_KEY_B64="$(base64 < "$public_der" | base64 | tr -d '\r\n')" \
+  bash "$key_script" pair "$tmp/double-der-private.pem" "$tmp/double-der-public.pem" > "$tmp/key-import-double-der.log"
+grep -Fq 'encoding=double-base64 pem_label=none' "$tmp/key-import-double-der.log"
+grep -Fq 'private_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log"
+grep -Fq 'public_key_format=DER normalized=PEM' "$tmp/key-import-double-der.log"
+grep -Fq 'curve=prime256v1 pair_match=true' "$tmp/key-import-double-der.log"
+
 set +e
 OPENWRT_FEED_SIGNING_KEY_B64="$public_b64" \
 OPENWRT_FEED_PUBLIC_KEY_B64="$public_b64" \

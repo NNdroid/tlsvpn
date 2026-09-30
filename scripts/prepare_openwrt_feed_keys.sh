@@ -10,7 +10,7 @@ Usage:
 The pair command reads OPENWRT_FEED_SIGNING_KEY_B64 and
 OPENWRT_FEED_PUBLIC_KEY_B64. The public command only reads the public-key
 variable. Base64-encoded PEM and DER are accepted. Raw PEM and one accidental
-extra Base64 layer around PEM are also normalized for recovery.
+extra Base64 layer around PEM or DER are also normalized for recovery.
 EOF
   exit 2
 }
@@ -76,17 +76,20 @@ decode_key_value() {
   fi
 
   # Recover a common configuration mistake where a value that was already
-  # Base64 text was encoded a second time. Do not recurse beyond one extra
-  # layer: accepting arbitrary wrapping would conceal a genuinely wrong key.
+  # Base64 text was encoded a second time. The second layer may contain PEM or
+  # DER, and the caller still requires OpenSSL to parse and validate the result.
+  # Do not recurse beyond one extra layer: accepting arbitrary wrapping would
+  # conceal a genuinely wrong key.
   if ! LC_ALL=C grep -a -q '[^A-Za-z0-9+/=[:space:]]' "$first"; then
     compact="$(tr -d '[:space:]' < "$first")"
     if [[ -n "$compact" && "$compact" =~ ^[A-Za-z0-9+/]*={0,2}$ ]] && \
        (( ${#compact} % 4 == 0 )) && \
        printf '%s' "$compact" | base64 --decode > "$second" 2>/dev/null && \
-       [[ -n "$(pem_label "$second")" ]]; then
+       [[ -s "$second" ]]; then
       cp "$second" "$output"
+      label="$(pem_label "$output")"
       printf '[openwrt-feed-key] %s encoding=double-base64 pem_label=%s bytes=%s\n' \
-        "$setting" "$(pem_label "$output")" "$(wc -c < "$output")"
+        "$setting" "${label:-none}" "$(wc -c < "$output")"
       return
     fi
   fi
