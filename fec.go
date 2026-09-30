@@ -94,21 +94,52 @@ type fecEncoder struct {
 	activeLen  int      // 当前组实际触碰的最大长度；reset 只清这一段
 	ic         *innerCipher
 	paritySent uint64 // 已生成校验帧计数（面板/metrics）
+
+	// multipath/armed 只由 AsyncPort.run goroutine 修改。直接构造 encoder 的
+	// 单元测试/benchmark 默认保持旧语义（立即编码）；数据面在只有一个物理
+	// backend 时显式切到 suppressed，恢复多路径后再等待下一个完整 K 组边界。
+	multipath bool
+	armed     bool
 }
 
 func newFECEncoder(k int, ic *innerCipher) *fecEncoder {
 	k = clampFecGroup(k)
 	return &fecEncoder{
-		k:    k,
-		ic:   ic,
-		seqs: make([]uint32, 0, k),
-		lens: make([]int, 0, k),
-		acc:  make([]byte, 0, 2048),
+		k:         k,
+		ic:        ic,
+		seqs:      make([]uint32, 0, k),
+		lens:      make([]int, 0, k),
+		acc:       make([]byte, 0, 2048),
+		multipath: true,
+		armed:     true,
 	}
 }
 
 // ParitySent 已生成的校验帧总数
 func (e *fecEncoder) ParitySent() uint64 { return atomic.LoadUint64(&e.paritySent) }
+
+// setPhysicalPathCount 根据实际注册的物理 backend 数量启停 FEC 热路径。
+// 单 TCP 是严格有序流：同一路径后面的 parity 不可能越过前面丢失/阻塞的数据，
+// 因此计算 XOR/parity 没有恢复价值。切回多路径时不能从半组继续，必须等到
+// seq ≡ 1 (mod K) 的下一个完整算术分组边界重新 armed。
+func (e *fecEncoder) setPhysicalPathCount(paths int) {
+	multipath := paths >= 2
+	if multipath == e.multipath {
+		return
+	}
+	e.multipath = multipath
+	if !multipath {
+		// 2 -> 1：任何未完成组都不能跨过 single-path 区间继续累计。
+		if len(e.seqs) != 0 || e.activeLen != 0 {
+			e.reset()
+		}
+		e.armed = false
+		return
+	}
+
+	// 1 -> 2：全局数据 seq 已经继续前进；只在下一个固定 K 边界恢复。
+	e.armed = false
+}
 
 // add 把一个数据帧计入当前分组；凑满 K 帧时生成校验帧并立即开启新分组。
 // 返回非 nil 表示校验帧就绪：缓冲取自内存池，所有权归调用方（广播后释放）。
@@ -116,6 +147,15 @@ func (e *fecEncoder) ParitySent() uint64 { return atomic.LoadUint64(&e.paritySen
 func (e *fecEncoder) add(vf VPNFrame) []byte {
 	if len(vf.Data) == 0 {
 		return nil
+	}
+	if !e.multipath {
+		return nil
+	}
+	if !e.armed {
+		if vf.Seq == 0 || (vf.Seq-1)%uint32(e.k) != 0 {
+			return nil
+		}
+		e.armed = true
 	}
 	e.seqs = append(e.seqs, vf.Seq)
 	e.lens = append(e.lens, len(vf.Data))
