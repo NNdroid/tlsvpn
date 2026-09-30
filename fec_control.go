@@ -6,18 +6,12 @@ import (
 	"sync/atomic"
 )
 
-// Dynamic RX FEC bypass research primitives. These are intentionally not wired
-// into AsyncPort or the receive loops yet. The purpose of this stage is to make
-// the sender-authoritative fence format and generation/window semantics testable
-// before changing the data path.
+// FEC_MODE is a protocol-v3 typed seq=0 control. The application protocol
+// version owns the payload layout; there is no nested legacy magic/version byte.
 const (
-	fecControlMagic   byte = 0xFD
-	fecControlVersion byte = 1
-
 	fecControlSuspend byte = 1
 	fecControlResume  byte = 2
-
-	fecControlWireLen = 16
+	fecControlWireLen      = 16
 )
 
 type fecModeControl struct {
@@ -29,23 +23,22 @@ type fecModeControl struct {
 func appendFECModeControl(dst []byte, c fecModeControl) []byte {
 	start := len(dst)
 	dst = append(dst, make([]byte, fecControlWireLen)...)
-	dst[start] = fecControlMagic
-	dst[start+1] = fecControlVersion
-	dst[start+2] = c.Op
-	// start+3 is reserved for future flags and remains zero in v1.
+	dst[start] = controlKindFECMode
+	dst[start+1] = c.Op
+	// start+2:start+4 is the v3 flags field and MUST remain zero.
 	binary.BigEndian.PutUint64(dst[start+4:start+12], c.Generation)
 	binary.BigEndian.PutUint32(dst[start+12:start+16], c.Boundary)
 	return dst
 }
 
 func parseFECModeControl(payload []byte) (fecModeControl, bool) {
-	if len(payload) != fecControlWireLen || payload[0] != fecControlMagic || payload[1] != fecControlVersion {
+	if len(payload) != fecControlWireLen || payload[0] != controlKindFECMode {
 		return fecModeControl{}, false
 	}
-	if payload[3] != 0 {
+	if binary.BigEndian.Uint16(payload[2:4]) != 0 {
 		return fecModeControl{}, false
 	}
-	op := payload[2]
+	op := payload[1]
 	if op != fecControlSuspend && op != fecControlResume {
 		return fecModeControl{}, false
 	}

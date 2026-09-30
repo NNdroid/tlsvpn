@@ -20,11 +20,13 @@ func BenchmarkDynamicFECDecoderDataPath(b *testing.B) {
 
 	b.Run("dynamic-bypass", func(b *testing.B) {
 		d := NewFECDecoder(4, nil, nil)
-		d.OnData(0, appendFECModeControl(nil, fecModeControl{
+		if err := d.OnControl(appendFECModeControl(nil, fecModeControl{
 			Generation: 1,
 			Op:         fecControlSuspend,
 			Boundary:   1,
-		}))
+		})); err != nil {
+			b.Fatalf("apply FEC_MODE control: %v", err)
+		}
 		b.ReportAllocs()
 		b.SetBytes(int64(len(frame)))
 		b.ResetTimer()

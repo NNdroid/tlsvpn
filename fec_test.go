@@ -90,7 +90,7 @@ func TestFECEncoderParityLayout(t *testing.T) {
 	if par == nil {
 		t.Fatal("K=4 时第 4 帧应产出校验帧")
 	}
-	if par[0] != fecMagic {
+	if par[0] != controlKindFECParity {
 		t.Fatalf("校验帧魔数应为 0xFE, got %02x", par[0])
 	}
 	if start := binary.BigEndian.Uint32(par[1:5]); start != 1 {
@@ -134,7 +134,7 @@ func partialGroupParity(start uint32, members [][]byte) []byte {
 		}
 	}
 	buf := make([]byte, 1+6+4*len(members)+maxLen)
-	buf[0] = fecMagic
+	buf[0] = controlKindFECParity
 	binary.BigEndian.PutUint32(buf[1:5], start)
 	buf[5] = byte(len(members))
 	off := 6

@@ -1704,7 +1704,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.connID.Store(connID)
 
 	req := HandshakeReq{
-		ProtocolVersion: 2,
+		ProtocolVersion: protocolVersion,
 		ClientInstance:  instanceID,
 		ConnID:          connID,
 		ClientID:        c.clientID,
@@ -1758,7 +1758,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	scanner.SetMaxDataLen(maxWireDataLen)
 	log.Debugf("[Conn %d] <= handshake response conn_id=%s session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, connID, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
-	if resp.ProtocolVersion != 2 {
+	if resp.ProtocolVersion != protocolVersion {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
 	c.sessionMu.Lock()
@@ -2139,9 +2139,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					}
 					frame = plain
 				}
-				if seq == 0 && useXorFec && c.isParityFrame(frame) {
-					// XOR 校验帧：交给 FEC 解码器，恢复出的帧由其回调写 TAP
-					c.fecDec.OnParity(frame)
+				if seq == 0 {
+					if !useXorFec || c.fecDec == nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
+						return
+					}
+					if cerr := c.fecDec.OnControl(frame); cerr != nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
+						return
+					}
 					putFrame(frame)
 					continue
 				}
@@ -2160,12 +2168,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	case <-runCtx.Done():
 		return 0, nil
 	}
-}
-
-// isParityFrame 识别 XOR 校验帧：线路帧 seq=0（不加密），负载首字节为魔数
-// 0xFE；普通控制/心跳帧负载为空，握手帧以 '{' 开头，均不会误判。
-func (c *Client) isParityFrame(frame []byte) bool {
-	return len(frame) >= 7 && frame[0] == fecMagic
 }
 
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {

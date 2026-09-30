@@ -96,24 +96,41 @@ func TestDynamicFECFaultTransition2To1To2(t *testing.T) {
 			return
 		}
 		if vf.Seq == 0 {
-			if ctrl, ok := parseFECModeControl(data); ok {
+			kind, err := parseControlKind(data)
+			if err != nil {
+				putFrame(data)
+				t.Fatalf("invalid v3 control in fault feed: %v", err)
+			}
+			switch kind {
+			case controlKindFECMode:
+				ctrl, ok := parseFECModeControl(data)
+				if !ok {
+					putFrame(data)
+					t.Fatal("malformed FEC_MODE in fault feed")
+				}
 				controls = append(controls, ctrl)
-				dec.OnData(0, data)
+				if err := dec.OnControl(data); err != nil {
+					putFrame(data)
+					t.Fatalf("FEC_MODE control rejected: %v", err)
+				}
 				putFrame(data)
 				return
-			}
-			if len(data) >= 7 && data[0] == fecMagic {
+			case controlKindFECParity:
 				start := binary.BigEndian.Uint32(data[1:5])
 				if start == 1 && heldOldParity == nil {
 					heldOldParity = data
 					return
 				}
-				dec.OnParity(data)
+				if err := dec.OnControl(data); err != nil {
+					putFrame(data)
+					t.Fatalf("FEC_PARITY control rejected: %v", err)
+				}
 				putFrame(data)
 				return
+			default:
+				putFrame(data)
+				t.Fatalf("unexpected control kind 0x%02x", kind)
 			}
-			putFrame(data)
-			return
 		}
 
 		// Model one data record stranded on the failed physical stream. Its old
@@ -167,7 +184,9 @@ func TestDynamicFECFaultTransition2To1To2(t *testing.T) {
 	// Late old parity arrives after SUSPEND and must still recover seq 3. Recovery
 	// advances reorder through all buffered single-path data, after which P2c can
 	// retire the old boundary.
-	dec.OnParity(heldOldParity)
+	if err := dec.OnControl(heldOldParity); err != nil {
+		t.Fatalf("delayed old parity rejected: %v", err)
+	}
 	putFrame(heldOldParity)
 	heldOldParity = nil
 	if got := rb.ExpectedSeqSnapshot(); got != 13 {

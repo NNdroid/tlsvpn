@@ -1,5 +1,7 @@
 # Dynamic 2→1 RX FEC bypass research
 
+Normative wire specification: [`protocol_v3.md`](protocol_v3.md). This file records design rationale and implementation staging only.
+
 Status: P2a state machine, P2b Go data-path integration, and P2c decoder-state cleanup are implemented on the research branch. P2d fault-injection/performance validation remains pending.
 
 Baseline: `perf/single-path-fec-bypass` / PR #68.

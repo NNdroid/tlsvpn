@@ -120,7 +120,7 @@ func rawHandshake(t *testing.T, srv *Server, fec bool, k int) (*HandshakeResp, e
 	}
 
 	req := HandshakeReq{
-		ProtocolVersion: 2,
+		ProtocolVersion: protocolVersion,
 		ClientInstance:  "abcdefghijklmnop",
 		ClientID:        derivedClientID("02:aa:bb:cc:dd:ee", "fec-policy-psk"),
 		PSK:             hashPSK("fec-policy-psk"),

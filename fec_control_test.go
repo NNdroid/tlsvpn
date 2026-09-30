@@ -205,10 +205,10 @@ func TestFECFenceConcurrentControlApplication(t *testing.T) {
 
 func TestFECControlDoesNotCollideWithParityMagic(t *testing.T) {
 	control := appendFECModeControl(nil, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
-	if len(control) == 0 || control[0] == fecMagic {
+	if len(control) == 0 || control[0] == controlKindFECParity {
 		t.Fatal("control magic collides with parity magic")
 	}
-	if bytes.Equal(control, []byte{fecMagic}) {
+	if bytes.Equal(control, []byte{controlKindFECParity}) {
 		t.Fatal("impossible parity/control alias")
 	}
 }

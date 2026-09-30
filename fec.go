@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -13,10 +14,8 @@ import (
 // 1 个校验帧（开销约 1/K）：校验帧负载 = K 个成员帧负载的逐字节异或，
 // 接收端在组内恰好丢 1 帧时用其余帧与校验帧异或即可恢复。
 //
-// 协商：客户端 -fec -fec-group K 时握手请求带 fec_group=K。支持 XOR 的
-// 服务端在响应中回带 fec_group 并对两个方向启用该模式；旧实现（Rust 或
-// 旧版 Go）忽略未知字段、响应中不带 fec_group，双方自动回退到传统复制
-// 模式，互通性不受影响。
+// 协商：协议 v3 中客户端 -fec -fec-group K 时握手请求带 fec_group=K，
+// 服务端必须明确接受并回带同一 K；不支持/不匹配时拒绝握手，不做旧协议回退。
 //
 // 编码（端口级，按全局 seq 分组，跨所有物理连接）：数据帧仍按 MinRTT
 // 单路分发，组满时生成校验帧并向所有连接各广播一份副本——任何单条连接
@@ -24,14 +23,12 @@ import (
 // 起连续编号（0 保留给心跳），分组起点固定 ≡ 1 (mod K)，两端无需额外
 // 同步即可算出任一帧所属的组。
 //
-// 校验帧线路格式（沿用 10 字节头，seq=0、padLen 随机，加密与否不影响帧头）：
+// 协议 v3 校验帧是 seq=0 的 typed control：
 //
-//	[1B 0xFE][4B groupStart(大端)][1B 成员数][成员数×4B 长度(大端)][异或载荷]
+//	[1B kind=0x01][4B groupStart(大端)][1B K][K×4B 长度(大端)][异或载荷]
 //
 // 异或载荷为组内成员【明文】负载的异或，-encrypt 开启时以 groupStart 为
 // seq 用独立 AEAD key domain 加密（见 newInnerCipherDomainForAlgo）。
-// seq=0 + 负载首字节 0xFE 即为识别标志；握手帧同为 seq=0 但以 '{' 开头，
-// 且仅出现在数据循环建立之前，不会混淆。
 //
 // 分组大小恒等于 K：解码端用 seq 的算术对齐（start ≡ 1 mod K）把数据帧归组，
 // 因此分组边界必须由两端独立算出、无法随帧协商。若允许"不满 K 的分组"，
@@ -46,10 +43,9 @@ import (
 // 帧按组 start 去重。
 
 const (
-	fecMagic            byte = 0xFE
-	fecMinGroup              = 2
-	fecMaxGroup              = 64
-	fecMaxPendingGroups      = 512 // 解码器在途分组上限（≈ 重排窗口量级）
+	fecMinGroup         = 2
+	fecMaxGroup         = 64
+	fecMaxPendingGroups = 512 // 解码器在途分组上限（≈ 重排窗口量级）
 	// fecDoneRing 已终结分组 start 的环形记录数（去重多连接广播的重复校验帧）。
 	// 必须为 2 的幂；取 256 使"相隔 256 组的 start 撞槽"在实践中不可达。
 	fecDoneRing = 256
@@ -259,7 +255,7 @@ func (e *fecEncoder) buildParity() []byte {
 	}
 	total := 6 + 4*len(e.lens) + maxLen + tagLen
 	buf := getFrameAtLeast(total)[:total]
-	buf[0] = fecMagic
+	buf[0] = controlKindFECParity
 	binary.BigEndian.PutUint32(buf[1:5], e.seqs[0])
 	buf[5] = byte(len(e.lens))
 	off := 6
@@ -469,17 +465,34 @@ func (d *fecDecoder) cleanupByReorderProgress() {
 	d.mu.Unlock()
 }
 
-// OnData 记录一个已解密的数据帧。frame 只读借用，不转移所有权。
-func (d *fecDecoder) OnData(seq uint32, frame []byte) {
-	if len(frame) == 0 {
-		return
+// OnControl handles a non-empty post-handshake protocol-v3 seq=0 control.
+// Unknown kinds and malformed FEC_MODE payloads are protocol errors; callers
+// terminate the affected physical connection rather than reinterpret v2 bytes.
+func (d *fecDecoder) OnControl(payload []byte) error {
+	kind, err := parseControlKind(payload)
+	if err != nil {
+		return err
 	}
-	if seq == 0 {
-		// Unknown seq=0 controls remain backward-compatible: old peers drop them
-		// in reorder, while new peers consume only the strict 0xFD/versioned form.
-		if ctrl, ok := parseFECModeControl(frame); ok {
-			d.handleModeControl(ctrl)
+	switch kind {
+	case controlKindFECParity:
+		d.OnParity(payload)
+		return nil
+	case controlKindFECMode:
+		ctrl, ok := parseFECModeControl(payload)
+		if !ok {
+			return fmt.Errorf("malformed FEC_MODE control")
 		}
+		d.handleModeControl(ctrl)
+		return nil
+	default:
+		return fmt.Errorf("unsupported control kind 0x%02x", kind)
+	}
+}
+
+// OnData records one decrypted VPN data frame. seq=0 is control-plane only and
+// must be dispatched through OnControl by the post-handshake receive loop.
+func (d *fecDecoder) OnData(seq uint32, frame []byte) {
+	if len(frame) == 0 || seq == 0 {
 		return
 	}
 	if d.staticSingle.Load() {
@@ -531,7 +544,7 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 
 // OnParity 处理一个校验帧负载。payload 只读借用，不转移所有权。
 func (d *fecDecoder) OnParity(payload []byte) {
-	if d.staticSingle.Load() || len(payload) < 7 || payload[0] != fecMagic {
+	if d.staticSingle.Load() || len(payload) < 7 || payload[0] != controlKindFECParity {
 		return
 	}
 	start := binary.BigEndian.Uint32(payload[1:5])

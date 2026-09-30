@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "psk_hashes": [
     {
       "psk": "",
@@ -138,6 +138,16 @@
       "pad_len": 65535,
       "seq": 4294967295,
       "header_hex": "0000ffffffffffffffff"
+    }
+  ],
+  "control_frames": [
+    {
+      "name": "fec_mode_suspend",
+      "payload_hex": "02010000010203040506070800000009"
+    },
+    {
+      "name": "fec_parity_k2",
+      "payload_hex": "01000000010200000002000000020206"
     }
   ],
   "tls_fingerprint_vectors": [

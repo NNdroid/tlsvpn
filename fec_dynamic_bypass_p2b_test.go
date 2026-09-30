@@ -22,6 +22,13 @@ func releaseTestBatch(batch []VPNFrame) {
 	putVPNFrameBatch(batch)
 }
 
+func applyTestFECModeControl(t *testing.T, d *fecDecoder, c fecModeControl) {
+	t.Helper()
+	if err := d.OnControl(appendFECModeControl(nil, c)); err != nil {
+		t.Fatalf("apply FEC_MODE control %+v: %v", c, err)
+	}
+}
+
 func TestDynamicFECFencePrependedToActualDataBackend(t *testing.T) {
 	p := &AsyncPort{encoder: newFECEncoder(4, nil)}
 	p.encoder.publishModeControl(fecControlSuspend, 5)
@@ -144,8 +151,7 @@ func TestDynamicFECEncoderPublishesSuspendAndResumeBoundaries(t *testing.T) {
 func TestDynamicRXDataBypassAndResume(t *testing.T) {
 	dec := NewFECDecoder(4, nil, nil)
 
-	suspend := appendFECModeControl(nil, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
-	dec.OnData(0, suspend)
+	applyTestFECModeControl(t, dec, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
 	for seq := uint32(5); seq <= 8; seq++ {
 		dec.OnData(seq, []byte{byte(seq)})
 	}
@@ -153,8 +159,7 @@ func TestDynamicRXDataBypassAndResume(t *testing.T) {
 		t.Fatalf("bypass interval created %d decoder groups", got)
 	}
 
-	resume := appendFECModeControl(nil, fecModeControl{Generation: 2, Op: fecControlResume, Boundary: 9})
-	dec.OnData(0, resume)
+	applyTestFECModeControl(t, dec, fecModeControl{Generation: 2, Op: fecControlResume, Boundary: 9})
 	dec.OnData(9, []byte{9})
 	if got := len(dec.groups); got != 1 {
 		t.Fatalf("resumed data groups=%d want=1", got)
@@ -185,7 +190,7 @@ func TestDynamicRXStillAcceptsOldParityAfterSuspend(t *testing.T) {
 	dec.OnData(1, data[0])
 	dec.OnData(2, data[1])
 	dec.OnData(4, data[3])
-	dec.OnData(0, appendFECModeControl(nil, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5}))
+	applyTestFECModeControl(t, dec, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
 	dec.OnParity(parity)
 	if recoveredSeq != 3 || len(recovered) != 2 || recovered[0] != 3 || recovered[1] != 3 {
 		t.Fatalf("old parity recovery seq=%d data=%v", recoveredSeq, recovered)

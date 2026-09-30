@@ -48,11 +48,11 @@ func TestDynamicFECSuspendDropsOnlyBypassGroups(t *testing.T) {
 		t.Fatalf("precondition groups=%v want starts 1 and 5", before)
 	}
 
-	d.OnData(0, appendFECModeControl(nil, fecModeControl{
+	applyTestFECModeControl(t, d, fecModeControl{
 		Generation: 1,
 		Op:         fecControlSuspend,
 		Boundary:   5,
-	}))
+	})
 
 	after := decoderGroupStarts(d)
 	if !after[1] {
@@ -69,11 +69,11 @@ func TestDynamicFECResumeDropsParityOnlyBypassGroup(t *testing.T) {
 	d := NewFECDecoder(4, nil, nil)
 	d.SetReorderProgress(func() uint32 { return progress.Load() })
 
-	d.OnData(0, appendFECModeControl(nil, fecModeControl{
+	applyTestFECModeControl(t, d, fecModeControl{
 		Generation: 1,
 		Op:         fecControlSuspend,
 		Boundary:   5,
-	}))
+	})
 
 	parity5 := testFECParity(t, 5, 4)
 	parity9 := testFECParity(t, 9, 4)
@@ -89,11 +89,11 @@ func TestDynamicFECResumeDropsParityOnlyBypassGroup(t *testing.T) {
 		t.Fatalf("precondition groups=%v want parity-only starts 5 and 9", before)
 	}
 
-	d.OnData(0, appendFECModeControl(nil, fecModeControl{
+	applyTestFECModeControl(t, d, fecModeControl{
 		Generation: 2,
 		Op:         fecControlResume,
 		Boundary:   9,
-	}))
+	})
 
 	after := decoderGroupStarts(d)
 	if after[5] {
@@ -112,11 +112,11 @@ func TestDynamicFECOldGroupsRetireOnlyAfterReorderCrossesFence(t *testing.T) {
 
 	d.OnData(1, []byte{1})
 	d.OnData(2, []byte{2})
-	d.OnData(0, appendFECModeControl(nil, fecModeControl{
+	applyTestFECModeControl(t, d, fecModeControl{
 		Generation: 1,
 		Op:         fecControlSuspend,
 		Boundary:   5,
-	}))
+	})
 	if !decoderGroupStarts(d)[1] {
 		t.Fatal("old group retired before reorder reached the fence")
 	}
@@ -151,11 +151,11 @@ func TestDynamicFECBypassProgressCheckIsSparse(t *testing.T) {
 		return progress.Load()
 	})
 
-	d.OnData(0, appendFECModeControl(nil, fecModeControl{
+	applyTestFECModeControl(t, d, fecModeControl{
 		Generation: 1,
 		Op:         fecControlSuspend,
 		Boundary:   5,
-	}))
+	})
 	base := calls.Load()
 	if base == 0 {
 		t.Fatal("control path did not perform initial reorder cleanup check")
