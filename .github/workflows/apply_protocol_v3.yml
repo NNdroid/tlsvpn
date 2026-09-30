@@ -94,6 +94,26 @@ jobs:
               raise SystemExit(f'p2c: migrated {n} controls, want 5')
           p.write_text(s)
 
+          p = Path('fec_dynamic_bypass_bench_test.go')
+          s = p.read_text()
+          old = '''\t\td.OnData(0, appendFECModeControl(nil, fecModeControl{
+          \t\t\tGeneration: 1,
+          \t\t\tOp:         fecControlSuspend,
+          \t\t\tBoundary:   1,
+          \t\t}))
+          '''
+          new = '''\t\tif err := d.OnControl(appendFECModeControl(nil, fecModeControl{
+          \t\t\tGeneration: 1,
+          \t\t\tOp:         fecControlSuspend,
+          \t\t\tBoundary:   1,
+          \t\t})); err != nil {
+          \t\t\tb.Fatalf("apply FEC_MODE control: %v", err)
+          \t\t}
+          '''
+          if s.count(old) != 1:
+              raise SystemExit(f'benchmark: old OnData control count={s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+
           p = Path('fec_dynamic_bypass_p2d_test.go')
           s = p.read_text()
           old = '''\t\tif vf.Seq == 0 {
@@ -174,7 +194,7 @@ jobs:
 
       - name: Format
         run: |
-          gofmt -w protocol_v3.go protocol_v3_control_test.go fec.go fec_control.go client.go server.go api.go protocol_conformance_test.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go fec_dynamic_bypass_p2d_test.go fec_policy_test.go
+          gofmt -w protocol_v3.go protocol_v3_control_test.go fec.go fec_control.go client.go server.go api.go protocol_conformance_test.go fec_control_test.go fec_dynamic_bypass_p2b_test.go fec_dynamic_bypass_p2c_test.go fec_dynamic_bypass_p2d_test.go fec_dynamic_bypass_bench_test.go fec_policy_test.go
           gofmt -w interop/probe.go
 
       - name: Regenerate protocol golden vectors
