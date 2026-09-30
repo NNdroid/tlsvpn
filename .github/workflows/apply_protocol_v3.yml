@@ -58,6 +58,7 @@ jobs:
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add fec.go client.go frame.go peer_info.go protocol_conformance_test.go testdata/protocol_golden.json docs/protocol_v3.md docs/dynamic_rx_fec_bypass.md
+          git add fec.go client.go frame.go peer_info.go protocol_conformance_test.go testdata/protocol_golden.json
+          git add -f docs/protocol_v3.md docs/dynamic_rx_fec_bypass.md
           git commit -m 'protocol: finalize v3 semantics and documentation'
           git push origin HEAD:research/dynamic-rx-fec-bypass
