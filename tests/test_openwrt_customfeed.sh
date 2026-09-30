@@ -23,6 +23,14 @@ grep -Fq 'find "$SDK_DIR/bin" -type f -name' "$script"
 grep -Fq 'conflicting APKs with the same canonical filename' "$script"
 grep -Fq 'git describe --tags --long --always' "$script"
 
+# GitHub pull_request jobs are checked out at refs/pull/<n>/merge. That
+# synthetic github.sha cannot be fetched by the OpenWrt GitHub downloader, so
+# the builder must normalize it to the merge commit's second parent (PR head).
+grep -Fq 'GITHUB_EVENT_NAME:-' "$script"
+grep -Fq 'git rev-parse HEAD^2' "$script"
+grep -Fq 'TLSVPN_SOURCE_VERSION="$pr_head_sha"' "$script"
+grep -Fq 'Pull request merge SHA' "$script"
+
 # The feed must be assembled from canonical SDK outputs, not renamed GitHub
 # Release assets that include target suffixes.
 if grep -Fq 'release-assets' "$script"; then
