@@ -63,6 +63,7 @@ jobs:
             local scenario="$1" impl="$2" bin="$3" conns="$4" mss="$5" tmp
             tmp=$(mktemp)
             printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$tmp"
+            chmod 0666 "$tmp"
             echo "=== scenario=$scenario impl=$impl conns=$conns mss=${mss:-default} ==="
             sudo -E env \
               BIN="$bin" PERF_CONNS="$conns" PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
@@ -74,7 +75,6 @@ jobs:
           }
           BASE="$GITHUB_WORKSPACE/tlsvpn-pre-p1"
           CAND="$GITHUB_WORKSPACE/tlsvpn-p1"
-          # Reverse implementation order on conns=4 to reduce runner temporal bias.
           run_one normal baseline  "$BASE" 2 ''
           run_one normal candidate "$CAND" 2 ''
           run_one normal candidate "$CAND" 4 ''
