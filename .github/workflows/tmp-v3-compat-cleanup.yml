@@ -1,0 +1,80 @@
+name: One-shot protocol v3 cleanup
+on:
+  push:
+    branches: ["perf/single-path-fec-bypass"]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/single-path-fec-bypass
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+      - name: Remove deprecated protocol-v2 config compatibility
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('config.go')
+          s = p.read_text()
+          pat = r'\n// stripDeprecatedSessionTokenConfig removes the former server\.session_token.*?\n}\n\n// loadConfigFile'
+          s2, n = re.subn(pat, '\n// loadConfigFile', s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'config.go compatibility helper removal matched {n}, want 1')
+          s2 = s2.replace('decodeData := stripDeprecatedSessionTokenConfig(data)\n\tdec := json.NewDecoder(bytes.NewReader(decodeData))', 'dec := json.NewDecoder(bytes.NewReader(data))')
+          s2 = s2.replace('if json.Unmarshal(decodeData, &probe) == nil {', 'if json.Unmarshal(data, &probe) == nil {')
+          if 'stripDeprecatedSessionTokenConfig' in s2 or 'decodeData' in s2:
+              raise SystemExit('deprecated session_token compatibility remains in config.go')
+          p.write_text(s2)
+
+          p = Path('config_test.go')
+          s = p.read_text()
+          pat = r'func TestLoadConfigIgnoresDeprecatedSessionToken\(t \*testing\.T\) \{.*?\n}\n\nfunc TestLoadConfigUnknownField'
+          repl = '''func TestLoadConfigRejectsDeprecatedSessionToken(t *testing.T) {
+\tp := writeTempConfig(t, `{
+\t\t"mode":"server",
+\t\t"psk":"test-only-high-entropy-secret",
+\t\t"addr":":4000",
+\t\t"server":{"session_token":false}
+\t}`)
+\t_, err := loadConfigFile(p)
+\tif err == nil || !strings.Contains(err.Error(), "unknown field") {
+\t\tt.Fatalf("removed server.session_token must be rejected, got %v", err)
+\t}
+}
+
+func TestLoadConfigUnknownField'''
+          s2, n = re.subn(pat, repl, s, count=1, flags=re.S)
+          if n != 1:
+              raise SystemExit(f'config_test.go legacy test replacement matched {n}, want 1')
+          p.write_text(s2)
+          PY
+          gofmt -w config.go config_test.go
+      - name: Reject TLSVPN protocol-v2 remnants
+        run: |
+          ! grep -R --line-number --include='*.go' -E 'ProtocolVersion:[[:space:]]*2|ProtocolVersion[[:space:]]*[!=]=[[:space:]]*2|protocol-v2|stripDeprecatedSessionTokenConfig' .
+          python3 - <<'PY'
+          import json
+          g=json.load(open('testdata/protocol_golden.json'))
+          assert g['version'] == 3, g['version']
+          PY
+      - name: Test
+        run: go test ./... -count=1
+      - name: Commit cleanup
+        run: |
+          rm -f .github/workflows/tmp-v3-compat-cleanup.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'protocol: remove remaining v2 compatibility config path'
+          git push origin HEAD:perf/single-path-fec-bypass
