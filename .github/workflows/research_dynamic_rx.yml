@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  p2a-state-machine:
+  dynamic-rx-fec:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -20,14 +20,14 @@ jobs:
 
       - name: Format gate
         run: |
-          files='fec_control.go fec_control_test.go'
+          files='client.go fec.go fec_control.go fec_control_test.go fec_dynamic_bypass_p2b_test.go'
           test -z "$(gofmt -l $files)" || { gofmt -d $files; exit 1; }
 
       - name: Build
         run: go build ./...
 
-      - name: Dynamic fence state-machine tests
-        run: go test ./... -count=1 -run 'TestFECModeControl|TestFECFence|TestFECControl'
+      - name: Dynamic RX FEC tests
+        run: go test ./... -count=1 -run 'FEC|Dynamic'
 
-      - name: Dynamic fence race gate
-        run: go test -race ./... -count=1 -run 'TestFECModeControl|TestFECFence|TestFECControl'
+      - name: Dynamic RX FEC race gate
+        run: go test -race ./... -count=1 -run 'FEC|Dynamic'
