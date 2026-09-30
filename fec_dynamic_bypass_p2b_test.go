@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"testing"
 )
@@ -87,6 +88,24 @@ func TestDynamicFECFenceOnlyOncePerBackendGeneration(t *testing.T) {
 	defer releaseTestBatch(out2)
 	if len(out2) != 1 || out2[0].Seq != 10 {
 		t.Fatalf("duplicate fence emitted: len=%d seq=%d", len(out2), out2[0].Seq)
+	}
+}
+
+func TestDynamicFECResetEpochClearsBackendFenceGeneration(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := NewAsyncPort(ctx, "dynamic-fence-epoch-test")
+	defer p.Close()
+
+	rtt := uint32(10_000)
+	ch := make(chan []VPNFrame, 1)
+	b := p.RegisterBackend(ch, &rtt)
+	defer p.UnregisterBackend(ch)
+	b.fecFenceGen.Store(9)
+
+	p.ResetEpoch(4, nil)
+	if got := b.fecFenceGen.Load(); got != 0 {
+		t.Fatalf("backend fence generation survived epoch reset: got=%d want=0", got)
 	}
 }
 
