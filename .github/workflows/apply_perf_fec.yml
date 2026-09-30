@@ -1,0 +1,37 @@
+name: Apply Real-TAP FEC coverage
+
+on:
+  push:
+    branches:
+      - perf/single-path-fec-bypass
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply FEC perf harness patch
+        run: python3 scripts/apply_perf_fec.py
+
+      - name: Validate shell and workflow edits
+        run: |
+          bash -n scripts/real_tap_perf.sh
+          grep -q 'PERF_FEC=true' .github/workflows/perf.yml
+          grep -q 'fec-comparison.tsv' .github/workflows/perf.yml
+
+      - name: Remove one-shot patch machinery and push result
+        run: |
+          rm -f scripts/apply_perf_fec.py .github/workflows/apply_perf_fec.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: benchmark static single-path FEC on real TAP'
+          git push origin HEAD:perf/single-path-fec-bypass
