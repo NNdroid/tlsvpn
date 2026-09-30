@@ -1497,6 +1497,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				s.mu.Unlock()
 				return
 			}
+			// A new client process is a clean epoch boundary, so a restart-time
+			// client.conns change may safely switch the RX decoder fast-path mode.
+			if session.FecDec != nil {
+				session.FecDec.SetStaticSinglePath(req.BrutalGroups && isStaticSinglePathTopology(req.BrutalConns))
+			}
 			if err := ensurePendingResumeToken(session); err != nil {
 				log.Errorf("[%s] failed to prepare the next session token: %v", clientID, err)
 				s.mu.Unlock()
@@ -1619,6 +1624,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		if fecEncK > 0 {
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
+			// Current Go clients always advertise BrutalGroups/BrutalConns as the
+			// authenticated physical-topology declaration even when shaping is off.
+			// Legacy/unknown peers (no group semantics) deliberately keep RX FEC on.
+			session.FecDec.SetStaticSinglePath(req.BrutalGroups && isStaticSinglePathTopology(req.BrutalConns))
 		}
 		s.activeClients[clientID] = session
 		if mac != "" {

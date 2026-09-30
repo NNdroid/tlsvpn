@@ -1801,8 +1801,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.fecSaltKey = resp.EncSalt
 		}
 		if fecRebuild {
-			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序
+			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序。
+			// client.conns 属于 restart-only 拓扑配置，因此 ==1 时可以安全使用
+			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
 			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
+			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}
 	}

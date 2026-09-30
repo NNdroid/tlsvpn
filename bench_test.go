@@ -181,3 +181,29 @@ func BenchmarkAsyncPortDispatchFECMatrix(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkFECDecodeDataPath measures the per-data-frame RX decoder cost after
+// P0 group retirement and the P1 configured-single-path atomic fast bypass.
+func BenchmarkFECDecodeDataPath(b *testing.B) {
+	pt := benchPayload()
+	for _, tc := range []struct {
+		name   string
+		bypass bool
+	}{
+		{name: "multipath", bypass: false},
+		{name: "static-single", bypass: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			d := NewFECDecoder(4, nil, nil)
+			d.SetStaticSinglePath(tc.bypass)
+			var seq uint32
+			b.SetBytes(int64(len(pt)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				seq++
+				d.OnData(seq, pt)
+			}
+		})
+	}
+}

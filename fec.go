@@ -232,30 +232,60 @@ type fecGroupState struct {
 }
 
 type fecDecoder struct {
-	mu         sync.Mutex
-	k          int
-	ic         *innerCipher
-	out        func(seq uint32, frame []byte)
-	groups     map[uint32]*fecGroupState // 组起点 → 组状态
-	groupOrder []uint32                  // group 创建顺序；已完成项 lazy skip
-	groupHead  int                       // groupOrder 首个可能仍活跃的位置
-	doneRing   [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
-	spares     []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
-	recovered  uint64                    // 异或恢复帧计数
-	lost       uint64                    // 确认丢失帧计数
+	mu           sync.Mutex
+	k            int
+	fullMask     uint64
+	staticSingle atomic.Bool // configured topology is exactly one physical path: RX FEC has no recovery value
+	ic           *innerCipher
+	out          func(seq uint32, frame []byte)
+	groups       map[uint32]*fecGroupState // 组起点 → 组状态
+	groupOrder   []uint32                  // group 创建顺序；已完成项 lazy skip
+	groupHead    int                       // groupOrder 首个可能仍活跃的位置
+	doneRing     [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
+	spares       []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
+	recovered    uint64                    // 异或恢复帧计数
+	lost         uint64                    // 确认丢失帧计数
 }
 
 // NewFECDecoder 创建解码器。k 必须与对端编码分组大小一致（来自握手协商）；
 // ic 为对端→本端方向的解密器（校验帧用 groupStart 作 seq 解密校验载荷）。
 func NewFECDecoder(k int, ic *innerCipher, out func(seq uint32, frame []byte)) *fecDecoder {
+	k = clampFecGroup(k)
+	fullMask := ^uint64(0)
+	if k < 64 {
+		fullMask = (uint64(1) << uint(k)) - 1
+	}
 	return &fecDecoder{
-		k:          clampFecGroup(k),
+		k:          k,
+		fullMask:   fullMask,
 		ic:         ic,
 		out:        out,
 		groups:     make(map[uint32]*fecGroupState, 64),
 		groupOrder: make([]uint32, 0, fecMaxPendingGroups+64),
 		spares:     make([]*fecGroupState, 0, fecMaxPendingGroups),
 	}
+}
+
+// isStaticSinglePathTopology is deliberately strict: zero means "unknown", not
+// single-path. The client has an authoritative configured count; the server only
+// uses this when the authenticated peer also advertised group/topology semantics.
+func isStaticSinglePathTopology(configuredConns int) bool { return configuredConns == 1 }
+
+// SetStaticSinglePath enables the RX fast bypass only for a topology configured
+// to have exactly one physical connection. This is intentionally NOT driven by
+// the current live connection count: a temporary 2->1 failover is precisely when
+// already-in-flight parity from the surviving path can still recover lost data.
+func (d *fecDecoder) SetStaticSinglePath(single bool) {
+	if !single {
+		d.staticSingle.Store(false)
+		return
+	}
+	if d.staticSingle.Swap(true) {
+		return
+	}
+	// Publish bypass before clearing state so new readers stop creating groups;
+	// OnData/OnParity re-check under d.mu to close the in-flight race window.
+	d.Reset()
 }
 
 // groupStartOf 计算数据帧所属分组的起点（起点 ≡ 1 mod k）
@@ -280,13 +310,13 @@ func (d *fecDecoder) Reset() {
 
 // OnData 记录一个已解密的数据帧。frame 只读借用，不转移所有权。
 func (d *fecDecoder) OnData(seq uint32, frame []byte) {
-	if len(frame) == 0 || seq == 0 {
+	if len(frame) == 0 || seq == 0 || d.staticSingle.Load() {
 		return
 	}
 	start := d.groupStartOf(seq)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.isDoneLocked(start) {
+	if d.staticSingle.Load() || d.isDoneLocked(start) {
 		return
 	}
 	g, ok := d.groups[start]
@@ -299,6 +329,15 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 		return // 重复到达
 	}
 	g.gotMask |= mask
+	// P0: once all K original members arrived, parity can no longer add value.
+	// Finish immediately even if parity has not arrived yet. Besides bounding the
+	// pending-group map, checking before XOR means the Kth frame avoids the final
+	// accumulator pass entirely. fullMask is precomputed and handles K=64 without
+	// an invalid 1<<64 shift.
+	if g.gotMask == d.fullMask {
+		d.finishGroupLocked(g)
+		return
+	}
 	if len(frame) > len(g.acc) {
 		g.acc = d.growAccLocked(g.acc, len(frame))
 	}
@@ -308,7 +347,7 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 
 // OnParity 处理一个校验帧负载。payload 只读借用，不转移所有权。
 func (d *fecDecoder) OnParity(payload []byte) {
-	if len(payload) < 7 || payload[0] != fecMagic {
+	if d.staticSingle.Load() || len(payload) < 7 || payload[0] != fecMagic {
 		return
 	}
 	start := binary.BigEndian.Uint32(payload[1:5])
@@ -344,7 +383,7 @@ func (d *fecDecoder) OnParity(payload []byte) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.isDoneLocked(start) {
+	if d.staticSingle.Load() || d.isDoneLocked(start) {
 		putFECLens(lens)
 		return
 	}
