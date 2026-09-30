@@ -172,6 +172,59 @@ OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
 
 The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621 and ath79/generic. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
 
+### OpenWrt APK feed signing key
+
+The OpenWrt 25.12 APK feed requires a stable, unencrypted OpenSSL **EC P-256** private/public key pair. Generate a dedicated pair once and keep the private key backed up securely:
+
+```bash
+umask 077
+
+openssl ecparam \
+  -name prime256v1 \
+  -genkey \
+  -noout \
+  -out ~/.ssh/tlsvpn_openwrt_feed_private.pem
+
+openssl ec \
+  -in ~/.ssh/tlsvpn_openwrt_feed_private.pem \
+  -pubout \
+  -out ~/.ssh/tlsvpn_openwrt_feed_public.pem
+```
+
+Validate the private key and prove that the public key belongs to it:
+
+```bash
+openssl ec \
+  -in ~/.ssh/tlsvpn_openwrt_feed_private.pem \
+  -check \
+  -noout
+
+cmp \
+  <(openssl ec -in ~/.ssh/tlsvpn_openwrt_feed_private.pem -pubout 2>/dev/null) \
+  ~/.ssh/tlsvpn_openwrt_feed_public.pem
+```
+
+Encode the complete file contents, including the PEM header and footer:
+
+```bash
+base64 -w0 ~/.ssh/tlsvpn_openwrt_feed_private.pem
+echo
+
+base64 -w0 ~/.ssh/tlsvpn_openwrt_feed_public.pem
+echo
+```
+
+Store the resulting values in the GitHub repository settings:
+
+- Private-key Base64: Actions **Secret** `OPENWRT_FEED_SIGNING_KEY_B64`
+- Public-key Base64: Actions **Variable** `OPENWRT_FEED_PUBLIC_KEY_B64`
+
+Do **not** use keys created by `minisign -G`, `ssh-keygen`, or the legacy OpenWrt `usign` tool. Minisign uses its own Ed25519 key-file format; it is not interchangeable with the EC P-256 PEM key expected by the OpenWrt APK signing path. Keep Minisign keys for separate artifact signatures and use a dedicated pair for the APK feed.
+
+Pull-request workflows intentionally cannot read the production private-key Secret and log that an ephemeral CI-only key pair is being used. To test the configured production key without publishing, manually run the `OpenWrt Custom Feed` workflow with `publish=false`. The trusted run must report `private_key_type=EC curve=prime256v1 pair_match=true` before it starts the SDK matrix.
+
+The full feed layout, publication behavior and client setup are documented in [`docs/openwrt-customfeed.md`](docs/openwrt-customfeed.md).
+
 ### `up` / `down` lifecycle hooks
 
 In the default self-managed mode, optional process-level hooks can run after tunnel networking is ready and during graceful cleanup:

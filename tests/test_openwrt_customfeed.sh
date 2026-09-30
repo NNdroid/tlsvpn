@@ -8,6 +8,7 @@ script="scripts/build_openwrt_customfeed.sh"
 key_script="scripts/prepare_openwrt_feed_keys.sh"
 workflow=".github/workflows/openwrt_customfeed.yml"
 doc="docs/openwrt-customfeed.md"
+readme="README.md"
 
 bash -n "$script"
 bash -n "$key_script"
@@ -121,6 +122,15 @@ if grep -Fq 'next push to `feature/openwrt-customfeed`' "$doc"; then
   echo 'documentation still describes the obsolete feature-branch publisher' >&2
   exit 1
 fi
+
+# Keep the main README self-contained for maintainers configuring the stable
+# APK feed trust root.
+grep -Fq 'openssl ecparam \' "$readme"
+grep -Fq -- '-name prime256v1' "$readme"
+grep -Fq 'OPENWRT_FEED_SIGNING_KEY_B64' "$readme"
+grep -Fq 'OPENWRT_FEED_PUBLIC_KEY_B64' "$readme"
+grep -Fq 'Do **not** use keys created by `minisign -G`' "$readme"
+grep -Fq 'publish=false' "$readme"
 
 # Exercise the repository assembly and SDK-OpenSSL compatibility path without
 # downloading a full SDK. The fake builder leaves canonical APKs and wrappers
