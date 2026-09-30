@@ -90,8 +90,8 @@ jobs:
           s = p.read_text()
           pattern = re.compile(r'd\.OnData\(0, appendFECModeControl\(nil, (fecModeControl\{.*?\})\)\)', re.S)
           s, n = pattern.subn(r'applyTestFECModeControl(t, d, \1)', s)
-          if n != 4:
-              raise SystemExit(f'p2c: migrated {n} controls, want 4')
+          if n != 5:
+              raise SystemExit(f'p2c: migrated {n} controls, want 5')
           p.write_text(s)
 
           p = Path('fec_dynamic_bypass_p2d_test.go')
