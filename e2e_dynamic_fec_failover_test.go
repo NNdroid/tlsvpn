@@ -83,6 +83,16 @@ func p2dSession(h *perfHarness) *ClientSession {
 	return s
 }
 
+func p2dSessionActiveConns(s *ClientSession) int {
+	if s == nil {
+		return 0
+	}
+	s.sessionMu.RLock()
+	n := s.ActiveConns
+	s.sessionMu.RUnlock()
+	return n
+}
+
 func p2dCloseOneClientConnection(t *testing.T, c *Client) int {
 	t.Helper()
 	c.connsMu.Lock()
@@ -142,7 +152,7 @@ func TestDynamicFECTLSMemTAPFailover2To1To2(t *testing.T) {
 	})
 	p2dWaitFor(t, perfHandshakeBudget, "server FEC session", func() bool {
 		s := p2dSession(h)
-		return s != nil && s.FecDec != nil && s.ActiveConns >= 2
+		return s != nil && s.FecDec != nil && p2dSessionActiveConns(s) >= 2
 	})
 
 	sess := p2dSession(h)
