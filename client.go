@@ -1333,7 +1333,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		tapDelivery := newOwnedTapDelivery(ctx, c.tap, asyncTapDeliveryQueue, reportTapWriteErr)
 		c.rxReorder = NewOwnedReorderBuffer(tapDelivery.EnqueueOwned)
 	} else {
-		c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+		c.rxReorder = NewActorReorderBuffer(func(orderedFrame []byte) {
 			if _, werr := c.tap.Write(orderedFrame); werr != nil {
 				reportTapWriteErr(werr)
 			}
@@ -1933,7 +1933,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.sessionEpoch = resp.SessionEpoch
 	}
 	if isNewSession && c.rxWorker != nil {
-		c.rxWorker.AdvanceEpoch()
+		c.rxWorker.AdvanceEpochAndReset(c.fecDec)
 	}
 
 	fecRebuild := false
@@ -1941,7 +1941,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if useXorFec {
 		// FEC 编解码器绑定当前会话的加密器与盐：会话/盐变化即重建
 		if c.fecDec == nil || c.fecAlgo != encAlgo || c.fecSaltKey != resp.EncSalt {
-			if c.fecDec != nil {
+			if c.fecDec != nil && c.rxWorker == nil {
 				c.fecDec.Reset()
 			}
 			fecRebuild = true
@@ -1952,8 +1952,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序。
 			// client.conns 属于 restart-only 拓扑配置，因此 ==1 时可以安全使用
 			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
-			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
-			c.fecDec.SetReorderProgress(c.rxReorder.ExpectedSeqSnapshot)
+			rxFECOut, rxReorderProgress := fecReorderHooks(c.rxReorder, c.rxWorker)
+			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, rxFECOut)
+			c.fecDec.SetReorderProgress(rxReorderProgress)
 			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}
@@ -1993,7 +1994,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.txPort.ResetEpoch(0, nil)
 		}
 		log.Infof("[Conn %d] 🔄 server reset the session; flushing stale local receive buffers...", connIndex)
-		c.rxReorder.Reset()
+		if c.rxWorker == nil {
+			c.rxReorder.Reset()
+		}
 	}
 
 	// 会话身份落盘：进程被杀后重启，第一次握手即回带旧令牌接回既有会话，

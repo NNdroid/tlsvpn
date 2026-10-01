@@ -93,6 +93,7 @@ type ReorderBufferStats struct {
 // 真正交付时才串行化。
 type ReorderBuffer struct {
 	mu          sync.Mutex
+	actorOwned  bool // true: rxSessionWorker is the sole state-machine writer; no timeoutWorker
 	expectedSeq uint32
 	ring        [][]byte
 	seqSlots    []uint32

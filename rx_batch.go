@@ -3,11 +3,10 @@ package main
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
-	// A 16-frame producer batch is large enough to amortize queue + FEC/reorder
-	// synchronization while still fitting the common ~16 KiB scanner read burst.
 	rxSessionBatchCap   = 16
 	rxSessionQueueDepth = 256
 )
@@ -32,7 +31,6 @@ func getRXSessionBatch() *rxSessionBatch {
 	b.fail = nil
 	return b
 }
-
 func putRXSessionBatch(b *rxSessionBatch) {
 	if b == nil {
 		return
@@ -44,7 +42,6 @@ func putRXSessionBatch(b *rxSessionBatch) {
 	b.fail = nil
 	rxSessionBatchPool.Put(b)
 }
-
 func freeRXSessionBatch(b *rxSessionBatch) {
 	if b == nil {
 		return
@@ -54,17 +51,15 @@ func freeRXSessionBatch(b *rxSessionBatch) {
 }
 
 type rxSessionWork struct {
-	batch   *rxSessionBatch
-	barrier chan struct{}
+	batch    *rxSessionBatch
+	barrier  chan struct{}
+	reset    bool
+	resetFEC *fecDecoder
 }
 
-// rxSessionWorker is the single mutation owner for a multi-connection RX
-// session. Physical TCP readers only decrypt and enqueue owned batches;
-// FEC, reorder and ordered delivery are serialized here at batch granularity.
 type rxSessionWorker struct {
-	reorder *ReorderBuffer
-	queue   chan rxSessionWork
-
+	reorder    *ReorderBuffer
+	queue      chan rxSessionWork
 	generation atomic.Uint64
 	closing    atomic.Bool
 	enqueueMu  sync.RWMutex
@@ -74,17 +69,14 @@ type rxSessionWorker struct {
 }
 
 func newRXSessionWorker(reorder *ReorderBuffer) *rxSessionWorker {
-	w := &rxSessionWorker{
-		reorder: reorder,
-		queue:   make(chan rxSessionWork, rxSessionQueueDepth),
-		closed:  make(chan struct{}),
-		done:    make(chan struct{}),
+	if reorder == nil || !reorder.actorOwned {
+		panic("rxSessionWorker requires an actor-owned ReorderBuffer")
 	}
+	w := &rxSessionWorker{reorder: reorder, queue: make(chan rxSessionWork, rxSessionQueueDepth), closed: make(chan struct{}), done: make(chan struct{})}
 	w.generation.Store(1)
 	go w.run()
 	return w
 }
-
 func (w *rxSessionWorker) enqueue(work rxSessionWork) bool {
 	if w == nil {
 		return false
@@ -101,17 +93,13 @@ func (w *rxSessionWorker) enqueue(work rxSessionWork) bool {
 		return false
 	}
 }
-
-// AdvanceEpoch invalidates all existing producers and establishes a queue
-// barrier. After it returns, no batch queued before the barrier can still
-// mutate FEC/reorder state, so callers may safely Reset/rekey them.
-func (w *rxSessionWorker) AdvanceEpoch() {
+func (w *rxSessionWorker) advanceEpoch(reset bool, fec *fecDecoder) {
 	if w == nil || w.closing.Load() {
 		return
 	}
 	w.generation.Add(1)
 	done := make(chan struct{})
-	if !w.enqueue(rxSessionWork{barrier: done}) {
+	if !w.enqueue(rxSessionWork{barrier: done, reset: reset, resetFEC: fec}) {
 		return
 	}
 	select {
@@ -119,7 +107,8 @@ func (w *rxSessionWorker) AdvanceEpoch() {
 	case <-w.closed:
 	}
 }
-
+func (w *rxSessionWorker) AdvanceEpoch()                        { w.advanceEpoch(false, nil) }
+func (w *rxSessionWorker) AdvanceEpochAndReset(fec *fecDecoder) { w.advanceEpoch(true, fec) }
 func (w *rxSessionWorker) Close() {
 	if w == nil {
 		return
@@ -132,13 +121,43 @@ func (w *rxSessionWorker) Close() {
 		<-w.done
 	})
 }
-
+func stopRXTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
 func (w *rxSessionWorker) run() {
-	defer close(w.done)
+	timer := time.NewTimer(time.Hour)
+	stopRXTimer(timer)
+	defer func() { stopRXTimer(timer); close(w.done) }()
+	var timerC <-chan time.Time
+	armGapTimer := func() {
+		deadline, ok := w.reorder.GapDeadlineActor()
+		if !ok {
+			stopRXTimer(timer)
+			timerC = nil
+			return
+		}
+		wait := time.Until(deadline)
+		if wait < 0 {
+			wait = 0
+		}
+		stopRXTimer(timer)
+		timer.Reset(wait)
+		timerC = timer.C
+	}
 	for {
 		select {
 		case work := <-w.queue:
 			w.process(work)
+			armGapTimer()
+		case now := <-timerC:
+			timerC = nil
+			w.reorder.ExpireGapActor(now)
+			armGapTimer()
 		case <-w.closed:
 			for {
 				select {
@@ -157,7 +176,28 @@ func (w *rxSessionWorker) run() {
 	}
 }
 
+func (w *rxSessionWorker) insertOriginalAndRecovery(seq uint32, frame []byte, recSeq uint32, rec []byte) {
+	if rec != nil && recSeq < seq {
+		w.reorder.InsertActorBuffered(recSeq, rec)
+		rec = nil
+	}
+	w.reorder.InsertActorBuffered(seq, frame)
+	if rec != nil && recSeq > seq {
+		w.reorder.InsertActorBuffered(recSeq, rec)
+		rec = nil
+	}
+	if rec != nil {
+		putFrame(rec)
+	}
+}
+
 func (w *rxSessionWorker) process(work rxSessionWork) {
+	if work.reset {
+		if work.resetFEC != nil {
+			work.resetFEC.ResetActor()
+		}
+		w.reorder.ResetActor()
+	}
 	if work.barrier != nil {
 		close(work.barrier)
 		return
@@ -182,11 +222,18 @@ func (w *rxSessionWorker) process(work rxSessionWork) {
 				w.failBatch(b, i+1, errRXControlWithoutFEC)
 				return
 			}
-			err := b.fec.OnControlWithScratch(frame, &controlScratch)
+			recSeq, rec, err := b.fec.OnControlActorWithScratch(frame, &controlScratch)
 			putFrame(frame)
 			if err != nil {
+				if rec != nil {
+					putFrame(rec)
+				}
 				w.failBatch(b, i+1, err)
 				return
+			}
+			if rec != nil {
+				w.reorder.InsertActorBuffered(recSeq, rec)
+				w.reorder.FlushActor()
 			}
 			i++
 			continue
@@ -196,19 +243,20 @@ func (w *rxSessionWorker) process(work rxSessionWork) {
 		for j < b.n && b.frames[j].Seq != 0 {
 			j++
 		}
-		segment := b.frames[i:j]
-		if b.fec != nil {
-			b.fec.OnDataBatch(segment)
+		for k := i; k < j; k++ {
+			seq, frame := b.frames[k].Seq, b.frames[k].Data
+			var recSeq uint32
+			var rec []byte
+			if b.fec != nil {
+				recSeq, rec, _ = b.fec.OnDataActor(seq, frame)
+			}
+			w.insertOriginalAndRecovery(seq, frame, recSeq, rec)
+			b.frames[k].Data = nil
 		}
-		w.reorder.InsertBatch(segment)
-		// InsertBatch consumes ownership even when a frame is duplicate/stale.
-		for k := range segment {
-			segment[k].Data = nil
-		}
+		w.reorder.FlushActor()
 		i = j
 	}
 }
-
 func (w *rxSessionWorker) failBatch(b *rxSessionBatch, next int, err error) {
 	for i := next; i < b.n; i++ {
 		if b.frames[i].Data != nil {
@@ -235,12 +283,8 @@ func (w *rxSessionWorker) NewProducer(fec *fecDecoder, fail func(error)) *rxBatc
 	}
 	return &rxBatchProducer{worker: w, fec: fec, fail: fail, generation: w.generation.Load()}
 }
-
 func (p *rxBatchProducer) Push(seq uint32, frame []byte) {
-	if p == nil {
-		return
-	}
-	if frame == nil {
+	if p == nil || frame == nil {
 		return
 	}
 	if p.batch == nil {
@@ -255,7 +299,6 @@ func (p *rxBatchProducer) Push(seq uint32, frame []byte) {
 		p.Flush()
 	}
 }
-
 func (p *rxBatchProducer) Flush() {
 	if p == nil || p.batch == nil {
 		return

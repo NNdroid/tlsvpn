@@ -16,7 +16,7 @@ func TestRXSessionWorkerBatchesAcrossProducers(t *testing.T) {
 	var mu sync.Mutex
 	got := make([]byte, 0, 4)
 	done := make(chan struct{})
-	rb := NewReorderBuffer(func(frame []byte) {
+	rb := NewActorReorderBuffer(func(frame []byte) {
 		mu.Lock()
 		got = append(got, frame[0])
 		if len(got) == 4 {
@@ -56,7 +56,7 @@ func TestRXSessionWorkerBatchesAcrossProducers(t *testing.T) {
 
 func TestRXSessionWorkerEpochDropsStaleProducer(t *testing.T) {
 	got := make(chan byte, 2)
-	rb := NewReorderBuffer(func(frame []byte) { got <- frame[0] })
+	rb := NewActorReorderBuffer(func(frame []byte) { got <- frame[0] })
 	w := newRXSessionWorker(rb)
 	defer func() { w.Close(); rb.Close() }()
 
