@@ -2,13 +2,13 @@
   "packages": [
     {
       "name": "luci-i18n-tlsvpn-de",
-      "version": "0.260930.28089",
-      "hashes": "c78928c460d531355950140b860029974ba7d9e61e97ab60d3b047ab930d425f",
+      "version": "0.261001.26565",
+      "hashes": "29e316b0cdaad748ec268e83fb274e6d1909e3019147a5b96aad1dd4721c918f",
       "description": "Translation for luci-proto-tlsvpn - Deutsch (German)",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
       "installed-size": 1025,
-      "file-size": 1429,
+      "file-size": 1430,
       "depends": [
         "libc",
         "luci-proto-tlsvpn"
@@ -18,13 +18,13 @@
       ]
     }, {
       "name": "luci-i18n-tlsvpn-fr",
-      "version": "0.260930.28089",
-      "hashes": "a54f279ad978a73f68e9726fc5647d7a0aa370f0ca9cd347523e8d66e6baf3f1",
+      "version": "0.261001.26565",
+      "hashes": "ab84dd6e05bc1300d2220c1f3368945370661217ddc390975763dd97b8539591",
       "description": "Translation for luci-proto-tlsvpn - Français (French)",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
       "installed-size": 1103,
-      "file-size": 1448,
+      "file-size": 1446,
       "depends": [
         "libc",
         "luci-proto-tlsvpn"
@@ -34,13 +34,13 @@
       ]
     }, {
       "name": "luci-i18n-tlsvpn-ja",
-      "version": "0.260930.28089",
-      "hashes": "9cd91f5ea5f62727b3a14ec0a3f61e4867f95f7d4836e70f7adc2ed1797d3f47",
+      "version": "0.261001.26565",
+      "hashes": "17d05faf7a4eea7b6a446a49d921853bd8c6f195fd4ea754e18d5a9193a9c0a2",
       "description": "Translation for luci-proto-tlsvpn - 日本語 (Japanese)",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
       "installed-size": 1149,
-      "file-size": 1505,
+      "file-size": 1504,
       "depends": [
         "libc",
         "luci-proto-tlsvpn"
@@ -50,13 +50,13 @@
       ]
     }, {
       "name": "luci-i18n-tlsvpn-zh-cn",
-      "version": "0.260930.28089",
-      "hashes": "7d6eb2546a361fab40c7ca1c8852b2e330664cdd2348bbef7b933bdc71c07011",
+      "version": "0.261001.26565",
+      "hashes": "c95ad95a8548abd57475145803e2656c6ed536644d7b1aa791643fd94bbc944d",
       "description": "Translation for luci-proto-tlsvpn - 简体中文 (Simplified Chinese)",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
       "installed-size": 1399,
-      "file-size": 1745,
+      "file-size": 1742,
       "depends": [
         "libc",
         "luci-proto-tlsvpn"
@@ -66,8 +66,8 @@
       ]
     }, {
       "name": "luci-i18n-tlsvpn-zh-tw",
-      "version": "0.260930.28089",
-      "hashes": "3a3f797dc679c3795bc2a2e8f6b19fa0e022e1891bcc7c322f9acc0771c16eb3",
+      "version": "0.261001.26565",
+      "hashes": "ce8e9b0c880846970aff0ad5e117be5627f645d61b5b7a17353dce80733ba78a",
       "description": "Translation for luci-proto-tlsvpn - 正體中文 (Traditional Chinese)",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
@@ -83,14 +83,14 @@
     }, {
       "name": "luci-proto-tlsvpn",
       "version": "0.1.0-r2",
-      "hashes": "88985a6316dc07a77cea9353e69c1ecc1d1f1c98789ca0d79a5f80ac32f87e3f",
+      "hashes": "bf3e12f30ab3b01a04315b19233fac4b61b55f7d7b5093b8700e42482aa8bd2b",
       "description": "LuCI support for the TLSVPN netifd protocol",
       "arch": "noarch",
       "origin": "feeds/base/luci-proto-tlsvpn",
       "maintainer": "OpenWrt LuCI community",
       "url": "https://github.com/openwrt/luci",
       "installed-size": 3824,
-      "file-size": 2217,
+      "file-size": 2219,
       "depends": [
         "libc",
         "tlsvpn-proto"
@@ -100,16 +100,16 @@
       ]
     }, {
       "name": "tlsvpn",
-      "version": "1.0.20260928_p91-r1",
-      "hashes": "755dbdeab0bf365cbb68ee6e38cad35b7f5c9c6eee5391296e66deb86495c2ba",
+      "version": "1.0.20261001-r1",
+      "hashes": "04e14d584b043eb700e39be1a65e150bcb7a0b0e9ac28afbcceefb99bd7175be",
       "description": "High-performance Layer-2 VPN over TCP+TLS with optional GCM, XOR FEC, multipath and TCP Brutal support.",
       "arch": "x86_64",
       "license": "GPL-3.0",
       "origin": "feeds/base/tlsvpn",
       "maintainer": "NNdroid",
       "url": "https://github.com/NNdroid/tlsvpn",
-      "installed-size": 11012200,
-      "file-size": 4405249,
+      "installed-size": 11217224,
+      "file-size": 4488760,
       "depends": [
         "ca-bundle>=0",
         "kmod-tun>=0",
@@ -120,15 +120,15 @@
       ]
     }, {
       "name": "tlsvpn-proto",
-      "version": "1.0.20260928_p91-r1",
-      "hashes": "5bf6c53608447c53a2ecfce50c936d01ec09b404cf29f50a1c4d35e1f1f458eb",
+      "version": "1.0.20261001-r1",
+      "hashes": "95099260c7f73a66f1b5d39e9e81602c7b50e2b5b4e657c27516e2be665bd2d8",
       "description": "Native OpenWrt netifd protocol integration for TLSVPN client interfaces. TLSVPN owns the TAP/data plane; netifd owns addresses, routes and firewall lifecycle.",
       "arch": "noarch",
       "license": "GPL-3.0",
       "origin": "feeds/base/tlsvpn",
       "maintainer": "NNdroid",
       "installed-size": 11325,
-      "file-size": 4221,
+      "file-size": 4219,
       "depends": [
         "libc",
         "resolveip>=0",
