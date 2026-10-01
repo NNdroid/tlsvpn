@@ -38,7 +38,11 @@ func openTapQueues(name string, count int, multi bool, open func(water.Config) (
 			if c.MultiQueue && (errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.EOPNOTSUPP)) {
 				log.Warnf("TAP multi-queue unavailable: %v; falling back to one queue", err)
 				c.MultiQueue = false
-				return open(c)
+				q, fallbackErr := open(c)
+				if fallbackErr != nil {
+					return nil, fallbackErr
+				}
+				return &tapQueues{queues: []io.ReadWriteCloser{q}}, nil
 			}
 			return nil, fmt.Errorf("open TAP queue %d: %w", i, err)
 		}

@@ -4,13 +4,14 @@ package main
 
 import (
 	"fmt"
-	"github.com/songgao/water"
-	"github.com/vishvananda/netlink"
 	"io"
 	"os"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/songgao/water"
+	"github.com/vishvananda/netlink"
 )
 
 func TestTapQueuesOpenFailureAndFallback(t *testing.T) {
@@ -43,6 +44,34 @@ func TestTapQueuesOpenFailureAndFallback(t *testing.T) {
 			}
 			if got != nil {
 				_ = got.Close()
+				_ = got.Close()
+			}
+		})
+	}
+}
+
+func TestTapQueuesPartialCreationClosesEveryFD(t *testing.T) {
+	for _, failAt := range []int{0, 1, 3} {
+		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
+			var opened []*testTapQueue
+			calls := 0
+			_, err := openTapQueues("tap-test", 4, false, func(c water.Config) (io.ReadWriteCloser, error) {
+				current := calls
+				calls++
+				if current == failAt {
+					return nil, syscall.EMFILE
+				}
+				q := newTestTapQueue()
+				opened = append(opened, q)
+				return q, nil
+			})
+			if err == nil || calls != failAt+1 {
+				t.Fatal("resource exhaustion was hidden")
+			}
+			for _, q := range opened {
+				if q.closed.Load() != 1 {
+					t.Fatal("partial queue set leaked/double-closed")
+				}
 			}
 		})
 	}
