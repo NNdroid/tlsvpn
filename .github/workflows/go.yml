@@ -35,7 +35,9 @@ jobs:
       run: GOOS=linux go vet ./...
 
     - name: Validate OpenWrt netifd/LuCI integration
-      run: bash tests/test_openwrt_integration.sh
+      run: |
+        bash tests/test_openwrt_integration.sh
+        bash tests/test_openwrt_customfeed.sh
 
     - name: Test Core Logic (go test -v)
       # NOTE: some tests (net_linux_test.go socket-mark / proxy_test.go dial

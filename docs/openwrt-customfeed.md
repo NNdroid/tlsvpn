@@ -1,13 +1,13 @@
 # OpenWrt 25.12 custom APK feed
 
-TLSVPN publishes an OpenWrt 25.12+ APK repository from the repository's `main` branch and release tags. The generated repository lives on the dedicated `openwrt-feed` branch; it is not stored in `main` and it does not replace the normal GitHub Release APK artifacts.
+TLSVPN publishes an OpenWrt 25.12+ APK repository from release tags or a manually selected repository ref. The generated repository lives on the dedicated `openwrt-feed` branch; it is not stored in `main` and it does not replace the normal GitHub Release APK artifacts.
 
 ## Publication model
 
 The production flow is:
 
 ```text
-main / v* tag
+v* tag / manual dispatch
     -> GitHub Actions build + validation
     -> signed APK repository payload
     -> generated openwrt-feed branch
@@ -15,7 +15,7 @@ main / v* tag
     -> OpenWrt /etc/apk/repositories.d/customfeeds.list
 ```
 
-Pull requests targeting `main` build and validate the complete feed matrix but never publish. A push to `main`, a `v*` tag, or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64` and the stable public-key Actions Variable `OPENWRT_FEED_PUBLIC_KEY_B64`.
+Automatic builds run only for `v*` tag pushes. Pull requests and pushes to `main` do not trigger this workflow. A `v*` tag or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64` and the stable public-key Actions Variable `OPENWRT_FEED_PUBLIC_KEY_B64`.
 
 The generated `openwrt-feed` branch is machine-owned. Do not edit it by hand.
 
@@ -166,8 +166,8 @@ Install and update TLSVPN by package name from the repository rather than by dow
 
 `.github/workflows/openwrt_customfeed.yml` behaves as follows:
 
-1. Pull requests to `main` run the contract test and build every supported target with an ephemeral key pair. They never receive the production private key and never publish.
-2. Pushes to `main` build every target and publish/update `openwrt-feed`. A missing stable signing secret or public-key variable is an error.
+1. Pull requests and branch pushes do not trigger this workflow. Manual validation with `publish=false` uses an ephemeral key pair and does not publish.
+2. Manual dispatch can select `main` or another ref; `publish=true` builds every target and publishes/updates `openwrt-feed`. A missing stable signing secret or public-key variable is an error.
 3. `v*` tag pushes also publish the feed with the stable configured key pair.
 4. `workflow_dispatch` always supports validation; setting `publish=true` turns it into a production publication and requires the stable configured key pair.
 5. Before production publication the workflow verifies that all target feeds contain the public key from `OPENWRT_FEED_PUBLIC_KEY_B64`.

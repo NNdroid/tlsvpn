@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'if [[ $- == *e* ]]; then echo "custom feed contract failed at line $LINENO: $BASH_COMMAND" >&2; fi' ERR
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -57,10 +58,13 @@ if grep -Fq 'release-assets' "$script"; then
   exit 1
 fi
 
-# Production publication comes from main/tags/manual dispatch. Pull requests
-# validate the whole feed matrix but cannot publish.
-grep -Fq 'pull_request:' "$workflow"
-grep -Fq -- '- main' "$workflow"
+# Automatic publication is tag-only; manual dispatch supports validation/publication.
+# Do not restore removed PR or branch-push triggers.
+if grep -Eq '^[[:space:]]+(pull_request|branches):' "$workflow"; then
+  echo 'custom feed must not trigger on PRs or branch pushes' >&2
+  exit 1
+fi
+grep -Fq 'workflow_dispatch:' "$workflow"
 grep -Fq 'tags:' "$workflow"
 grep -Fq -- "- 'v*'" "$workflow"
 grep -Fq "github.event_name != 'pull_request'" "$workflow"
