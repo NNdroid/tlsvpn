@@ -421,6 +421,7 @@ func csrfGuard(next http.HandlerFunc) http.HandlerFunc {
 
 func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, webKey string, cfg *Config) {
 	mgr := NewWebManager(srv, cli, cfg, nil)
+	mgr.diagnostics = &diagnosticHistory{}
 	mux := http.NewServeMux()
 	mgr.mux = mux
 	auth := mgr.auth // 认证串可热更：经 mgr 读取当前配置
@@ -437,7 +438,11 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 
 	// WebUI 单一 SSE 数据通道；兼容 JSON API 仍保留给脚本/测试。
 	mux.HandleFunc("/api/stream", auth(func(w http.ResponseWriter, r *http.Request) {
-		handleDashboardStream(w, r, srv, cli)
+		handleDashboardStream(w, r, srv, cli, mgr.diagnostics)
+	}))
+	mux.HandleFunc("/api/diagnostics", auth(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(mgr.diagnostics.snapshot(r.URL.Query().Get("range")))
 	}))
 
 	// 状态统计 API

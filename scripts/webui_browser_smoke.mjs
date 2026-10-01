@@ -60,6 +60,13 @@ function statsFixture(mode='client',stage=1,instance='browser-smoke') {
   };
 }
 
+function diagnosticsFixture(instance='browser-smoke') {
+  return {instance_id:instance,step_sec:2,points:[0,1,2].map(i=>({t:1700000000000+i*2000,
+    metrics:{online:2,fec_data:100000,fec_parity:25000,fec_pct:25,recovered:i,lost:0,pad:2000,pad_wire:100000,pad_pct:2,reconnect:0,drop:0,tap_error:0},
+    conns:[{id:'conn-a',client:'local',label:'peer-a',metrics:{up:i?32.38*1024**2:null,down:i?10*1024**2:null,rtt:i?20:null,queue:128,assigned:i?30*1024**2:null}},
+      {id:'conn-b',client:'other',label:'peer-b',metrics:{up:1000,down:2000,rtt:40,queue:4096,assigned:1000}}]}))};
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://127.0.0.1');
@@ -76,6 +83,8 @@ const server = http.createServer(async (req, res) => {
       const statsTimer=setTimeout(()=>emit('stats',statsFixture()),100);
       res.on('close',()=>clearTimeout(statsTimer));
       emit('trend', { step_sec: 1, points: [] });
+      const diagnosticsTimer=setTimeout(()=>emit('diagnostics',diagnosticsFixture()),150);
+      res.on('close',()=>clearTimeout(diagnosticsTimer));
       emit('logs', []);
       emit('events', []);
       res.write(': browser-smoke\n\n');
@@ -83,7 +92,7 @@ const server = http.createServer(async (req, res) => {
       res.on('close', () => openStreams.delete(res));
       return;
     }
-    if (['/api/stats','/api/trend','/api/logs','/api/events'].includes(u.pathname)) {
+    if (['/api/stats','/api/trend','/api/logs','/api/events','/api/diagnostics'].includes(u.pathname)) {
       legacyPollHits.push(u.pathname);
       res.writeHead(418, { 'content-type': 'application/json' });
       res.end('{"error":"legacy polling forbidden"}');
@@ -160,6 +169,10 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
   if (state.framevizType !== 'object') failures.push(`[${lang}] FRAMEVIZ_I18N is ${state.framevizType}`);
   if (state.documentLang !== lang) failures.push(`[${lang}] document lang is ${state.documentLang}`);
   if (!state.framevizCard) failures.push(`[${lang}] frame visualizer did not render`);
+  const diagnosticsState=await page.evaluate(()=>({cards:document.querySelectorAll('.diagnostic-card').length,
+    sampled:document.getElementById('diag-throughput')?.diagPlot?.first,title:document.getElementById('diag-title')?.textContent}));
+  if(diagnosticsState.cards!==6||diagnosticsState.sampled!==1700000000000||!diagnosticsState.title)
+    failures.push('['+lang+'] diagnostic charts did not receive SSE history');
   for (const expected of framevizExpect[lang]) {
     if (!state.framevizText.includes(expected)) failures.push(`[${lang}] frame visualizer missing localized text: ${expected}`);
   }
@@ -202,6 +215,34 @@ for (const deviceScaleFactor of [1,2]) {
   await chartPage.goto(origin,{waitUntil:'domcontentloaded'});
   for (const width of [360,1100]) {
     await chartPage.setViewportSize({width,height:800});
+    await chartPage.evaluate(([stats,history])=>{applyStats(stats);applyDiagnostics(history);},[statsFixture(),diagnosticsFixture()]);
+    const diagBounds=await chartPage.evaluate(history=>{
+      const errors=[],original=CanvasRenderingContext2D.prototype.fillText;
+      CanvasRenderingContext2D.prototype.fillText=function(text,x,y,...rest){
+        if(this.canvas.id.startsWith('diag-')){
+          const b=this.measureText(text),scale=rest[0]?Math.min(1,rest[0]/b.width):1;
+          if(x-b.actualBoundingBoxLeft*scale < -0.5 || x+b.actualBoundingBoxRight*scale > this.canvas.clientWidth+0.5)
+            errors.push(this.canvas.id+' clips '+text);
+        }
+        return original.call(this,text,x,y,...rest);
+      };
+      try {applyDiagnostics(history);} finally {CanvasRenderingContext2D.prototype.fillText=original;}
+      return errors;
+    },diagnosticsFixture());
+    diagBounds.forEach(x=>failures.push('[diagnostic canvas] '+x));
+    const throughput=chartPage.locator('#diag-throughput');
+    await throughput.scrollIntoViewIfNeeded();const box=await throughput.boundingBox();
+    await chartPage.mouse.move(box.x+box.width*0.6,box.y+70);
+    const linked=await chartPage.evaluate(()=>[...document.querySelectorAll('.diagnostic-card canvas')].map(c=>c.dataset.diagHover));
+    if(!linked[0]||linked.some(t=>t!==linked[0]))failures.push('diagnostic hover did not synchronize');
+    await chartPage.selectOption('#diag-client','other');
+    const filtered=await chartPage.locator('#diag-wrap-throughput .legend').innerText();
+    if(filtered.includes('conn-a')||!filtered.includes('conn-b'))failures.push('diagnostic client filter failed');
+    await chartPage.evaluate(()=>setRange('1h'));
+    const cleared=await chartPage.evaluate(()=>document.getElementById('diag-throughput').diagPlot.first);
+    if(cleared!==0)failures.push('range switch retained stale diagnostic points');
+    await chartPage.evaluate(([stats,history])=>{applyStats(stats);applyDiagnostics(history);applyStats({...stats,instance_id:'after-restart'});},[statsFixture(),diagnosticsFixture()]);
+    if(await chartPage.evaluate(()=>document.getElementById('diag-throughput').diagPlot.first)!==0)failures.push('restart retained diagnostic points');
     const errors=await chartPage.evaluate(()=>{
       const errors=[];
       for(const id of ['chart','traffic-chart']) {

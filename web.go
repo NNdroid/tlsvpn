@@ -26,6 +26,7 @@ type webListener struct {
 }
 
 type WebManager struct {
+ diagnostics *diagnosticHistory
 	srv *Server
 	cli *Client
 	mux *http.ServeMux
@@ -84,6 +85,7 @@ func cfgStamp(cfg *Config) string {
 
 func (w *WebManager) Run() {
 	for {
+		w.sampleDiagnostics()
 		w.rebindIfNeeded()
 		time.Sleep(2 * time.Second)
 	}
