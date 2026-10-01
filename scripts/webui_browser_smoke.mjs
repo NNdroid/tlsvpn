@@ -256,7 +256,17 @@ for (const deviceScaleFactor of [1,2]) {
     await chartPage.mouse.move(box.x+box.width*0.6,box.y+70);
     const linked=await chartPage.evaluate(()=>[...document.querySelectorAll('.diagnostic-card canvas')].map(c=>c.dataset.diagHover));
     if(!linked[0]||linked.some(t=>t!==linked[0]))failures.push('diagnostic hover did not synchronize');
-    await chartPage.selectOption('#diag-client','other');
+    const nativeVisible=await chartPage.evaluate(()=>[...document.querySelectorAll('select')].filter(s=>getComputedStyle(s).visibility!=='hidden').map(s=>s.id));
+    if(nativeVisible.length)failures.push('native selects still visible: '+nativeVisible.join(','));
+    const clientDropdown=chartPage.locator('#diag-client').locator('..');
+    await clientDropdown.locator('.dl-btn').click();
+    const menuBox=await clientDropdown.locator('.dl-menu').boundingBox();
+    if(menuBox.x<0||menuBox.x+menuBox.width>chartPage.viewportSize().width)failures.push('dropdown exceeds viewport');
+    await clientDropdown.locator('.dl-opt').filter({hasText:'other'}).click();
+    await clientDropdown.locator('.dl-btn').focus();
+    await chartPage.keyboard.press('ArrowDown');
+    await chartPage.keyboard.press('Escape');
+    if(await clientDropdown.locator('.dl-btn').getAttribute('aria-expanded')!=='false')failures.push('dropdown Escape failed');
     const filtered=await chartPage.locator('#diag-wrap-throughput .legend').innerText();
     if(filtered.includes('conn-a')||!filtered.includes('conn-b'))failures.push('diagnostic client filter failed');
     await chartPage.evaluate(()=>setRange('1h'));
