@@ -7,14 +7,14 @@ import (
 	"unicode/utf8"
 )
 
-func TestPeerInfoOptionalHandshakeCompatibility(t *testing.T) {
-	raw := []byte(`{"protocol_version":2,"client_id":"x","psk":"y"}`)
+func TestPeerInfoOptionalV3Handshake(t *testing.T) {
+	raw := []byte(`{"protocol_version":3,"client_id":"x","psk":"y"}`)
 	var req HandshakeReq
 	if err := json.Unmarshal(raw, &req); err != nil {
 		t.Fatal(err)
 	}
 	if req.PeerInfo != nil {
-		t.Fatalf("old handshake unexpectedly has peer info: %+v", req.PeerInfo)
+		t.Fatalf("v3 handshake without metadata unexpectedly has peer info: %+v", req.PeerInfo)
 	}
 	req.PeerInfo = &PeerInfo{Implementation: "go", Hostname: "node-a", OS: "linux", Arch: "arm64", Version: "v1"}
 	b, err := json.Marshal(req)

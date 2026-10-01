@@ -122,11 +122,11 @@ func buildGoldenVectors() *GoldenVectors {
 	gcmSalt := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77}
 	gcmPlain := []byte("ethernet-payload")
 	for _, domain := range []string{"data", "fec"} {
-		ic, err := newGCMInnerCipherDomain(gcmPSK, gcmSalt, domain)
+		ic, err := newInnerCipherDomainForAlgo(gcmPSK, gcmSalt, domain, encAlgoGCM)
 		if err != nil {
 			panic(err)
 		}
-		wire := make([]byte, len(gcmPlain)+gcmTagSize)
+		wire := make([]byte, len(gcmPlain)+aeadTagSize)
 		copy(wire, gcmPlain)
 		ic.sealInPlace(wire, len(gcmPlain), 0x01020304, uint32(len(wire)))
 		gv.GCMDomainVectors = append(gv.GCMDomainVectors, GCMDomainVec{
@@ -312,11 +312,11 @@ func TestGoldenSelfConsistency(t *testing.T) {
 	for _, v := range gv.GCMDomainVectors {
 		salt, _ := hex.DecodeString(v.SaltHex)
 		plain, _ := hex.DecodeString(v.PlaintextHex)
-		ic, err := newGCMInnerCipherDomain(v.PSK, salt, v.Domain)
+		ic, err := newInnerCipherDomainForAlgo(v.PSK, salt, v.Domain, encAlgoGCM)
 		if err != nil {
 			t.Fatalf("GCM domain vector init: %v", err)
 		}
-		wire := make([]byte, len(plain)+gcmTagSize)
+		wire := make([]byte, len(plain)+aeadTagSize)
 		copy(wire, plain)
 		ic.sealInPlace(wire, len(plain), v.Seq, uint32(len(wire)))
 		if got := hex.EncodeToString(wire); got != v.CiphertextHex {
@@ -446,8 +446,8 @@ func TestHandshakeOmitEmpty(t *testing.T) {
 func TestFrameGCMRoundTrip(t *testing.T) {
 	psk := "gcm_roundtrip_key"
 	salt := randomSalt()
-	tx, _ := newGCMInnerCipher(psk, salt)
-	rx, _ := newGCMInnerCipher(psk, salt)
+	tx, _ := newInnerCipherForAlgo(psk, salt, encAlgoGCM)
+	rx, _ := newInnerCipherForAlgo(psk, salt, encAlgoGCM)
 
 	payloads := [][]byte{
 		[]byte("gcm-a"),
@@ -465,8 +465,8 @@ func TestFrameGCMRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("第 %d 帧读取失败: %v", i, err)
 		}
-		if len(got) != len(want)+gcmTagSize {
-			t.Fatalf("第 %d 帧线路负载应含标签: got %d want %d", i, len(got), len(want)+gcmTagSize)
+		if len(got) != len(want)+aeadTagSize {
+			t.Fatalf("第 %d 帧线路负载应含标签: got %d want %d", i, len(got), len(want)+aeadTagSize)
 		}
 		plain, err := rx.openInPlace(got, seq, uint32(len(got)))
 		if err != nil {
@@ -555,7 +555,7 @@ func TestPadModeBucket(t *testing.T) {
 func TestBucketPaddingCoversEveryNormalIPPacketLength(t *testing.T) {
 	prev := setPadMode(padModeBucket)
 	defer setPadMode(prev)
-	for wireLen := 1; wireLen <= 1514+gcmTagSize; wireLen++ {
+	for wireLen := 1; wireLen <= 1514+aeadTagSize; wireLen++ {
 		pad := currentPadLength(wireLen)
 		if pad <= 0 {
 			t.Fatalf("wireLen=%d was emitted without padding", wireLen)

@@ -362,7 +362,7 @@ func main() {
 			fatalf("read data: %v", err)
 		}
 		if seq == 0 && len(body) == 0 {
-			fmt.Printf("PASS protocol=2 epoch=%d algo=%d session=%s ipv4=%s tls=%s:%s\n", resp.SessionEpoch, resp.EncAlgo, resp.SessionID, resp.IPv4, resp.TLS.FingerprintKind, resp.TLS.FingerprintSHA256)
+			fmt.Printf("PASS protocol=3 epoch=%d algo=%d session=%s ipv4=%s tls=%s:%s\n", resp.SessionEpoch, resp.EncAlgo, resp.SessionID, resp.IPv4, resp.TLS.FingerprintKind, resp.TLS.FingerprintSHA256)
 			return
 		}
 		if seq != 0 && bytes.HasPrefix(body, []byte("FAIL")) {

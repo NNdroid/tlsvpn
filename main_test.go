@@ -56,7 +56,7 @@ func TestClientIDValidation(t *testing.T) {
 
 func TestMACStringValidation(t *testing.T) {
 	if isValidMACString("") {
-		t.Error("协议 v2 不允许空 MAC")
+		t.Error("协议 v3 不允许空 MAC")
 	}
 	if !isValidMACString("00:1a:2b:3c:4d:5e") || !isValidMACString("00:1A:2B:3C:4D:5E") {
 		t.Error("合法 MAC 被误拒")
@@ -106,8 +106,8 @@ func (p *stubPort) WriteFrame(frame []byte) error {
 
 type noopPort struct{ name string }
 
-func (p *noopPort) ID() string                { return p.name }
-func (p *noopPort) WriteFrame([]byte) error   { return nil }
+func (p *noopPort) ID() string              { return p.name }
+func (p *noopPort) WriteFrame([]byte) error { return nil }
 
 func macFrame(dst, src macKey) []byte {
 	f := make([]byte, 14)
@@ -501,37 +501,6 @@ func TestIncrementIP(t *testing.T) {
 // ==========================================
 // 会话令牌与 PSK 失败限流测试
 // ==========================================
-
-func TestSessionToken(t *testing.T) {
-	psk := "rotate_me_please"
-	sessionID := "550e8400-e29b-41d4-a716-446655440000"
-
-	tok := computeSessionToken(psk, sessionID)
-	if tok == "" || len(tok) != 64 {
-		t.Fatalf("令牌应为 64 位 hex，实际 %q", tok)
-	}
-
-	// 正确组合通过
-	if !verifySessionToken(psk, sessionID, tok) {
-		t.Error("合法令牌校验应通过")
-	}
-	// 会话 ID 被换（冒充别人的会话）必须失败
-	if verifySessionToken(psk, "00000000-0000-0000-0000-000000000000", tok) {
-		t.Error("不同会话 ID 的令牌校验应失败")
-	}
-	// PSK 被换（轮换后旧令牌）必须失败
-	if verifySessionToken("another_psk", sessionID, tok) {
-		t.Error("不同 PSK 的令牌校验应失败")
-	}
-	// 空令牌（旧版客户端）必须失败
-	if verifySessionToken(psk, sessionID, "") {
-		t.Error("空令牌校验应失败")
-	}
-	// 常量时间接口不应因空比较而 panic
-	if verifySessionToken(psk, sessionID, "garbage") {
-		t.Error("伪造令牌校验应失败")
-	}
-}
 
 func TestPSKFailLimit(t *testing.T) {
 	s := &Server{pskFail: make(map[string]*pskFailBucket)}

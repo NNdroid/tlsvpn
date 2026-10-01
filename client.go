@@ -1306,7 +1306,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		}
 	}
 
-	// v2 只在单物理连接时把 RX/reorder 与阻塞 TAP write 解耦。旧 real-TAP
+	// 只在单物理连接时把 RX/reorder 与阻塞 TAP write 解耦。旧 real-TAP
 	// 实验显示 conns=1 有正收益信号，而 conns=2/4 的额外 channel/goroutine
 	// 调度会抵消收益；多连接因此继续保留直接 TAP 交付路径。
 	reportTapWriteErr := func(werr error) {
@@ -1842,7 +1842,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if resp.PeerInfo != nil {
 		c.peerInfo = normalizePeerInfo(resp.PeerInfo)
 	} else {
-		// Rolling upgrade: an authenticated old server omits peer_info. Clear the
+		// Optional peer_info may be absent from a v3 response. Clear the
 		// previous node's metadata instead of showing stale identity in WebUI.
 		c.peerInfo = PeerInfo{}
 	}

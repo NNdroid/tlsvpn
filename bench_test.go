@@ -17,10 +17,10 @@ func benchPayload() []byte {
 
 func BenchmarkGCMSealOpen(b *testing.B) {
 	salt := randomSalt()
-	tx, _ := newGCMInnerCipher("bench_gcm", salt)
-	rx, _ := newGCMInnerCipher("bench_gcm", salt)
+	tx, _ := newInnerCipherForAlgo("bench_gcm", salt, encAlgoGCM)
+	rx, _ := newInnerCipherForAlgo("bench_gcm", salt, encAlgoGCM)
 	pt := benchPayload()
-	region := make([]byte, len(pt)+gcmTagSize)
+	region := make([]byte, len(pt)+aeadTagSize)
 
 	b.SetBytes(int64(len(pt)))
 	b.ResetTimer()
@@ -35,10 +35,10 @@ func BenchmarkGCMSealOpen(b *testing.B) {
 
 func BenchmarkGCM128SealOpen(b *testing.B) {
 	salt := randomSalt()
-	tx, _ := newGCMInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
-	rx, _ := newGCMInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
+	tx, _ := newInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
+	rx, _ := newInnerCipherForAlgo("bench_gcm128", salt, encAlgoGCM128)
 	pt := benchPayload()
-	region := make([]byte, len(pt)+gcmTagSize)
+	region := make([]byte, len(pt)+aeadTagSize)
 
 	b.SetBytes(int64(len(pt)))
 	b.ReportAllocs()

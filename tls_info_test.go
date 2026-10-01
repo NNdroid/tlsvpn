@@ -78,35 +78,3 @@ func TestHandshakeRespTLSIsOptionalAndBoundedToPublicSummary(t *testing.T) {
 		}
 	}
 }
-
-func TestHandshakeTLSRollingUpgradeCompatibility(t *testing.T) {
-	// old writer -> new reader：旧服务端没有 tls 字段，新客户端必须照常上线。
-	oldWire := []byte(`{"success":true,"message":"OK","client_id":"c","ipv4":"10.0.0.2/24","ipv6":"fd00::2/80"}`)
-	var current HandshakeResp
-	if err := json.Unmarshal(oldWire, &current); err != nil {
-		t.Fatalf("new reader rejected old response: %v", err)
-	}
-	if current.TLS != nil {
-		t.Fatalf("old response produced unexpected TLS summary: %+v", current.TLS)
-	}
-
-	// new writer -> old reader：Go JSON 默认忽略未知字段，旧客户端不得因 tls 扩展断线。
-	newWire, err := json.Marshal(HandshakeResp{
-		Success: true, Message: "OK", ClientID: "c", IPv4: "10.0.0.2/24", IPv6: "fd00::2/80",
-		TLS: fullTLSInfoSample(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var legacy struct {
-		Success  bool   `json:"success"`
-		Message  string `json:"message"`
-		ClientID string `json:"client_id"`
-	}
-	if err := json.Unmarshal(newWire, &legacy); err != nil {
-		t.Fatalf("old reader rejected new response: %v", err)
-	}
-	if !legacy.Success || legacy.ClientID != "c" {
-		t.Fatalf("legacy reader lost required fields: %+v", legacy)
-	}
-}

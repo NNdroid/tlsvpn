@@ -1699,7 +1699,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	encAlgo := session.EncAlgo
 	icTx, icRx := session.icTx, session.icRx
 	// peer_info describes the peer on this authenticated handshake. During a
-	// rolling downgrade an older client omits it, so overwrite with the empty
+	// peer_info is absent, overwrite with the empty
 	// normalized value instead of retaining identity from a previous connection.
 	session.sessionMu.Lock()
 	session.PeerInfo = normalizePeerInfo(req.PeerInfo)

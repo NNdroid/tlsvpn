@@ -5,7 +5,7 @@ import (
 	"io"
 )
 
-// asyncTapDeliveryQueue is deliberately much smaller than the v1 experiment's
+// asyncTapDeliveryQueue is deliberately much smaller than the initial experiment's
 // 1024-frame queue. 128 Ethernet frames are enough to overlap short TAP write
 // stalls without retaining ~1.5 MiB of packet buffers or adding a large latency
 // reservoir in front of the kernel device. The repeated real-TAP validation
@@ -17,9 +17,9 @@ const asyncTapDeliveryQueue = 128
 // worker writes frames in FIFO order, preserving Ethernet packet ordering.
 //
 // The queue is bounded. When it fills, the producer blocks and applies
-// backpressure instead of adding packet loss. v2 only enables this path for a
+// backpressure instead of adding packet loss. The client only enables this path for a
 // single physical connection; multipath keeps the direct TAP path because the
-// v1 real-TAP matrix showed scheduler/channel overhead there outweighed the
+// real-TAP matrix showed scheduler/channel overhead there outweighed the
 // overlap benefit.
 type ownedTapDelivery struct {
 	ctx        context.Context
