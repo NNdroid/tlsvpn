@@ -655,7 +655,7 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 		ci.tcpConn.Close()
 	}
 	if session.RxWorker != nil {
-		session.RxWorker.AdvanceEpoch()
+		session.RxWorker.AdvanceEpochAndReset(session.FecDec)
 	}
 	saltA, saltB := newRandomSalt(), newRandomSalt()
 	var icTx, icRx, fecTx, fecRx *innerCipher
@@ -683,13 +683,16 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	session.InstanceID = instanceID
 	session.Epoch++
 	session.ActiveConns = 0
-	session.RxReorder.Reset()
-	if session.FecDec != nil {
-		session.FecDec.Reset()
+	if session.RxWorker == nil {
+		session.RxReorder.Reset()
+		if session.FecDec != nil {
+			session.FecDec.Reset()
+		}
 	}
 	if session.FecEncK > 0 {
-		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, session.RxReorder.Insert)
-		session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
+		rxFECOut, rxReorderProgress := fecReorderHooks(session.RxReorder, session.RxWorker)
+		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, rxFECOut)
+		session.FecDec.SetReorderProgress(rxReorderProgress)
 		session.Port.ResetEpoch(session.FecEncK, fecTx)
 	} else {
 		session.Port.ResetEpoch(0, nil)
@@ -1618,7 +1621,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		// 服务端收到的解密 frame 已来自 frame pool；重排后把所有权直接交给
 		// VSwitch，命中 AsyncPort 单播时可继续零拷贝进入后端发送队列。
-		session.RxReorder = NewOwnedReorderBuffer(func(orderedFrame []byte) {
+		newRXReorder := NewOwnedReorderBuffer
+		if !isStaticSinglePathTopology(req.BrutalConns) {
+			newRXReorder = NewOwnedActorReorderBuffer
+		}
+		session.RxReorder = newRXReorder(func(orderedFrame []byte) {
 			if session.macBin != (macKey{}) {
 				s.vswitch.ProcessOwnedSessionFrame(clientID, session.macBin, orderedFrame)
 			} else {
@@ -1629,8 +1636,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			session.RxWorker = newRXSessionWorker(session.RxReorder)
 		}
 		if fecEncK > 0 {
-			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
-			session.FecDec.SetReorderProgress(session.RxReorder.ExpectedSeqSnapshot)
+			rxFECOut, rxReorderProgress := fecReorderHooks(session.RxReorder, session.RxWorker)
+			session.FecDec = NewFECDecoder(fecEncK, fecRx, rxFECOut)
+			session.FecDec.SetReorderProgress(rxReorderProgress)
 			// Current Go clients always advertise BrutalGroups/BrutalConns as the
 			// authenticated physical-topology declaration even when shaping is off.
 			// Legacy/unknown peers (no group semantics) deliberately keep RX FEC on.
