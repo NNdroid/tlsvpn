@@ -3,11 +3,12 @@ name: Go Real-TAP Performance
 on:
   push:
     branches:
+      - main
       - 'perf/**'
   workflow_dispatch:
 
 # This workflow may promote a freshly validated profile to default.pgo on the
-# canonical performance branch. It never writes on pull_request events.
+# canonical main branch. Performance branches remain read-only test targets.
 permissions:
   contents: write
 
@@ -376,7 +377,7 @@ jobs:
           PY
 
       - name: Promote newly trained profile when selected
-        if: github.ref == 'refs/heads/perf/single-path-fec-bypass'
+        if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
           selection=$(cat perf-artifacts/pgo-selection.txt)
