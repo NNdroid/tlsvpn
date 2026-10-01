@@ -1,0 +1,123 @@
+name: Temporary P2 RX Actor Real-TAP
+
+on:
+  push:
+    branches:
+      - p2/rx-actor-ownership
+
+permissions:
+  contents: read
+
+jobs:
+  paired-realtap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout P2 candidate
+        uses: actions/checkout@v4
+        with:
+          path: candidate
+      - name: Checkout P1 baseline
+        uses: actions/checkout@v4
+        with:
+          ref: perf/single-path-fec-bypass
+          path: baseline
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends iproute2 iperf3 openssl
+      - name: Build identical-PGO binaries
+        run: |
+          (cd candidate && go build -trimpath -o "$GITHUB_WORKSPACE/p2-bin")
+          (cd baseline && go build -trimpath -o "$GITHUB_WORKSPACE/p1-bin")
+          go version -m "$GITHUB_WORKSPACE/p2-bin" | grep -E 'pgo=|vcs.revision' || true
+          go version -m "$GITHUB_WORKSPACE/p1-bin" | grep -E 'pgo=|vcs.revision' || true
+      - name: Add small-MTU benchmark hook
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('candidate/scripts/real_tap_perf.sh')
+          s = p.read_text()
+          needle = '''if ! wait_for_client_ip; then
+            tail -80 "$TMP/client.log" >&2 || true
+            die "client tunnel address did not appear"
+          fi
+          sleep 0.5
+          '''
+          repl = '''if ! wait_for_client_ip; then
+            tail -80 "$TMP/client.log" >&2 || true
+            die "client tunnel address did not appear"
+          fi
+          if [[ -n "${PERF_TAP_MTU:-}" ]]; then
+            ip netns exec "$NS_SRV" ip link set dev "$TAP_SRV" mtu "$PERF_TAP_MTU"
+            ip netns exec "$NS_CLI" ip link set dev "$TAP_CLI" mtu "$PERF_TAP_MTU"
+          fi
+          sleep 0.5
+          '''
+          if needle not in s:
+              raise SystemExit('small-MTU insertion point not found')
+          p.write_text(s.replace(needle, repl, 1))
+          PY
+          chmod +x candidate/scripts/real_tap_perf.sh
+      - name: Run paired P1/P2 matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'round\tmtu\tconns\tdirection\tmode\tmbps\n' > paired.tsv
+          run_one() {
+            local round="$1" mtu="$2" conns="$3" mode="$4" bin tmp
+            if [[ "$mode" == p1 ]]; then bin="$GITHUB_WORKSPACE/p1-bin"; else bin="$GITHUB_WORKSPACE/p2-bin"; fi
+            tmp=$(mktemp)
+            local mtu_env=""
+            [[ "$mtu" != 1500 ]] && mtu_env="$mtu"
+            sudo -E env BIN="$bin" PERF_CONNS="$conns" PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
+              PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=3 PERF_MIN_MBPS=100 \
+              PERF_TAP_MTU="$mtu_env" PERF_RESULT_FILE="$tmp" \
+              bash candidate/scripts/real_tap_perf.sh
+            awk -F '\t' -v r="$round" -v m="$mtu" -v c="$conns" -v mode="$mode" \
+              'BEGIN{OFS="\t"} NF>=5 {print r,m,c,$4,mode,$5}' "$tmp" >> paired.tsv
+            rm -f "$tmp"
+          }
+          for round in 1 2; do
+            if [[ "$round" == 1 ]]; then modes='p1 p2'; else modes='p2 p1'; fi
+            for mtu in 1500 296; do
+              for conns in 2 4; do
+                for mode in $modes; do
+                  echo "=== round=$round mtu=$mtu conns=$conns mode=$mode ==="
+                  run_one "$round" "$mtu" "$conns" "$mode"
+                done
+              done
+            done
+          done
+          cat paired.tsv
+      - name: Compare paired throughput
+        run: |
+          python3 - <<'PY'
+          import csv, math
+          rows = list(csv.DictReader(open('paired.tsv'), delimiter='\t'))
+          by = {}
+          for r in rows:
+              key=(r['round'],r['mtu'],r['conns'],r['direction'])
+              by.setdefault(key,{})[r['mode']]=float(r['mbps'])
+          ratios=[]
+          groups={}
+          print('round mtu conns direction p1_mbps p2_mbps delta_pct')
+          for key in sorted(by, key=lambda k:(int(k[0]),int(k[1]),int(k[2]),k[3])):
+              v=by[key]
+              if set(v)!={'p1','p2'}:
+                  raise SystemExit(f'incomplete pair {key}: {v}')
+              ratio=v['p2']/v['p1']
+              delta=(ratio-1)*100
+              ratios.append(ratio)
+              groups.setdefault(key[1],[]).append(ratio)
+              print(*key, f"{v['p1']:.1f}", f"{v['p2']:.1f}", f"{delta:+.2f}%")
+          def geo(xs): return (math.exp(sum(math.log(x) for x in xs)/len(xs))-1)*100
+          print(f'OVERALL_GEOMEAN={geo(ratios):+.2f}%')
+          for mtu,xs in sorted(groups.items(), key=lambda kv:int(kv[0])):
+              print(f'MTU_{mtu}_GEOMEAN={geo(xs):+.2f}%')
+          worst=min((x-1)*100 for x in ratios)
+          print(f'WORST_CELL={worst:+.2f}%')
+          PY
