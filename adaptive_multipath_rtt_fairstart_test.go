@@ -39,6 +39,10 @@ func TestAdaptiveSchedulerMeasuredSlowRTTStillExcluded(t *testing.T) {
 	fastB := testAdaptiveBackend(900)
 	unknown := testAdaptiveBackend(adaptiveUnknownRTTUS)
 	slow := testAdaptiveBackend(80_000)
+	// A measured path needs both RTT and a writer sample. Keep unknown cold.
+	for _, b := range []*Backend{fastA, fastB, slow} {
+		b.rateBytesPerSec.Store(100_000_000)
+	}
 	backends := []*Backend{fastA, fastB, unknown, slow}
 
 	p.inputRateBytesPerSec.Store(adaptiveActive4RateBytesPerSec)

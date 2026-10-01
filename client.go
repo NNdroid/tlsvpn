@@ -60,6 +60,8 @@ type AsyncPort struct {
 	exhausted     atomic.Bool
 	onExhaust     func()
 	dropped       uint64 // 各环节丢弃帧计数（面板/metrics）
+	fecTXArmed    atomic.Bool
+	written       txFrameCounters
 	paritySent    atomic.Uint64
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
@@ -86,7 +88,7 @@ type portEpochReset struct {
 // Dropped 累计丢弃帧数（队列满、后端投递失败、无后端）
 func (p *AsyncPort) Dropped() uint64 { return atomic.LoadUint64(&p.dropped) }
 
-// ParitySent 已生成的 FEC 校验帧数（未启用 FEC 时为 0）
+// ParitySent is the legacy parity-attempt counter. Web stats use written counters.
 func (p *AsyncPort) ParitySent() uint64 {
 	return p.paritySent.Load()
 }
@@ -310,6 +312,7 @@ func (p *AsyncPort) run() {
 		case <-p.ctx.Done():
 			return
 		case reset := <-p.resetEpoch:
+			p.fecTXArmed.Store(false)
 			p.txSeq = 0
 			p.parityNext = 0
 			p.dataNext = 0
@@ -405,6 +408,7 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 				parities = append(parities, par)
 			}
 		}
+		p.fecTXArmed.Store(p.encoder.multipath && p.encoder.armed)
 		best := dataBest
 		p.dropN(sendOwnedBatchToAnyFenced(p, backends, best, batch))
 		for _, par := range parities {
@@ -753,31 +757,10 @@ func sendFrameTo(b *Backend, vf VPNFrame) int {
 	return 1
 }
 
-// FECRecovered FEC 解码恢复帧数（客户端会话级，面板/metrics 用）
-func (c *Client) FECRecovered() uint64 {
-	if c.fecDec == nil {
-		return 0
-	}
-	rec, _ := c.fecDec.FECStats()
-	return rec
-}
-
-// FECLost FEC 无法恢复的确认丢失帧数
-func (c *Client) FECLost() uint64 {
-	if c.fecDec == nil {
-		return 0
-	}
-	_, lost := c.fecDec.FECStats()
-	return lost
-}
-
-// FECStats 恢复/丢失计数（面板用）
-func (c *Client) FECStats() (uint64, uint64) {
-	if c.fecDec == nil {
-		return 0, 0
-	}
-	return c.fecDec.FECStats()
-}
+// Lifetime recovery counters survive receive decoder/key-epoch replacement.
+func (c *Client) FECRecovered() uint64       { return c.fecLifetime.recovered.Load() }
+func (c *Client) FECLost() uint64            { return c.fecLifetime.lost.Load() }
+func (c *Client) FECStats() (uint64, uint64) { return c.FECRecovered(), c.FECLost() }
 
 // ReconnectAttempts 累计重连尝试次数
 func (c *Client) ReconnectAttempts() uint64 { return atomic.LoadUint64(&c.reconnects) }
@@ -819,6 +802,7 @@ func parseServerAddresses(addrStr string) []string {
 }
 
 type Client struct {
+	fecLifetime     fecLifetimeCounters
 	clientID        string
 	serverSessionID string // 记录服务端的会话ID
 	sessionToken    string // 服务端下发的会话令牌；重连握手时回带，用于
@@ -1133,19 +1117,21 @@ func (c *Client) wakeAll() {
 
 // clientConnInfo 单条物理连接的运行明细（面板展示 + 强制重连句柄）
 type clientConnInfo struct {
-	target    string
-	connID    atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
-	remote    atomic.Value // string：对端地址（握手后可得）
-	state     atomic.Value // string：connecting / up / retrying
-	lastError atomic.Value // string：最近一次失败原因
-	rttCache  *uint32      // 微秒（200ms 刷新）
-	backend   atomic.Pointer[Backend]
-	conn      atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
-	txBytes   uint64
-	rxBytes   uint64
-	retries   uint64
-	brutal    atomic.Pointer[brutalApplyResult] // 本连接的内核实际状态；nil=尚未尝试
-	linkedAt  int64                             // 最近一次握手成功时间（unix 秒，0=未连接过）
+	target      string
+	connID      atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
+	remote      atomic.Value // string：对端地址（握手后可得）
+	state       atomic.Value // string：connecting / up / retrying
+	lastError   atomic.Value // string：最近一次失败原因
+	rttMeasured atomic.Bool
+	rttCache    *uint32 // 微秒（200ms 刷新）
+	backend     atomic.Pointer[Backend]
+	conn        atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
+	txBytes     uint64
+	rxBytes     uint64
+	retries     uint64
+	brutal      atomic.Pointer[brutalApplyResult] // 本连接的内核实际状态；nil=尚未尝试
+	negotiated  atomic.Pointer[sessionNeg]
+	linkedAt    int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
@@ -1552,29 +1538,29 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
-	Index     int               `json:"index"`
-	ConnID    string            `json:"conn_id,omitempty"`
-	Target    string            `json:"target"`
-	Remote    string            `json:"remote"`
-	State     string            `json:"state"`
-	LastError string            `json:"last_error,omitempty"`
-	RttMs     uint32            `json:"rtt_ms"`
-	Scheduler schedulerConnJSON `json:"scheduler"`
-	TxBytes   uint64            `json:"tx_bytes"`
-	RxBytes   uint64            `json:"rx_bytes"`
-	Retries   uint64            `json:"retries"`
-	AgeSec    uint64            `json:"age_sec"`
+	Negotiated   bool              `json:"negotiated"`
+	SessionEpoch uint64            `json:"session_epoch"`
+	EncAlgo      int               `json:"enc_algo"`
+	FEC          string            `json:"fec"`
+	Index        int               `json:"index"`
+	ConnID       string            `json:"conn_id,omitempty"`
+	Target       string            `json:"target"`
+	Remote       string            `json:"remote"`
+	State        string            `json:"state"`
+	LastError    string            `json:"last_error,omitempty"`
+	RttMs        uint32            `json:"rtt_ms"`
+	Scheduler    schedulerConnJSON `json:"scheduler"`
+	TxBytes      uint64            `json:"tx_bytes"`
+	RxBytes      uint64            `json:"rx_bytes"`
+	Retries      uint64            `json:"retries"`
+	AgeSec       uint64            `json:"age_sec"`
 	// TCP Brutal 生效结果（客户端本地整形）
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
-	// 服务端授予本端的整形速率。会话级取值（最近一次握手响应），不是逐连接：
-	// 服务端对每条物理连接各授各的，客户端只拿到握手响应里那一份，所以同一会话
-	// 的多条连接会显示同一组数——这是"客户端只有一份协商结果"的真实反映，
-	// 不是聚合错误。0 = 服务端没给（brutal 关或预算为 0）。
+	// Rates granted by this physical connection's handshake. Zero means unshaped.
 	BrutalTxMbps uint64 `json:"brutal_tx_mbps"`
 	BrutalRxMbps uint64 `json:"brutal_rx_mbps"`
-	// 本会话 TLS 握手摘要（客户端自己的 ClientHello/协商结果）。会话级：
-	// 同一会话的所有连接共享同一组值。
+	// This physical connection's immutable TLS handshake result.
 	SNI        string `json:"sni,omitempty"`
 	TLSVersion string `json:"tls_version,omitempty"`
 	TLSCipher  string `json:"tls_cipher,omitempty"`
@@ -1588,42 +1574,55 @@ func (c *Client) avgRTT() float64 {
 	if len(conns) == 0 {
 		return 0
 	}
-	var sum uint64
+	var sum, count uint64
 	for _, ci := range conns {
-		sum += uint64(ci.RttMs)
+		if ci.RttMs > 0 && ci.RttMs < 100000 {
+			sum += uint64(ci.RttMs)
+			count++
+		}
 	}
-	return float64(sum) / float64(len(conns))
+	if count == 0 {
+		return 0
+	}
+	return float64(sum) / float64(count)
 }
 
 func (c *Client) snapshotConns() []connSnapshot {
-	// negInfo 归 sessionMu，连接表归 connsMu。这里用两段不重叠的临界区各取各的，
-	// 而不是持着一把再拿另一把：现有代码里没有确定的锁序，嵌套一把就制造出
-	// 一个全仓库唯一的 connsMu→sessionMu 路径，将来谁在 sessionMu 里碰 connsMu
-	// 就死锁。握手侧只整体替换 negInfo 指针、不原地改字段，所以取出后即可无锁读。
-	c.sessionMu.Lock()
-	neg := c.negInfo
-	c.sessionMu.Unlock()
-	txRate, rxRate := uint64(0), uint64(0)
-	if neg != nil {
-		txRate, rxRate = neg.TxRateMbps, neg.RxRateMbps
-	}
 	c.connsMu.Lock()
 	defer c.connsMu.Unlock()
 	out := make([]connSnapshot, 0, len(c.conns))
 	now := time.Now().Unix()
-	var sni, tlsVer, tlsCipher, tlsAlpn string
-	if neg != nil && neg.TLS != nil {
-		sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
-	}
 	for i := 0; i < int(c.connsCount); i++ {
 		ci, ok := c.conns[i]
 		if !ok {
 			continue
 		}
+		var sni, tlsVer, tlsCipher, tlsAlpn string
+		var txRate, rxRate, epoch uint64
+		var enc int
+		fec := ""
+		negotiated := false
+		state, _ := ci.state.Load().(string)
+		if neg := ci.negotiated.Load(); neg != nil && (state == "up" || state == "") {
+			txRate, rxRate = neg.TxRateMbps, neg.RxRateMbps
+			epoch, enc, negotiated = neg.SessionEpoch, neg.EncAlgo, true
+			fec = "off"
+			if neg.FEC {
+				fec = fmt.Sprintf("xor K=%d", neg.FecGroup)
+			}
+			if neg.TLS != nil {
+				sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
+			}
+		}
+		var rtt uint32
+		if ci.rttCache != nil && ci.rttMeasured.Load() && (state == "up" || state == "") {
+			rtt = atomic.LoadUint32(ci.rttCache) / 1000
+		}
 		snap := connSnapshot{
+			Negotiated: negotiated, SessionEpoch: epoch, EncAlgo: enc, FEC: fec,
 			Index:        i,
 			Target:       ci.target,
-			RttMs:        atomic.LoadUint32(ci.rttCache) / 1000,
+			RttMs:        rtt,
 			Scheduler:    schedulerSnapshot(ci.backend.Load()),
 			TxBytes:      atomic.LoadUint64(&ci.txBytes),
 			RxBytes:      atomic.LoadUint64(&ci.rxBytes),
@@ -1647,7 +1646,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if v, okv := ci.lastError.Load().(string); okv {
 			snap.LastError = v
 		}
-		if la := atomic.LoadInt64(&ci.linkedAt); la > 0 {
+		if la := atomic.LoadInt64(&ci.linkedAt); la > 0 && (state == "up" || state == "") && now >= la {
 			snap.AgeSec = uint64(now - la)
 		}
 		if br := ci.brutal.Load(); br != nil {
@@ -1708,12 +1707,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	defer runCancel()
 
 	lv := c.live.Load()
-	ci := c.connInfoAt(connIndex)
-	shadow := &clientConnInfo{target: lv.targetAddrs[connIndex%len(lv.targetAddrs)], rttCache: new(uint32)}
-	shadow.state.Store("connecting")
-	if ci == nil {
-		ci = shadow // 热更后注册表索引越界：使用影子明细，仅丢失展示
-	}
+	ci := c.beginConnAttempt(connIndex, lv.targetAddrs[connIndex%len(lv.targetAddrs)])
 	linkedAt := time.Time{}
 	defer func() {
 		if !linkedAt.IsZero() {
@@ -1954,6 +1948,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
 			rxFECOut, rxReorderProgress := fecReorderHooks(c.rxReorder, c.rxWorker)
 			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, rxFECOut)
+			c.fecDec.lifetime = &c.fecLifetime
 			c.fecDec.SetReorderProgress(rxReorderProgress)
 			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
@@ -1970,7 +1965,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// 协商快照：面板展示的是服务端实际回传的取值，而不是本地配置声明。
 	// BrutalTotalTx/Rx 是服务端分配给本端上下行的整形总速率（0 = 未整形）。
 	negTx, negRx := resp.BrutalTotalTx, resp.BrutalTotalRx
-	c.negInfo = &sessionNeg{
+	connNeg := &sessionNeg{
 		ProtocolVersion: resp.ProtocolVersion,
 		FEC:             resp.FEC,
 		FecGroup:        int(resp.FecGroup),
@@ -1982,6 +1977,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		RxRateMbps:      negRx,
 		TLS:             resp.TLS,
 	}
+	c.negInfo = connNeg
+	ci.negotiated.Store(connNeg)
 	c.gwV4 = resp.GwV4
 	c.gwV6 = resp.GwV6
 	// 面板展示：分配的隧道地址
@@ -2041,9 +2038,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	atomic.StoreUint32(rttCache, 50000)
 
 	// 连接明细：握手成功，进入 up 态
+	c.connsMu.Lock()
+	ci.rttMeasured.Store(false)
 	ci.rttCache = rttCache
+	c.connsMu.Unlock()
 	ci.conn.Store(connHolder{tlsConn})
-	ci.linkedAt = time.Now().Unix()
+	atomic.StoreInt64(&ci.linkedAt, time.Now().Unix())
 	ci.state.Store("up")
 	ci.lastError.Store("")
 
@@ -2118,17 +2118,20 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case <-rttC:
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
+					ci.rttMeasured.Store(true)
 				}
 			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
+				var written txFrameTotals
+				padEpoch := padAccountingEpoch()
 				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
 					queuedPayload += batch.Bytes
 					var n, last int
-					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch)
+					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -2148,14 +2151,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
 				batchCork.BeforeWrite(len(sendBuffer))
-				if _, err := tlsConn.Write(sendBuffer); err != nil {
+				nw, err := tlsConn.Write(sendBuffer)
+				if err == nil && nw != len(sendBuffer) {
+					err = io.ErrShortWrite
+				}
+				if err != nil {
 					errChan <- err
 					return
 				}
+				c.txPort.written.record(written)
 				backend.completeQueuedBytes(queuedPayload)
 				backend.observeDelivered(queuedPayload)
 				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
-				recordPadBytes(uint64(len(sendBuffer)), padTotal)
+				recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
 				// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline
 				// 可少一次 runtime_pollSetDeadline syscall。
 				atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
@@ -2174,7 +2182,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				// 本端连接，而本端读方向可能仍在正常收帧——面板显示 tunnel up 但
 				// 链路已单向死亡。加超时后本端 10s 内自发现并重拨。
 				refreshWriteDeadline()
-				if _, err := tlsConn.Write(sendBuffer); err != nil {
+				nw, err := tlsConn.Write(sendBuffer)
+				if err == nil && nw != len(sendBuffer) {
+					err = io.ErrShortWrite
+				}
+				if err != nil {
 					errChan <- err
 					return
 				}
@@ -2182,12 +2194,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 	}()
 
+	c.sessionMu.Lock()
+	connDecoder, connWorker, connReorder := c.fecDec, c.rxWorker, c.rxReorder
+	c.sessionMu.Unlock()
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
 		var rxAEADScratch nonceAADScratch
 		var rxProducer *rxBatchProducer
-		if c.rxWorker != nil {
-			rxProducer = c.rxWorker.NewProducer(c.fecDec, func(cerr error) {
+		if connWorker != nil {
+			rxProducer = connWorker.NewProducer(connDecoder, func(cerr error) {
 				select {
 				case errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr):
 				default:
@@ -2231,9 +2246,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			}
 
 			if err == nil && frame != nil {
-				rxBytesBatch += uint64(len(frame))
+				rxBytesBatch += scanner.lastWireSize
 				rxPacketsBatch++
-				if rxPacketsBatch >= 64 {
+				if rxPacketsBatch >= 64 || !scanner.BufferedFrameReady() {
 					flushRxStats()
 				}
 				if seq != 0 && icRx != nil {
@@ -2247,7 +2262,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					frame = plain
 				}
 				if seq == 0 {
-					if !useXorFec || c.fecDec == nil {
+					if !useXorFec || connDecoder == nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
 						return
@@ -2259,7 +2274,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						}
 						continue
 					}
-					if cerr := c.fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
+					if cerr := connDecoder.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
 						return
@@ -2275,10 +2290,10 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					continue
 				}
 				if useXorFec {
-					c.fecDec.OnData(seq, frame)
+					connDecoder.OnData(seq, frame)
 				}
 				// 丢入重排缓冲区，后续的 Write 和 putFrame 由缓冲区内部接管
-				c.rxReorder.Insert(seq, frame)
+				connReorder.Insert(seq, frame)
 			}
 		}
 	}()
@@ -2475,4 +2490,21 @@ func (h connHolder) CloseIfOpen() {
 	if h.c != nil {
 		h.c.Close()
 	}
+}
+
+// Each physical attempt owns its counters; old writer/reader goroutines may still
+// flush while a replacement is dialing, but cannot contaminate the new row.
+func (c *Client) beginConnAttempt(index int, target string) *clientConnInfo {
+	ci := &clientConnInfo{target: target, rttCache: new(uint32)}
+	ci.state.Store("connecting")
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+	if old := c.conns[index]; old != nil {
+		ci.retries = atomic.LoadUint64(&old.retries)
+		if err, ok := old.lastError.Load().(string); ok {
+			ci.lastError.Store(err)
+		}
+		c.conns[index] = ci
+	}
+	return ci
 }

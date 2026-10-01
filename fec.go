@@ -301,6 +301,7 @@ type fecDecoder struct {
 	groupHead       int                       // groupOrder 首个可能仍活跃的位置
 	doneRing        [fecDoneRing]uint32       // 已终结分组 start 的环形表（O(1) 去重）
 	spares          []*fecGroupState          // decoder 内部 free-list，最多复用 pending 上限数量
+	lifetime        *fecLifetimeCounters      // immutable once published
 	recovered       uint64                    // 异或恢复帧计数
 	lost            uint64                    // 确认丢失帧计数
 }
@@ -801,6 +802,9 @@ func (d *fecDecoder) tryRecoverLocked(g *fecGroupState) {
 	g.gotMask |= uint64(1) << uint(missing)
 	d.finishGroupLocked(g)
 	atomic.AddUint64(&d.recovered, 1)
+	if d.lifetime != nil {
+		d.lifetime.recovered.Add(1)
+	}
 	if d.out != nil {
 		d.out(recoveredSeq, rec)
 	} else {
@@ -829,7 +833,11 @@ func (d *fecDecoder) FECStats() (recovered, lost uint64) {
 // 并把组内仍未到达的成员计为确认丢失
 func (d *fecDecoder) finishGroupLocked(g *fecGroupState) {
 	if g.k > 0 && g.parity != nil {
-		atomic.AddUint64(&d.lost, uint64(g.missingCountLocked()))
+		n := uint64(g.missingCountLocked())
+		atomic.AddUint64(&d.lost, n)
+		if d.lifetime != nil {
+			d.lifetime.lost.Add(n)
+		}
 	}
 	d.markDoneLocked(g.start)
 	delete(d.groups, g.start)

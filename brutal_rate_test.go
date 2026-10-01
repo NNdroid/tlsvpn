@@ -150,8 +150,7 @@ func TestConnsSummaryCountsHealthyConns(t *testing.T) {
 //
 // 曾因为 connSnapshot 根本没有速率字段、前端又对本地连接行硬编码 0，导致整形
 // 明明生效（brutal_error 为空）面板却永远显示 "-"。速率取自 negInfo，是会话级
-// （最近一次握手响应）的取值：服务端对每条物理连接各授各的，客户端只拿到握手
-// 响应里那一份，所以同一会话的多条连接显示同一组数是预期行为，不是聚合错误。
+// Each connection must use its own response, independent of the session summary.
 func TestSnapshotConnsCarriesNegotiatedRates(t *testing.T) {
 	newClient := func(setNeg bool) *Client {
 		c := &Client{connsCount: 4, conns: map[int]*clientConnInfo{}}
@@ -162,7 +161,10 @@ func TestSnapshotConnsCarriesNegotiatedRates(t *testing.T) {
 			c.conns[i] = ci
 		}
 		if setNeg {
-			c.negInfo = &sessionNeg{TxRateMbps: 7, RxRateMbps: 125}
+			c.negInfo = &sessionNeg{TxRateMbps: 99, RxRateMbps: 999}
+			for _, ci := range c.conns {
+				ci.negotiated.Store(&sessionNeg{TxRateMbps: 7, RxRateMbps: 125})
+			}
 		}
 		return c
 	}

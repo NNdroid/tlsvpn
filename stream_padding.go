@@ -74,7 +74,7 @@ func appendOwnedFrameBatchStreamWithScratch(buf []byte, frames []VPNFrame, ic *i
 	return buf, n, last
 }
 
-func appendOwnedVPNFrameBatchStreamWithScratch(buf []byte, batch *VPNFrameBatch, ic *innerCipher, scratch *nonceAADScratch) ([]byte, int, int) {
+func appendOwnedVPNFrameBatchStreamWithScratch(buf []byte, batch *VPNFrameBatch, ic *innerCipher, scratch *nonceAADScratch, totals ...*txFrameTotals) ([]byte, int, int) {
 	if batch == nil {
 		return buf, 0, -1
 	}
@@ -83,6 +83,9 @@ func appendOwnedVPNFrameBatchStreamWithScratch(buf []byte, batch *VPNFrameBatch,
 	for _, vf := range batch.Frames {
 		var start int
 		buf, start = appendUnpaddedFrameWithScratch(buf, vf, ic, scratch)
+		if len(totals) > 0 && totals[0] != nil {
+			totals[0].add(vf, len(buf)-start)
+		}
 		last = start
 	}
 	freeFrames(batch.Frames)

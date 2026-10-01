@@ -17,12 +17,12 @@ func TestWebUIMetricFormulaContract(t *testing.T) {
 	for _, want := range []string{
 		"Math.ceil(v.length * 0.95) - 1",
 		"const reorder = data.reorder || {}",
-		"const dataTxPackets = Math.max(0, c.txPackets - parityTx)",
+		"fec.counter_domain === 'written'",
 		"const txAttempts = c.txPackets + dropped",
-		"c.rxBytes / c.rxPackets",
-		"parityTx / dataTxPackets * 100",
+		"c.rxBytes/c.rxPackets",
+		"parityWire/dataWire*100",
 		"const missing = recovered + lost",
-		"recovered / missing * 100",
+		"recovered/missing*100",
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("metric formula contract missing %q", want)

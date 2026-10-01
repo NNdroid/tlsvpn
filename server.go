@@ -430,21 +430,22 @@ type ClientSession struct {
 
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
 type connInfo struct {
-	connID    string
-	remote    string
-	tcpConn   *net.TCPConn
-	rttCache  *uint32 // 微秒（200ms 刷新）
-	backend   atomic.Pointer[Backend]
-	txBytes   uint64
-	rxBytes   uint64
-	txPackets uint64
-	rxPackets uint64
-	brutal    atomic.Pointer[brutalApplyResult] // 内核实际状态；nil=尚未尝试
-	linkedAt  int64                             // 建立时间（unix 秒）
-	brutalTx  uint64
-	brutalRx  uint64
-	epoch     uint64
-	tls       *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
+	connID      string
+	remote      string
+	tcpConn     *net.TCPConn
+	rttMeasured atomic.Bool
+	rttCache    *uint32 // 微秒（200ms 刷新）
+	backend     atomic.Pointer[Backend]
+	txBytes     uint64
+	rxBytes     uint64
+	txPackets   uint64
+	rxPackets   uint64
+	brutal      atomic.Pointer[brutalApplyResult] // 内核实际状态；nil=尚未尝试
+	linkedAt    int64                             // 建立时间（unix 秒）
+	brutalTx    uint64
+	brutalRx    uint64
+	epoch       uint64
+	tls         *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
 }
 
 type Server struct {
@@ -463,9 +464,18 @@ type Server struct {
 	brutalDown uint64
 	cfg        atomic.Pointer[Config] // 当前生效配置（面板热更数据源）
 
-	macAddr       string
-	activeClients map[string]*ClientSession
-	macToIP       map[string]MacBinding
+	macAddr                                                    string
+	txBytesTotal, rxBytesTotal, txPacketsTotal, rxPacketsTotal atomic.Uint64
+	fecLifetime                                                fecLifetimeCounters
+	retiredParityAttempts                                      uint64
+	retiredReorder                                             reorderStatsJSON
+	written                                                    txFrameCounters
+	retiredDropped                                             uint64 // guarded by mu
+	collectClientTraffic                                       atomic.Bool
+	trafficLast                                                map[*ClientSession][2]uint64 // guarded by mu; only active or awaiting final sample
+	retiredTraffic                                             []retiredTrafficSession
+	activeClients                                              map[string]*ClientSession
+	macToIP                                                    map[string]MacBinding
 
 	encrypt   bool
 	encAlgo   int // 服务端期望的内层算法；新会话必须与客户端声明完全一致
@@ -864,25 +874,49 @@ func (s *Server) avgRTT() float64 {
 	if len(conns) == 0 {
 		return 0
 	}
-	var sum uint64
+	var sum, count uint64
 	for _, c := range conns {
-		sum += uint64(c.RttMs)
-	}
-	return float64(sum) / float64(len(conns))
-}
-
-// sampleClientTraffic 各客户端会话累计字节的快照：上行=Rx（client→server）、
-// 下行=Tx（server→client）。趋势/每客户端流量统计按 60 秒差分取增量。
-func (s *Server) sampleClientTraffic() map[string][2]uint64 {
-	out := make(map[string][2]uint64, len(s.activeClients))
-	s.mu.RLock()
-	for id, session := range s.activeClients {
-		out[id] = [2]uint64{
-			atomic.LoadUint64(&session.RxBytes),
-			atomic.LoadUint64(&session.TxBytes),
+		if c.RttMs > 0 && c.RttMs < 100000 {
+			sum += uint64(c.RttMs)
+			count++
 		}
 	}
-	s.mu.RUnlock()
+	if count == 0 {
+		return 0
+	}
+	return float64(sum) / float64(count)
+}
+
+// sampleClientTraffic returns deltas by logical client, including the final
+// unsampled bytes of retired sessions and new sessions created between samples.
+func (s *Server) sampleClientTraffic() map[string][2]uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trafficLast == nil {
+		s.trafficLast = make(map[*ClientSession][2]uint64)
+	}
+	out := make(map[string][2]uint64)
+	add := func(id string, session *ClientSession) {
+		current := [2]uint64{atomic.LoadUint64(&session.RxBytes), atomic.LoadUint64(&session.TxBytes)}
+		previous := s.trafficLast[session]
+		delta := out[id]
+		for i := 0; i < 2; i++ {
+			if current[i] >= previous[i] {
+				delta[i] += current[i] - previous[i]
+			}
+		}
+		out[id] = delta
+		s.trafficLast[session] = current
+	}
+	for id, session := range s.activeClients {
+		add(id, session)
+	}
+	for _, retired := range s.retiredTraffic {
+		add(retired.id, retired.session)
+		delete(s.trafficLast, retired.session)
+	}
+	clear(s.retiredTraffic)
+	s.retiredTraffic = s.retiredTraffic[:0]
 	return out
 }
 
@@ -902,11 +936,15 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 			if ci.tls != nil {
 				sni, tlsVer, tlsCipher, tlsAlpn = ci.tls.SNI, ci.tls.Version, ci.tls.CipherSuite, ci.tls.ALPN
 			}
+			var rtt uint32
+			if ci.rttCache != nil && ci.rttMeasured.Load() {
+				rtt = atomic.LoadUint32(ci.rttCache) / 1000
+			}
 			out = append(out, serverConnSnapshot{
 				ClientID:  id,
 				ConnID:    ci.connID,
 				Remote:    ci.remote,
-				RttMs:     atomic.LoadUint32(ci.rttCache) / 1000,
+				RttMs:     rtt,
 				Scheduler: schedulerSnapshot(ci.backend.Load()),
 				TxBytes:   atomic.LoadUint64(&ci.txBytes),
 				RxBytes:   atomic.LoadUint64(&ci.rxBytes),
@@ -1198,6 +1236,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		}
 	}()
 
+	srv.installTrafficAccounting(dailyTraffic)
 	if cfg.Web.Addr != "" {
 		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
 	}
@@ -1638,6 +1677,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if fecEncK > 0 {
 			rxFECOut, rxReorderProgress := fecReorderHooks(session.RxReorder, session.RxWorker)
 			session.FecDec = NewFECDecoder(fecEncK, fecRx, rxFECOut)
+			session.FecDec.lifetime = &s.fecLifetime
 			session.FecDec.SetReorderProgress(rxReorderProgress)
 			// Current Go clients always advertise BrutalGroups/BrutalConns as the
 			// authenticated physical-topology declaration even when shaping is off.
@@ -1778,7 +1818,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
+	s.mu.Lock()
 	ci.rttCache = rttCache
+	s.mu.Unlock()
 
 	connTxChan := make(chan *VPNFrameBatch, 32)
 	backend := port.RegisterOwnedBackend(connTxChan, rttCache)
@@ -1824,17 +1866,20 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case <-rttC:
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
+					ci.rttMeasured.Store(true)
 				}
 			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
+				var written txFrameTotals
+				padEpoch := padAccountingEpoch()
 				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
 					queuedPayload += batch.Bytes
 					var n, last int
-					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch)
+					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -1854,16 +1899,23 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				padTotal := uint64(tailPad)
 				refreshWriteDeadline()
 				batchCork.BeforeWrite(len(sendBuffer))
-				_, werr := conn.Write(sendBuffer)
+				nw, werr := conn.Write(sendBuffer)
+				if werr == nil && nw != len(sendBuffer) {
+					werr = io.ErrShortWrite
+				}
 				if werr != nil {
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
 					conn.Close()
 					return
 				}
+				port.written.record(written)
+				s.written.record(written)
+				s.txBytesTotal.Add(uint64(len(sendBuffer)))
+				s.txPacketsTotal.Add(uint64(txPackets))
 				backend.completeQueuedBytes(queuedPayload)
 				backend.observeDelivered(queuedPayload)
 				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
-				recordPadBytes(uint64(len(sendBuffer)), padTotal)
+				recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
 				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
 				atomic.AddUint64(&session.TxPackets, uint64(txPackets))
 				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
@@ -1910,6 +1962,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if rxPacketsBatch == 0 {
 			return
 		}
+		s.rxBytesTotal.Add(rxBytesBatch)
+		s.rxPacketsTotal.Add(rxPacketsBatch)
 		atomic.AddUint64(&session.RxBytes, rxBytesBatch)
 		atomic.AddUint64(&session.RxPackets, rxPacketsBatch)
 		atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
@@ -1948,9 +2002,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				putFrame(frame)
 				return
 			}
-			rxBytesBatch += uint64(len(frame))
+			rxBytesBatch += scanner.lastWireSize
 			rxPacketsBatch++
-			if rxPacketsBatch >= 64 {
+			if rxPacketsBatch >= 64 || !scanner.BufferedFrameReady() {
 				flushRxStats()
 			}
 			if seq != 0 && icRx != nil {
@@ -2011,6 +2065,9 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 	delete(s.usedV4, session.IPv4)
 	delete(s.usedV6, session.IPv6)
 	delete(s.activeClients, clientID)
+	if s.collectClientTraffic.Load() {
+		s.retiredTraffic = append(s.retiredTraffic, retiredTrafficSession{clientID, session})
+	}
 	evBus.emit("off", "warn", clientID, "session destroyed; IPs and MAC binding released")
 	s.macToIPCleanLocked(session.MAC, session.IPv4)
 	s.vswitch.RemovePort(clientID)
@@ -2021,6 +2078,11 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 		session.RxReorder.Close()
 	}
 	session.Port.Close()
+	s.retiredDropped += session.Port.Dropped()
+	s.retiredParityAttempts += session.Port.ParitySent()
+	if session.RxReorder != nil {
+		addReorderStats(&s.retiredReorder, session.RxReorder.Stats())
+	}
 }
 
 // macToIPCleanLocked 会话销毁时回收其 MAC 绑定，防止表无限增长。

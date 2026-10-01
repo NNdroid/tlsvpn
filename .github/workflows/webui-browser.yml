@@ -18,6 +18,8 @@ jobs:
           node-version: '22'
       - name: Check i18n coverage
         run: node scripts/check_i18n.mjs
+      - name: Verify nonzero metric formulas and restart boundaries
+        run: node scripts/webui_metrics_regression.mjs
       - name: Install Playwright
         run: |
           npm install --no-save --package-lock=false playwright@1.55.0

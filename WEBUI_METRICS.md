@@ -1,0 +1,16 @@
+# Dashboard accounting contract
+
+- `instance_id` identifies a process; `sample_time_ms` supplies the snapshot clock. A new process resets browser rates, scheduler baselines, logs and events. SSE reconnects carry the current instance and cursors; the server resets cursors from a different process.
+- `global_*` are process lifetime counters, including retired sessions. Client rows remain session lifetime counters. Daily history may survive restarts and is not a process total.
+- TX/RX byte counters include application-frame headers, inner AEAD tags and padding. They exclude empty heartbeats, handshake records and outer TLS/TCP/IP overhead. RX accounts the complete consumed record, before removing padding or decrypting the payload.
+- Up means client to server and down means server to client, in every dashboard view. Server TX maps to down; server RX maps to up.
+- `active_clients` counts online logical clients. `retained_sessions` includes disconnected sessions reserved for reconnect. Server `sessions.active` measures reserved sessions against the configured limit.
+- FEC `counter_domain=written` means DATA/PARITY/CONTROL counters advance only after a complete successful application write. `parity_tx` is successful parity frames; `parity_attempts` separately exposes scheduler attempts. The legacy internal `AsyncPort.ParitySent()` method retains its attempt semantics for compatibility.
+- FEC overhead is `parity_wire_bytes / data_wire_bytes`, using application-frame wire bytes before cover padding. It is a byte ratio, not a packet ratio or a network-interface bandwidth measurement. Unknown legacy counter domains render unavailable. Overview and diagnostics use the same formula; configured redundancy alone is not a fault.
+- FEC enabled/negotiated sessions, armed TX sessions and RX bypass sessions are separate. TX activity requires multi-path topology and encoder arming; a retained session can remain negotiated with no online paths.
+- Padding `wire_bytes` includes all successful non-heartbeat application records in the current policy epoch, including unpadded records and handshake/control writes. Thus it has a broader record scope than the post-handshake traffic totals. Off mode counts wire bytes and reports zero padding. A strategy switch starts a new epoch; old prepared writes do not contaminate the new period.
+- Scheduler assignment measures accepted payload bytes (DATA plus FEC), not successful wire bytes. Shares are calculated within a logical client. `rate_mbps` is the payload socket-write EWMA, not end-to-end capacity. DATA standby paths may carry parity.
+- A connection owns its immutable negotiation result. Disconnected paths do not report live TLS/rate/RTT values. Bootstrap RTT estimates are not measured RTT; averages exclude unavailable paths.
+- Per-client history consumes session deltas, including retired tails and new sessions between samples. Pending retired samples are released after sampling. History sampling runs without a Web listener as well. Trend rates use actual elapsed time.
+
+Regression gates: Go accounting/lifecycle/traffic tests with Linux race, Node metric execution, six-language Chromium rendering with nonzero client/server fixtures and restart sequences, and mixed Go/Rust wire E2E against the actual PR commit. No wire-format changes are required by these fixes.
