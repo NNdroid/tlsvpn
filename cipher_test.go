@@ -454,6 +454,7 @@ func TestStatsClientModeShape(t *testing.T) {
 		encAlgo:    encAlgoGCM,
 		assignedV4: "10.0.0.5",
 		fecStatus:  "xor K=4",
+		negInfo:    &sessionNeg{FEC: true, FecGroup: 4},
 	}
 	cli.live.Store(&liveConfig{encrypt: true, fecMode: true, connsCount: 1, targetAddrs: []string{"127.0.0.1:4000"}})
 	mux := http.NewServeMux()
@@ -682,7 +683,6 @@ func TestReconnectBackoff(t *testing.T) {
 		t.Fatalf("快速失败阈值应低于封顶: fast=%s max=%s", reconnectFastFailMax, reconnectBackoffMax)
 	}
 }
-
 
 func TestGCM128SealOpenRoundtrip(t *testing.T) {
 	salt := randomSalt()
