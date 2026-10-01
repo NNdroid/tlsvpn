@@ -24,7 +24,8 @@ import (
 
 // ======================= 异步聚合端口 (支持 MinRTT) =======================
 type Backend struct {
-	ch       chan []VPNFrame
+	ch       chan []VPNFrame // legacy/cold compatibility path; production uses ownedCh
+	ownedCh  chan *VPNFrameBatch
 	rttCache *uint32
 
 	// Adaptive scheduler observability. queuedBytes includes channel-resident
@@ -39,6 +40,7 @@ type Backend struct {
 	assignedBatches    atomic.Uint64 // actual data batches accepted by this backend
 	fecAssignedBytes   atomic.Uint64 // FEC parity payload bytes accepted by this backend
 	fecAssignedBatches atomic.Uint64 // FEC parity batches accepted by this backend
+	fecFenceGen        atomic.Uint64 // latest dynamic RX fence generation queued before data on this backend
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
 	rateSampleBytes    uint64
 	rateSampleStart    time.Time
@@ -162,6 +164,54 @@ func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 		}
 	}
 }
+
+// RegisterOwnedBackend is the production data path. The channel carries the
+// batch object itself, so descriptor storage and its byte count have one owner.
+func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint32) *Backend {
+	p.backendsMu.Lock()
+	defer p.backendsMu.Unlock()
+	b := &Backend{ownedCh: ch, rttCache: rttCache}
+	p.backends = append(p.backends, b)
+	return b
+}
+
+func (p *AsyncPort) UnregisterOwnedBackend(ch chan *VPNFrameBatch) {
+	p.backendsMu.Lock()
+	defer p.backendsMu.Unlock()
+	for i, b := range p.backends {
+		if b.ownedCh == ch {
+			p.preferred.CompareAndSwap(b, nil)
+			p.backends = append(p.backends[:i], p.backends[i+1:]...)
+			break
+		}
+	}
+}
+
+func (b *Backend) queueLen() int {
+	if b == nil {
+		return 0
+	}
+	if b.ownedCh != nil {
+		return len(b.ownedCh)
+	}
+	return len(b.ch)
+}
+
+func (b *Backend) queueCap() int {
+	if b == nil {
+		return 0
+	}
+	if b.ownedCh != nil {
+		return cap(b.ownedCh)
+	}
+	return cap(b.ch)
+}
+
+func (b *Backend) queueHasRoom() bool {
+	capacity := b.queueCap()
+	return capacity > 0 && b.queueLen() < capacity
+}
+
 func (p *AsyncPort) WriteFrame(frame []byte) error {
 	select {
 	case <-p.ctx.Done():
@@ -223,7 +273,7 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 
 		// Fast path: dispatchBatch keeps the preferred backend in an atomic
 		// pointer. When that queue has room, no backend-list lock/scan is needed.
-		if b := p.preferred.Load(); b != nil && cap(b.ch) > 0 && len(b.ch) < cap(b.ch) {
+		if b := p.preferred.Load(); b != nil && b.queueHasRoom() {
 			return true
 		}
 
@@ -231,7 +281,7 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 		n := len(p.backends)
 		ready := false
 		for _, b := range p.backends {
-			if cap(b.ch) > 0 && len(b.ch) < cap(b.ch) {
+			if b.queueHasRoom() {
 				ready = true
 				break
 			}
@@ -252,8 +302,8 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 
 func (p *AsyncPort) run() {
 	const MaxBatchBytes = streamTLSBatchSoftLimit
-	batch := make([]VPNFrame, 0, 128)
-	var batchBytes int
+	batch := getOwnedVPNFrameBatch()
+	defer func() { freeOwnedVPNFrameBatch(batch) }()
 
 	for {
 		select {
@@ -269,18 +319,25 @@ func (p *AsyncPort) run() {
 			} else {
 				p.encoder = nil
 			}
+			// Fence generations are scoped to the sequence/key epoch because a new
+			// encoder starts generation numbering from one. Backends can survive an
+			// epoch reset, so clear their remembered generation or the first new
+			// SUSPEND/RESUME could be mistaken for an already-queued old fence.
+			p.backendsMu.RLock()
+			for _, b := range p.backends {
+				if b != nil {
+					b.fecFenceGen.Store(0)
+				}
+			}
+			p.backendsMu.RUnlock()
 			close(reset.done)
 		case frame := <-p.ch:
 			p.noteInputDequeued(len(frame))
 			if len(frame) == 0 {
-				// 零长帧不携带数据：不消耗 seq、不参与 FEC 分组
-				// （否则接收端按算术分组会把该槽位视为永久缺失，毒化整组恢复）
 				putFrame(frame)
 				continue
 			}
 			if !p.waitForBackendSlot() {
-				// 没有活动后端时在 seq 分配前丢弃；连接建立后新的 TAP
-				// 帧会重新进入队列，不给接收端留下不存在的序号洞。
 				p.dropN(1)
 				putFrame(frame)
 				continue
@@ -291,17 +348,16 @@ func (p *AsyncPort) run() {
 				putFrame(frame)
 				continue
 			}
-			batch = append(batch, VPNFrame{Seq: seq, Data: frame})
-			batchBytes += len(frame)
+			appendOwnedVPNFrame(batch, VPNFrame{Seq: seq, Data: frame})
 
 			// Interactive bursts get one very short coalescing opportunity. Under
 			// sustained load p.ch is already non-empty, so the hot bulk path never sleeps.
-			if len(p.ch) == 0 && batchBytes < MaxBatchBytes {
+			if len(p.ch) == 0 && batch.Bytes < MaxBatchBytes {
 				time.Sleep(150 * time.Microsecond)
 			}
 
 			queueLen := len(p.ch)
-			for i := 0; i < queueLen && batchBytes < MaxBatchBytes; i++ {
+			for i := 0; i < queueLen && batch.Bytes < MaxBatchBytes; i++ {
 				f := <-p.ch
 				p.noteInputDequeued(len(f))
 				if len(f) == 0 {
@@ -314,78 +370,79 @@ func (p *AsyncPort) run() {
 					putFrame(f)
 					continue
 				}
-				batch = append(batch, VPNFrame{Seq: s, Data: f})
-				batchBytes += len(f)
+				appendOwnedVPNFrame(batch, VPNFrame{Seq: s, Data: f})
 			}
 
-			// Adaptive scheduling uses bytes, backend in-flight work and measured path
-			// delivery rate. queueLen remains only the bounded drain snapshot above.
-			p.dispatchBatch(batch, batchBytes)
-
-			batch = batch[:0]
-			batchBytes = 0
+			// Ownership moves as one object: scheduler/TLS writer consume both the
+			// descriptors and the authoritative payload-byte count.
+			p.dispatchOwnedBatch(batch)
+			batch = getOwnedVPNFrameBatch()
 		}
 	}
 }
 
-// dispatchBatch 把一批帧分发给后端，并接管 batch 内全部缓冲的所有权：
-//   - XOR FEC：数据帧 MinRTT 单路发送，校验帧只发送一份并在其它健康路径间轮转；
-//   - 普通模式：MinRTT 单路发送。
-//
-// wire format 不变，旧端/新端 decoder 都只要求收到至少一份 parity。
-func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
-	// register/unregister 是冷路径；发送是非阻塞 channel 投递。直接在 RLock
-	// 下使用后端切片，避免每个 batch append([]*Backend(nil), ...) 分配快照。
+// dispatchBatch 把一个 owned batch 分发给后端，并接管其中全部 payload。
+// 成功时 batch 指针本身转交给唯一后端；失败时本函数负责释放并归池。
+func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
+	if batch == nil {
+		return
+	}
 	p.backendsMu.RLock()
 	defer p.backendsMu.RUnlock()
 	backends := p.backends
 	if len(backends) == 0 {
-		p.dropN(len(batch))
-		freeFrames(batch)
+		p.dropN(len(batch.Frames))
+		freeOwnedVPNFrameBatch(batch)
 		return
 	}
-	pressure := p.schedulerPressureFor(backends, uint64(batchBytes))
-	dataBest := p.pickAdaptiveBackend(backends, pressure, uint64(batchBytes))
+	pressure := p.schedulerPressureFor(backends, batch.Bytes)
+	dataBest := p.pickAdaptiveBackend(backends, pressure, batch.Bytes)
 
 	if p.encoder != nil {
 		parities := p.parityScratch[:0]
-		for _, vf := range batch {
+		for _, vf := range batch.Frames {
 			if par := p.encoder.add(vf); par != nil {
 				parities = append(parities, par)
 			}
 		}
 		best := dataBest
-		// 低负载仍走 MinRTT；持续 backlog 时会在 RTT 接近的健康路径间主动 striping。
-		// 若目标连接瞬时满则继续尝试其它后端；全部满时
-		// 做有界短退让，让拥塞尽量回推到 seq 分配之前的输入队列。
-		p.dropN(sendBatchToAny(backends, best, batch))
+		p.dropN(sendOwnedBatchToAnyFenced(p, backends, best, batch))
 		for _, par := range parities {
 			if len(backends) < 2 {
-				// 单条 TCP 是严格有序流：原始数据若因 TCP 丢包/HOL 尚未到达，
-				// 同一路径后面的 parity 也不可能越过它，因此没有提前恢复价值。
-				// 仍持续喂 encoder 保持 seq/K 分组对齐，但不把 parity 发上线路。
 				putFrame(par)
 				continue
 			}
 			p.paritySent.Add(1)
-			// parity 与数据尽量走不同物理路径，并在健康后端间轮转。decoder
-			// 是会话级共享状态，只需任意一条连接收到一份即可恢复单帧丢失。
 			target := p.pickParityBackend(backends, best)
 			p.dropN(sendOwnedFrameTo(target, VPNFrame{Seq: 0, Data: par}))
 		}
-		clear(parities) // 不让 scratch 长期持有已归池 payload
+		clear(parities)
 		p.parityScratch = parities[:0]
 		return
 	}
 
-	p.dropN(sendBatchToAny(backends, dataBest, batch))
+	p.dropN(sendOwnedBatchToAnyFenced(p, backends, dataBest, batch))
+}
+
+// dispatchBatch retains the historical raw-slice API for tests/cold callers.
+// It converts once into the ownership object, transfers payload ownership, and
+// never participates in the production AsyncPort.run hot path.
+func (p *AsyncPort) dispatchBatch(batch []VPNFrame, batchBytes int) {
+	owned := getOwnedVPNFrameBatch()
+	owned.Frames = append(owned.Frames, batch...)
+	owned.Bytes = uint64(batchBytes)
+	for i := range batch {
+		batch[i].Data = nil
+	}
+	p.dispatchOwnedBatch(owned)
 }
 
 const backendRTTHysteresisMin = 5_000 // 微秒
 
 func backendScore(b *Backend) (uint32, bool) {
-	qLen := len(b.ch)
-	if qLen >= cap(b.ch)-2 {
+	qLen := b.queueLen()
+	qCap := b.queueCap()
+	if qCap == 0 || qLen >= qCap-2 {
 		return math.MaxUint32, false
 	}
 	rtt := atomic.LoadUint32(b.rttCache)
@@ -517,32 +574,94 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 	return backends[start]
 }
 
-// sendBatchToAny 把数据 batch 的 payload 所有权转移给某个可写后端。
-// 热路径先无阻塞尝试 preferred/其它连接；只有所有连接都满时才进入最多 5ms
-// 的短退让。这样可以显著减少“分配 seq 后再丢 batch”造成的重排序号洞。
-// 成功或最终失败后，调用方 batch 中的 Data 都会被置 nil。
-func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) int {
-	out := getVPNFrameBatch(len(batch))
-	copy(out, batch)
-	for i := range batch {
-		batch[i].Data = nil
+// tryQueueOwnedBatch transfers batch ownership on success and leaves ownership
+// with the caller on failure. Production backends use ownedCh and therefore do
+// not copy descriptors. The legacy []VPNFrame channel exists only for cold/unit
+// compatibility and snapshots descriptors before taking payload ownership.
+func tryQueueOwnedBatch(b *Backend, batch *VPNFrameBatch) bool {
+	if b == nil || batch == nil {
+		return false
 	}
-	outBytes := vpnFrameBatchBytes(out)
+	if b.ownedCh != nil {
+		select {
+		case b.ownedCh <- batch:
+			return true
+		default:
+			return false
+		}
+	}
+	if b.ch == nil {
+		return false
+	}
+	legacy := getVPNFrameBatch(len(batch.Frames))
+	copy(legacy, batch.Frames)
+	select {
+	case b.ch <- legacy:
+		// payload ownership moved into the copied legacy descriptors; only the
+		// ownership-object descriptor storage is returned here.
+		putOwnedVPNFrameBatch(batch)
+		return true
+	default:
+		putVPNFrameBatch(legacy)
+		return false
+	}
+}
+
+// sendOwnedBatchToAnyFenced is the production scheduler transfer. AsyncPort has
+// already computed batch.Bytes while ingesting TAP frames, so neither scheduler
+// nor TLS writer needs a frame-length scan.
+func sendOwnedBatchToAnyFenced(p *AsyncPort, backends []*Backend, preferred *Backend, batch *VPNFrameBatch) int {
+	out := batch
+	if out == nil {
+		return 0
+	}
+	outBytes := out.Bytes
 
 	trySend := func(b *Backend) bool {
 		if b == nil {
 			return false
 		}
-		b.addQueuedBytes(outBytes)
-		select {
-		case b.ch <- out:
+
+		sendBatch := out
+		var ctrl fecModeControl
+		fenced := false
+		if p != nil && p.encoder != nil {
+			if current, ok := p.encoder.currentModeControl(); ok && b.fecFenceGen.Load() < current.Generation {
+				ctrl = current
+				payload := getFrameAtLeast(fecControlWireLen)[:0]
+				payload = appendFECModeControl(payload, current)
+				withFence := getOwnedVPNFrameBatch()
+				appendOwnedVPNFrame(withFence, VPNFrame{Seq: 0, Data: payload})
+				withFence.Frames = append(withFence.Frames, out.Frames...)
+				withFence.Bytes += out.Bytes
+				sendBatch = withFence
+				fenced = true
+			}
+		}
+
+		b.addQueuedBytes(sendBatch.Bytes)
+		if tryQueueOwnedBatch(b, sendBatch) {
+			if fenced {
+				b.fecFenceGen.Store(ctrl.Generation)
+				// sendBatch owns copied data descriptors now; return only out's
+				// descriptor container, never the payloads.
+				putOwnedVPNFrameBatch(out)
+			}
+			out = nil
 			b.assignedBytes.Add(outBytes)
 			b.assignedBatches.Add(1)
 			return true
-		default:
-			b.completeQueuedBytes(outBytes)
-			return false
 		}
+
+		b.completeQueuedBytes(sendBatch.Bytes)
+		if fenced {
+			// The data payloads still belong to out. Only the temporary fence has
+			// unique payload ownership on a failed attempt.
+			putFrame(sendBatch.Frames[0].Data)
+			sendBatch.Frames[0].Data = nil
+			putOwnedVPNFrameBatch(sendBatch)
+		}
+		return false
 	}
 
 	tryAll := func() bool {
@@ -561,8 +680,6 @@ func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) i
 		return 0
 	}
 
-	// 仅拥塞慢路径进入这里。5ms 远低于 50ms reorder skip deadline，
-	// 同时给 TLS writer 足够机会腾出一个 batch slot。
 	deadline := time.Now().Add(5 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		time.Sleep(50 * time.Microsecond)
@@ -571,18 +688,33 @@ func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) i
 		}
 	}
 
-	freeFrames(out)
-	putVPNFrameBatch(out)
-	return len(out)
+	dropped := len(out.Frames)
+	freeOwnedVPNFrameBatch(out)
+	return dropped
 }
 
-// sendBatchTo 保留给单后端测试/兼容调用；内部仍走同一所有权转移路径。
+// sendBatchToAnyFenced is retained for cold/tests that still construct a raw
+// []VPNFrame. It converts once into the ownership object; production AsyncPort
+// never enters this compatibility path.
+func sendBatchToAnyFenced(p *AsyncPort, backends []*Backend, preferred *Backend, batch []VPNFrame) int {
+	owned := getOwnedVPNFrameBatch()
+	owned.Frames = append(owned.Frames, batch...)
+	owned.Bytes = vpnFrameBatchBytes(batch)
+	for i := range batch {
+		batch[i].Data = nil
+	}
+	return sendOwnedBatchToAnyFenced(p, backends, preferred, owned)
+}
+
+func sendBatchToAny(backends []*Backend, preferred *Backend, batch []VPNFrame) int {
+	return sendBatchToAnyFenced(nil, backends, preferred, batch)
+}
+
 func sendBatchTo(b *Backend, batch []VPNFrame) int {
 	return sendBatchToAny([]*Backend{b}, b, batch)
 }
 
-// sendOwnedFrameTo 把单帧 payload 所有权直接转移给一个后端；用于
-// 单份 FEC parity，避免旧广播路径的 N 次 clone/memcpy。
+// sendOwnedFrameTo transfers one already-owned payload as a one-frame batch.
 func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
 	if b == nil {
 		if vf.Data != nil {
@@ -590,38 +722,35 @@ func sendOwnedFrameTo(b *Backend, vf VPNFrame) int {
 		}
 		return 1
 	}
-	out := getVPNFrameBatch(1)
-	out[0] = vf
-	n := uint64(len(vf.Data))
+	out := getOwnedVPNFrameBatch()
+	appendOwnedVPNFrame(out, vf)
+	n := out.Bytes
 	b.addQueuedBytes(n)
-	select {
-	case b.ch <- out:
+	if tryQueueOwnedBatch(b, out) {
 		b.fecAssignedBytes.Add(n)
 		b.fecAssignedBatches.Add(1)
 		return 0
-	default:
-		b.completeQueuedBytes(n)
-		freeFrames(out)
-		putVPNFrameBatch(out)
-		return 1
 	}
+	b.completeQueuedBytes(n)
+	freeOwnedVPNFrameBatch(out)
+	return 1
 }
 
-// sendFrameTo 保留给需要独立副本的兼容/测试路径。
+// sendFrameTo retains copy semantics for callers that do not transfer payload ownership.
 func sendFrameTo(b *Backend, vf VPNFrame) int {
-	out := getVPNFrameBatch(1)
-	out[0] = VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)}
-	n := uint64(len(out[0].Data))
-	b.addQueuedBytes(n)
-	select {
-	case b.ch <- out:
-		return 0
-	default:
-		b.completeQueuedBytes(n)
-		freeFrames(out)
-		putVPNFrameBatch(out)
+	if b == nil {
 		return 1
 	}
+	out := getOwnedVPNFrameBatch()
+	appendOwnedVPNFrame(out, VPNFrame{Seq: vf.Seq, Data: cloneFrame(vf.Data)})
+	n := out.Bytes
+	b.addQueuedBytes(n)
+	if tryQueueOwnedBatch(b, out) {
+		return 0
+	}
+	b.completeQueuedBytes(n)
+	freeOwnedVPNFrameBatch(out)
+	return 1
 }
 
 // FECRecovered FEC 解码恢复帧数（客户端会话级，面板/metrics 用）
@@ -729,6 +858,7 @@ type Client struct {
 	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
 	txPort           *AsyncPort
 	rxReorder        *ReorderBuffer
+	rxWorker         *rxSessionWorker
 	fecDec           *fecDecoder
 	TxBytes          uint64
 	RxBytes          uint64
@@ -1203,11 +1333,12 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		tapDelivery := newOwnedTapDelivery(ctx, c.tap, asyncTapDeliveryQueue, reportTapWriteErr)
 		c.rxReorder = NewOwnedReorderBuffer(tapDelivery.EnqueueOwned)
 	} else {
-		c.rxReorder = NewReorderBuffer(func(orderedFrame []byte) {
+		c.rxReorder = NewActorReorderBuffer(func(orderedFrame []byte) {
 			if _, werr := c.tap.Write(orderedFrame); werr != nil {
 				reportTapWriteErr(werr)
 			}
 		})
+		c.rxWorker = newRXSessionWorker(c.rxReorder)
 	}
 
 	// Web 面板（可选，web.addr 未指定时不启动）；携带完整配置供面板热更
@@ -1246,6 +1377,9 @@ func (c *Client) Run(ctx context.Context) {
 			[]policyRoutingSpec{policyRoutingSpecFor(c.live.Load(), c.gwV4, c.gwV6)})
 		for _, spec := range specs {
 			cleanPolicyRouting(c.tapName, spec)
+		}
+		if c.rxWorker != nil {
+			c.rxWorker.Close()
 		}
 		c.rxReorder.Close()
 		c.txPort.Close()
@@ -1653,7 +1787,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.connID.Store(connID)
 
 	req := HandshakeReq{
-		ProtocolVersion: 2,
+		ProtocolVersion: protocolVersion,
 		ClientInstance:  instanceID,
 		ConnID:          connID,
 		ClientID:        c.clientID,
@@ -1707,7 +1841,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	scanner.SetMaxDataLen(maxWireDataLen)
 	log.Debugf("[Conn %d] <= handshake response conn_id=%s session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, connID, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
-	if resp.ProtocolVersion != 2 {
+	if resp.ProtocolVersion != protocolVersion {
 		return 0, fmt.Errorf("unsupported server protocol version %d", resp.ProtocolVersion)
 	}
 	c.sessionMu.Lock()
@@ -1788,12 +1922,26 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			log.Warnf("[Conn %d] FEC requested but server negotiated fec_group=%d, FEC disabled", connIndex, resp.FecGroup)
 		}
 	}
+	// Resolve the receive epoch before touching decoder state. Multi-connection
+	// readers may still own partial batches from the old key/session generation;
+	// AdvanceEpoch invalidates them and waits for all already-queued work before
+	// FEC/reorder are reset or rebound below.
+	isNewSession := false
+	if c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {
+		isNewSession = true
+		c.serverSessionID = resp.SessionID
+		c.sessionEpoch = resp.SessionEpoch
+	}
+	if isNewSession && c.rxWorker != nil {
+		c.rxWorker.AdvanceEpochAndReset(c.fecDec)
+	}
+
 	fecRebuild := false
 	useXorFec := lv.fecMode && c.fecNegotiated > 0
 	if useXorFec {
 		// FEC 编解码器绑定当前会话的加密器与盐：会话/盐变化即重建
 		if c.fecDec == nil || c.fecAlgo != encAlgo || c.fecSaltKey != resp.EncSalt {
-			if c.fecDec != nil {
+			if c.fecDec != nil && c.rxWorker == nil {
 				c.fecDec.Reset()
 			}
 			fecRebuild = true
@@ -1801,8 +1949,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.fecSaltKey = resp.EncSalt
 		}
 		if fecRebuild {
-			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序
-			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, c.rxReorder.Insert)
+			// XOR FEC 解码器：恢复出的帧按原 seq 注入重排缓冲，保证输出有序。
+			// client.conns 属于 restart-only 拓扑配置，因此 ==1 时可以安全使用
+			// 静态 RX bypass；不能用 liveConns，因为临时 2->1 时 parity 仍有价值。
+			rxFECOut, rxReorderProgress := fecReorderHooks(c.rxReorder, c.rxWorker)
+			c.fecDec = NewFECDecoder(c.fecNegotiated, fecRx, rxFECOut)
+			c.fecDec.SetReorderProgress(rxReorderProgress)
+			c.fecDec.SetStaticSinglePath(isStaticSinglePathTopology(lv.connsCount))
 			c.txPort.AttachFEC(c.fecNegotiated, fecTx)
 		}
 	}
@@ -1810,12 +1963,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.encAlgo = encAlgo
 		c.icTx = icTx
 		c.icRx = icRx
-	}
-	isNewSession := false
-	if c.serverSessionID != resp.SessionID || c.sessionEpoch != resp.SessionEpoch {
-		isNewSession = true
-		c.serverSessionID = resp.SessionID
-		c.sessionEpoch = resp.SessionEpoch
 	}
 	// 记下服务端下发的会话令牌，供后续重连回带。服务端未开启 session_token
 	// 时该字段为空，行为与旧版一致。
@@ -1847,7 +1994,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.txPort.ResetEpoch(0, nil)
 		}
 		log.Infof("[Conn %d] 🔄 server reset the session; flushing stale local receive buffers...", connIndex)
-		c.rxReorder.Reset()
+		if c.rxWorker == nil {
+			c.rxReorder.Reset()
+		}
 	}
 
 	// 会话身份落盘：进程被杀后重启，第一次握手即回带旧令牌接回既有会话，
@@ -1899,12 +2048,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	ci.lastError.Store("")
 
 	errChan := make(chan error, 2)
-	connTxChan := make(chan []VPNFrame, 32)
-	backend := c.txPort.RegisterBackend(connTxChan, rttCache)
+	connTxChan := make(chan *VPNFrameBatch, 32)
+	backend := c.txPort.RegisterOwnedBackend(connTxChan, rttCache)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
-		c.txPort.UnregisterBackend(connTxChan)
+		c.txPort.UnregisterOwnedBackend(connTxChan)
 	}()
 
 	batchCork := newTLSBatchCork(rawConn)
@@ -1935,6 +2084,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1969,16 +2119,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
 				}
-			case frames := <-connTxChan:
+			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
 				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
-					queuedPayload += vpnFrameBatchBytes(frames)
+					queuedPayload += batch.Bytes
 					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
+					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -1987,7 +2137,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 						break
 					}
 					select {
-					case frames = <-connTxChan:
+					case batch = <-connTxChan:
 						continue
 					default:
 						break drainBatches
@@ -2034,6 +2184,18 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	go func() {
 		var rxBytesBatch, rxPacketsBatch uint64
+		var rxAEADScratch nonceAADScratch
+		var rxProducer *rxBatchProducer
+		if c.rxWorker != nil {
+			rxProducer = c.rxWorker.NewProducer(c.fecDec, func(cerr error) {
+				select {
+				case errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr):
+				default:
+				}
+				_ = tlsConn.Close()
+			})
+			defer rxProducer.Flush()
+		}
 		flushRxStats := func() {
 			if rxPacketsBatch == 0 {
 				return
@@ -2075,7 +2237,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					flushRxStats()
 				}
 				if seq != 0 && icRx != nil {
-					plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
+					plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
 					if derr != nil {
 						// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 						log.Debugf("[Conn %d] dropped tampered/foreign frame (seq=%d): %v", connIndex, seq, derr)
@@ -2084,10 +2246,32 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					}
 					frame = plain
 				}
-				if seq == 0 && useXorFec && c.isParityFrame(frame) {
-					// XOR 校验帧：交给 FEC 解码器，恢复出的帧由其回调写 TAP
-					c.fecDec.OnParity(frame)
+				if seq == 0 {
+					if !useXorFec || c.fecDec == nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)
+						return
+					}
+					if rxProducer != nil {
+						rxProducer.Push(0, frame)
+						if !scanner.BufferedFrameReady() {
+							rxProducer.Flush()
+						}
+						continue
+					}
+					if cerr := c.fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
+						putFrame(frame)
+						errChan <- fmt.Errorf("protocol v%d control: %w", protocolVersion, cerr)
+						return
+					}
 					putFrame(frame)
+					continue
+				}
+				if rxProducer != nil {
+					rxProducer.Push(seq, frame)
+					if !scanner.BufferedFrameReady() {
+						rxProducer.Flush()
+					}
 					continue
 				}
 				if useXorFec {
@@ -2105,12 +2289,6 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	case <-runCtx.Done():
 		return 0, nil
 	}
-}
-
-// isParityFrame 识别 XOR 校验帧：线路帧 seq=0（不加密），负载首字节为魔数
-// 0xFE；普通控制/心跳帧负载为空，握手帧以 '{' 开头，均不会误判。
-func (c *Client) isParityFrame(frame []byte) bool {
-	return len(frame) >= 7 && frame[0] == fecMagic
 }
 
 func (c *Client) setupInterface(v4cidr, v6cidr string) error {

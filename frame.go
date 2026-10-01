@@ -45,6 +45,51 @@ func putVPNFrameBatch(b []VPNFrame) {
 	}
 }
 
+// VPNFrameBatch is the production ownership unit between AsyncPort and a
+// backend consumer. Frames and Bytes move together: AsyncPort computes Bytes
+// while building the batch, the scheduler transfers the pointer, and the TLS/TAP
+// consumer returns the object to the pool after consuming every payload.
+type VPNFrameBatch struct {
+	Frames []VPNFrame
+	Bytes  uint64
+}
+
+func newOwnedVPNFrameBatch() any {
+	return &VPNFrameBatch{Frames: make([]VPNFrame, 0, hotVPNBatchCap)}
+}
+
+var ownedVPNFrameBatchPool = sync.Pool{New: newOwnedVPNFrameBatch}
+
+func getOwnedVPNFrameBatch() *VPNFrameBatch {
+	b := ownedVPNFrameBatchPool.Get().(*VPNFrameBatch)
+	b.Frames = b.Frames[:0]
+	b.Bytes = 0
+	return b
+}
+
+func putOwnedVPNFrameBatch(b *VPNFrameBatch) {
+	if b == nil {
+		return
+	}
+	clear(b.Frames) // release payload references before the descriptor storage is pooled
+	b.Frames = b.Frames[:0]
+	b.Bytes = 0
+	ownedVPNFrameBatchPool.Put(b)
+}
+
+func freeOwnedVPNFrameBatch(b *VPNFrameBatch) {
+	if b == nil {
+		return
+	}
+	freeFrames(b.Frames)
+	putOwnedVPNFrameBatch(b)
+}
+
+func appendOwnedVPNFrame(b *VPNFrameBatch, vf VPNFrame) {
+	b.Frames = append(b.Frames, vf)
+	b.Bytes += uint64(len(vf.Data))
+}
+
 // framePoolSizes 帧缓冲尺寸分档。保留该表供测试/文档核对；真正池对象使用
 // *[N]byte，而不是 []byte。把 slice 直接放进 sync.Pool 会在 interface 装箱时
 // 让 slice header 逃逸，高 PPS 下这本身会制造显著 GC 压力。
@@ -420,6 +465,25 @@ func NewFrameScanner(r io.Reader) *FrameScanner {
 // SetMaxDataLen 调整帧负载上限（认证前收紧、认证后放开的配对使用）
 func (fs *FrameScanner) SetMaxDataLen(n int) { fs.maxDataLen = n }
 
+// BufferedFrameReady reports whether ReadFrame can consume one more complete
+// frame without another socket/TLS read. RX producers use this to flush a partial
+// session batch before they would block, preserving interactive latency.
+func (fs *FrameScanner) BufferedFrameReady() bool {
+	const headerSize = 10
+	available := len(fs.buf) - fs.offset
+	if available < headerSize {
+		return false
+	}
+	rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
+	if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+		// Let ReadFrame report the protocol error immediately rather than delaying
+		// the current batch in an attempt to coalesce with malformed input.
+		return false
+	}
+	padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+	return available >= headerSize+int(rawDataLen)+padLen
+}
+
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 	const HeaderSize = 10
 
@@ -532,8 +596,8 @@ type HandshakeReq struct {
 	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
 	// SessionToken：客户端回带上一次收到的会话令牌（hex）。
-	// 服务端开启 session_token 时，重连既有会话必须携带正确令牌，
-	// 仅持有共享 PSK 的第三方无法冒充既有会话（见 computeSessionToken）。
+	// 重连既有会话必须携带正确令牌；仅持有共享 PSK 的第三方无法冒充
+	// 既有会话。
 	SessionToken string `json:"session_token,omitempty"`
 	// PeerInfo is diagnostic metadata only; never use it for authentication/authorization.
 	PeerInfo *PeerInfo `json:"peer_info,omitempty"`
@@ -569,10 +633,10 @@ type HandshakeResp struct {
 	EncSalt  string `json:"enc_salt,omitempty"`  // hex(8B)：客户端→服务端方向
 	EncSalt2 string `json:"enc_salt2,omitempty"` // hex(8B)：服务端→客户端方向
 	// SessionToken：本次会话的重连接入令牌（hex），客户端须在下一次握手回带。
-	// 仅在服务端开启 session_token 时下发。
+	// 协议 v3 始终使用该令牌进行既有会话接续。
 	SessionToken string `json:"session_token,omitempty"`
-	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要。新增客户端接受
-	// 字段缺失，旧客户端会忽略该可选字段，支持滚动升级与回滚。
+	// TLS 是服务端实际观测到的 ClientHello 与最终协商摘要，仅用于诊断，
+	// 不参与认证或授权。
 	TLS *TLSHandshakeInfo `json:"tls,omitempty"`
 	// PeerInfo is returned only after application-layer authentication succeeds.
 	PeerInfo *PeerInfo `json:"peer_info,omitempty"`

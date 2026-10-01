@@ -399,6 +399,7 @@ type ClientSession struct {
 	PeerInfo           PeerInfo // 客户端自报诊断元数据；不参与认证/授权
 	macBin             macKey   // 会话注册 MAC 的二进制形式，VSwitch 源 MAC 归属校验用
 	RxReorder          *ReorderBuffer
+	RxWorker           *rxSessionWorker
 	FecDec             *fecDecoder       // XOR 奇偶校验解码器（req.FecGroup >= 2 时启用）
 	FecEncK            int               // 下行 XOR 分组大小（0 表示未启用）
 	FecMode            string            // 面板展示：xor K=d / off
@@ -653,6 +654,9 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	for ci := range session.conns {
 		ci.tcpConn.Close()
 	}
+	if session.RxWorker != nil {
+		session.RxWorker.AdvanceEpochAndReset(session.FecDec)
+	}
 	saltA, saltB := newRandomSalt(), newRandomSalt()
 	var icTx, icRx, fecTx, fecRx *innerCipher
 	if session.Encrypt {
@@ -679,12 +683,16 @@ func (s *Server) rotateSessionEpochLocked(session *ClientSession, instanceID, ps
 	session.InstanceID = instanceID
 	session.Epoch++
 	session.ActiveConns = 0
-	session.RxReorder.Reset()
-	if session.FecDec != nil {
-		session.FecDec.Reset()
+	if session.RxWorker == nil {
+		session.RxReorder.Reset()
+		if session.FecDec != nil {
+			session.FecDec.Reset()
+		}
 	}
 	if session.FecEncK > 0 {
-		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, session.RxReorder.Insert)
+		rxFECOut, rxReorderProgress := fecReorderHooks(session.RxReorder, session.RxWorker)
+		session.FecDec = NewFECDecoder(session.FecEncK, fecRx, rxFECOut)
+		session.FecDec.SetReorderProgress(rxReorderProgress)
 		session.Port.ResetEpoch(session.FecEncK, fecTx)
 	} else {
 		session.Port.ResetEpoch(0, nil)
@@ -1101,18 +1109,16 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	}
 	srv.tap = tap
 
-	tapBackend := make(chan []VPNFrame, 32)
+	tapBackend := make(chan *VPNFrameBatch, 32)
 	tapPort := NewAsyncPort(ctx, tapPortID)
-	tapPort.RegisterBackend(tapBackend, new(uint32))
+	tapPort.RegisterOwnedBackend(tapBackend, new(uint32))
 	srv.vswitch.AddPort(tapPort)
 
 	go func() {
-		for frames := range tapBackend {
-			for _, vf := range frames {
+		for batch := range tapBackend {
+			for _, vf := range batch.Frames {
 				if len(vf.Data) > 0 {
 					if _, werr := srv.tap.Write(vf.Data); werr != nil {
-						// 旧实现把这里的错误直接丢掉，TAP 故障表现为"隧道在线但
-						// 客户端不通"。计数 + 限频日志让故障可观测。
 						n := srv.tapWriteErrs.Add(1)
 						if n == 1 || n%1000 == 0 {
 							log.Warnf("TAP write failed #%d: %v", n, werr)
@@ -1121,7 +1127,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 					putFrame(vf.Data)
 				}
 			}
-			putVPNFrameBatch(frames)
+			putOwnedVPNFrameBatch(batch)
 		}
 	}()
 
@@ -1421,7 +1427,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		log.Warnf("[%s] connection refused: MAC must be a non-zero unicast address", clientID)
 		return
 	}
-	if req.ProtocolVersion != 2 {
+	if req.ProtocolVersion != protocolVersion {
 		log.Warnf("[%s] connection refused: unsupported protocol_version=%d", clientID, req.ProtocolVersion)
 		return
 	}
@@ -1496,6 +1502,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				log.Errorf("[%s] failed to rotate the session key epoch: %v", clientID, err)
 				s.mu.Unlock()
 				return
+			}
+			// A new client process is a clean epoch boundary, so a restart-time
+			// client.conns change may safely switch the RX decoder fast-path mode.
+			if session.FecDec != nil {
+				session.FecDec.SetStaticSinglePath(req.BrutalGroups && isStaticSinglePathTopology(req.BrutalConns))
 			}
 			if err := ensurePendingResumeToken(session); err != nil {
 				log.Errorf("[%s] failed to prepare the next session token: %v", clientID, err)
@@ -1610,15 +1621,28 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		})
 		// 服务端收到的解密 frame 已来自 frame pool；重排后把所有权直接交给
 		// VSwitch，命中 AsyncPort 单播时可继续零拷贝进入后端发送队列。
-		session.RxReorder = NewOwnedReorderBuffer(func(orderedFrame []byte) {
+		newRXReorder := NewOwnedReorderBuffer
+		if !isStaticSinglePathTopology(req.BrutalConns) {
+			newRXReorder = NewOwnedActorReorderBuffer
+		}
+		session.RxReorder = newRXReorder(func(orderedFrame []byte) {
 			if session.macBin != (macKey{}) {
 				s.vswitch.ProcessOwnedSessionFrame(clientID, session.macBin, orderedFrame)
 			} else {
 				s.vswitch.ProcessOwnedFrame(clientID, orderedFrame)
 			}
 		})
+		if !isStaticSinglePathTopology(req.BrutalConns) {
+			session.RxWorker = newRXSessionWorker(session.RxReorder)
+		}
 		if fecEncK > 0 {
-			session.FecDec = NewFECDecoder(fecEncK, fecRx, session.RxReorder.Insert)
+			rxFECOut, rxReorderProgress := fecReorderHooks(session.RxReorder, session.RxWorker)
+			session.FecDec = NewFECDecoder(fecEncK, fecRx, rxFECOut)
+			session.FecDec.SetReorderProgress(rxReorderProgress)
+			// Current Go clients always advertise BrutalGroups/BrutalConns as the
+			// authenticated physical-topology declaration even when shaping is off.
+			// Legacy/unknown peers (no group semantics) deliberately keep RX FEC on.
+			session.FecDec.SetStaticSinglePath(req.BrutalGroups && isStaticSinglePathTopology(req.BrutalConns))
 		}
 		s.activeClients[clientID] = session
 		if mac != "" {
@@ -1727,7 +1751,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.ProtocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -1756,12 +1780,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	atomic.StoreUint32(rttCache, 50000)
 	ci.rttCache = rttCache
 
-	connTxChan := make(chan []VPNFrame, 32)
-	backend := port.RegisterBackend(connTxChan, rttCache)
+	connTxChan := make(chan *VPNFrameBatch, 32)
+	backend := port.RegisterOwnedBackend(connTxChan, rttCache)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
-		port.UnregisterBackend(connTxChan)
+		port.UnregisterOwnedBackend(connTxChan)
 	}()
 
 	batchCork := newTLSBatchCork(tcpConn)
@@ -1770,6 +1794,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
+		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(4 * time.Second)
 		defer keepAliveTicker.Stop()
 
@@ -1800,16 +1825,16 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
 				}
-			case frames := <-connTxChan:
+			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
 				txPackets := 0
 				queuedPayload := uint64(0)
 				lastFrameStart := -1
 			drainBatches:
 				for {
-					queuedPayload += vpnFrameBatchBytes(frames)
+					queuedPayload += batch.Bytes
 					var n, last int
-					sendBuffer, n, last = appendOwnedFrameBatchStream(sendBuffer, frames, icTx)
+					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch)
 					txPackets += n
 					if last >= 0 {
 						lastFrameStart = last
@@ -1818,7 +1843,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 						break
 					}
 					select {
-					case frames = <-connTxChan:
+					case batch = <-connTxChan:
 						continue
 					default:
 						break drainBatches
@@ -1868,6 +1893,19 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
 	var rxBytesBatch, rxPacketsBatch uint64
+	var rxAEADScratch nonceAADScratch
+	session.sessionMu.RLock()
+	rxWorkerForConn := session.RxWorker
+	fecForConn := session.FecDec
+	session.sessionMu.RUnlock()
+	var rxProducer *rxBatchProducer
+	if rxWorkerForConn != nil {
+		rxProducer = rxWorkerForConn.NewProducer(fecForConn, func(cerr error) {
+			log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
+			_ = conn.Close()
+		})
+		defer rxProducer.Flush()
+	}
 	flushRxStats := func() {
 		if rxPacketsBatch == 0 {
 			return
@@ -1916,7 +1954,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				flushRxStats()
 			}
 			if seq != 0 && icRx != nil {
-				plain, derr := icRx.openInPlace(frame, seq, uint32(len(frame)))
+				plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
 				if derr != nil {
 					// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 					log.Debugf("[%s] dropped tampered/foreign frame (seq=%d): %v", clientID, seq, derr)
@@ -1925,10 +1963,32 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 				frame = plain
 			}
-			if seq == 0 && fecDec != nil && len(frame) >= 7 && frame[0] == fecMagic {
-				// XOR 校验帧：交给会话级 FEC 解码器
-				fecDec.OnParity(frame)
+			if seq == 0 {
+				if fecDec == nil {
+					putFrame(frame)
+					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
+					return
+				}
+				if rxProducer != nil {
+					rxProducer.Push(0, frame)
+					if !scanner.BufferedFrameReady() {
+						rxProducer.Flush()
+					}
+					continue
+				}
+				if cerr := fecDec.OnControlWithScratch(frame, &rxAEADScratch); cerr != nil {
+					putFrame(frame)
+					log.Debugf("[%s] protocol v%d control violation: %v", clientID, protocolVersion, cerr)
+					return
+				}
 				putFrame(frame)
+				continue
+			}
+			if rxProducer != nil {
+				rxProducer.Push(seq, frame)
+				if !scanner.BufferedFrameReady() {
+					rxProducer.Flush()
+				}
 				continue
 			}
 			if fecDec != nil {
@@ -1954,6 +2014,9 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 	evBus.emit("off", "warn", clientID, "session destroyed; IPs and MAC binding released")
 	s.macToIPCleanLocked(session.MAC, session.IPv4)
 	s.vswitch.RemovePort(clientID)
+	if session.RxWorker != nil {
+		session.RxWorker.Close()
+	}
 	if session.RxReorder != nil {
 		session.RxReorder.Close()
 	}

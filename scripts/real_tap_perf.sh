@@ -11,6 +11,8 @@
 #   PERF_CONNS          client physical connections (default: 1)
 #   PERF_ENC_ALGO       gcm256 | gcm128 | chacha20 | xchacha20 (default: gcm256)
 #   PERF_PAD_MODE       bucket | off (default: bucket)
+#   PERF_FEC            true | false (default: false)
+#   PERF_FEC_GROUP      XOR group K when PERF_FEC=true (default: 4)
 #   PERF_DIRECTION      upload | download | both (default: both)
 #   PERF_SECONDS        iperf duration per direction (default: 3)
 #   PERF_MIN_MBPS       hard minimum for each measured direction (default: 500)
@@ -27,6 +29,8 @@ BIN="${BIN:-./tlsvpn}"
 PERF_CONNS="${PERF_CONNS:-1}"
 PERF_ENC_ALGO="${PERF_ENC_ALGO:-gcm256}"
 PERF_PAD_MODE="${PERF_PAD_MODE:-bucket}"
+PERF_FEC="${PERF_FEC:-false}"
+PERF_FEC_GROUP="${PERF_FEC_GROUP:-4}"
 PERF_DIRECTION="${PERF_DIRECTION:-both}"
 PERF_SECONDS="${PERF_SECONDS:-3}"
 PERF_MIN_MBPS="${PERF_MIN_MBPS:-500}"
@@ -63,6 +67,9 @@ validate_inputs() {
   [[ "$PERF_CONNS" =~ ^[1-9][0-9]*$ ]] || die "PERF_CONNS must be a positive integer"
   case "$PERF_ENC_ALGO" in gcm256|gcm128) ;; *) die "PERF_ENC_ALGO must be gcm256 or gcm128" ;; esac
   case "$PERF_PAD_MODE" in bucket|off) ;; *) die "PERF_PAD_MODE must be bucket or off" ;; esac
+  case "$PERF_FEC" in true|false) ;; *) die "PERF_FEC must be true or false" ;; esac
+  [[ "$PERF_FEC_GROUP" =~ ^[0-9]+$ ]] || die "PERF_FEC_GROUP must be an integer"
+  (( PERF_FEC_GROUP >= 2 && PERF_FEC_GROUP <= 64 )) || die "PERF_FEC_GROUP must be in [2,64]"
   case "$PERF_DIRECTION" in upload|download|both) ;; *) die "PERF_DIRECTION must be upload, download or both" ;; esac
   [[ "$PERF_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "PERF_SECONDS must be a positive integer"
   [[ -x "$BIN" ]] || die "BIN is not executable: $BIN"
@@ -207,6 +214,8 @@ EOF
   "web": {"addr": "$WEB_ADDR", "bind": "all", "auth": "$WEB_AUTH"},
   "client": {
     "conns": $PERF_CONNS,
+    "fec": $PERF_FEC,
+    "fec_group": $PERF_FEC_GROUP,
     "cert_sha256": "$fp",
     "insecure": true
   }

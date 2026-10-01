@@ -1,4 +1,4 @@
-// Command probe is a self-contained protocol-v2 interoperability client.
+// Command probe is a self-contained protocol-v3 interoperability client.
 // It intentionally does not import the main package, so it can detect wire
 // incompatibilities instead of sharing the implementation under test.
 package main
@@ -280,7 +280,7 @@ func main() {
 	}
 	pskHash := sha256.Sum256([]byte(*psk))
 	req := handshakeReq{
-		ProtocolVersion: 2,
+		ProtocolVersion: 3,
 		ClientInstance:  hex.EncodeToString(instance[:]),
 		ClientID:        clientID(*mac, *psk),
 		PSK:             hex.EncodeToString(pskHash[:]),
@@ -314,8 +314,8 @@ func main() {
 	if !resp.Success {
 		fatalf("handshake rejected: %s", resp.Message)
 	}
-	if resp.ProtocolVersion != 2 || resp.SessionEpoch == 0 {
-		fatalf("server lacks protocol-v2 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
+	if resp.ProtocolVersion != 3 || resp.SessionEpoch == 0 {
+		fatalf("server lacks protocol-v3 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
 	}
 	if resp.TLS == nil {
 		fatalf("server did not return server-observed TLS summary")

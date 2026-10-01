@@ -93,6 +93,7 @@ type ReorderBufferStats struct {
 // 真正交付时才串行化。
 type ReorderBuffer struct {
 	mu          sync.Mutex
+	actorOwned  bool // true: rxSessionWorker is the sole state-machine writer; no timeoutWorker
 	expectedSeq uint32
 	ring        [][]byte
 	seqSlots    []uint32
@@ -194,6 +195,17 @@ func (rb *ReorderBuffer) Stats() ReorderBufferStats {
 	}
 }
 
+// ExpectedSeqSnapshot is a cold-path progress probe for FEC cleanup. Keep the
+// existing mutex as the source of truth rather than publishing expectedSeq on
+// every Insert/drain: dynamic topology transitions and parity are sparse, while
+// normal RX data must not pay another atomic store per packet.
+func (rb *ReorderBuffer) ExpectedSeqSnapshot() uint32 {
+	rb.mu.Lock()
+	seq := rb.expectedSeq
+	rb.mu.Unlock()
+	return seq
+}
+
 // Insert 将收到的包推入缓冲区
 func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 	if seq == 0 {
@@ -210,6 +222,48 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 		return
 	}
 	wake := rb.insertLocked(seq, frame)
+	batch := rb.takePendingLocked()
+	if batch != nil {
+		rb.deliverMu.Lock()
+	}
+	rb.mu.Unlock()
+	if wake {
+		rb.signalGapWorker()
+	}
+	rb.deliver(batch)
+	if batch != nil {
+		rb.deliverMu.Unlock()
+	}
+}
+
+// InsertBatch consumes a reader-owned batch with one reorder critical section.
+// It is the multi-connection RX worker hot path; Insert remains for recovered frames
+// and compatibility callers. Every Data buffer is consumed regardless of outcome.
+func (rb *ReorderBuffer) InsertBatch(frames []VPNFrame) {
+	if len(frames) == 0 {
+		return
+	}
+	rb.mu.Lock()
+	if rb.shutting {
+		rb.mu.Unlock()
+		freeFrames(frames)
+		return
+	}
+	wake := false
+	for i := range frames {
+		frame := frames[i].Data
+		if frames[i].Seq == 0 {
+			if frame != nil {
+				putFrame(frame)
+			}
+			frames[i].Data = nil
+			continue
+		}
+		if rb.insertLocked(frames[i].Seq, frame) {
+			wake = true
+		}
+		frames[i].Data = nil
+	}
 	batch := rb.takePendingLocked()
 	if batch != nil {
 		rb.deliverMu.Lock()

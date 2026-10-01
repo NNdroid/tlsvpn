@@ -96,6 +96,8 @@
   };
 
   // Data scheduler counters and FEC parity counters are lifetime monotonic.
+  // Keep lifetime assigned counters only as cumulative diagnostics/tooltips; the
+  // live scheduler cells below must use interval deltas, never lifetime totals.
   // Convert both into deltas over the actual snapshot interval. assigned_* keeps
   // its original data-only meaning for scheduler tests; the WebUI displays the
   // actual transport assignment (DATA + FEC), so standby parity paths no longer
