@@ -23,9 +23,12 @@ jobs:
         run: |
           python3 .github/tmp_apply_p2.py
           gofmt -w buffer.go rx_actor.go rx_batch.go client.go server.go rx_batch_test.go rx_actor_test.go
-      - name: Targeted correctness tests
+      - name: Actor unit tests
         run: |
-          go test -count=1 ./... -run 'TestRXSessionWorker|TestRXActor|TestFECDecoder|TestFECMode|TestDynamic'
+          go test -v -count=1 ./... -run 'TestRXSessionWorker|TestRXActor'
+      - name: Trace dynamic FEC E2E
+        run: |
+          go test -v -count=1 ./... -run 'TestDynamicFECTLSMemTAPFailover2To1To2'
       - name: Actor/FEC race gate
         run: |
           go test -race -count=1 ./... -run 'TestRXSessionWorker|TestRXActor|TestFECDecoder|TestFECMode'
