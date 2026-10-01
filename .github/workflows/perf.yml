@@ -262,14 +262,20 @@ jobs:
                   w.writerow((r[0], r[1], f'{r[2]:.1f}', f'{r[3]:.1f}', f'{r[4]:+.2f}'))
 
           pgo_geo = (math.exp(sum(math.log(r[5]) for r in pgo_rows) / len(pgo_rows)) - 1.0) * 100.0
+          direction_geos = {}
+          for direction in sorted({r[1] for r in pgo_rows}):
+              ratios = [r[5] for r in pgo_rows if r[1] == direction]
+              direction_geos[direction] = (math.exp(sum(math.log(x) for x in ratios) / len(ratios)) - 1.0) * 100.0
           worst_main = min(r[6] for r in rows)
-          worst_pgo = min(r[4] for r in pgo_rows)
+          worst_direction = min(direction_geos, key=direction_geos.get)
+          worst_direction_geo = direction_geos[worst_direction]
+          direction_summary = ', '.join(f'{direction}={geo:+.2f}%' for direction, geo in direction_geos.items())
           summary = (
               f'main-off -> candidate-PGO geomean: {main_geo:+.2f}%\n'
               f'FEC main-off -> candidate-PGO geomean: {fec_geo:+.2f}%\n'
               f'candidate PGO-off -> PGO-on geomean: {pgo_geo:+.2f}%\n'
+              f'candidate PGO per-direction geomean: {direction_summary}\n'
               f'worst main/candidate cell: {worst_main:+.2f}%\n'
-              f'worst isolated PGO pair: {worst_pgo:+.2f}%\n'
           )
           (root/'pgo-gate.txt').write_text(summary)
           print((root/'comparison.tsv').read_text())
@@ -286,8 +292,13 @@ jobs:
               failures.append(f'isolated PGO gain below 0.5%: {pgo_geo:+.2f}%')
           if worst_main < -10.0:
               failures.append(f'one main/candidate cell regressed >10%: {worst_main:+.2f}%')
-          if worst_pgo < -5.0:
-              failures.append(f'one isolated PGO pair regressed >5%: {worst_pgo:+.2f}%')
+          # Each direction is measured twice with reversed A/B ordering. Gate on
+          # the cross-round geometric mean instead of one noisy hosted-runner pair.
+          if worst_direction_geo < -3.0:
+              failures.append(
+                  f'isolated PGO {worst_direction} cross-round regression exceeds 3%: '
+                  f'{worst_direction_geo:+.2f}%'
+              )
           if failures:
               raise SystemExit('PGO promotion gate failed:\n  - ' + '\n  - '.join(failures))
           PY
