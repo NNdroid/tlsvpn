@@ -93,7 +93,7 @@ func writeDashboardJSON(w http.ResponseWriter, flusher http.Flusher, event strin
 // handleDashboardStream is the browser dashboard's single live transport.
 // /api/stats, /api/trend, /api/logs and /api/events remain as compatibility
 // APIs for scripts/tests, but the WebUI consumes all periodic data from here.
-func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, cli *Client) {
+func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, cli *Client, histories ...*diagnosticHistory) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -131,6 +131,11 @@ func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, 
 		}
 		if err := writeDashboardJSON(w, flusher, "trend", dashboardTrendSnapshot(rng)); err != nil {
 			return err
+		}
+		if len(histories) > 0 && histories[0] != nil {
+			if err := writeDashboardJSON(w, flusher, "diagnostics", histories[0].snapshot(rng)); err != nil {
+				return err
+			}
 		}
 
 		logs := logRing.snapshot(logAfter)

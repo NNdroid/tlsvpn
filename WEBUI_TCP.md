@@ -1,0 +1,13 @@
+# Observed TCP state (Go, Linux)
+
+Connection rows expose `tcp`: `source`, `scope`, `peer`, `sample_time_ms`, `values` and `unavailable`. The connection-management TCP button shows details and updates them with the existing stats SSE stream. Desired configuration, prior handshake shaping intent and global sysctl defaults are never substituted for an observed value.
+
+The WebManager samples established sockets about every two seconds, outside session/connection registry locks, and stores an immutable snapshot on the physical connection object. Normal stats snapshots and RTT/scheduler hot paths only load this cache. Sampling uses `TCPConn.SyscallConn().Control`, which protects socket descriptor lifetime during reads. Reconnect attempts own new caches; inactive client rows hide the previous socket's observations. A closed socket reports a read error.
+
+Linux `getsockopt` reads NoDelay, congestion control, KeepAlive and its idle/interval/probe parameters, CORK, QUICKACK, current send/receive buffer capacities, MSS, USER_TIMEOUT, NOTSENT_LOWAT and SO_MARK. One TCP_INFO call reads state, congestion state, RTT/variation/RTO, negotiated features/window scales, MSS/PMTU, cwnd, unacked/retransmitting segments, total/new retransmissions, unsent bytes, peer receive window, delivery/pacing estimates, and cumulative busy/window/buffer-limited time and retransmitted bytes.
+
+The returned TCP_INFO length controls field availability. New tail fields on older kernels are marked unsupported, not zero. Native byte order and packed bitfield order are respected. Unsupported options, permission failures, no socket and unsupported platforms are explicit; zero/false remain real observations. The initial retransmission delta and intervals over ten seconds remain absent. Each delta is accompanied by its actual sample interval.
+
+These are local socket measurements. SOCKS5 dialing retains a private handle to the local-to-proxy socket and labels that scope and actual peer. The private wrapper forwards the existing SOCKS connection operations and deliberately does not expose NetConn to existing tuning helpers, preserving their previous behavior. There are no new setsockopt calls, socket policies or wire protocol changes.
+
+CORK and QUICKACK are transient sampled values, not proof that a batching policy is disabled/enabled permanently. Linux SO_SNDBUF/SO_RCVBUF include kernel accounting space; capacities are not queued payload sizes or TCP windows. Delivery rate may be application-limited; it is not a bandwidth benchmark. Cumulative limited-time metrics are not current utilization percentages. USER_TIMEOUT zero means kernel defaults. Samples are timestamped; the UI uses the server clock plus elapsed browser time to indicate stale samples.

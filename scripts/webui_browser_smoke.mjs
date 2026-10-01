@@ -43,7 +43,7 @@ function contentType(file) {
 function statsFixture(mode='client',stage=1,instance='browser-smoke') {
   const client={tx_bytes:stage*12600,rx_bytes:stage*6300,tx_packets:stage*126,rx_packets:stage*50,active_conns:2,ipv4:'10.0.0.2',fec:'xor K=4',enc_algo:2};
   const conn=(id,owner)=>({conn_id:id,client_id:owner,index:0,target:'test.example:443',remote:'127.0.0.1:443',state:'up',tx_bytes:stage*6300,rx_bytes:stage*3150,rtt_ms:20,age_sec:10,fec:'xor K=4',enc_algo:2,tls_version:'TLS 1.3',scheduler:{active:true,queued_bytes:0,rate_mbps:8,assigned_bytes:stage*1000,assigned_batches:stage,fec_assigned_bytes:0,fec_assigned_batches:0}});
-  return {
+  const fixture={
     mode,version:'ci-smoke',instance_id:instance,sample_time_ms:1000+stage*1000,uptime_sec:10+stage,
     accounting_scope:'application_wire_excluding_heartbeat',active_clients:1,retained_sessions:1,live_conns:2,
     clients:mode==='client'?{local:client}:{A:client},
@@ -58,6 +58,15 @@ function statsFixture(mode='client',stage=1,instance='browser-smoke') {
     sessions:{active:2,max:2},cfg:{fec:true,fec_mode:'xor K=4',encrypt:true,conns:2},negotiate:{fec:true,fec_group:4},
     mem:{heap_alloc_mb:1,num_goroutine:10},system:{},traffic:{daily:[]}
   };
+  for(const c of [...fixture.conns,...fixture.server_conns])c.tcp={source:'linux_socket',scope:c.conn_id==='a'?'local_tcp':'local_to_proxy',sample_time_ms:fixture.sample_time_ms,peer:'127.0.0.1:443',values:{nodelay:false,keepalive:true,congestion:'cubic',cork:false,quickack:false,keepidle_sec:21,total_retrans:7,retrans_delta:1,retrans_interval_ms:2000,sndbuf_bytes:131072,rcvbuf_bytes:65536},unavailable:{delivery_rate_Bps:'unsupported_short_tcp_info'}};
+  return fixture;
+}
+
+function diagnosticsFixture(instance='browser-smoke') {
+  return {instance_id:instance,step_sec:2,points:[0,1,2].map(i=>({t:1700000000000+i*2000,
+    metrics:{online:2,fec_data:100000,fec_parity:25000,fec_pct:25,recovered:i,lost:0,pad:2000,pad_wire:100000,pad_pct:2,reconnect:0,drop:0,tap_error:0},
+    conns:[{id:'conn-a',client:'local',label:'peer-a',metrics:{up:i?32.38*1024**2:null,down:i?10*1024**2:null,rtt:i?20:null,queue:128,assigned:i?30*1024**2:null}},
+      {id:'conn-b',client:'other',label:'peer-b',metrics:{up:1000,down:2000,rtt:40,queue:4096,assigned:1000}}]}))};
 }
 
 const server = http.createServer(async (req, res) => {
@@ -76,6 +85,8 @@ const server = http.createServer(async (req, res) => {
       const statsTimer=setTimeout(()=>emit('stats',statsFixture()),100);
       res.on('close',()=>clearTimeout(statsTimer));
       emit('trend', { step_sec: 1, points: [] });
+      const diagnosticsTimer=setTimeout(()=>emit('diagnostics',diagnosticsFixture()),150);
+      res.on('close',()=>clearTimeout(diagnosticsTimer));
       emit('logs', []);
       emit('events', []);
       res.write(': browser-smoke\n\n');
@@ -83,7 +94,7 @@ const server = http.createServer(async (req, res) => {
       res.on('close', () => openStreams.delete(res));
       return;
     }
-    if (['/api/stats','/api/trend','/api/logs','/api/events'].includes(u.pathname)) {
+    if (['/api/stats','/api/trend','/api/logs','/api/events','/api/diagnostics'].includes(u.pathname)) {
       legacyPollHits.push(u.pathname);
       res.writeHead(418, { 'content-type': 'application/json' });
       res.end('{"error":"legacy polling forbidden"}');
@@ -160,6 +171,15 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
   if (state.framevizType !== 'object') failures.push(`[${lang}] FRAMEVIZ_I18N is ${state.framevizType}`);
   if (state.documentLang !== lang) failures.push(`[${lang}] document lang is ${state.documentLang}`);
   if (!state.framevizCard) failures.push(`[${lang}] frame visualizer did not render`);
+  const diagnosticsState=await page.evaluate(()=>({cards:document.querySelectorAll('.diagnostic-card').length,
+    sampled:document.getElementById('diag-throughput')?.diagPlot?.first,title:document.getElementById('diag-title')?.textContent}));
+  if(diagnosticsState.cards!==6||diagnosticsState.sampled!==1700000000000||!diagnosticsState.title)
+    failures.push('['+lang+'] diagnostic charts did not receive SSE history');
+  await page.evaluate(()=>{document.getElementById('pane-conns').style.display='block';renderConnsTable(lastStats,false);});
+  await page.locator('[data-tcp-id="a"]').click();
+  const tcpState=await page.evaluate(()=>({open:document.getElementById('tcp-dialog').open,nodelay:document.querySelector('[data-tcp-field="nodelay"]').textContent,keepalive:document.querySelector('[data-tcp-field="keepalive"]').textContent,congestion:document.querySelector('[data-tcp-field="congestion"]').textContent,unavailable:document.querySelector('[data-tcp-field="delivery_rate_Bps"]').textContent}));
+  if(!tcpState.open||tcpState.congestion!=='cubic'||tcpState.nodelay===tcpState.keepalive||!tcpState.unavailable.includes('unsupported_short_tcp_info'))failures.push('['+lang+'] TCP kernel facts were not displayed');
+  await page.locator('#tcp-close').click();
   for (const expected of framevizExpect[lang]) {
     if (!state.framevizText.includes(expected)) failures.push(`[${lang}] frame visualizer missing localized text: ${expected}`);
   }
@@ -193,6 +213,15 @@ for(const mode of ['client','server']) {
     return errors;
   },[statsFixture(mode,0,'metric-'+mode),statsFixture(mode,1,'metric-'+mode),mode]);
   result.forEach(x=>failures.push('['+mode+' metrics] '+x));
+  await page.evaluate(stats=>{applyStats(stats);document.getElementById('pane-conns').style.display='block';},statsFixture(mode));
+  await page.locator('[data-tcp-id="b"]').click();
+  if(!await page.locator('#tcp-scope').innerText().then(x=>x.includes('SOCKS5')))failures.push('['+mode+'] proxy transport scope missing');
+  await page.evaluate(stats=>{stats.cfg.tcp_nodelay=true;applyStats(stats);},statsFixture(mode,2));
+  const noDelay=await page.locator('[data-tcp-field="nodelay"]').innerText();
+  if(!['关闭','關閉','Off','Aus','Désactivé','無効'].includes(noDelay))failures.push('TCP UI inferred NoDelay from cfg');
+  await page.evaluate(stats=>{stats.conns=[];stats.server_conns=[];applyStats(stats);},statsFixture(mode,3));
+  if(await page.locator('#tcp-fields').innerText())failures.push('retired socket details retained');
+  await page.locator('#tcp-close').click();
 }
 
 // Check actual canvas glyph bounds at desktop/mobile widths and both pixel ratios.
@@ -202,6 +231,39 @@ for (const deviceScaleFactor of [1,2]) {
   await chartPage.goto(origin,{waitUntil:'domcontentloaded'});
   for (const width of [360,1100]) {
     await chartPage.setViewportSize({width,height:800});
+    await chartPage.evaluate(([stats,history])=>{applyStats(stats);applyDiagnostics(history);},[statsFixture(),diagnosticsFixture()]);
+    await chartPage.evaluate(()=>{document.getElementById('pane-conns').style.display='block';});
+    await chartPage.locator('[data-tcp-id="a"]').click();
+    const tcpFits=await chartPage.evaluate(()=>{const dialog=document.getElementById('tcp-dialog');return dialog.getBoundingClientRect().width<=innerWidth&&dialog.scrollWidth<=dialog.clientWidth;});
+    if(!tcpFits)failures.push('TCP dialog overflow at viewport '+width+' DPR '+deviceScaleFactor);
+    await chartPage.locator('#tcp-close').click();
+    const diagBounds=await chartPage.evaluate(history=>{
+      const errors=[],original=CanvasRenderingContext2D.prototype.fillText;
+      CanvasRenderingContext2D.prototype.fillText=function(text,x,y,...rest){
+        if(this.canvas.id.startsWith('diag-')){
+          const b=this.measureText(text),scale=rest[0]?Math.min(1,rest[0]/b.width):1;
+          if(x-b.actualBoundingBoxLeft*scale < -0.5 || x+b.actualBoundingBoxRight*scale > this.canvas.clientWidth+0.5)
+            errors.push(this.canvas.id+' clips '+text);
+        }
+        return original.call(this,text,x,y,...rest);
+      };
+      try {setRange('24h');applyDiagnostics(history);setRange('2m');applyDiagnostics(history);} finally {CanvasRenderingContext2D.prototype.fillText=original;}
+      return errors;
+    },diagnosticsFixture());
+    diagBounds.forEach(x=>failures.push('[diagnostic canvas] '+x));
+    const throughput=chartPage.locator('#diag-throughput');
+    await throughput.scrollIntoViewIfNeeded();const box=await throughput.boundingBox();
+    await chartPage.mouse.move(box.x+box.width*0.6,box.y+70);
+    const linked=await chartPage.evaluate(()=>[...document.querySelectorAll('.diagnostic-card canvas')].map(c=>c.dataset.diagHover));
+    if(!linked[0]||linked.some(t=>t!==linked[0]))failures.push('diagnostic hover did not synchronize');
+    await chartPage.selectOption('#diag-client','other');
+    const filtered=await chartPage.locator('#diag-wrap-throughput .legend').innerText();
+    if(filtered.includes('conn-a')||!filtered.includes('conn-b'))failures.push('diagnostic client filter failed');
+    await chartPage.evaluate(()=>setRange('1h'));
+    const cleared=await chartPage.evaluate(()=>document.getElementById('diag-throughput').diagPlot.first);
+    if(cleared!==0)failures.push('range switch retained stale diagnostic points');
+    await chartPage.evaluate(([stats,history])=>{applyStats(stats);applyDiagnostics(history);applyStats({...stats,instance_id:'after-restart'});},[statsFixture(),diagnosticsFixture()]);
+    if(await chartPage.evaluate(()=>document.getElementById('diag-throughput').diagPlot.first)!==0)failures.push('restart retained diagnostic points');
     const errors=await chartPage.evaluate(()=>{
       const errors=[];
       for(const id of ['chart','traffic-chart']) {
