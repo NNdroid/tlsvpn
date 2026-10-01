@@ -250,6 +250,12 @@ The **Runtime status** tab shows what the process is really doing rather than wh
 
 Prometheus metrics at `/metrics` are protected by the Web UI authentication gate. Security: `web.auth` backs the login flow, successful browser login uses an HttpOnly SameSite session cookie, mutating API calls require the CSRF header, and HTTPS is available through `web.cert`/`web.key`.
 
+## WebUI documentation
+
+- [Dashboard accounting](docs/WEBUI_METRICS.md)
+- [Diagnostic charts](docs/WEBUI_CHARTS.md)
+- [Observed Linux TCP state](docs/WEBUI_TCP.md)
+
 ## Notes
 
 1. **Brutal** needs the `tcp_brutal` kernel module; **TAP** needs root (or `CAP_NET_ADMIN`).
