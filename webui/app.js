@@ -24,7 +24,7 @@ function fmtBytes(b,s=false){
 }
 function badge(f){if(!f||f==='off')return '<span class="badge b-off">'+t('badge.off')+'</span>';
   if(f==='dup')return '<span class="badge b-dup">'+t('badge.dup')+'</span>';return '<span class="badge b-on">'+f+'</span>';}
-function encBadge(a){if(a===2)return '<span class="badge b-on">AES-256-GCM</span>';
+function encBadge(a){if(a===null||a===undefined)return '<span class="badge b-off">-</span>';if(a===2)return '<span class="badge b-on">AES-256-GCM</span>';
   if(a===4)return '<span class="badge b-on">AES-128-GCM</span>';
   if(a===5)return '<span class="badge b-on">ChaCha20-Poly1305</span>';
   if(a===6)return '<span class="badge b-on">XChaCha20-Poly1305</span>';
@@ -1631,7 +1631,7 @@ function renderConnsTable(data,fresh){
   if(data.mode==='server'){
     (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:data.session_epoch||0,err:c.last_error||'',enc:data.enc_algo,fec:data.fec_mode||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1836,7 +1836,7 @@ function renderDrawer(){
   if(conns.length){
     connHtml=conns.map(function(x){
       const rtt=x.rtt_ms||0;
-      const xEnc=x.enc_algo!==undefined?x.enc_algo:data.enc_algo;
+      const xEnc=x.negotiated===false?null:(x.enc_algo!==undefined?x.enc_algo:data.enc_algo);
       const up=x.brutal_cli_tx_mbps||x.brutal_tx_mbps||0;
       const dn=x.brutal_srv_tx_mbps||x.brutal_rx_mbps||0;
       let brut;
@@ -1855,7 +1855,7 @@ function renderDrawer(){
         '</div>'+
         '<div class="dc-conn-meta">'+
           '<span class="dc-conn-k">'+esc(t('th.age'))+' '+(x.age_sec?fmtDur(x.age_sec):'-')+'</span>'+
-          '<span class="dc-conn-k">'+esc(t('th.epoch'))+' '+(x.session_epoch||data.session_epoch||0)+'</span>'+
+          '<span class="dc-conn-k">'+esc(t('th.epoch'))+' '+(x.session_epoch!==undefined?x.session_epoch:(data.session_epoch||0))+'</span>'+
           encBadge(xEnc)+badge(x.fec||fec)+brut+pkts+
         '</div>'+
         (x.sni?'<div class="dc-conn-sni">'+esc(t('dc.sec_sni'))+': '+esc(x.sni)+'</div>':'')+

@@ -197,11 +197,11 @@ func TestWebStatsConnectionOwnsNegotiation(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		ci := &clientConnInfo{rttCache: new(uint32)}
 		ci.state.Store("up")
-		ci.negotiated.Store(&sessionNeg{TxRateMbps: uint64(10 + i), TLS: &TLSHandshakeInfo{SNI: []string{"first.example", "second.example"}[i], Version: []string{"TLS 1.2", "TLS 1.3"}[i]}})
+		ci.negotiated.Store(&sessionNeg{TxRateMbps: uint64(10 + i), SessionEpoch: uint64(10 + i), FEC: i == 1, FecGroup: 4, EncAlgo: i * 2, TLS: &TLSHandshakeInfo{SNI: []string{"first.example", "second.example"}[i], Version: []string{"TLS 1.2", "TLS 1.3"}[i]}})
 		c.conns[i] = ci
 	}
 	got := c.snapshotConns()
-	if got[0].BrutalTxMbps != 10 || got[1].BrutalTxMbps != 11 || got[0].SNI == got[1].SNI || got[0].TLSVersion == got[1].TLSVersion {
+	if got[0].BrutalTxMbps != 10 || got[1].BrutalTxMbps != 11 || got[0].SNI == got[1].SNI || got[0].TLSVersion == got[1].TLSVersion || got[0].SessionEpoch == got[1].SessionEpoch || got[0].EncAlgo == got[1].EncAlgo || got[0].FEC == got[1].FEC {
 		t.Fatalf("shared negotiation leaked: %+v", got)
 	}
 	c.conns[0].state.Store("retrying")

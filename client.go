@@ -1538,25 +1538,26 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
-	Index     int               `json:"index"`
-	ConnID    string            `json:"conn_id,omitempty"`
-	Target    string            `json:"target"`
-	Remote    string            `json:"remote"`
-	State     string            `json:"state"`
-	LastError string            `json:"last_error,omitempty"`
-	RttMs     uint32            `json:"rtt_ms"`
-	Scheduler schedulerConnJSON `json:"scheduler"`
-	TxBytes   uint64            `json:"tx_bytes"`
-	RxBytes   uint64            `json:"rx_bytes"`
-	Retries   uint64            `json:"retries"`
-	AgeSec    uint64            `json:"age_sec"`
+	Negotiated   bool              `json:"negotiated"`
+	SessionEpoch uint64            `json:"session_epoch"`
+	EncAlgo      int               `json:"enc_algo"`
+	FEC          string            `json:"fec"`
+	Index        int               `json:"index"`
+	ConnID       string            `json:"conn_id,omitempty"`
+	Target       string            `json:"target"`
+	Remote       string            `json:"remote"`
+	State        string            `json:"state"`
+	LastError    string            `json:"last_error,omitempty"`
+	RttMs        uint32            `json:"rtt_ms"`
+	Scheduler    schedulerConnJSON `json:"scheduler"`
+	TxBytes      uint64            `json:"tx_bytes"`
+	RxBytes      uint64            `json:"rx_bytes"`
+	Retries      uint64            `json:"retries"`
+	AgeSec       uint64            `json:"age_sec"`
 	// TCP Brutal 生效结果（客户端本地整形）
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
-	// 服务端授予本端的整形速率。会话级取值（最近一次握手响应），不是逐连接：
-	// 服务端对每条物理连接各授各的，客户端只拿到握手响应里那一份，所以同一会话
-	// 的多条连接会显示同一组数——这是"客户端只有一份协商结果"的真实反映，
-	// 不是聚合错误。0 = 服务端没给（brutal 关或预算为 0）。
+	// Rates granted by this physical connection's handshake. Zero means unshaped.
 	BrutalTxMbps uint64 `json:"brutal_tx_mbps"`
 	BrutalRxMbps uint64 `json:"brutal_rx_mbps"`
 	// This physical connection's immutable TLS handshake result.
@@ -1597,10 +1598,18 @@ func (c *Client) snapshotConns() []connSnapshot {
 			continue
 		}
 		var sni, tlsVer, tlsCipher, tlsAlpn string
-		var txRate, rxRate uint64
+		var txRate, rxRate, epoch uint64
+		var enc int
+		fec := ""
+		negotiated := false
 		state, _ := ci.state.Load().(string)
 		if neg := ci.negotiated.Load(); neg != nil && (state == "up" || state == "") {
 			txRate, rxRate = neg.TxRateMbps, neg.RxRateMbps
+			epoch, enc, negotiated = neg.SessionEpoch, neg.EncAlgo, true
+			fec = "off"
+			if neg.FEC {
+				fec = fmt.Sprintf("xor K=%d", neg.FecGroup)
+			}
 			if neg.TLS != nil {
 				sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
 			}
@@ -1610,6 +1619,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			rtt = atomic.LoadUint32(ci.rttCache) / 1000
 		}
 		snap := connSnapshot{
+			Negotiated: negotiated, SessionEpoch: epoch, EncAlgo: enc, FEC: fec,
 			Index:        i,
 			Target:       ci.target,
 			RttMs:        rtt,

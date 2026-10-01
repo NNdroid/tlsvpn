@@ -915,7 +915,11 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		v4, v6 := cli.assignedV4, cli.assignedV6
 		mac := cli.macAddr
 		sessionEpoch := cli.sessionEpoch
-		fec, enc, decoder, rxReorder := cli.fecStatus, cli.encAlgo, cli.fecDec, cli.rxReorder
+		fec, enc, decoder, rxReorder := "off", cli.encAlgo, cli.fecDec, cli.rxReorder
+		negotiatedFEC := cli.negInfo != nil && cli.negInfo.FEC
+		if negotiatedFEC {
+			fec = fmt.Sprintf("xor K=%d", cli.negInfo.FecGroup)
+		}
 		cli.sessionMu.Unlock()
 		stats.SessionEpoch = sessionEpoch
 		if p := cli.remotePeerInfoSnapshot(); p != nil {
@@ -938,7 +942,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		if cli.txPort != nil {
 			stats.Dropped = cli.txPort.Dropped()
 			rec, lost := cli.FECStats()
-			fecEnabled := decoder != nil && fec != "off"
+			fecEnabled := negotiatedFEC && decoder != nil
 			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityAttempts: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
 			stats.Fec.setWritten(cli.txPort.written.snapshot())
 			if fecEnabled {
