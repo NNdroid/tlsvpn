@@ -110,6 +110,9 @@ func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, 
 	}
 	logAfter := dashboardQueryUint(r, "log_after")
 	eventAfter := dashboardQueryUint(r, "event_after")
+	if id := r.URL.Query().Get("instance_id"); id != "" && id != dashboardInstanceID {
+		logAfter, eventAfter = 0, 0
+	}
 	interval := dashboardStreamInterval(r)
 
 	w.Header().Set("Content-Type", "text/event-stream")

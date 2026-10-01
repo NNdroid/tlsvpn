@@ -20,10 +20,10 @@ func TestPadStatsSnapshotOffModeReportsZero(t *testing.T) {
 		t.Fatalf("off mode snapshot = %+v, want mode=off with all-zero counters", got)
 	}
 
-	// pad=0 的记账调用是空操作：心跳等空帧、off 模式下的整包都不该写计数器
+	// Successful unpadded application records belong in the denominator.
 	recordPadBytes(128, 0)
-	if w, p := padStatsSnapshot(); w != 0 || p != 0 {
-		t.Fatalf("recordPadBytes with pad=0 must be a no-op, got %d/%d", w, p)
+	if w, p := padStatsSnapshot(); w != 128 || p != 0 {
+		t.Fatalf("unpadded write must count wire bytes, got %d/%d", w, p)
 	}
 }
 

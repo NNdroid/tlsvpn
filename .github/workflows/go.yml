@@ -45,6 +45,9 @@ jobs:
       continue-on-error: true
       run: go test -v ./...
 
+    - name: WebUI accounting and lifecycle regression (hard gate)
+      run: go test -race -count=1 ./... -run 'TestWeb|TestStats|TestTraffic|TestPad|TestSetPadMode|TestDashboard|TestSnapshotConns|TestAdaptiveScheduler'
+
     - name: Deterministic crypto/FEC core (hard gate)
       # Pure logic/in-memory tests for every authenticated inner AEAD and FEC.
       # These must never be softened by hosted-runner networking exceptions.
@@ -115,10 +118,8 @@ jobs:
         retention-days: 14
 
   e2e:
-    # Run e2e independently of the unit-test job. Pin both implementations to
-    # the protocol-v3 development branches so CI validates the actual v3 pair
-    # rather than either repository's older default branch.
+    # Always validate this patch, including pull requests, against the v3 Rust peer.
     uses: ./.github/workflows/e2e.yml
     with:
-      go_ref: perf/single-path-fec-bypass
+      go_ref: ${{ github.event.pull_request.head.sha || github.sha }}
       rs_ref: protocol/v3-dynamic-fec

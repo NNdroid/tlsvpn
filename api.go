@@ -21,6 +21,7 @@ import (
 var errInvalidWebAuth = errors.New("-web-auth must be in the form user:password")
 
 var processStart = time.Now()
+var dashboardInstanceID = fmt.Sprintf("%d", processStart.UnixNano())
 
 // ensureBasicAuthFormat 校验 -web-auth 格式 user:password
 func ensureBasicAuthFormat(v string) error {
@@ -46,13 +47,17 @@ var appVersion = "1.1.0"
 // ======================= Web UI 与 监控 API =======================
 
 type WebStats struct {
-	Mode          string                 `json:"mode"`
-	Version       string                 `json:"version"`
-	UptimeSec     uint64                 `json:"uptime_sec"`
-	ActiveClients int                    `json:"active_clients"`
-	Clients       map[string]interface{} `json:"clients,omitempty"`
-	GlobalTxBytes uint64                 `json:"global_tx_bytes"`
-	GlobalRxBytes uint64                 `json:"global_rx_bytes"`
+	InstanceID       string                 `json:"instance_id"`
+	SampleTimeMs     int64                  `json:"sample_time_ms"`
+	AccountingScope  string                 `json:"accounting_scope"`
+	RetainedSessions int                    `json:"retained_sessions"`
+	Mode             string                 `json:"mode"`
+	Version          string                 `json:"version"`
+	UptimeSec        uint64                 `json:"uptime_sec"`
+	ActiveClients    int                    `json:"active_clients"`
+	Clients          map[string]interface{} `json:"clients,omitempty"`
+	GlobalTxBytes    uint64                 `json:"global_tx_bytes"`
+	GlobalRxBytes    uint64                 `json:"global_rx_bytes"`
 	// 扩展观测
 	LogLevel  string `json:"log_level"`
 	Dropped   uint64 `json:"dropped_frames"`
@@ -131,6 +136,17 @@ type serverConnSnapshot struct {
 }
 
 type fecStatsJSON struct {
+	CounterDomain    string `json:"counter_domain,omitempty"`
+	ParityAttempts   uint64 `json:"parity_attempts"`
+	DataTx           uint64 `json:"data_tx"`
+	ControlTx        uint64 `json:"control_tx"`
+	DataWireBytes    uint64 `json:"data_wire_bytes"`
+	ParityWireBytes  uint64 `json:"parity_wire_bytes"`
+	EnabledSessions  int    `json:"enabled_sessions"`
+	TXActiveSessions int    `json:"tx_active_sessions"`
+	RXBypassSessions int    `json:"rx_bypass_sessions"`
+	Group            int    `json:"group,omitempty"`
+
 	Enabled   bool   `json:"enabled"`
 	ParityTx  uint64 `json:"parity_tx"`
 	Recovered uint64 `json:"recovered"`
@@ -190,13 +206,11 @@ type protectStatsJSON struct {
 	PSKFail          []pskFailJSON `json:"psk_fail,omitempty"`
 }
 
-// padStatsJSON 混淆填充的线路开销：已发出的记录占多少字节、其中多少是填充。
-// 记账点在 Write 成功之后：数据分支记的 wire 与 tx_bytes 是同一个
-// len(sendBuffer)；控制帧（重协商、控制下发）也计入 wire，但走的不是
-// connTxChan，所以不计入 tx_bytes。写失败或被掐断的帧不计入。空心跳帧也不
-// 计入，它是保活代价而不是流量开销。off 模式两项都是 0、overhead_pct 为
-// 0.0，面板照常渲染而不是显示"未启用"。
+// Padding counters cover successful non-heartbeat application records during
+// the current padding-policy epoch. Wire includes headers and inner AEAD tags;
+// off mode still counts wire bytes and correctly reports zero padding overhead.
 type padStatsJSON struct {
+	Epoch       uint64  `json:"epoch"`
 	Mode        string  `json:"mode"`
 	WireBytes   uint64  `json:"wire_bytes"`
 	PadBytes    uint64  `json:"pad_bytes"`
@@ -413,8 +427,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 
 	// 趋势 RTT 采样与每客户端流量差分都依赖 mode 侧回调，在这里挂上
 	if srv != nil {
-		dailyTraffic.SetRTTSampler(srv.avgRTT)
-		dailyTraffic.SetClientSampler(srv.sampleClientTraffic)
+		srv.installTrafficAccounting(dailyTraffic)
 	} else if cli != nil {
 		dailyTraffic.SetRTTSampler(cli.avgRTT)
 	}
@@ -664,13 +677,16 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 
 		if srv != nil {
 			srv.mu.RLock()
-			n := len(srv.activeClients)
+			n := 0
 			var tx, rx, pk uint64
 			for _, s2 := range srv.activeClients {
-				tx += atomic.LoadUint64(&s2.TxBytes)
-				rx += atomic.LoadUint64(&s2.RxBytes)
-				pk += atomic.LoadUint64(&s2.TxPackets) + atomic.LoadUint64(&s2.RxPackets)
+				s2.sessionMu.RLock()
+				if s2.ActiveConns > 0 {
+					n++
+				}
+				s2.sessionMu.RUnlock()
 			}
+			tx, rx, pk = srv.txBytesTotal.Load(), srv.rxBytesTotal.Load(), srv.txPacketsTotal.Load()+srv.rxPacketsTotal.Load()
 			srv.mu.RUnlock()
 			emit("tlsvpn_active_clients", "Number of active client sessions", "gauge", fmt.Sprint(n))
 			emit("tlsvpn_tx_bytes_total", "Total bytes sent to clients", "counter", fmt.Sprint(tx))
@@ -682,8 +698,10 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_ip_pool_v6_used", "Allocated IPv6 addresses", "gauge", fmt.Sprint(v6u))
 			srv.mu.RLock()
 			var rec, lost, parity, portDropped uint64
-			var reorder reorderStatsJSON
+			portDropped = srv.retiredDropped
+			var reorder = srv.retiredReorder
 			for _, s2 := range srv.activeClients {
+				s2.sessionMu.RLock()
 				if s2.FecDec != nil {
 					r2, l2 := s2.FecDec.FECStats()
 					rec += r2
@@ -694,11 +712,15 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 				if s2.RxReorder != nil {
 					addReorderStats(&reorder, s2.RxReorder.Stats())
 				}
+				s2.sessionMu.RUnlock()
 			}
 			srv.mu.RUnlock()
-			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(rec))
-			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(lost))
-			emit("tlsvpn_fec_parity_frames_total", "Parity frames generated", "counter", fmt.Sprint(parity))
+			_ = rec
+			_ = lost
+			emit("tlsvpn_fec_recovered_frames_total", "Frames recovered by XOR FEC", "counter", fmt.Sprint(srv.fecLifetime.recovered.Load()))
+			emit("tlsvpn_fec_lost_frames_total", "Frames confirmed lost despite FEC", "counter", fmt.Sprint(srv.fecLifetime.lost.Load()))
+			_ = parity
+			emit("tlsvpn_fec_parity_frames_total", "Parity frames successfully written", "counter", fmt.Sprint(srv.written.parityFrames.Load()))
 			emit("tlsvpn_port_dropped_frames_total", "Frames dropped due to backpressure", "counter", fmt.Sprint(portDropped))
 			emit("tlsvpn_reorder_gap_events_total", "Observed sequence gaps", "counter", fmt.Sprint(reorder.GapEvents))
 			emit("tlsvpn_reorder_timeout_flushes_total", "Gap timeouts that resumed delivery", "counter", fmt.Sprint(reorder.TimeoutFlushes))
@@ -741,7 +763,7 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 // startWebStatsHandler 输出运行状态 JSON（server/client 两种模式）
 func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, cli *Client) {
 	w.Header().Set("Content-Type", "application/json")
-	stats := WebStats{Version: appVersion, Clients: make(map[string]interface{}), LogLevel: currentLogLevelName()}
+	stats := WebStats{InstanceID: dashboardInstanceID, SampleTimeMs: time.Now().UnixMilli(), AccountingScope: "application_wire_excluding_heartbeat", Version: appVersion, Clients: make(map[string]interface{}), LogLevel: currentLogLevelName()}
 
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
@@ -755,7 +777,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.Mode = "server"
 		stats.UptimeSec = uint64(time.Since(srv.startedAt) / time.Second)
 		srv.mu.RLock()
-		stats.ActiveClients = len(srv.activeClients)
+		stats.RetainedSessions = len(srv.activeClients)
 		type tmpSession struct {
 			v4, v6, mac, fec        string
 			conns, enc              int
@@ -763,17 +785,27 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			peer                    PeerInfo
 		}
 		snapClients := make(map[string]tmpSession, len(srv.activeClients))
-		var gTxB, gRxB, gTxP, gRxP uint64
 		for id, session := range srv.activeClients {
 			session.sessionMu.Lock()
 			conns := session.ActiveConns
+			if conns > 0 {
+				stats.ActiveClients++
+			}
+			stats.LiveConns += conns
+			if session.FecDec != nil {
+				stats.Fec.EnabledSessions++
+				if conns >= 2 && session.Port.fecTXArmed.Load() {
+					stats.Fec.TXActiveSessions++
+				}
+				if session.FecDec.bypassSnapshot() {
+					stats.Fec.RXBypassSessions++
+				}
+			}
 			session.sessionMu.Unlock()
 			txB := atomic.LoadUint64(&session.TxBytes)
 			rxB := atomic.LoadUint64(&session.RxBytes)
 			txP := atomic.LoadUint64(&session.TxPackets)
 			rxP := atomic.LoadUint64(&session.RxPackets)
-			// 全局字节/包计数：跨所有会话求和，面板此前一直是 0
-			gTxB, gRxB, gTxP, gRxP = gTxB+txB, gRxB+rxB, gTxP+txP, gRxP+rxP
 			snapClients[id] = tmpSession{
 				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: session.EncAlgo, conns: conns,
 				txB: txB, rxB: rxB, txP: txP, rxP: rxP,
@@ -784,6 +816,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		var rec, lost, parity, portDropped uint64
 		var reorder reorderStatsJSON
 		for _, session := range srv.activeClients {
+			session.sessionMu.RLock()
 			if session.FecDec != nil {
 				r2, l2 := session.FecDec.FECStats()
 				rec += r2
@@ -794,21 +827,29 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 			if session.RxReorder != nil {
 				addReorderStats(&reorder, session.RxReorder.Stats())
 			}
+			session.sessionMu.RUnlock()
 		}
-		stats.IPPool = &ipPoolJSON{}
-		stats.IPPool.V4Used, stats.IPPool.V4Total, stats.IPPool.V6Used = srv.IPPoolStatus()
-		stats.MACs = srv.MACSnapshot()
+		portDropped += srv.retiredDropped
+		parity += srv.retiredParityAttempts
+		mergeReorderJSON(&reorder, srv.retiredReorder)
 		srv.mu.RUnlock()
 		// 注意：snapshotServerConns 内部会再次拿读锁，必须在 RUnlock 之后调用，
 		// 否则同 goroutine 递归 RLock 在写者排队时会死锁。
+		stats.IPPool = &ipPoolJSON{}
+		stats.IPPool.V4Used, stats.IPPool.V4Total, stats.IPPool.V6Used = srv.IPPoolStatus()
+		stats.MACs = srv.MACSnapshot()
 		stats.ServerConns = srv.snapshotServerConns()
-		stats.Fec = fecStatsJSON{Enabled: true, ParityTx: parity, Recovered: rec, Lost: lost}
+		stats.Fec.Enabled = stats.Fec.EnabledSessions > 0
+		stats.Fec.ParityAttempts = parity
+		stats.Fec.Recovered = srv.fecLifetime.recovered.Load()
+		stats.Fec.Lost = srv.fecLifetime.lost.Load()
+		stats.Fec.setWritten(srv.written.snapshot())
 		stats.Dropped = portDropped
 		stats.Reorder = reorder
 		stats.TapErrors = srv.tapWriteErrs.Load()
-		// 全局字节/包计数：此前声明了字段但从未赋值，面板一直显示 0
-		stats.GlobalTxBytes, stats.GlobalRxBytes = gTxB, gRxB
-		stats.GlobalTxPackets, stats.GlobalRxPackets = gTxP, gRxP
+		// Process totals include retired sessions; session rows keep their own lifetime.
+		stats.GlobalTxBytes, stats.GlobalRxBytes = srv.txBytesTotal.Load(), srv.rxBytesTotal.Load()
+		stats.GlobalTxPackets, stats.GlobalRxPackets = srv.txPacketsTotal.Load(), srv.rxPacketsTotal.Load()
 		stats.DropBreakdown = dropBreakdownJSON{
 			Backpressure: portDropped,
 			SpoofedSrc:   srv.vswitch.spoofDrops.Load(),
@@ -833,7 +874,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.Cfg = snapshotCfg(cfg, "server")
 		if cfg != nil {
 			// 会话水位：active 对 max_sessions（0 = 不限，面板按"无上限"渲染）
-			stats.Sessions = &sessionsJSON{Active: stats.ActiveClients, Max: cfg.Server.MaxSessions}
+			stats.Sessions = &sessionsJSON{Active: stats.RetainedSessions, Max: cfg.Server.MaxSessions}
 			stats.Routes = routeStateSnapshot(cfg.Client.Fwmark)
 			stats.TapLink = tapLinkStats(cfg.Tap)
 		}
@@ -874,18 +915,19 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		v4, v6 := cli.assignedV4, cli.assignedV6
 		mac := cli.macAddr
 		sessionEpoch := cli.sessionEpoch
+		fec, enc, decoder, rxReorder := cli.fecStatus, cli.encAlgo, cli.fecDec, cli.rxReorder
 		cli.sessionMu.Unlock()
 		stats.SessionEpoch = sessionEpoch
 		if p := cli.remotePeerInfoSnapshot(); p != nil {
 			stats.Peer = p
 		}
 		conns := int(atomic.LoadInt32(&cli.liveConns))
-		fec := cli.fecStatus
-		lv := cli.live.Load()
 		// encAlgoNone=0（TLS only）/ 2（AES-256-GCM）/ 4（AES-128-GCM）/ 5（ChaCha20）/ 6（XChaCha20）。
 		// 算法号本身已无歧义，直接下发。
-		enc := cli.encAlgo
-		stats.ActiveClients = 1
+		if conns > 0 {
+			stats.ActiveClients = 1
+		}
+		stats.RetainedSessions = 1
 		stats.Clients["local"] = map[string]interface{}{
 			"client_id": cli.clientID, "ipv4": v4, "ipv6": v6, "mac": mac, "active_conns": conns,
 			"tx_bytes": atomic.LoadUint64(&cli.TxBytes), "rx_bytes": atomic.LoadUint64(&cli.RxBytes),
@@ -896,11 +938,22 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		if cli.txPort != nil {
 			stats.Dropped = cli.txPort.Dropped()
 			rec, lost := cli.FECStats()
-			fecEnabled := lv != nil && lv.fecMode
-			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityTx: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
+			fecEnabled := decoder != nil && fec != "off"
+			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityAttempts: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
+			stats.Fec.setWritten(cli.txPort.written.snapshot())
+			if fecEnabled {
+				stats.Fec.EnabledSessions = 1
+				stats.Fec.Group = decoder.k
+				if conns >= 2 && cli.txPort.fecTXArmed.Load() {
+					stats.Fec.TXActiveSessions = 1
+				}
+				if decoder.bypassSnapshot() {
+					stats.Fec.RXBypassSessions = 1
+				}
+			}
 		}
-		if cli.rxReorder != nil {
-			addReorderStats(&stats.Reorder, cli.rxReorder.Stats())
+		if rxReorder != nil {
+			addReorderStats(&stats.Reorder, rxReorder.Stats())
 		}
 		stats.TapErrors = cli.tapWriteErrs.Load()
 		stats.FecMode = fec
@@ -1036,8 +1089,10 @@ func padOverhead(wire, pad uint64) float64 {
 // 返回全零（mode 仍如实报告）而不是 nil：面板据此显示 0.0%，而不是"未启用"——
 // 后者会把"填充已正确关闭"说成"没配置"。
 func padStatsJSONPtr() *padStatsJSON {
-	wire, pad := padStatsSnapshot()
-	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad)}
+	padStatsMu.Lock()
+	defer padStatsMu.Unlock()
+	wire, pad := padWireC.v.Load(), padPadC.v.Load()
+	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad), Epoch: padStatsEpoch}
 }
 
 // certInfoSnapshot 证书有效期换算成面板可直接读的形式；证书信息不可用时返回
@@ -1115,9 +1170,27 @@ func (s *Server) negSnapshot() runtimeNegJSON {
 	s.mu.RUnlock()
 
 	n := runtimeNegJSON{ProtocolVersion: protocolVersion, SessionToken: true, PadMode: padModeName()}
+	s.mu.RLock()
+	group, mixed := 0, false
+	for _, session := range s.activeClients {
+		session.sessionMu.RLock()
+		if session.FecDec != nil {
+			n.FEC = true
+			k := session.FecEncK
+			if group == 0 {
+				group = k
+			} else if group != k {
+				mixed = true
+			}
+		}
+		session.sessionMu.RUnlock()
+	}
+	s.mu.RUnlock()
+	if !mixed {
+		n.FecGroup = group
+	}
 	if cfg != nil {
-		n.FEC = cfg.Client.FEC
-		n.FecGroup = cfg.Client.FecGroup
+
 		// 服务端预算按逻辑客户端分组，不是全机连接数均分。逐会话的实际范围
 		// 由 serverConnsBrutal 在握手快照后补入。
 		n.Brutal = brutalSummary(cfg.Brutal, cfg.BrutalUp, cfg.BrutalDown, 0)
@@ -1353,4 +1426,11 @@ func (c *Client) PendingRestart() []string {
 		return c.NeedsRestart(cfg)
 	}
 	return nil
+}
+
+func mergeReorderJSON(a *reorderStatsJSON, b reorderStatsJSON) {
+	a.GapEvents += b.GapEvents
+	a.TimeoutFlushes += b.TimeoutFlushes
+	a.SkippedFrames += b.SkippedFrames
+	a.DroppedFrames += b.DroppedFrames
 }

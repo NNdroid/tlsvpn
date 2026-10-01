@@ -266,6 +266,8 @@ func init() { padModeCode.Store(padCodeBucket) }
 // 策略真正变化时清零填充累计：两种策略的线路长度分布完全不同，混在一个
 // 累计里会让"填充开销"既不代表旧策略也不代表新策略。
 func setPadMode(mode string) string {
+	padStatsMu.Lock()
+	defer padStatsMu.Unlock()
 	actual := padModeBucket
 	if mode == padModeOff {
 		actual = padModeOff
@@ -279,6 +281,7 @@ func setPadMode(mode string) string {
 	}
 	padWireC.v.Store(0)
 	padPadC.v.Store(0)
+	padStatsEpoch++
 	return actual
 }
 
@@ -308,23 +311,31 @@ type padCounter struct {
 	_pad [56]byte
 }
 
+var padStatsMu sync.Mutex
+var padStatsEpoch uint64
+
+func padAccountingEpoch() uint64 { padStatsMu.Lock(); defer padStatsMu.Unlock(); return padStatsEpoch }
+
 var (
 	padWireC padCounter // 已发出记录的线路字节：10B 帧头 + 负载 + 填充
 	padPadC  padCounter // 其中属于混淆填充的字节
 )
 
-// recordPadBytes 在 Write 成功之后调用，wire 是整包的线路字节数。
-// pad=0（off 模式、或心跳等空帧被调用方跳过）时完全不写计数器，因此 off
-// 模式下这条路径与未引入统计前一样热。
-func recordPadBytes(wire, pad uint64) {
-	if pad == 0 {
+// Record every successful application record, including records with no padding.
+// Epoch guards keep writes assembled before a policy change out of the new period.
+func recordPadBytes(wire, pad uint64) { recordPadBytesAt(wire, pad, padAccountingEpoch()) }
+func recordPadBytesAt(wire, pad, epoch uint64) {
+	padStatsMu.Lock()
+	defer padStatsMu.Unlock()
+	if epoch != padStatsEpoch {
 		return
 	}
 	padWireC.v.Add(wire)
 	padPadC.v.Add(pad)
 }
-
 func padStatsSnapshot() (wire, pad uint64) {
+	padStatsMu.Lock()
+	defer padStatsMu.Unlock()
 	return padWireC.v.Load(), padPadC.v.Load()
 }
 
@@ -420,11 +431,15 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher, recordLimit ...
 
 // writeStreamFrame 发送无需去重的控制帧
 func writeStreamFrame(w io.Writer, frame []byte, recordLimit ...int) error {
+	epoch := padAccountingEpoch()
 	streamBuf := getFrame()[:0]
 	streamBuf, pad := appendPaddedFrame(streamBuf, VPNFrame{Seq: 0, Data: frame}, nil, recordLimit...)
-	_, err := w.Write(streamBuf)
+	n, err := w.Write(streamBuf)
+	if err == nil && n != len(streamBuf) {
+		err = io.ErrShortWrite
+	}
 	if err == nil {
-		recordPadBytes(uint64(len(streamBuf)), uint64(pad))
+		recordPadBytesAt(uint64(len(streamBuf)), uint64(pad), epoch)
 	}
 	putFrame(streamBuf[:cap(streamBuf)])
 	return err
@@ -453,7 +468,8 @@ type FrameScanner struct {
 	offset int
 	// maxDataLen 当前允许的帧负载上限：认证前的握手帧用小上限，认证通过后
 	// 恢复线路全量上限（见 SetMaxDataLen）。
-	maxDataLen int
+	maxDataLen   int
+	lastWireSize uint64 // complete record consumed by the last successful ReadFrame
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
@@ -486,6 +502,7 @@ func (fs *FrameScanner) BufferedFrameReady() bool {
 
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 	const HeaderSize = 10
+	fs.lastWireSize = 0
 
 	for {
 		available := len(fs.buf) - fs.offset
@@ -504,6 +521,7 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 			totalLen := dataLen + padLen
 
 			if available >= HeaderSize+totalLen {
+				fs.lastWireSize = uint64(HeaderSize + totalLen)
 				if dataLen == 0 {
 					// 心跳/控制帧：返回给调用方（frame=nil），用于刷新读超时。
 					// 旧实现在此静默跳过，导致空闲隧道的 30 秒读超时永不刷新、

@@ -213,7 +213,7 @@ func TestDashboardRendersServerObservedTLS(t *testing.T) {
 	js := dashboardJS(t)
 	for _, token := range []string{
 		"fingerprint_sha256", "fingerprint_kind", "cipher_suite_id", "offered_cipher_suites",
-		"ClientHello fingerprint (not JA3/JA4)",
+		"t('stt.neg.tlsfp')",
 	} {
 		if !strings.Contains(js, token) {
 			t.Fatalf("dashboard does not render server-observed TLS field %q", token)

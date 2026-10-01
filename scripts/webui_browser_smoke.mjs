@@ -40,16 +40,23 @@ function contentType(file) {
   return 'application/octet-stream';
 }
 
-function statsFixture() {
+function statsFixture(mode='client',stage=1,instance='browser-smoke') {
+  const client={tx_bytes:stage*12600,rx_bytes:stage*6300,tx_packets:stage*126,rx_packets:stage*50,active_conns:2,ipv4:'10.0.0.2',fec:'xor K=4',enc_algo:2};
+  const conn=(id,owner)=>({conn_id:id,client_id:owner,index:0,target:'test.example:443',remote:'127.0.0.1:443',state:'up',tx_bytes:stage*6300,rx_bytes:stage*3150,rtt_ms:20,age_sec:10,fec:'xor K=4',enc_algo:2,tls_version:'TLS 1.3',scheduler:{active:true,queued_bytes:0,rate_mbps:8,assigned_bytes:stage*1000,assigned_batches:stage,fec_assigned_bytes:0,fec_assigned_batches:0}});
   return {
-    mode: 'client', version: 'ci-smoke', uptime: 1,
-    clients: {}, conns: [], server_conns: [], mac_table: [], bans: [],
-    tx_bytes: 0, rx_bytes: 0, tx_packets: 0, rx_packets: 0,
-    dropped_frames: 0, tap_write_errors: 0,
-    fec: { enabled: false, parity_tx: 0, recovered: 0, lost: 0 },
-    reorder: { dropped_frames: 0, skipped_frames: 0, gap_events: 0 },
-    drop_breakdown: {}, padding: {}, sessions: {}, runtime: {},
-    traffic: { daily: [] }, alerts: [], routes: [], rules: []
+    mode,version:'ci-smoke',instance_id:instance,sample_time_ms:1000+stage*1000,uptime_sec:10+stage,
+    accounting_scope:'application_wire_excluding_heartbeat',active_clients:1,retained_sessions:1,live_conns:2,
+    clients:mode==='client'?{local:client}:{A:client},
+    conns:mode==='client'?[conn('a','local'),conn('b','local')]:[],
+    server_conns:mode==='server'?[conn('a','A'),conn('b','A')]:[],
+    global_tx_bytes:stage*12600,global_rx_bytes:stage*6300,global_tx_packets:stage*126,global_rx_packets:stage*50,
+    dropped_frames:0,tap_write_errors:0,reconnect_attempts:0,
+    fec:{enabled:true,counter_domain:'written',parity_tx:stage*25,parity_attempts:stage*25,data_tx:stage*100,control_tx:stage,data_wire_bytes:stage*10000,parity_wire_bytes:stage*2500,recovered:stage,lost:0,enabled_sessions:1,tx_active_sessions:1,rx_bypass_sessions:0,group:4},
+    fec_mode:'xor K=4',enc_algo:2,
+    reorder:{dropped_frames:0,skipped_frames:0,gap_events:0},drop_breakdown:{backpressure:0,reorder:0},
+    pad:{mode:'bucket',epoch:1,wire_bytes:stage*1000,pad_bytes:stage*20,overhead_pct:stage?2:0},
+    sessions:{active:2,max:2},cfg:{fec:true,fec_mode:'xor K=4',encrypt:true,conns:2},negotiate:{fec:true,fec_group:4},
+    mem:{heap_alloc_mb:1,num_goroutine:10},system:{},traffic:{daily:[]}
   };
 }
 
@@ -65,7 +72,9 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/stream') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
       const emit = (name, value) => res.write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`);
-      emit('stats', statsFixture());
+      emit('stats', statsFixture('client',0));
+      const statsTimer=setTimeout(()=>emit('stats',statsFixture()),100);
+      res.on('close',()=>clearTimeout(statsTimer));
       emit('trend', { step_sec: 1, points: [] });
       emit('logs', []);
       emit('events', []);
@@ -159,6 +168,31 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
       if (state.framevizText.includes(leaked)) failures.push(`[${lang}] frame visualizer leaked English text: ${leaked}`);
     }
   }
+}
+
+// Exercise actual rendering with nonzero client/server counters and restart sequences.
+for(const mode of ['client','server']) {
+  const result=await page.evaluate(([first,next,mode])=>{
+    applyStats(first);applyStats(next);
+    const expectedUp=mode==='server'?6300:12600,expectedDown=mode==='server'?12600:6300;
+    const errors=[];
+    const check=(id,want)=>{const got=document.getElementById(id)?.textContent;if(got!==want)errors.push(id+': '+got+' != '+want);};
+    check('total-tx',fmtBytes(12600));check('total-rx',fmtBytes(6300));
+    check('live-up',fmtBytes(expectedUp,true));check('live-down',fmtBytes(expectedDown,true));
+    check('fec-overhead','25.0%');
+    const diag=dgRun(next).fec.find(x=>x.ch==='fecovh');if(!diag.det.startsWith('25.0'))errors.push('diagnostic FEC differs');
+    openClient(mode==='server'?'A':'local');renderDrawer();closeDrawer();
+    logSeq=1000;evSeq=1000;
+    const restart=JSON.parse(JSON.stringify(next));restart.instance_id='restarted-'+mode;restart.uptime_sec=0;restart.sample_time_ms=500;
+    applyStats(restart);
+    check('total-tx-speed',fmtBytes(0,true));
+    applyLogs([{seq:1,time:'00:00:00',level:'INFO',msg:'fresh-process-'+mode}]);
+    applyEvents([{seq:1,type:'up',level:'info',time:'00:00:00',msg:'fresh-event-'+mode}]);
+    if(logSeq!==1 || evSeq!==1)errors.push('restart cursors did not accept new sequence');
+    if(!document.getElementById('logbox').textContent.includes('fresh-process-'+mode))errors.push('new process log missing');
+    return errors;
+  },[statsFixture(mode,0,'metric-'+mode),statsFixture(mode,1,'metric-'+mode),mode]);
+  result.forEach(x=>failures.push('['+mode+' metrics] '+x));
 }
 
 if (legacyPollHits.length) failures.push('legacy polling requests observed: '+legacyPollHits.join(', '));

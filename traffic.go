@@ -95,9 +95,11 @@ type trafficSnapshotJSON struct {
 }
 
 type TrafficAccounting struct {
-	up, down atomic.Uint64 // 进程启动以来的线路字节累计（单调）
-	lastUp   uint64        // 上次采样值，用于算增量
-	lastDown uint64
+	clientDeltaFn func() map[string][2]uint64
+	up, down      atomic.Uint64 // 进程启动以来的线路字节累计（单调）
+	lastUp        uint64        // 上次采样值，用于算增量
+	lastDown      uint64
+	lastFlush     time.Time
 
 	mu      sync.Mutex
 	started bool
@@ -146,6 +148,14 @@ func (t *TrafficAccounting) SetRTTSampler(fn func() float64) {
 
 // SetClientSampler 注册每客户端流量采样回调：返回 clientID → {上行累计, 下行累计}
 // （服务端视角：上行取会话 Rx、下行取会话 Tx，均为单调计数）。
+// SetClientDeltaSampler uses per-session deltas so retiring/recreating a logical
+// client between samples cannot erase its final traffic or reset its baseline.
+func (t *TrafficAccounting) SetClientDeltaSampler(fn func() map[string][2]uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.clientDeltaFn = fn
+}
+
 func (t *TrafficAccounting) SetClientSampler(fn func() map[string][2]uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -180,6 +190,7 @@ func (t *TrafficAccounting) OnConfig(cfg *Config) {
 	t.days = days
 	if !t.started {
 		t.started = true
+		t.lastFlush = time.Now()
 		t.file = file
 		t.clientFile = clientFile
 		t.loadLocked()
@@ -243,6 +254,7 @@ func (t *TrafficAccounting) recentLoop() {
 		now := time.Now()
 		if last.IsZero() {
 			last = now
+			lastUp, lastDown = t.up.Load(), t.down.Load()
 			continue
 		}
 		up, down := t.up.Load(), t.down.Load()
@@ -275,13 +287,17 @@ func (t *TrafficAccounting) RecentSnapshot() trendSnapshotJSON {
 // flush 采样一轮：把计数器增量累进当天桶与趋势缓冲，跨天则轮转，
 // 然后裁剪并按需落盘。
 func (t *TrafficAccounting) flush(now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	up := t.up.Load()
 	down := t.down.Load()
 	dUp, dDown := up-t.lastUp, down-t.lastDown
 	t.lastUp, t.lastDown = up, down
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	seconds := 60.0
+	if !t.lastFlush.IsZero() && now.After(t.lastFlush) {
+		seconds = now.Sub(t.lastFlush).Seconds()
+	}
+	t.lastFlush = now
 	today := now.Format(trafficDayLayout)
 	if today != t.today {
 		t.today = today
@@ -306,7 +322,7 @@ func (t *TrafficAccounting) flush(now time.Time) {
 		lastMinute = t.trend[n-1].TUnix / 60
 	}
 	if dUp > 0 || dDown > 0 || thisMinute != lastMinute {
-		p := trendPoint{TUnix: thisMinute * 60, UpBps: float64(dUp) / 60, DownBps: float64(dDown) / 60}
+		p := trendPoint{TUnix: thisMinute * 60, UpBps: float64(dUp) / seconds, DownBps: float64(dDown) / seconds}
 		if t.rttFn != nil {
 			p.RttMs = t.rttFn()
 		}
@@ -322,6 +338,26 @@ func (t *TrafficAccounting) flush(now time.Time) {
 
 // sampleClientsLocked 拉取各客户端的会话累计字节并差分入当天桶。
 func (t *TrafficAccounting) sampleClientsLocked(today string, now time.Time) {
+	if t.clientDeltaFn != nil {
+		for id, delta := range t.clientDeltaFn() {
+			if delta[0] == 0 && delta[1] == 0 {
+				continue
+			}
+			m := t.clientBuckets[today]
+			if m == nil {
+				m = make(map[string]*trafficDay)
+				t.clientBuckets[today] = m
+			}
+			b := m[id]
+			if b == nil {
+				b = &trafficDay{}
+				m[id] = b
+			}
+			b.Up += delta[0]
+			b.Down += delta[1]
+		}
+		return
+	}
 	if t.clientFn == nil {
 		return
 	}
@@ -475,11 +511,11 @@ func (t *TrafficAccounting) writeFileAtomic(path string, data []byte) bool {
 // Snapshot 供 /api/stats 使用。"今天"的值补上尚未采样的增量，保证顶部汇总、
 // 柱状图与日表三处数字一致。今日之外的历史桶不含未采样增量（历史已定格）。
 func (t *TrafficAccounting) Snapshot() trafficSnapshotJSON {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	up, down := t.up.Load(), t.down.Load()
 	dUp, dDown := up-t.lastUp, down-t.lastDown
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
 	today := time.Now().Format(trafficDayLayout)
 	out := trafficSnapshotJSON{
 		Days:  t.days,
@@ -550,10 +586,13 @@ func (t *TrafficAccounting) TrendSnapshot(minutes int) trendSnapshotJSON {
 }
 
 // ClientSnapshot 返回各客户端的按日流量历史（按客户端 ID 与日期排序）。
-// 今日值不含未采样增量（最多滞后一个采样周期）。
+// Delta samplers include current unflushed traffic before rendering today.
 func (t *TrafficAccounting) ClientSnapshot() []clientTrafficJSON {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.clientDeltaFn != nil {
+		t.sampleClientsLocked(time.Now().Format(trafficDayLayout), time.Now())
+	}
 	ids := make([]string, 0)
 	seen := make(map[string]bool)
 	for _, m := range t.clientBuckets {
