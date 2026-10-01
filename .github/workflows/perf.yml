@@ -41,12 +41,21 @@ jobs:
           bash -n scripts/real_tap_perf.sh
           bash -n scripts/build.sh
 
-      - name: Build unprofiled candidate and main baseline
+      - name: Build candidate variants and main baseline
         run: |
+          set -euo pipefail
           mkdir -p perf-bin perf-artifacts
-          # The training binary must never inherit a previously committed
-          # default.pgo; otherwise the A/B training cycle is not reproducible.
+          # Training is always unprofiled so profile generation is reproducible.
           go build -pgo=off -trimpath -o "$PWD/perf-bin/tlsvpn-candidate-off" .
+          # This is the binary we actually ship if a newly trained profile does
+          # not clear the isolated promotion threshold.
+          test -s default.pgo
+          go build -trimpath -o "$PWD/perf-bin/tlsvpn-candidate-committed" .
+          go version -m "$PWD/perf-bin/tlsvpn-candidate-committed" \
+            > perf-artifacts/committed-pgo-buildinfo.txt
+          grep -q -- '-pgo=default.pgo' perf-artifacts/committed-pgo-buildinfo.txt
+          # Main remains an unprofiled baseline so the matrix measures the full
+          # performance branch effect, including whichever profile will ship.
           (cd baseline && go build -pgo=off -trimpath -o "$OLDPWD/perf-bin/tlsvpn-main" .)
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/main.tsv
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > perf-artifacts/candidate.tsv
@@ -88,7 +97,7 @@ jobs:
           sudo chown -R "$USER:$USER" perf-artifacts
           awk -F '\t' 'BEGIN{OFS="\t"} {print "download", $0}' perf-artifacts/profile-download.tsv >> perf-artifacts/profile-throughput.tsv
 
-      - name: Merge representative CPU profiles into default.pgo
+      - name: Merge representative CPU profiles into candidate PGO
         run: |
           set -euo pipefail
           # Equal-duration upload/download × server/client samples give one
@@ -104,14 +113,14 @@ jobs:
             perf-bin/tlsvpn-candidate-off perf-artifacts/default.pgo \
             > perf-artifacts/default-pgo-top.txt
 
-      - name: Build PGO candidate
+      - name: Build newly trained PGO candidate
         run: |
           set -euo pipefail
           go build -pgo="$PWD/perf-artifacts/default.pgo" -trimpath \
-            -o "$PWD/perf-bin/tlsvpn-candidate" .
-          go version -m "$PWD/perf-bin/tlsvpn-candidate" \
-            > perf-artifacts/candidate-buildinfo.txt
-          cat perf-artifacts/candidate-buildinfo.txt
+            -o "$PWD/perf-bin/tlsvpn-candidate-new" .
+          go version -m "$PWD/perf-bin/tlsvpn-candidate-new" \
+            > perf-artifacts/new-pgo-buildinfo.txt
+          cat perf-artifacts/new-pgo-buildinfo.txt
 
       - name: Render real-TAP pprof summaries
         run: |
@@ -128,10 +137,10 @@ jobs:
             done
           done
 
-      - name: Run isolated paired PGO A/B
+      - name: Run isolated paired newly-trained PGO A/B
         env:
           OFF_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate-off
-          PGO_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
+          PGO_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate-new
         run: |
           set -euo pipefail
           # Two rounds with reversed ordering reduce hosted-runner temporal bias.
@@ -141,7 +150,7 @@ jobs:
               if [ "$mode" = off ]; then bin="$OFF_BIN"; else bin="$PGO_BIN"; fi
               out="$PWD/perf-artifacts/pgo-${mode}-${round}.tsv"
               printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$out"
-              echo "=== PGO A/B round=$round mode=$mode ==="
+              echo "=== newly-trained PGO A/B round=$round mode=$mode ==="
               sudo -E env \
                 BIN="$bin" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
                 PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
@@ -151,7 +160,72 @@ jobs:
           done
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Run paired main-off/candidate-PGO throughput matrix
+      - name: Select profile used by release candidate
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv
+          import math
+          from pathlib import Path
+
+          root = Path('perf-artifacts')
+          key_fields = ('conns', 'enc_algo', 'pad_mode', 'direction')
+
+          def load(path):
+              out = {}
+              with path.open(newline='') as f:
+                  for row in csv.DictReader(f, delimiter='\t'):
+                      out[tuple(row[k] for k in key_fields)] = float(row['mbps'])
+              return out
+
+          rows = []
+          for round_no in (1, 2):
+              off = load(root/f'pgo-off-{round_no}.tsv')
+              pgo = load(root/f'pgo-pgo-{round_no}.tsv')
+              if set(off) != set(pgo):
+                  raise SystemExit(f'PGO A/B matrix mismatch in round {round_no}')
+              for key in sorted(off):
+                  ratio = pgo[key] / off[key] if off[key] else 1.0
+                  rows.append((round_no, key[-1], ratio))
+
+          overall = (math.exp(sum(math.log(r[2]) for r in rows) / len(rows)) - 1.0) * 100.0
+          direction_geos = {}
+          for direction in sorted({r[1] for r in rows}):
+              ratios = [r[2] for r in rows if r[1] == direction]
+              direction_geos[direction] = (math.exp(sum(math.log(x) for x in ratios) / len(ratios)) - 1.0) * 100.0
+          worst_direction = min(direction_geos.values())
+
+          # A new profile is an optimization opportunity, not a correctness
+          # requirement. If it is neutral, noisy, or directionally regressive,
+          # keep the already-validated committed profile and validate that exact
+          # shipping binary in the full matrix below.
+          selected = 'new' if overall >= 0.5 and worst_direction >= -3.0 else 'committed'
+          (root/'pgo-selection.txt').write_text(selected + '\n')
+          (root/'pgo-selection-summary.txt').write_text(
+              f'new profile isolated geomean: {overall:+.2f}%\n' +
+              'per direction: ' + ', '.join(f'{k}={v:+.2f}%' for k, v in direction_geos.items()) + '\n' +
+              f'selected release profile: {selected}\n'
+          )
+          print((root/'pgo-selection-summary.txt').read_text())
+          PY
+
+          selection=$(cat perf-artifacts/pgo-selection.txt)
+          case "$selection" in
+            new)
+              cp perf-bin/tlsvpn-candidate-new perf-bin/tlsvpn-candidate
+              ;;
+            committed)
+              cp perf-bin/tlsvpn-candidate-committed perf-bin/tlsvpn-candidate
+              ;;
+            *)
+              echo "unknown PGO selection: $selection" >&2
+              exit 1
+              ;;
+          esac
+          go version -m perf-bin/tlsvpn-candidate > perf-artifacts/selected-buildinfo.txt
+          cat perf-artifacts/selected-buildinfo.txt
+
+      - name: Run paired main-off/release-candidate throughput matrix
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -169,7 +243,7 @@ jobs:
                   PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
                   bash scripts/real_tap_perf.sh
 
-                echo "=== candidate -pgo=default.pgo: conns=$conns enc=$enc pad=$pad ==="
+                echo "=== selected release candidate: conns=$conns enc=$enc pad=$pad ==="
                 sudo -E env \
                   BIN="$CANDIDATE_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
                   PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
@@ -180,7 +254,7 @@ jobs:
           done
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Run paired single-path FEC main-off/candidate-PGO throughput
+      - name: Run paired single-path FEC main-off/release-candidate throughput
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -198,7 +272,7 @@ jobs:
             PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
             bash scripts/real_tap_perf.sh
 
-          echo "=== candidate -pgo=default.pgo: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+          echo "=== selected release candidate: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
           sudo -E env \
             BIN="$CANDIDATE_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
             PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
@@ -206,7 +280,7 @@ jobs:
             bash scripts/real_tap_perf.sh
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Compare PGO candidate and enforce promotion gate
+      - name: Validate release candidate and promotion decision
         run: |
           python3 - <<'PY'
           import csv
@@ -242,7 +316,7 @@ jobs:
               return rows, (geo - 1.0) * 100.0
 
           rows, main_geo = compare(root/'main.tsv', root/'candidate.tsv', root/'comparison.tsv')
-          fec_rows, fec_geo = compare(root/'fec-main.tsv', root/'fec-candidate.tsv', root/'fec-comparison.tsv')
+          _, fec_geo = compare(root/'fec-main.tsv', root/'fec-candidate.tsv', root/'fec-comparison.tsv')
 
           pgo_rows = []
           for round_no in (1, 2):
@@ -257,7 +331,7 @@ jobs:
 
           with (root/'pgo-comparison.tsv').open('w', newline='') as f:
               w = csv.writer(f, delimiter='\t')
-              w.writerow(('round', 'direction', 'pgo_off_mbps', 'pgo_on_mbps', 'delta_pct'))
+              w.writerow(('round', 'direction', 'pgo_off_mbps', 'new_pgo_mbps', 'delta_pct'))
               for r in pgo_rows:
                   w.writerow((r[0], r[1], f'{r[2]:.1f}', f'{r[3]:.1f}', f'{r[4]:+.2f}'))
 
@@ -267,15 +341,14 @@ jobs:
               ratios = [r[5] for r in pgo_rows if r[1] == direction]
               direction_geos[direction] = (math.exp(sum(math.log(x) for x in ratios) / len(ratios)) - 1.0) * 100.0
           worst_main = min(r[6] for r in rows)
-          worst_direction = min(direction_geos, key=direction_geos.get)
-          worst_direction_geo = direction_geos[worst_direction]
-          direction_summary = ', '.join(f'{direction}={geo:+.2f}%' for direction, geo in direction_geos.items())
+          selection = (root/'pgo-selection.txt').read_text().strip()
           summary = (
-              f'main-off -> candidate-PGO geomean: {main_geo:+.2f}%\n'
-              f'FEC main-off -> candidate-PGO geomean: {fec_geo:+.2f}%\n'
-              f'candidate PGO-off -> PGO-on geomean: {pgo_geo:+.2f}%\n'
-              f'candidate PGO per-direction geomean: {direction_summary}\n'
-              f'worst main/candidate cell: {worst_main:+.2f}%\n'
+              f'selected release profile: {selection}\n'
+              f'main-off -> release-candidate geomean: {main_geo:+.2f}%\n'
+              f'FEC main-off -> release-candidate geomean: {fec_geo:+.2f}%\n'
+              f'new PGO-off -> PGO-on isolated geomean: {pgo_geo:+.2f}%\n'
+              f'new PGO per-direction geomean: ' + ', '.join(f'{k}={v:+.2f}%' for k, v in direction_geos.items()) + '\n'
+              f'worst main/release-candidate cell: {worst_main:+.2f}%\n'
           )
           (root/'pgo-gate.txt').write_text(summary)
           print((root/'comparison.tsv').read_text())
@@ -285,32 +358,36 @@ jobs:
 
           failures = []
           if main_geo < 0.0:
-              failures.append(f'aggregate candidate PGO regression vs main: {main_geo:+.2f}%')
+              failures.append(f'aggregate release candidate regression vs main: {main_geo:+.2f}%')
           if fec_geo < -3.0:
-              failures.append(f'FEC regression vs main exceeds 3%: {fec_geo:+.2f}%')
-          if pgo_geo < 0.5:
-              failures.append(f'isolated PGO gain below 0.5%: {pgo_geo:+.2f}%')
+              failures.append(f'FEC release candidate regression vs main exceeds 3%: {fec_geo:+.2f}%')
           if worst_main < -10.0:
-              failures.append(f'one main/candidate cell regressed >10%: {worst_main:+.2f}%')
-          # Each direction is measured twice with reversed A/B ordering. Gate on
-          # the cross-round geometric mean instead of one noisy hosted-runner pair.
-          if worst_direction_geo < -3.0:
-              failures.append(
-                  f'isolated PGO {worst_direction} cross-round regression exceeds 3%: '
-                  f'{worst_direction_geo:+.2f}%'
-              )
+              failures.append(f'one main/release-candidate cell regressed >10%: {worst_main:+.2f}%')
+          if selection == 'new':
+              worst_direction_geo = min(direction_geos.values())
+              if pgo_geo < 0.5:
+                  failures.append(f'new profile selected below 0.5% isolated gain: {pgo_geo:+.2f}%')
+              if worst_direction_geo < -3.0:
+                  failures.append(f'new profile selected with directional regression: {worst_direction_geo:+.2f}%')
+          elif selection != 'committed':
+              failures.append(f'unknown release profile selection: {selection}')
           if failures:
-              raise SystemExit('PGO promotion gate failed:\n  - ' + '\n  - '.join(failures))
+              raise SystemExit('release performance gate failed:\n  - ' + '\n  - '.join(failures))
           PY
 
-      - name: Promote validated profile to default.pgo
+      - name: Promote newly trained profile when selected
         if: github.ref == 'refs/heads/perf/single-path-fec-bypass'
         run: |
           set -euo pipefail
+          selection=$(cat perf-artifacts/pgo-selection.txt)
+          if [ "$selection" != new ]; then
+            echo "New profile did not clear promotion threshold; retaining committed default.pgo"
+            exit 0
+          fi
           cp perf-artifacts/default.pgo default.pgo
           git add default.pgo
           if git diff --cached --quiet; then
-            echo 'default.pgo already matches the validated profile'
+            echo 'default.pgo already matches the validated newly trained profile'
             exit 0
           fi
           git config user.name 'github-actions[bot]'
