@@ -430,6 +430,7 @@ type ClientSession struct {
 
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
 type connInfo struct {
+	tcpObservation atomic.Pointer[tcpSocketSnapshot]
 	connID      string
 	remote      string
 	tcpConn     *net.TCPConn
@@ -941,6 +942,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				rtt = atomic.LoadUint32(ci.rttCache) / 1000
 			}
 			out = append(out, serverConnSnapshot{
+				TCP: ci.tcpObservation.Load(),
 				ClientID:  id,
 				ConnID:    ci.connID,
 				Remote:    ci.remote,

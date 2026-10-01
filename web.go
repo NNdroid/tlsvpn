@@ -85,6 +85,7 @@ func cfgStamp(cfg *Config) string {
 
 func (w *WebManager) Run() {
 	for {
+		w.sampleTCPObservations()
 		w.sampleDiagnostics()
 		w.rebindIfNeeded()
 		time.Sleep(2 * time.Second)

@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
@@ -108,7 +109,7 @@ func initGlobalProxy(raw string, fwmark int) error {
 		return err
 	}
 
-	d, err := xproxy.SOCKS5("tcp", host, auth, base)
+	d, err := xproxy.SOCKS5("tcp", host, auth, observedProxyForwarder{base})
 	if err != nil {
 		return fmt.Errorf("create socks5 dialer failed: %v", err)
 	}
@@ -124,7 +125,43 @@ func initGlobalProxy(raw string, fwmark int) error {
 
 // dialContext 是全局唯一的对外拨号入口，所有 socket 都必须经过这里。
 func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return globalDialer.DialContext(ctx, network, addr)
+	capture := &proxyTransportCapture{}
+	conn, err := globalDialer.DialContext(context.WithValue(ctx, proxyTransportCaptureKey{}, capture), network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if capture.used.Load() {
+		return &observedProxyTransport{Conn: conn, tcp: capture.tcp.Load()}, nil
+	}
+	return conn, nil
+}
+
+// Retain the local socket while SOCKS wraps it. This private observation handle
+// intentionally does not expose NetConn: existing tuning/cork helpers keep their
+// current proxy behavior. Reads/writes/deadlines/Close still use the SOCKS Conn.
+type proxyTransportCaptureKey struct{}
+type proxyTransportCapture struct {
+	tcp  atomic.Pointer[net.TCPConn]
+	used atomic.Bool
+}
+type observedProxyTransport struct {
+	net.Conn
+	tcp *net.TCPConn
+}
+type observedProxyForwarder struct{ base *net.Dialer }
+
+func (d observedProxyForwarder) Dial(network, addr string) (net.Conn, error) {
+	return d.base.Dial(network, addr)
+}
+func (d observedProxyForwarder) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := d.base.DialContext(ctx, network, addr)
+	if capture, ok := ctx.Value(proxyTransportCaptureKey{}).(*proxyTransportCapture); ok {
+		capture.used.Store(true)
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			capture.tcp.Store(tcp)
+		}
+	}
+	return conn, err
 }
 
 // underlyingTCPConn 取出真实的本地 TCP socket。

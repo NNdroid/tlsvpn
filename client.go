@@ -1117,6 +1117,9 @@ func (c *Client) wakeAll() {
 
 // clientConnInfo 单条物理连接的运行明细（面板展示 + 强制重连句柄）
 type clientConnInfo struct {
+	observedTCP atomic.Pointer[net.TCPConn]
+	observedProxy atomic.Bool
+	tcpObservation atomic.Pointer[tcpSocketSnapshot]
 	target      string
 	connID      atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
 	remote      atomic.Value // string：对端地址（握手后可得）
@@ -1538,6 +1541,7 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
+	TCP *tcpSocketSnapshot `json:"tcp,omitempty"`
 	Negotiated   bool              `json:"negotiated"`
 	SessionEpoch uint64            `json:"session_epoch"`
 	EncAlgo      int               `json:"enc_algo"`
@@ -1634,6 +1638,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			TLSCipher:    tlsCipher,
 			TLSALPN:      tlsAlpn,
 		}
+		if state=="up" {snap.TCP=ci.tcpObservation.Load()}
 		if v, okv := ci.connID.Load().(string); okv {
 			snap.ConnID = v
 		}
@@ -1727,6 +1732,10 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, err
 	}
 	ci.remote.Store(rawConn.RemoteAddr().String())
+	if observed,ok:=rawConn.(*observedProxyTransport);ok {
+		ci.observedTCP.Store(observed.tcp)
+		ci.observedProxy.Store(true)
+	} else {ci.observedTCP.Store(underlyingTCPConn(rawConn))}
 	ci.conn.Store(connHolder{rawConn})
 
 	// 保留 TCP_NODELAY；不要用 SO_RCVBUF/SO_SNDBUF 固定窗口。
