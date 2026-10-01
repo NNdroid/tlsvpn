@@ -195,6 +195,46 @@ for(const mode of ['client','server']) {
   result.forEach(x=>failures.push('['+mode+' metrics] '+x));
 }
 
+// Check actual canvas glyph bounds at desktop/mobile widths and both pixel ratios.
+for (const deviceScaleFactor of [1,2]) {
+  const context=await browser.newContext({deviceScaleFactor});
+  const chartPage=await context.newPage();
+  await chartPage.goto(origin,{waitUntil:'domcontentloaded'});
+  for (const width of [360,1100]) {
+    await chartPage.setViewportSize({width,height:800});
+    const errors=await chartPage.evaluate(()=>{
+      const errors=[];
+      for(const id of ['chart','traffic-chart']) {
+        const canvas=document.getElementById(id);
+        // History can be hidden; expose it so the mobile layout is measured too.
+        if(id==='traffic-chart')document.getElementById('pane-traffic').style.display='block';
+        canvas.style.display='block';canvas.style.width='100%';
+        const ctx=canvas.getContext('2d'),original=ctx.fillText;
+        ctx.fillText=function(text,x,y,...rest){
+          const bounds=this.measureText(text);
+          if(x-bounds.actualBoundingBoxLeft < -0.5 || x+bounds.actualBoundingBoxRight > canvas.clientWidth+0.5)
+            errors.push(id+' clipped '+text+' at width '+canvas.clientWidth);
+          return original.call(this,text,x,y,...rest);
+        };
+        try {
+          for(const max of [32.38*1024**2,1023.99*1024**3]) {
+            const pts=[0,0.5,1].map(x=>({x,up:max/4,down:max/2,rtt:20,label:'09:37:36'}));
+            renderLineChart(id,pts,{max,perSec:id==='chart',maxRtt:40,hover:-1});
+            const state=chartState[id];
+            if(state.plot.r<=state.plot.l)errors.push(id+' has no plot area');
+            const rect=canvas.getBoundingClientRect();
+            if(chartIdxAt(id,rect.left+state.plot.l)!==0 || chartIdxAt(id,rect.left+state.plot.r)!==2)
+              errors.push(id+' hover coordinates differ from plot');
+          }
+        } finally {ctx.fillText=original;}
+      }
+      return errors;
+    });
+    errors.forEach(x=>failures.push('[chart DPR '+deviceScaleFactor+'] '+x));
+  }
+  await context.close();
+}
+
 if (legacyPollHits.length) failures.push('legacy polling requests observed: '+legacyPollHits.join(', '));
 await browser.close();
 for (const stream of openStreams) stream.end();

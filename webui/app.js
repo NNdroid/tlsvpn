@@ -78,15 +78,19 @@ function renderLineChart(canvasId,pts,opts){
   if(c.width!==Math.round(W*dpr)||c.height!==Math.round(H*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,W,H);
-  const L=56,R=16,T=16,B=24,pw=W-L-R,ph=H-T-B;
   const max=Math.max(1,opts.max||1);
+  ctx.font='10px sans-serif';
+  const ticks=Array.from({length:5},(_,g)=>fmtBytes(max*(4-g)/4,opts.perSec));
+  // Reserve the measured label width, the axis gap, and an outer gutter.
+  const L=Math.max(56,Math.ceil(Math.max(...ticks.map(s=>ctx.measureText(s).width)))+14);
+  const R=16,T=16,B=24,pw=W-L-R,ph=H-T-B;
   // 网格 + 纵坐标刻度
   ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
   ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';ctx.textAlign='right';
   for(let g=0;g<=4;g++){
     const y=T+ph*g/4;
     ctx.beginPath();ctx.moveTo(L,y+.5);ctx.lineTo(W-R,y+.5);ctx.stroke();
-    ctx.fillText(fmtBytes(max*(4-g)/4,opts.perSec),L-6,y+3);
+    ctx.fillText(ticks[g],L-6,y+3);
   }
   ctx.textAlign='left';
   if(!pts||pts.length<2){
@@ -128,7 +132,7 @@ function renderLineChart(canvasId,pts,opts){
   pts.forEach((p,i)=>{
     if(i%step!==0&&i!==pts.length-1)return;
     const tw=ctx.measureText(p.label).width;
-    const tx=Math.max(L,Math.min(L+p.x*pw-tw/2,W-R-tw));
+    const tx=Math.max(L+tw/2,Math.min(L+p.x*pw,W-R-tw/2));
     ctx.fillText(p.label,tx,H-8);
   });
   ctx.textAlign='left';
