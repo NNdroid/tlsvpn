@@ -469,7 +469,7 @@ func (d *fecDecoder) cleanupByReorderProgress() {
 
 // OnControl handles a non-empty post-handshake protocol-v3 seq=0 control.
 // Unknown kinds and malformed FEC_MODE payloads are protocol errors; callers
-// terminate the affected physical connection rather than reinterpret v2 bytes.
+// terminate the affected physical connection rather than reinterpret unsupported control payloads.
 func (d *fecDecoder) OnControl(payload []byte) error {
 	var scratch nonceAADScratch
 	return d.OnControlWithScratch(payload, &scratch)

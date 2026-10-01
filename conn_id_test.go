@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestHandshakeConnIDWireCompatibility(t *testing.T) {
+func TestHandshakeConnIDWire(t *testing.T) {
 	const id = "00000000-0000-4000-8000-000000000001"
 	b, err := json.Marshal(HandshakeReq{ClientID: "c", PSK: "p", ConnID: id})
 	if err != nil {
@@ -23,14 +23,6 @@ func TestHandshakeConnIDWireCompatibility(t *testing.T) {
 		t.Fatalf("conn_id = %v, want %s", got, id)
 	}
 
-	// Rolling upgrade: old clients do not send conn_id and must still decode.
-	var old HandshakeReq
-	if err := json.Unmarshal([]byte(`{"client_id":"c","psk":"p"}`), &old); err != nil {
-		t.Fatal(err)
-	}
-	if old.ConnID != "" {
-		t.Fatalf("old handshake unexpectedly produced conn_id %q", old.ConnID)
-	}
 }
 
 func TestClientSnapshotCarriesConnID(t *testing.T) {

@@ -56,7 +56,7 @@ func TestSendRespRateDirections(t *testing.T) {
 	if err := (&Server{}).sendResp(&buf, true, "OK", "cid", "sid",
 		"10.8.0.0/24", "fd00::/80",
 		true, 30, 500, // group 语义：客户端上行总量, 客户端下行总量
-		false, 0, encAlgoGCM, "", "", "", true, 2, 3, nil); err != nil {
+		false, 0, encAlgoGCM, "", "", "", true, protocolVersion, 3, nil); err != nil {
 		t.Fatalf("发送握手响应失败：%v", err)
 	}
 

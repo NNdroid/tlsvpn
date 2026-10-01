@@ -30,24 +30,6 @@ func pskKey(psk string) []byte {
 
 func hashPSK(psk string) string { return hex.EncodeToString(pskKey(psk)) }
 
-// computeSessionToken 会话令牌 = HMAC-SHA256(pskKey, "session-token-v1" ‖ sessionID)。
-//
-// 身份伪造的根因是"共享 PSK + 自报 MAC"：clientID 完全由 (mac, psk) 推导，
-// 任何持密者只要知道目标 MAC 就能算出对方 clientID，触发会话复活分支接管
-// 其隧道流量。令牌只在受害者的 TLS 会话内下发一次，重连时必须回带——
-// 第三方从未见过它，因此无法冒充既有会话。首次接入仍走 PSK 校验。
-func computeSessionToken(psk, sessionID string) string {
-	m := hmac.New(sha256.New, pskKey(psk))
-	m.Write([]byte("session-token-v1"))
-	m.Write([]byte(sessionID))
-	return hex.EncodeToString(m.Sum(nil))
-}
-
-// verifySessionToken 常量时间比较令牌
-func verifySessionToken(psk, sessionID, want string) bool {
-	return hmac.Equal([]byte(want), []byte(computeSessionToken(psk, sessionID)))
-}
-
 // newSessionToken 生成独立于共享 PSK 和可预测会话标识的重连凭据。共享 PSK
 // 只证明“属于这个 VPN”，随机令牌才证明“拥有这个既有会话”。
 func newSessionToken() (string, error) {
@@ -67,7 +49,7 @@ func verifyRandomSessionToken(stored, want string) bool {
 const (
 	// encAlgoNone 未启用内层加密（encrypt=false）：线路负载即明文，只靠 TLS。
 	encAlgoNone = 0
-	// 2 保持既有 AES-256-GCM wire 语义；3 曾被历史 GCM-v2 占用；4 是 AES-128-GCM。
+	// Algorithm IDs are stable wire identifiers; ID 3 is reserved and unsupported.
 	// 新算法只扩展握手 enc_algo，帧头、16B tag、8B session salt 字段均保持不变。
 	encAlgoGCM       = 2
 	encAlgoGCM128    = 4
@@ -86,12 +68,6 @@ const (
 	xchachaNonceLabel = "tlsvpn-xchacha20-nonce-v1"
 )
 
-// 历史名称保留，避免测试/外部辅助代码因常量重命名失效。
-const (
-	gcmTagSize   = aeadTagSize
-	gcmNonceSize = standardNonceSize
-)
-
 // innerCipher 是统一的内层 AEAD。AES-GCM 与 ChaCha20-Poly1305 使用 12B nonce：
 // seq(4BE)||salt(8B)。XChaCha20-Poly1305 需要 24B nonce；为了不新增握手字段，
 // 使用现有随机 salt 确定性派生 20B prefix，再追加 seq(4BE)。salt 每个 session
@@ -101,20 +77,6 @@ type innerCipher struct {
 	algo         int
 	salt         [encSaltSize]byte
 	xnoncePrefix [20]byte
-}
-
-// 兼容历史 AES-256-GCM 构造 API。
-func newGCMInnerCipher(psk string, salt []byte) (*innerCipher, error) {
-	return newInnerCipherForAlgo(psk, salt, encAlgoGCM)
-}
-func newGCMInnerCipherForAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {
-	return newInnerCipherForAlgo(psk, salt, algo)
-}
-func newGCMInnerCipherDomain(psk string, salt []byte, domain string) (*innerCipher, error) {
-	return newInnerCipherDomainForAlgo(psk, salt, domain, encAlgoGCM)
-}
-func newGCMInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo int) (*innerCipher, error) {
-	return newInnerCipherDomainForAlgo(psk, salt, domain, algo)
 }
 
 func newInnerCipherForAlgo(psk string, salt []byte, algo int) (*innerCipher, error) {

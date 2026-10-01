@@ -53,22 +53,22 @@ func encodeGroup(k int, ic *innerCipher, startSeq uint32, payloads [][]byte) []b
 
 func TestGCMSealOpenRoundtrip(t *testing.T) {
 	salt := randomSalt()
-	tx, err := newGCMInnerCipher("roundtrip_psk", salt)
+	tx, err := newInnerCipherForAlgo("roundtrip_psk", salt, encAlgoGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rx, err := newGCMInnerCipher("roundtrip_psk", salt)
+	rx, err := newInnerCipherForAlgo("roundtrip_psk", salt, encAlgoGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range []int{1, 16, 100, 1400, 3000} {
 		pt := make([]byte, n)
 		rand.Read(pt)
-		region := make([]byte, n+gcmTagSize)
+		region := make([]byte, n+aeadTagSize)
 		copy(region, pt)
-		written := tx.sealInPlace(region, n, 12345, uint32(n+gcmTagSize))
-		if written != n+gcmTagSize {
-			t.Fatalf("sealInPlace 应写入 %d 字节, 实际 %d", n+gcmTagSize, written)
+		written := tx.sealInPlace(region, n, 12345, uint32(n+aeadTagSize))
+		if written != n+aeadTagSize {
+			t.Fatalf("sealInPlace 应写入 %d 字节, 实际 %d", n+aeadTagSize, written)
 		}
 		plain, err := rx.openInPlace(region, 12345, uint32(written))
 		if err != nil {
@@ -81,14 +81,14 @@ func TestGCMSealOpenRoundtrip(t *testing.T) {
 }
 func TestGCMRejectsTampering(t *testing.T) {
 	salt := randomSalt()
-	tx, _ := newGCMInnerCipher("tamper_psk", salt)
-	rx, _ := newGCMInnerCipher("tamper_psk", salt)
+	tx, _ := newInnerCipherForAlgo("tamper_psk", salt, encAlgoGCM)
+	rx, _ := newInnerCipherForAlgo("tamper_psk", salt, encAlgoGCM)
 	pt := bytes.Repeat([]byte{0xAB}, 200)
 
 	mk := func() []byte {
-		region := make([]byte, len(pt)+gcmTagSize)
+		region := make([]byte, len(pt)+aeadTagSize)
 		copy(region, pt)
-		tx.sealInPlace(region, len(pt), 7, uint32(len(pt)+gcmTagSize))
+		tx.sealInPlace(region, len(pt), 7, uint32(len(pt)+aeadTagSize))
 		return region
 	}
 
@@ -117,15 +117,15 @@ func TestGCMRejectsTampering(t *testing.T) {
 func TestGCMCrossSaltAndDirectionSeparation(t *testing.T) {
 	// 同 PSK、同 seq、不同盐 → 密文必须不同（会话间/客户端间密钥流隔离）
 	salt1, salt2 := randomSalt(), randomSalt()
-	a, _ := newGCMInnerCipher("shared_psk", salt1)
-	b, _ := newGCMInnerCipher("shared_psk", salt2)
+	a, _ := newInnerCipherForAlgo("shared_psk", salt1, encAlgoGCM)
+	b, _ := newInnerCipherForAlgo("shared_psk", salt2, encAlgoGCM)
 	pt := bytes.Repeat([]byte{0x42}, 64)
-	ra := make([]byte, len(pt)+gcmTagSize)
+	ra := make([]byte, len(pt)+aeadTagSize)
 	copy(ra, pt)
-	a.sealInPlace(ra, len(pt), 5, uint32(len(pt)+gcmTagSize))
-	rb := make([]byte, len(pt)+gcmTagSize)
+	a.sealInPlace(ra, len(pt), 5, uint32(len(pt)+aeadTagSize))
+	rb := make([]byte, len(pt)+aeadTagSize)
 	copy(rb, pt)
-	b.sealInPlace(rb, len(pt), 5, uint32(len(pt)+gcmTagSize))
+	b.sealInPlace(rb, len(pt), 5, uint32(len(pt)+aeadTagSize))
 	if bytes.Equal(ra, rb) {
 		t.Fatal("不同盐的同 seq 密文应不同")
 	}
@@ -134,9 +134,9 @@ func TestGCMCrossSaltAndDirectionSeparation(t *testing.T) {
 		t.Fatal("异盐密文应解密失败")
 	}
 	// 同盐不同 seq 密文不同
-	rc := make([]byte, len(pt)+gcmTagSize)
+	rc := make([]byte, len(pt)+aeadTagSize)
 	copy(rc, pt)
-	a.sealInPlace(rc, len(pt), 6, uint32(len(pt)+gcmTagSize))
+	a.sealInPlace(rc, len(pt), 6, uint32(len(pt)+aeadTagSize))
 	if bytes.Equal(ra[0:16], rc[0:16]) {
 		t.Fatal("同盐不同 seq 密文前缀不应相同")
 	}
@@ -146,16 +146,16 @@ func TestGCMCrossSaltAndDirectionSeparation(t *testing.T) {
 // salt/seq 相同，它们也必须用不同 key domain，否则两条发送路径会复用 nonce。
 func TestGCMDataAndFECDomainSeparation(t *testing.T) {
 	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	dataIC, err := newGCMInnerCipherDomain("domain_psk", salt, "data")
+	dataIC, err := newInnerCipherDomainForAlgo("domain_psk", salt, "data", encAlgoGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fecIC, err := newGCMInnerCipherDomain("domain_psk", salt, "fec")
+	fecIC, err := newInnerCipherDomainForAlgo("domain_psk", salt, "fec", encAlgoGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plain := []byte("same plaintext and sequence")
-	wireLen := uint32(len(plain) + gcmTagSize)
+	wireLen := uint32(len(plain) + aeadTagSize)
 	dataWire := make([]byte, wireLen)
 	fecWire := make([]byte, wireLen)
 	copy(dataWire, plain)
@@ -171,7 +171,7 @@ func TestGCMDataAndFECDomainSeparation(t *testing.T) {
 }
 
 func TestNonceNeverRepeats(t *testing.T) {
-	ic, _ := newGCMInnerCipher("nonce_psk", randomSalt())
+	ic, _ := newInnerCipherForAlgo("nonce_psk", randomSalt(), encAlgoGCM)
 	seqs := nonceCoverageSeqs()
 
 	// 前提：抽到的 seq 必须互不相同。旧实现用 mathrand.IntN(1<<30) 抽随机 seq，
@@ -198,7 +198,7 @@ func TestNonceNeverRepeats(t *testing.T) {
 	}
 
 	// 换个盐：同一 seq 必须给出不同 nonce，否则两端盐不一致时会互相解开对方密文
-	other, _ := newGCMInnerCipher("nonce_psk", randomSalt())
+	other, _ := newInnerCipherForAlgo("nonce_psk", randomSalt(), encAlgoGCM)
 	if string(ic.gcmNonce(77)) == string(other.gcmNonce(77)) {
 		t.Fatal("不同盐的 nonce 应不同")
 	}
@@ -225,8 +225,8 @@ func TestFrameGCMWireRoundtrip(t *testing.T) {
 	// 帧级往返：appendPaddedFrame(GCM) → FrameScanner → openInPlace
 	// 真实协议中盐由握手下发、两端一致
 	salt := randomSalt()
-	tx, _ := newGCMInnerCipher("wire_psk", salt)
-	rx, _ := newGCMInnerCipher("wire_psk", salt)
+	tx, _ := newInnerCipherForAlgo("wire_psk", salt, encAlgoGCM)
+	rx, _ := newInnerCipherForAlgo("wire_psk", salt, encAlgoGCM)
 
 	var stream []byte
 	payloads := [][]byte{
@@ -247,8 +247,8 @@ func TestFrameGCMWireRoundtrip(t *testing.T) {
 			t.Fatalf("第 %d 帧读取失败: %v", i, err)
 		}
 		// 线路负载 = 密文+标签：明文长 + 16
-		if len(frame) != len(want)+gcmTagSize {
-			t.Fatalf("第 %d 帧线路负载应含 16B 标签: got %d want %d", i, len(frame), len(want)+gcmTagSize)
+		if len(frame) != len(want)+aeadTagSize {
+			t.Fatalf("第 %d 帧线路负载应含 16B 标签: got %d want %d", i, len(frame), len(want)+aeadTagSize)
 		}
 		plain, err := rx.openInPlace(frame, seq, uint32(len(frame)))
 		if err != nil {
@@ -277,8 +277,8 @@ func (r *bytesReader) Read(p []byte) (int, error) {
 func TestFECGCMParityRoundTrip(t *testing.T) {
 	// GCM 加密链路下的校验帧往返：编码端加密 → 解码端解密恢复丢失帧
 	salt := randomSalt()
-	enc, _ := newGCMInnerCipher("fec_gcm_psk", salt)
-	dec, _ := newGCMInnerCipher("fec_gcm_psk", salt)
+	enc, _ := newInnerCipherForAlgo("fec_gcm_psk", salt, encAlgoGCM)
+	dec, _ := newInnerCipherForAlgo("fec_gcm_psk", salt, encAlgoGCM)
 
 	c, out := newFecCollector()
 	d := NewFECDecoder(4, dec, out)
@@ -301,8 +301,8 @@ func TestFECGCMParityRoundTrip(t *testing.T) {
 	}
 
 	// 校验帧线路格式：6B 描述 + 4×4B 成员长度 + maxLen(150) 密文 + 16B 标签
-	if len(parity) != 6+4*4+150+gcmTagSize {
-		t.Fatalf("校验帧长度应含 16B 标签: got %d want %d", len(parity), 6+4*4+150+gcmTagSize)
+	if len(parity) != 6+4*4+150+aeadTagSize {
+		t.Fatalf("校验帧长度应含 16B 标签: got %d want %d", len(parity), 6+4*4+150+aeadTagSize)
 	}
 
 	c.expect(1)
@@ -322,8 +322,8 @@ func TestFECGCMParityRoundTrip(t *testing.T) {
 
 func TestFECGCMParityWrongSaltRejected(t *testing.T) {
 	// 用不同盐解密校验帧必须失败，整组放弃（不得产出伪造的"恢复"帧）
-	enc, _ := newGCMInnerCipher("fec_gcm_psk", randomSalt())
-	dec, _ := newGCMInnerCipher("fec_gcm_psk", randomSalt()) // 异盐
+	enc, _ := newInnerCipherForAlgo("fec_gcm_psk", randomSalt(), encAlgoGCM)
+	dec, _ := newInnerCipherForAlgo("fec_gcm_psk", randomSalt(), encAlgoGCM) // 异盐
 
 	c, out := newFecCollector()
 	d := NewFECDecoder(4, dec, out)
@@ -351,7 +351,7 @@ func TestFECGCMParityWrongSaltRejected(t *testing.T) {
 }
 
 func mustGCM(psk string, salt []byte) *innerCipher {
-	ic, err := newGCMInnerCipher(psk, salt)
+	ic, err := newInnerCipherForAlgo(psk, salt, encAlgoGCM)
 	if err != nil {
 		panic(err)
 	}
@@ -368,16 +368,6 @@ func TestHandshakeJSONGCMFields(t *testing.T) {
 	for _, k := range []string{"enc_algo", "enc_salt", "enc_salt2"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("GCM 响应缺少字段 %s", k)
-		}
-	}
-
-	legacy := HandshakeResp{Success: true, Encrypt: true}
-	b2, _ := json.Marshal(legacy)
-	var m2 map[string]any
-	json.Unmarshal(b2, &m2)
-	for _, k := range []string{"enc_algo", "enc_salt", "enc_salt2"} {
-		if _, ok := m2[k]; ok {
-			t.Fatalf("legacy 响应不应出现字段 %s（旧端兼容）", k)
 		}
 	}
 
@@ -686,20 +676,20 @@ func TestReconnectBackoff(t *testing.T) {
 
 func TestGCM128SealOpenRoundtrip(t *testing.T) {
 	salt := randomSalt()
-	tx, err := newGCMInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
+	tx, err := newInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rx, err := newGCMInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
+	rx, err := newInnerCipherForAlgo("roundtrip_gcm128_psk", salt, encAlgoGCM128)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range []int{1, 16, 100, 1400, 3000} {
 		pt := make([]byte, n)
 		rand.Read(pt)
-		region := make([]byte, n+gcmTagSize)
+		region := make([]byte, n+aeadTagSize)
 		copy(region, pt)
-		written := tx.sealInPlace(region, n, 4242, uint32(n+gcmTagSize))
+		written := tx.sealInPlace(region, n, 4242, uint32(n+aeadTagSize))
 		plain, err := rx.openInPlace(region, 4242, uint32(written))
 		if err != nil {
 			t.Fatalf("len=%d AES-128-GCM decrypt failed: %v", n, err)
@@ -712,16 +702,16 @@ func TestGCM128SealOpenRoundtrip(t *testing.T) {
 
 func TestGCM128And256UseSeparateKeyDomains(t *testing.T) {
 	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	g128, err := newGCMInnerCipherForAlgo("same_psk", salt, encAlgoGCM128)
+	g128, err := newInnerCipherForAlgo("same_psk", salt, encAlgoGCM128)
 	if err != nil {
 		t.Fatal(err)
 	}
-	g256, err := newGCMInnerCipherForAlgo("same_psk", salt, encAlgoGCM)
+	g256, err := newInnerCipherForAlgo("same_psk", salt, encAlgoGCM)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pt := bytes.Repeat([]byte{0x6a}, 1400)
-	wireLen := uint32(len(pt) + gcmTagSize)
+	wireLen := uint32(len(pt) + aeadTagSize)
 
 	a := make([]byte, wireLen)
 	copy(a, pt)
@@ -744,9 +734,9 @@ func TestGCM128CrossLanguageGoldenVector(t *testing.T) {
 	plain, _ := hex.DecodeString("746c7376706e2d67636d3132382d63726f73732d6c616e67756167652d766563746f72")
 	want, _ := hex.DecodeString("fad2a4db0a2a0d73db601949351e36d354bb4698df7c2f27040f8229960d93d67066fe116d875cb38daa0877f281a3d5fbab9e")
 	const seq uint32 = 0x01020304
-	wireLen := uint32(len(plain) + gcmTagSize)
+	wireLen := uint32(len(plain) + aeadTagSize)
 
-	ic, err := newGCMInnerCipherForAlgo(psk, salt, encAlgoGCM128)
+	ic, err := newInnerCipherForAlgo(psk, salt, encAlgoGCM128)
 	if err != nil {
 		t.Fatal(err)
 	}

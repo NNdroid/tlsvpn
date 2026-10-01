@@ -7,12 +7,12 @@ const root = path.resolve('webui');
 const openStreams = new Set();
 const legacyPollHits = [];
 const framevizExpect = {
-  'zh-CN': ['协议头 (header)', '固定 10 B 大端序头。', '最后一帧 · padLen=N', '旧版迁移说明：'],
-  'zh-TW': ['協定標頭 (header)', '固定 10 B 大端序標頭。', '最後一幀 · padLen=N', '舊版遷移說明：'],
-  en: ['Protocol header', 'Fixed 10 B big-endian header.', 'Final frame · padLen=N', 'Legacy migration note:'],
-  de: ['Protokoll-Header', 'Fester 10-B-Big-Endian-Header.', 'Letzter Frame · padLen=N', 'Migrationshinweis:'],
-  fr: ['En-tête du protocole', 'En-tête big-endian fixe de 10 o.', 'Dernière trame · padLen=N', 'Note de migration :'],
-  ja: ['プロトコルヘッダー', '固定 10 B のビッグエンディアンヘッダーです。', '最終フレーム · padLen=N', '移行メモ：']
+  'zh-CN': ['协议头 (header)', '固定 10 B 大端序头。', '最后一帧 · padLen=N'],
+  'zh-TW': ['協定標頭 (header)', '固定 10 B 大端序標頭。', '最後一幀 · padLen=N'],
+  en: ['Protocol header', 'Fixed 10 B big-endian header.', 'Final frame · padLen=N'],
+  de: ['Protokoll-Header', 'Fester 10-B-Big-Endian-Header.', 'Letzter Frame · padLen=N'],
+  fr: ['En-tête du protocole', 'En-tête big-endian fixe de 10 o.', 'Dernière trame · padLen=N'],
+  ja: ['プロトコルヘッダー', '固定 10 B のビッグエンディアンヘッダーです。', '最終フレーム · padLen=N']
 };
 
 function renderedIndex(src) {
@@ -164,7 +164,7 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
     if (!state.framevizText.includes(expected)) failures.push(`[${lang}] frame visualizer missing localized text: ${expected}`);
   }
   if (lang !== 'en') {
-    for (const leaked of ['Fixed 10 B big-endian header.', 'Final frame · padLen=N', 'Legacy migration note:']) {
+    for (const leaked of ['Fixed 10 B big-endian header.', 'Final frame · padLen=N']) {
       if (state.framevizText.includes(leaked)) failures.push(`[${lang}] frame visualizer leaked English text: ${leaked}`);
     }
   }
