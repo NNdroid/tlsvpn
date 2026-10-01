@@ -226,7 +226,7 @@ for (const deviceScaleFactor of [1,2]) {
         }
         return original.call(this,text,x,y,...rest);
       };
-      try {applyDiagnostics(history);} finally {CanvasRenderingContext2D.prototype.fillText=original;}
+      try {setRange('24h');applyDiagnostics(history);setRange('2m');applyDiagnostics(history);} finally {CanvasRenderingContext2D.prototype.fillText=original;}
       return errors;
     },diagnosticsFixture());
     diagBounds.forEach(x=>failures.push('[diagnostic canvas] '+x));
