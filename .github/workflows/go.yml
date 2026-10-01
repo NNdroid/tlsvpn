@@ -118,8 +118,8 @@ jobs:
         retention-days: 14
 
   e2e:
-    # Always validate this patch, including pull requests, against the v3 Rust peer.
+    # Always validate this patch, including pull requests, against Rust main.
     uses: ./.github/workflows/e2e.yml
     with:
       go_ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      rs_ref: protocol/v3-dynamic-fec
+      rs_ref: main
