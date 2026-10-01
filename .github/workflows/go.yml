@@ -120,5 +120,5 @@ jobs:
     # rather than either repository's older default branch.
     uses: ./.github/workflows/e2e.yml
     with:
-      go_ref: perf/single-path-fec-bypass
+      go_ref: ${{ github.event.pull_request.head.sha || github.sha }}
       rs_ref: protocol/v3-dynamic-fec

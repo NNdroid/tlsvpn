@@ -30,14 +30,16 @@ import (
 
 // Config 顶层配置
 type Config struct {
-	Mode     string `json:"mode"`                // 必填：server | client
-	PSK      string `json:"psk"`                 // 预共享密钥
-	Tap      string `json:"tap,omitempty"`       // TAP 设备名（默认 tap0）
-	Mac      string `json:"mac,omitempty"`       // 手动指定 MAC
-	Addr     string `json:"addr"`                // server: 监听地址；client: 目标地址列表
-	LogLevel string `json:"log_level,omitempty"` // 默认 info
-	Up       string `json:"up,omitempty"`        // 隧道就绪后执行一次（直接 exec，不经 shell）
-	Down     string `json:"down,omitempty"`      // 进程退出/启动回滚时执行一次
+	TapQueues     int    `json:"tap_queues,omitempty"`      // Linux read queues (1..16; default 1)
+	TapMultiQueue bool   `json:"tap_multi_queue,omitempty"` // Flag-only experimental control
+	Mode          string `json:"mode"`                      // 必填：server | client
+	PSK           string `json:"psk"`                       // 预共享密钥
+	Tap           string `json:"tap,omitempty"`             // TAP 设备名（默认 tap0）
+	Mac           string `json:"mac,omitempty"`             // 手动指定 MAC
+	Addr          string `json:"addr"`                      // server: 监听地址；client: 目标地址列表
+	LogLevel      string `json:"log_level,omitempty"`       // 默认 info
+	Up            string `json:"up,omitempty"`              // 隧道就绪后执行一次（直接 exec，不经 shell）
+	Down          string `json:"down,omitempty"`            // 进程退出/启动回滚时执行一次
 	// 内层加密（GCM 协商）。刻意不带 omitempty：否则面板"保存配置"会丢掉
 	// 显式的 false，下次重载又被默认值翻回 true。
 	Encrypt    bool   `json:"encrypt"`
@@ -235,6 +237,9 @@ func loadConfigFile(path string) (*Config, error) {
 
 // applyDefaults 填充未指定的默认值（与命令行标志默认值保持一致）
 func (c *Config) applyDefaults() {
+	if c.TapQueues == 0 {
+		c.TapQueues = 1
+	}
 	if c.Tap == "" {
 		c.Tap = "tap0"
 	}
@@ -303,6 +308,12 @@ func (c *Config) applyDefaults() {
 
 // Validate 校验配置合法性。在 applyDefaults 之后调用。
 func (c *Config) Validate() error {
+	if c.TapQueues < 1 || c.TapQueues > 16 {
+		return fmt.Errorf("tap_queues must be between 1 and 16")
+	}
+	if c.Tap == "mem" && (c.TapQueues > 1 || c.TapMultiQueue) {
+		return fmt.Errorf("TAP multi-queue requires a real TAP device")
+	}
 	if err := validateHookPath("up", c.Up); err != nil {
 		return err
 	}

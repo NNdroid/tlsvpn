@@ -18,7 +18,6 @@ import (
 
 	"github.com/google/uuid"
 	utls "github.com/refraction-networking/utls"
-	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 )
 
@@ -1238,7 +1237,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		iface = newMemTap(ctx)
 		log.Infof("Using in-memory TAP backend (no real device)")
 	} else {
-		t, err := water.New(newTapConfig(cfg.Tap))
+		t, err := openConfiguredTap(cfg)
 		if err != nil {
 			log.Fatalf("Client TAP creation error: %v", err)
 		}
@@ -1385,7 +1384,7 @@ func (c *Client) Run(ctx context.Context) {
 		c.txPort.Close()
 	}()
 
-	go func() {
+	stopTapReaders := runTapReaders(c.tap, func(reader io.Reader) {
 		readSize, pooledRead := tapReadBufferSize(c.tapName)
 		if pooledRead {
 			log.Debugf("[Client] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
@@ -1403,7 +1402,7 @@ func (c *Client) Run(ctx context.Context) {
 			} else {
 				buf = fallback
 			}
-			rn, err := c.tap.Read(buf)
+			rn, err := reader.Read(buf)
 			if err != nil {
 				if pooledRead {
 					putFrame(buf)
@@ -1434,7 +1433,8 @@ func (c *Client) Run(ctx context.Context) {
 				_ = c.txPort.WriteFrame(buf[:rn])
 			}
 		}
-	}()
+	})
+	defer stopTapReaders()
 
 	var wg sync.WaitGroup
 	lv0 := c.live.Load()
@@ -2442,7 +2442,7 @@ func (c *Client) NeedsRestart(cfg *Config) []string {
 	var out []string
 	if old := c.bootCfg.Load(); old != nil {
 		o := old
-		if o.Tap != cfg.Tap {
+		if o.Tap != cfg.Tap || o.TapQueues != cfg.TapQueues || o.TapMultiQueue != cfg.TapMultiQueue {
 			out = append(out, "tap")
 		}
 		if o.Mac != cfg.Mac {

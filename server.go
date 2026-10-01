@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 )
 
@@ -1005,7 +1004,7 @@ func (s *Server) NeedsRestart(cfg *Config) []string {
 		return nil
 	}
 	var out []string
-	if o.Tap != cfg.Tap {
+	if o.Tap != cfg.Tap || o.TapQueues != cfg.TapQueues || o.TapMultiQueue != cfg.TapMultiQueue {
 		out = append(out, "tap")
 	}
 	if o.Mac != cfg.Mac {
@@ -1077,7 +1076,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		tap = newMemTap(ctx)
 		log.Infof("Using in-memory TAP backend (no real device)")
 	} else {
-		t, err := water.New(newTapConfig(cfg.Tap))
+		t, err := openConfiguredTap(cfg)
 		if err != nil {
 			log.Fatalf("Server TAP error: %v", err)
 		}
@@ -1131,7 +1130,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		}
 	}()
 
-	go func() {
+	stopTapReaders := runTapReaders(srv.tap, func(reader io.Reader) {
 		readSize, pooledRead := tapReadBufferSize(cfg.Tap)
 		if pooledRead {
 			log.Debugf("[Server] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
@@ -1147,7 +1146,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 			} else {
 				buf = fallback
 			}
-			rn, err := srv.tap.Read(buf)
+			rn, err := reader.Read(buf)
 			if err != nil {
 				if pooledRead {
 					putFrame(buf)
@@ -1160,7 +1159,8 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 				srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
 			}
 		}
-	}()
+	})
+	defer stopTapReaders()
 
 	tlsConfig := getServerTLSConfig(cfg.Server.Cert, cfg.Server.Key)
 	tcpAddr, err := net.ResolveTCPAddr("tcp", cfg.Addr)

@@ -37,6 +37,12 @@ PERF_MIN_MBPS="${PERF_MIN_MBPS:-500}"
 PERF_RESULT_FILE="${PERF_RESULT_FILE:-}"
 PERF_PROFILE_DIR="${PERF_PROFILE_DIR:-}"
 PERF_DIAG_FILE="${PERF_DIAG_FILE:-}"
+PERF_TAP_QUEUES="${PERF_TAP_QUEUES:-}"
+PERF_TAP_MULTI_QUEUE="${PERF_TAP_MULTI_QUEUE:-false}"
+PERF_STREAMS="${PERF_STREAMS:-1}"
+PERF_REQUIRE_TAP="${PERF_REQUIRE_TAP:-false}"
+PERF_WARMUP="${PERF_WARMUP:-0}"
+PERF_LOG_LEVEL="${PERF_LOG_LEVEL:-warn}"
 
 PORT="${PORT:-18600}"
 WEB_ADDR="127.0.0.1:18780"
@@ -72,6 +78,13 @@ validate_inputs() {
   (( PERF_FEC_GROUP >= 2 && PERF_FEC_GROUP <= 64 )) || die "PERF_FEC_GROUP must be in [2,64]"
   case "$PERF_DIRECTION" in upload|download|both) ;; *) die "PERF_DIRECTION must be upload, download or both" ;; esac
   [[ "$PERF_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "PERF_SECONDS must be a positive integer"
+  [[ "$PERF_WARMUP" =~ ^[0-9]+$ ]] || die "invalid warmup"
+  [[ "$PERF_STREAMS" =~ ^[1-9][0-9]*$ ]] || die "PERF_STREAMS must be positive"
+  if [[ -n "$PERF_TAP_QUEUES" ]]; then
+    [[ "$PERF_TAP_QUEUES" =~ ^[0-9]+$ ]] || die "invalid TAP queue count"
+    (( PERF_TAP_QUEUES >= 1 && PERF_TAP_QUEUES <= 16 )) || die "invalid TAP queue count"
+  fi
+  case "$PERF_TAP_MULTI_QUEUE" in true|false) ;; *) die "invalid multi-queue flag" ;; esac
   [[ -x "$BIN" ]] || die "BIN is not executable: $BIN"
   command -v ip >/dev/null || die "iproute2 is required"
   command -v iperf3 >/dev/null || die "iperf3 is required"
@@ -81,10 +94,12 @@ validate_inputs() {
 
 capability_gate() {
   if [[ $EUID -ne 0 ]]; then
+    [[ "$PERF_REQUIRE_TAP" != true ]] || die "root/CAP_NET_ADMIN required"
     log "SKIP: root/CAP_NET_ADMIN required"
     exit 0
   fi
   if [[ ! -c /dev/net/tun ]]; then
+    [[ "$PERF_REQUIRE_TAP" != true ]] || die "/dev/net/tun unavailable"
     log "SKIP: /dev/net/tun unavailable"
     exit 0
   fi
@@ -108,6 +123,7 @@ capability_gate() {
   ip link del "$cap_a" 2>/dev/null || true
   ip netns del "$cap_ns" 2>/dev/null || true
   if [[ -n "$reason" ]]; then
+    [[ "$PERF_REQUIRE_TAP" != true ]] || die "$reason"
     log "SKIP: $reason"
     exit 0
   fi
@@ -133,6 +149,10 @@ gracious_stop() {
 
 cleanup() {
   gracious_stop
+  if [[ -n "${PERF_RAW_DIR:-}" && -n "$TMP" ]]; then
+    mkdir -p "$PERF_RAW_DIR"
+    cp "$TMP"/*.log "$PERF_RAW_DIR/" 2>/dev/null || true
+  fi
   ip netns del "$NS_SRV" 2>/dev/null || true
   ip netns del "$NS_CLI" 2>/dev/null || true
   ip link del "$VETH_SRV" 2>/dev/null || true
@@ -180,17 +200,21 @@ wait_for_client_ip() {
 }
 
 write_configs() {
-  local fp="$1" psk="$2"
+  local fp="$1" psk="$2" tap_config=""
+  if [[ -n "$PERF_TAP_QUEUES" ]]; then
+    tap_config="\"tap_queues\": $PERF_TAP_QUEUES, \"tap_multi_queue\": $PERF_TAP_MULTI_QUEUE,"
+  fi
   cat >"$TMP/server.json" <<EOF
 {
   "mode": "server",
   "addr": "$UNDERLAY_SRV:$PORT",
   "psk": "$psk",
   "tap": "$TAP_SRV",
+  $tap_config
   "encrypt": true,
   "enc_algo": "$PERF_ENC_ALGO",
   "pad_mode": "$PERF_PAD_MODE",
-  "log_level": "warn",
+  "log_level": "$PERF_LOG_LEVEL",
   "web": {"addr": "$WEB_ADDR", "bind": "all", "auth": "$WEB_AUTH"},
   "server": {
     "cert": "$TMP/cert.pem",
@@ -207,10 +231,11 @@ EOF
   "addr": "$UNDERLAY_SRV:$PORT",
   "psk": "$psk",
   "tap": "$TAP_CLI",
+  $tap_config
   "encrypt": true,
   "enc_algo": "$PERF_ENC_ALGO",
   "pad_mode": "$PERF_PAD_MODE",
-  "log_level": "warn",
+  "log_level": "$PERF_LOG_LEVEL",
   "web": {"addr": "$WEB_ADDR", "bind": "all", "auth": "$WEB_AUTH"},
   "client": {
     "conns": $PERF_CONNS,
@@ -338,10 +363,16 @@ PY
 iperf_direction() {
   local direction="$1" json mbps extra=""
   [[ "$direction" == "download" ]] && extra="-R"
-  json=$(ip netns exec "$NS_CLI" iperf3 -c "$GW_V4" -p "$((PORT + 1))" -t "$PERF_SECONDS" -J $extra 2>"$TMP/iperf-$direction.err") || {
+  json=$(ip netns exec "$NS_CLI" iperf3 -c "$GW_V4" -p "$((PORT + 1))" -t "$PERF_SECONDS" -P "$PERF_STREAMS" -O "$PERF_WARMUP" -J $extra 2>"$TMP/iperf-$direction.err") || {
     cat "$TMP/iperf-$direction.err" >&2 || true
     die "iperf3 $direction failed"
   }
+  if [[ -n "${PERF_RAW_DIR:-}" ]]; then
+    mkdir -p "$PERF_RAW_DIR"
+    printf '%s\n' "$json" > "$PERF_RAW_DIR/iperf-$direction.json"
+    ip netns exec "$NS_CLI" ip -s link show dev "$TAP_CLI" > "$PERF_RAW_DIR/client-link-$direction.txt"
+    ip netns exec "$NS_SRV" ip -s link show dev "$TAP_SRV" > "$PERF_RAW_DIR/server-link-$direction.txt"
+  fi
   mbps=$(printf '%s\n' "$json" | parse_mbps) || die "cannot parse iperf3 $direction result"
   log "$direction: ${mbps} Mbps (conns=$PERF_CONNS enc=$PERF_ENC_ALGO pad=$PERF_PAD_MODE)"
   record_result "$direction" "$mbps"

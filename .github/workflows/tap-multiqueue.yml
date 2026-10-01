@@ -1,0 +1,87 @@
+name: TAP multi-queue experiment
+
+on:
+  pull_request:
+    paths:
+      - 'tap_queues*'
+      - 'client.go'
+      - 'server.go'
+      - 'config.go'
+      - 'scripts/*tap*'
+      - '.github/workflows/tap-multiqueue.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y iproute2 iperf3 openssl
+          test -c /dev/net/tun || sudo modprobe tun
+          go test -race -count=5 ./... -run 'TestTapQueue|TestFEC|TestProtocol|TestOwnedTap|TestClientRestart|TestReorder'
+          go test -c -o /tmp/tlsvpn-tests
+          sudo env TLSVPN_TEST_REAL_TAP=1 /tmp/tlsvpn-tests -test.run TestTapQueuesRealKernelLifecycle -test.v
+          GOOS=linux GOARCH=arm64 go build -o /tmp/tlsvpn-arm64 .
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o /tmp/tlsvpn-mipsle .
+          bash tests/test_openwrt_integration.sh
+          go build -o "$PWD/tlsvpn" .
+          for queues in 1 2 4; do
+            sudo env BIN="$PWD/tlsvpn" PERF_TAP_QUEUES="$queues" PERF_CONNS=4 PERF_FEC=true PERF_SECONDS=5 PERF_REQUIRE_TAP=true bash scripts/real_tap_perf.sh
+          done
+
+  throughput:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        streams: [1, 4, 16]
+        conns: [1, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
+          path: baseline
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Build identical settings and record runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y iproute2 iperf3 openssl
+          test -c /dev/net/tun || sudo modprobe tun
+          mkdir -p artifacts perf-bin
+          go build -trimpath -o "$PWD/perf-bin/candidate" .
+          (cd baseline && go build -trimpath -o "$OLDPWD/perf-bin/baseline" .)
+          { uname -a; lscpu; go version; iperf3 --version; git rev-parse HEAD; git -C baseline rev-parse HEAD; } > artifacts/environment.txt
+          bash -n scripts/real_tap_perf.sh scripts/tap_multiqueue_perf.sh
+      - name: Paired randomized real-TAP A/B (five repeats, both directions)
+        env:
+          PERF_STREAMS: ${{ matrix.streams }}
+          PERF_CONNS: ${{ matrix.conns }}
+          PERF_SECONDS: '20'
+          PERF_WARMUP: '3'
+          PERF_FEC: 'true'
+          PERF_REQUIRE_TAP: 'true'
+        run: sudo -E bash scripts/tap_multiqueue_perf.sh
+      - name: Summarize without automatically promoting a noisy result
+        run: |
+          sudo chown -R "$USER:$USER" artifacts
+          python3 scripts/summarize_tap_perf.py artifacts | tee artifacts/summary.md
+          cat artifacts/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tap-mq-s${{ matrix.streams }}-c${{ matrix.conns }}
+          path: artifacts/
+          if-no-files-found: error
