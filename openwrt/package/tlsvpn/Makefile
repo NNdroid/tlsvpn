@@ -5,14 +5,15 @@ include $(TOPDIR)/rules.mk
 PKG_NAME:=tlsvpn
 
 # These defaults keep local SDK builds convenient. Release builds override all
-# three variables from scripts/build_openwrt_apk.sh so the APK is built from
+# version and source variables from scripts/build_openwrt_apk.sh so the APK is built from
 # the exact tagged commit rather than from a moving branch.
 TLSVPN_PKG_VERSION?=0.1.0
+TLSVPN_PKG_RELEASE?=1
 TLSVPN_SOURCE_VERSION?=main
 TLSVPN_SOURCE_DATE?=2026-09-24
 
 PKG_VERSION:=$(TLSVPN_PKG_VERSION)
-PKG_RELEASE:=1
+PKG_RELEASE:=$(TLSVPN_PKG_RELEASE)
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/NNdroid/tlsvpn.git
 PKG_SOURCE_VERSION:=$(TLSVPN_SOURCE_VERSION)

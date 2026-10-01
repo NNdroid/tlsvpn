@@ -4,6 +4,12 @@ TLSVPN publishes an OpenWrt 25.12+ APK repository from release tags or a manuall
 
 ## Publication model
 
+The APK builder passes the same normalized `TLSVPN_PKG_VERSION` and source commit
+timestamp (Unix seconds) as `TLSVPN_PKG_RELEASE` to the main, protocol, and LuCI
+packages. Feed and GitHub Release builds of the same commit therefore share the
+same revision, including on reruns. Direct SDK builds default to `0.1.0-r1`.
+Commit timestamps are not a build counter; older commits can have lower revisions.
+
 The production flow is:
 
 ```text

@@ -3,8 +3,11 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-proto-tlsvpn
-PKG_VERSION:=0.1.0
-PKG_RELEASE:=2
+# Share the version passed by the APK build script with tlsvpn and tlsvpn-proto.
+TLSVPN_PKG_VERSION?=0.1.0
+TLSVPN_PKG_RELEASE?=1
+PKG_VERSION:=$(TLSVPN_PKG_VERSION)
+PKG_RELEASE:=$(TLSVPN_PKG_RELEASE)
 PKGARCH:=all
 
 LUCI_TITLE:=LuCI support for the TLSVPN netifd protocol

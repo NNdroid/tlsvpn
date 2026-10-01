@@ -11,7 +11,10 @@ case "$OPENWRT_VERSION" in 25.12*|SNAPSHOT) ;; *) echo "error: OpenWrt APK build
 for tool in curl sha256sum tar zstd git make; do command -v "$tool" >/dev/null || exit 2; done
 SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 SOURCE_DATE="${TLSVPN_SOURCE_DATE:-$(git show -s --format=%cs "$SOURCE_VERSION" 2>/dev/null || date -u +%Y-%m-%d)}"
-SOURCE_EPOCH="$(git show -s --format=%ct "$SOURCE_VERSION" 2>/dev/null || date -u +%s)"
+# A shared source commit gives feed and release builds a stable APK revision.
+SOURCE_EPOCH="$(git show -s --format=%ct "$SOURCE_VERSION")"
+[[ "$SOURCE_EPOCH" =~ ^[0-9]+$ ]] || { echo 'error: invalid source commit timestamp' >&2; exit 1; }
+PACKAGE_RELEASE="$SOURCE_EPOCH"
 source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
 normalize_apk_version(){ local raw="${1#v}"; if [[ "$raw" =~ ^[0-9]+([.][0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]+)?$ ]]; then printf '%s\n' "$raw"; elif [[ "$raw" =~ ^([0-9]+([.][0-9]+)*)-([0-9]+)-g[0-9A-Fa-f]+$ ]]; then printf '%s_p%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"; else printf '0.0.%s_git%s\n' "$source_day" "$SOURCE_EPOCH"; fi; }
 PACKAGE_VERSION="$(normalize_apk_version "${TLSVPN_PKG_VERSION:-0.0.${source_day}_git${SOURCE_EPOCH}}")"
@@ -43,7 +46,7 @@ CONFIG_PACKAGE_tlsvpn-proto=m
 CONFIG_PACKAGE_luci-proto-tlsvpn=m
 EOF
 for pkg in "${luci_i18n_packages[@]}"; do printf 'CONFIG_PACKAGE_%s=m\n' "$pkg" >>"$SDK_DIR/.config"; done
-make_args=("TLSVPN_SOURCE_VERSION=$SOURCE_VERSION" "TLSVPN_SOURCE_DATE=$SOURCE_DATE" "TLSVPN_PKG_VERSION=$PACKAGE_VERSION"); make -C "$SDK_DIR" "${make_args[@]}" defconfig; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/tlsvpn/compile V=sc; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/luci-proto-tlsvpn/compile V=sc
+make_args=("TLSVPN_SOURCE_VERSION=$SOURCE_VERSION" "TLSVPN_SOURCE_DATE=$SOURCE_DATE" "TLSVPN_PKG_VERSION=$PACKAGE_VERSION" "TLSVPN_PKG_RELEASE=$PACKAGE_RELEASE"); make -C "$SDK_DIR" "${make_args[@]}" defconfig; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/tlsvpn/compile V=sc; make -C "$SDK_DIR" -j"$JOBS" "${make_args[@]}" package/luci-proto-tlsvpn/compile V=sc
 rm -f "$OUTPUT_DIR"/*.apk "$OUTPUT_DIR"/SHA256SUMS-*.txt 2>/dev/null || true; main_count=0
 while IFS= read -r apk; do base="$(basename "$apk")"; case "$base" in luci-i18n-tlsvpn-*.apk) [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = 1 ]||continue; dest="${base%.apk}-openwrt-$OPENWRT_VERSION-all.apk";; tlsvpn-proto-*.apk|luci-proto-tlsvpn-*.apk) [ "$OPENWRT_INCLUDE_ARCH_INDEPENDENT" = 1 ]||continue; dest="${base%.apk}-openwrt-$OPENWRT_VERSION-all.apk";; tlsvpn-*.apk) dest="${base%.apk}-openwrt-$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET.apk"; main_count=$((main_count+1));; *) continue;; esac; cp -f "$apk" "$OUTPUT_DIR/$dest"; done < <(find "$SDK_DIR/bin" -type f -name '*.apk'|sort)
 [ "$main_count" -ge 1 ] || { echo 'error: tlsvpn APK was not produced' >&2; exit 1; }
