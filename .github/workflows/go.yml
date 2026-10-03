@@ -23,30 +23,30 @@ jobs:
     - name: Test interop probe
       run: (cd interop && go test ./...)
 
-    - name: Validate Linux optimized architecture matrix
+    - name: Validate full Linux release matrix
       run: |
         chmod +x scripts/build.sh
         ./scripts/build.sh --list | tee /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_amd64_v2' /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_amd64_v3' /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_amd64_v4' /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_arm64_v8.2' /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_riscv64' /tmp/tlsvpn-build-matrix.txt
-        grep -Fq 'tlsvpn_linux_ppc64le_power10' /tmp/tlsvpn-build-matrix.txt
+        for asset in \
+          tlsvpn_linux_amd64 \
+          tlsvpn_linux_amd64_v2 \
+          tlsvpn_linux_amd64_v3 \
+          tlsvpn_linux_amd64_v4 \
+          tlsvpn_linux_arm64 \
+          tlsvpn_linux_arm64_v8.2 \
+          tlsvpn_linux_arm_v5 \
+          tlsvpn_linux_arm_v6 \
+          tlsvpn_linux_mips64le \
+          tlsvpn_linux_mips64 \
+          tlsvpn_linux_riscv64 \
+          tlsvpn_linux_ppc64le_power10 \
+          tlsvpn_linux_s390x \
+          tlsvpn_linux_loong64; do
+          grep -Fq "$asset" /tmp/tlsvpn-build-matrix.txt || { echo "matrix missing $asset" >&2; exit 1; }
+        done
 
         rm -rf bin
-        HOST_ALIAS=0 PGO_MODE=off JOBS=4 ./scripts/build.sh \
-          linux/amd64 \
-          linux/amd64@v2 \
-          linux/amd64@v3 \
-          linux/amd64@v4 \
-          linux/arm64@v8.2 \
-          linux/arm@v6 \
-          linux/mips64le \
-          linux/riscv64 \
-          linux/ppc64le@power10 \
-          linux/s390x \
-          linux/loong64
+        HOST_ALIAS=0 PGO_MODE=off JOBS=4 ./scripts/build.sh linux
         sha256sum -c bin/SHA256SUMS-native.txt
 
     - name: Vet
