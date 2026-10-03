@@ -24,7 +24,7 @@ func webuiHandler() http.Handler {
 		`<button data-v="zh-CN" onclick="setLang('zh-CN')">简中</button>
         <button data-v="zh-TW" onclick="setLang('zh-TW')">繁中</button>`, 1)
 	indexHTML = strings.Replace(indexHTML, "</body>",
-		"<script src=\"frameviz.js\"></script>\n<script src=\"metrics.js\"></script>\n<script src=\"stream.js\"></script>\n</body>", 1)
+		"<script src=\"frameviz.js\"></script>\n<script src=\"metrics.js\"></script>\n<script src=\"stream.js\"></script>\n<script src=\"mcp-settings.js\"></script>\n</body>", 1)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/") && r.URL.Path != "/" { http.NotFound(w, r); return }
