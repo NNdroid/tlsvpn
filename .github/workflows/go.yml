@@ -47,7 +47,7 @@ jobs:
 
         rm -rf bin
         HOST_ALIAS=0 PGO_MODE=off JOBS=4 ./scripts/build.sh linux
-        sha256sum -c bin/SHA256SUMS-native.txt
+        (cd bin && sha256sum -c SHA256SUMS-native.txt)
 
     - name: Vet
       run: go vet -v ./...
