@@ -23,8 +23,31 @@ jobs:
     - name: Test interop probe
       run: (cd interop && go test ./...)
 
-    - name: Cross-build ARM64 v8.2
-      run: GOOS=linux GOARCH=arm64 GOARM64=v8.2 CGO_ENABLED=0 go build ./...
+    - name: Validate full Linux release matrix
+      run: |
+        chmod +x scripts/build.sh
+        ./scripts/build.sh --list | tee /tmp/tlsvpn-build-matrix.txt
+        for asset in \
+          tlsvpn_linux_amd64 \
+          tlsvpn_linux_amd64_v2 \
+          tlsvpn_linux_amd64_v3 \
+          tlsvpn_linux_amd64_v4 \
+          tlsvpn_linux_arm64 \
+          tlsvpn_linux_arm64_v8.2 \
+          tlsvpn_linux_arm_v5 \
+          tlsvpn_linux_arm_v6 \
+          tlsvpn_linux_mips64le \
+          tlsvpn_linux_mips64 \
+          tlsvpn_linux_riscv64 \
+          tlsvpn_linux_ppc64le_power10 \
+          tlsvpn_linux_s390x \
+          tlsvpn_linux_loong64; do
+          grep -Fq "$asset" /tmp/tlsvpn-build-matrix.txt || { echo "matrix missing $asset" >&2; exit 1; }
+        done
+
+        rm -rf bin
+        HOST_ALIAS=0 PGO_MODE=off JOBS=4 ./scripts/build.sh linux
+        (cd bin && sha256sum -c SHA256SUMS-native.txt)
 
     - name: Vet
       run: go vet -v ./...
