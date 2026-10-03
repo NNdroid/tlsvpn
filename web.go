@@ -170,7 +170,7 @@ func (w *WebManager) rebindIfNeeded() {
 		}
 		w.listeners = append(w.listeners, &webListener{spec: sp, l: l})
 		go w.serve(l)
-		log.Infof("[Web] listening on %s (bind=%s, auth=%v, tls=%v)", addr, cfg.Web.Bind, cfg.Web.Auth != "", tlsCfg != nil)
+		log.Infof("[Web] listening on %s (bind=%s, auth=%v, mcp_auth=%s, tls=%v)", addr, cfg.Web.Bind, cfg.Web.Auth != "", normalizeMCPAuthMode(cfg.Web.MCP.AuthMode), tlsCfg != nil)
 	}
 	if len(failed) > 0 && w.onceWarn("listen|"+strings.Join(failed, "|")) {
 		log.Warnf("[Web] %s (other listeners still serving, will retry)", strings.Join(failed, "; "))
@@ -212,32 +212,22 @@ func mcpBasicAuthValid(r *http.Request, expected string) bool {
 }
 
 // auth uses an HttpOnly cookie session instead of browser Basic Auth prompts.
-// The existing web.auth user:password setting remains the credential source.
-// Login endpoints are handled here so every dashboard/API route shares exactly
-// the same authentication boundary and EventSource can authenticate by cookie.
-// MCP uses the same credential source, but also accepts HTTP Basic Auth because
-// non-browser MCP clients generally cannot complete the dashboard cookie login.
+// The dashboard keeps web.auth as its credential source. MCP shares the same
+// listener/TLS/port but its authentication policy is independently configured
+// under web.mcp; the backward-compatible default is inherit_web. OAuth protected
+// resource metadata is intentionally public when oauth_jwt mode is enabled.
 func (w *WebManager) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		expected := w.Config().Web.Auth
-
+		if isMCPMetadataPath(r.URL.Path) {
+			w.serveMCPMetadata(rw, r)
+			return
+		}
 		if isMCPPath(r.URL.Path) {
-			if expected != "" && !dashboardSessions.valid(dashboardSessionToken(r), expected) && !mcpBasicAuthValid(r, expected) {
-				rw.Header().Set("Content-Type", "application/json")
-				rw.Header().Set("Cache-Control", "no-store")
-				rw.Header().Set("WWW-Authenticate", `Basic realm="tlsvpn-mcp", charset="UTF-8"`)
-				rw.WriteHeader(http.StatusUnauthorized)
-				_, _ = rw.Write([]byte(`{"error":"unauthorized"}`))
-				return
-			}
-			if w.mcp == nil {
-				http.NotFound(rw, r)
-				return
-			}
-			w.mcp.ServeHTTP(rw, r)
+			w.serveMCP(rw, r)
 			return
 		}
 
+		expected := w.Config().Web.Auth
 		if expected == "" {
 			next(rw, r)
 			return
