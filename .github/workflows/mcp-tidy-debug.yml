@@ -1,0 +1,27 @@
+name: MCP Tidy Debug
+
+on:
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  tidy-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Show go mod tidy diff
+        run: |
+          cp go.mod /tmp/go.mod.before
+          cp go.sum /tmp/go.sum.before
+          go mod tidy
+          echo '===== go.mod diff ====='
+          diff -u /tmp/go.mod.before go.mod || true
+          echo '===== go.sum diff ====='
+          diff -u /tmp/go.sum.before go.sum || true
+      - name: Build after tidy
+        run: go build -v ./...
+      - name: MCP tests after tidy
+        run: go test -race -count=1 ./... -run 'TestWebMCP|TestMCP'
