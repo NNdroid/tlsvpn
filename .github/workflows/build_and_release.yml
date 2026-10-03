@@ -60,7 +60,7 @@ jobs:
             test -s "bin/$asset" || { echo "missing native asset: $asset" >&2; exit 1; }
           done
           test -s bin/SHA256SUMS-native.txt
-          sha256sum -c bin/SHA256SUMS-native.txt
+          (cd bin && sha256sum -c SHA256SUMS-native.txt)
 
       - name: Upload native binaries
         uses: actions/upload-artifact@v4
@@ -164,6 +164,11 @@ jobs:
 
       - name: List release assets
         run: find release-assets -maxdepth 2 -type f -print | sort
+
+      - name: Verify downloaded native checksums
+        run: |
+          test -s release-assets/SHA256SUMS-native.txt
+          (cd release-assets && sha256sum -c SHA256SUMS-native.txt)
 
       - name: Create Release and upload assets
         uses: softprops/action-gh-release@v2
