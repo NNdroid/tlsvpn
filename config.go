@@ -77,7 +77,8 @@ type WebConfig struct {
 	//              面板只有进入隧道才能访问；
 	//   "all"    — 绑定全部接口（旧行为）。
 	// 端口取自 Addr 的端口部分。
-	Bind string `json:"bind,omitempty"` // 默认 all
+	Bind string    `json:"bind,omitempty"` // 默认 all
+	MCP  MCPConfig `json:"mcp,omitempty"`  // 同端口 MCP Server 的独立认证策略
 }
 
 // ServerConfig 服务端专属
@@ -176,7 +177,21 @@ const exampleConfigJSON = `{
 	    "auth": "admin:REPLACE-WITH-A-RANDOM-PASSWORD",
 	    "bind": "tunnel",
     "cert": "",
-    "key": ""
+    "key": "",
+    "mcp": {
+      "auth_mode": "inherit_web",
+      "username": "",
+      "credential": "",
+      "api_key_header": "X-API-Key",
+      "oauth": {
+        "jwks_url": "",
+        "issuer": "",
+        "audience": "",
+        "resource": "",
+        "authorization_servers": [],
+        "required_scopes": []
+      }
+    }
   },
   "client": {
     "interface_manager": "self",
@@ -256,6 +271,7 @@ func (c *Config) applyDefaults() {
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
 	}
+	c.Web.MCP.applyDefaults()
 	if c.Encrypt {
 		if c.EncAlgo == "" {
 			c.EncAlgo = "gcm256"
@@ -348,6 +364,9 @@ func (c *Config) Validate() error {
 	}
 	if strings.EqualFold(c.Web.Auth, "admin:change-me") || strings.EqualFold(c.Web.Auth, "admin:replace-with-a-random-password") {
 		return fmt.Errorf("web.auth uses a known placeholder; replace it with a unique password")
+	}
+	if err := c.Web.MCP.Validate(); err != nil {
+		return err
 	}
 	if (c.Web.Cert == "") != (c.Web.Key == "") {
 		return fmt.Errorf("web.cert and web.key must be provided together")
