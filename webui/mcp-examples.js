@@ -183,7 +183,7 @@
     parts.push("  -H 'Content-Type: application/json'");
     parts.push("  -H 'Accept: application/json, text/event-stream'");
     parts.push("  --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"tlsvpn-webui-test\",\"version\":\"1\"}}}'");
-    return parts.join(' \\\n');
+    return parts.join(' \\'+'\n');
   }
 
   function modeNote(){
@@ -229,6 +229,14 @@
 
   settings.addEventListener('input',renderExamples);
   settings.addEventListener('change',renderExamples);
+  const syncButton=q('mcp-sync');
+  if(syncButton)syncButton.addEventListener('click',()=>setTimeout(renderExamples,0));
+
+  const previousLoad=window.loadConfig;
+  if(typeof previousLoad==='function')window.loadConfig=async function(){const r=await previousLoad.apply(this,arguments);renderExamples();return r;};
+  const previousSave=window.saveConfig;
+  if(typeof previousSave==='function')window.saveConfig=async function(){const r=await previousSave.apply(this,arguments);setTimeout(renderExamples,0);return r;};
+
   new MutationObserver(translate).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
   translate();
 })();
