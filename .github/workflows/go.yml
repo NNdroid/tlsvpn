@@ -23,8 +23,31 @@ jobs:
     - name: Test interop probe
       run: (cd interop && go test ./...)
 
-    - name: Cross-build ARM64 v8.2
-      run: GOOS=linux GOARCH=arm64 GOARM64=v8.2 CGO_ENABLED=0 go build ./...
+    - name: Validate Linux optimized architecture matrix
+      run: |
+        chmod +x scripts/build.sh
+        ./scripts/build.sh --list | tee /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_amd64_v2' /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_amd64_v3' /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_amd64_v4' /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_arm64_v8.2' /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_riscv64' /tmp/tlsvpn-build-matrix.txt
+        grep -Fq 'tlsvpn_linux_ppc64le_power10' /tmp/tlsvpn-build-matrix.txt
+
+        rm -rf bin
+        HOST_ALIAS=0 PGO_MODE=off JOBS=4 ./scripts/build.sh \
+          linux/amd64 \
+          linux/amd64@v2 \
+          linux/amd64@v3 \
+          linux/amd64@v4 \
+          linux/arm64@v8.2 \
+          linux/arm@v6 \
+          linux/mips64le \
+          linux/riscv64 \
+          linux/ppc64le@power10 \
+          linux/s390x \
+          linux/loong64
+        sha256sum -c bin/SHA256SUMS-native.txt
 
     - name: Vet
       run: go vet -v ./...
