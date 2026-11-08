@@ -44,6 +44,13 @@ type Backend struct {
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
 	rateSampleBytes    uint64
 	rateSampleStart    time.Time
+
+	// stalled 标记该后端对应的物理连接已被判定为不健康（写/读失败、或连续多次
+	// RTT 采样失败）。调度器跳过 stalled 后端，使其不再接收新的数据，避免把
+	// 数据送进死路径。连接恢复/重建时由新一轮握手清除。
+	stalled atomic.Bool
+	// rttFailures 连续 RTT 采样失败计数；超过阈值即视为连接异常并置 stalled。
+	rttFailures atomic.Uint32
 }
 
 type AsyncPort struct {
@@ -446,7 +453,7 @@ const backendRTTHysteresisMin = 5_000 // 微秒
 func backendScore(b *Backend) (uint32, bool) {
 	qLen := b.queueLen()
 	qCap := b.queueCap()
-	if qCap == 0 || qLen >= qCap-2 {
+	if qCap == 0 || qLen >= qCap-2 || b.isStalled() {
 		return math.MaxUint32, false
 	}
 	rtt := atomic.LoadUint32(b.rttCache)
@@ -478,7 +485,15 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 		}
 	}
 	if bestBackend == nil {
+		// 所有后端均不可用（stalled/满队列）。优先选一条未 stalled 的后端，
+		// 避免回退到死路径；全部 stalled 时才取第一条兜底。
 		bestBackend = backends[0]
+		for _, b := range backends {
+			if b != nil && !b.isStalled() {
+				bestBackend = b
+				break
+			}
+		}
 		p.preferred.Store(bestBackend)
 		return bestBackend
 	}
@@ -779,6 +794,50 @@ func (c *Client) ForceReconnect() {
 	c.wakeAll()
 }
 func (p *AsyncPort) Close() { p.cancel() }
+
+// rebalanceBrutalRates 在物理连接数变化后重新分配 Brutal 整形份额。
+//
+// 初始握手时每条连接按 config 声明的 connsCount 均分总预算；当其余连接断开
+// 后，幸存连接应拿到更大的份额（例如 4 条中的 3 条断开后，幸存者应拿回全部
+// 预算而不是停在 1/4）。v2 group 语义由内核在组内自动重分配，本方法只是用
+// 新的逐连接份额重新 apply 一次（对 v2 等价于设置相同的组总速率，无害）。
+//
+// 调用方在连接 up/down 计数变化后触发；本方法自行加锁遍历。
+// skipConnIndex >= 0 表示跳过该连接（正在断开、socket 已关闭，无需也不应再
+// 重新整形），-1 表示遍历全部。
+func (c *Client) rebalanceBrutalRates(skipConnIndex int) {
+	live := int(atomic.LoadInt32(&c.liveConns))
+	if live <= 0 {
+		return
+	}
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+	for connIndex, ci := range c.conns {
+		if ci == nil || connIndex == skipConnIndex {
+			continue
+		}
+		if state, _ := ci.state.Load().(string); state != "up" {
+			continue
+		}
+		cfg := ci.brutalCfg.Load()
+		if cfg == nil || !cfg.enabled {
+			continue
+		}
+		tcpConn := ci.observedTCP.Load()
+		if tcpConn == nil {
+			continue
+		}
+		// 按当前实际存活连接数重新计算逐连接份额（v1 逐连接 ABI）。
+		newLegacy := splitLegacyBrutalRateBps(cfg.totalRateMbps, live, cfg.connIndex)
+		br := applyTCPBrutal(tcpConn, cfg.totalRateMbps, newLegacy, cfg.groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[Conn %d] TCP Brutal rebalance skipped: %s", cfg.connIndex, br.Error)
+		} else if br.Error != "" {
+			log.Debugf("[Conn %d] TCP Brutal rebalance limited observability: %s", cfg.connIndex, br.Error)
+		}
+	}
+}
 
 // ======================= 客户端实现 =======================
 
@@ -1115,6 +1174,16 @@ func (c *Client) wakeAll() {
 	}
 }
 
+// brutalRebalanceCfg 保存 Brutal 整形参数，供连接数变化时重新分配每连接份额。
+// 连接建立后存活数变化（其余物理连接断开/重连）时，幸存连接应重新获得更大
+// 的整形份额（v1 逐连接 ABI），而不是永远停在握手时按 connsCount 均分的份额。
+type brutalRebalanceCfg struct {
+	totalRateMbps uint64 // 会话整形总预算（Mbps），v2 group 语义下由内核在组内重分配
+	groupID       uint64 // 内核 group id（v2 有效）
+	connIndex     int    // 本连接在配置中的下标，用于重新计算逐连接份额
+	enabled       bool   // 是否已成功应用 Brutal（false 则无需重协商）
+}
+
 // clientConnInfo 单条物理连接的运行明细（面板展示 + 强制重连句柄）
 type clientConnInfo struct {
 	observedTCP atomic.Pointer[net.TCPConn]
@@ -1133,6 +1202,7 @@ type clientConnInfo struct {
 	rxBytes     uint64
 	retries     uint64
 	brutal      atomic.Pointer[brutalApplyResult] // 本连接的内核实际状态；nil=尚未尝试
+	brutalCfg   atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
 	negotiated  atomic.Pointer[sessionNeg]
 	linkedAt    int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
@@ -1869,6 +1939,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		}
 		br := applyTCPBrutal(tcpConn, totalRate, legacyRateBps, groupID)
 		ci.brutal.Store(br.clone())
+		// 保存重协商参数：连接数变化（其余物理连接断开/重连）时，幸存连接需
+		// 重新计算逐连接份额，否则 v1 逐连接 ABI 会一直停在初始均分份额上。
+		ci.brutalCfg.Store(&brutalRebalanceCfg{
+			totalRateMbps: totalRate,
+			groupID:       groupID,
+			connIndex:     connIndex,
+			enabled:       br.Applied,
+		})
 		if !br.Applied {
 			log.Warnf("[Conn %d] TCP Brutal shaping skipped after handshake: %s", connIndex, br.Error)
 		} else if br.Error != "" {
@@ -2083,18 +2161,22 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			log.Infof("[Conn %d] netifd interface %s is up on %s", connIndex, c.netifdInterface, c.tapName)
 		}
 	}
+	// 连接数变化：重新分配每条存活连接的 Brutal 份额（新连接不跳过，用新份额覆盖）。
+	c.rebalanceBrutalRates(-1)
 	defer func() {
 		if atomic.AddInt32(&c.liveConns, -1) == 0 && c.usesNetifd() {
 			if err := c.notifyNetifdDown(); err != nil {
 				log.Warnf("netifd link-down notification failed: %v", err)
 			}
 		}
+		// 跳过正在断开的这条连接（socket 已关闭），其余幸存连接拿回更大份额。
+		c.rebalanceBrutalRates(connIndex)
 	}()
 
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		var txAEADScratch nonceAADScratch
-		keepAliveTicker := time.NewTicker(4 * time.Second)
+		keepAliveTicker := time.NewTicker(keepaliveInterval)
 		defer keepAliveTicker.Stop()
 
 		// RTT 刷新复用现有发送 goroutine，避免每条物理连接再起一个
@@ -2104,13 +2186,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 全进程共享 1Hz 粗时钟；热路径只做 atomic Load + 整数比较。
 		// epoch 变化时才真正读取时钟并更新 poll deadline。
 		writeDeadlineEpoch := currentDeadlineEpoch()
-		_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+		_ = tlsConn.SetWriteDeadline(time.Now().Add(datapathWriteTimeout))
 		refreshWriteDeadline := func() {
 			epoch := currentDeadlineEpoch()
 			if epoch != writeDeadlineEpoch {
-				// 11s 绝对截止保证任意时刻开始阻塞的 Write 仍会在约
-				// 10~11s 内失败。
-				_ = tlsConn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+				// 绝对截止保证任意时刻开始阻塞的 Write 仍会在约
+				// datapathWriteTimeout 内失败。
+				_ = tlsConn.SetWriteDeadline(time.Now().Add(datapathWriteTimeout))
 				writeDeadlineEpoch = epoch
 			}
 		}
@@ -2128,6 +2210,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
 					ci.rttMeasured.Store(true)
+					backend.noteRTTSuccess()
+				} else if err != nil {
+					// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
+					// 该后端标记为 stalled，调度器不再向其分配数据。
+					// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
+					backend.noteRTTFailure()
 				}
 			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
@@ -2165,6 +2253,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					err = io.ErrShortWrite
 				}
 				if err != nil {
+					// 写失败即连接不可用：尽早置 stalled，调度器立即停用该后端。
+					backend.markStalled()
 					errChan <- err
 					return
 				}
@@ -2196,6 +2286,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					err = io.ErrShortWrite
 				}
 				if err != nil {
+					backend.markStalled()
 					errChan <- err
 					return
 				}
@@ -2233,17 +2324,20 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		defer flushRxStats()
 
 		readDeadlineEpoch := currentDeadlineEpoch()
-		_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
+		_ = tlsConn.SetReadDeadline(time.Now().Add(datapathReadTimeout))
 		for {
 			frame, seq, err := scanner.ReadFrame()
 			if err != nil {
+				// 对端消失/读超时：尽早置 stalled，调度器立即停用该后端。
+				backend.markStalled()
 				errChan <- err
 				return
 			}
 			epoch := currentDeadlineEpoch()
 			if epoch != readDeadlineEpoch {
-				// 1s 粗粒度刷新、16s deadline => 实际空闲判死约 15~16s。
-				_ = tlsConn.SetReadDeadline(time.Now().Add(16 * time.Second))
+				// 1s 粗粒度刷新、datapathReadTimeout deadline => 实际空闲判死约
+				// datapathReadTimeout 秒。
+				_ = tlsConn.SetReadDeadline(time.Now().Add(datapathReadTimeout))
 				readDeadlineEpoch = epoch
 			}
 			// 心跳/控制帧（frame=nil）：读超时已被 SetReadDeadline 刷新，

@@ -442,6 +442,7 @@ type connInfo struct {
 	txPackets   uint64
 	rxPackets   uint64
 	brutal      atomic.Pointer[brutalApplyResult] // 内核实际状态；nil=尚未尝试
+	brutalCfg   atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
 	linkedAt    int64                             // 建立时间（unix 秒）
 	brutalTx    uint64
 	brutalRx    uint64
@@ -786,6 +787,39 @@ func (s *Server) BanList() map[string]int64 {
 }
 
 // kickSession 断开一个会话的所有物理连接并停止下行（Web 面板 kick 用）
+// rebalanceSessionBrutal 在会话连接数变化后重新分配每条存活连接的 Brutal
+// 整形份额（服务端→客户端下行方向）。v2 group 语义由内核自动重分配，本方法
+// 只是按新的逐连接份额重新 apply 一次（对 v2 等价于设置相同组总速率，无害）。
+// skipConn 为正在断开的连接（socket 已关闭，跳过）。调用方无需持 sessionMu。
+func (s *Server) rebalanceSessionBrutal(session *ClientSession, skipConn *connInfo) {
+	if session == nil {
+		return
+	}
+	session.sessionMu.RLock()
+	defer session.sessionMu.RUnlock()
+	live := session.ActiveConns
+	if live <= 0 {
+		return
+	}
+	for ci := range session.conns {
+		if ci == skipConn || ci.tcpConn == nil {
+			continue
+		}
+		cfg := ci.brutalCfg.Load()
+		if cfg == nil || !cfg.enabled {
+			continue
+		}
+		newLegacy := splitLegacyBrutalRateBps(cfg.totalRateMbps, live, cfg.connIndex)
+		br := applyTCPBrutal(ci.tcpConn, cfg.totalRateMbps, newLegacy, cfg.groupID)
+		ci.brutal.Store(br.clone())
+		if !br.Applied {
+			log.Warnf("[%s] TCP Brutal rebalance skipped: %s", ci.remote, br.Error)
+		} else if br.Error != "" {
+			log.Debugf("[%s] TCP Brutal rebalance limited observability: %s", ci.remote, br.Error)
+		}
+	}
+}
+
 func (s *Server) kickSession(session *ClientSession) {
 	s.mu.Lock()
 	clientID := ""
@@ -1760,6 +1794,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 		session.sessionMu.Unlock()
 		s.mu.Unlock()
+		// 会话连接数减少：幸存连接重新分配 Brutal 份额（跳过正在断开的这条）。
+		s.rebalanceSessionBrutal(session, ci)
 	}()
 
 	// 速率整形参数在锁内快照，避免与 ApplyConfig 的写构成数据竞争
@@ -1809,6 +1845,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 		br := applyTCPBrutal(tcpConn, serverTxRate, serverLegacyRateBps, groupID)
 		ci.brutal.Store(br.clone())
+		// 保存重协商参数：会话连接数变化（本会话其它物理连接断开/重连）时，
+		// 幸存连接应重新获得更大的整形份额，而不是停在初始均分份额上。
+		ci.brutalCfg.Store(&brutalRebalanceCfg{
+			totalRateMbps: serverTxRate,
+			groupID:       groupID,
+			connIndex:     req.BrutalConnIndex,
+			enabled:       br.Applied,
+		})
 		if !br.Applied {
 			log.Warnf("[%s] TCP Brutal shaping skipped after handshake: %s", clientID, br.Error)
 		} else if br.Error != "" {
@@ -1817,6 +1861,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	} else {
 		ci.brutal.Store((&brutalApplyResult{}).clone())
 	}
+	// 会话连接数增加：重新分配每条存活连接的 Brutal 份额（含新连接，用新份额覆盖）。
+	s.rebalanceSessionBrutal(session, nil)
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
@@ -1839,7 +1885,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	go func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		var txAEADScratch nonceAADScratch
-		keepAliveTicker := time.NewTicker(4 * time.Second)
+		keepAliveTicker := time.NewTicker(keepaliveInterval)
 		defer keepAliveTicker.Stop()
 
 		// 与客户端一致：RTT 采样合并到已有发送 goroutine，避免每个物理连接
@@ -1847,11 +1893,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		var rttTicker *time.Ticker
 		var rttC <-chan time.Time
 		writeDeadlineEpoch := currentDeadlineEpoch()
-		_ = conn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+		_ = conn.SetWriteDeadline(time.Now().Add(datapathWriteTimeout))
 		refreshWriteDeadline := func() {
 			epoch := currentDeadlineEpoch()
 			if epoch != writeDeadlineEpoch {
-				_ = conn.SetWriteDeadline(time.Now().Add(11 * time.Second))
+				_ = conn.SetWriteDeadline(time.Now().Add(datapathWriteTimeout))
 				writeDeadlineEpoch = epoch
 			}
 		}
@@ -1869,6 +1915,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
 					ci.rttMeasured.Store(true)
+					backend.noteRTTSuccess()
+				} else if err != nil {
+					// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
+					// 该后端标记为 stalled，调度器不再向其分配数据。
+					// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
+					backend.noteRTTFailure()
 				}
 			case batch := <-connTxChan:
 				sendBuffer = sendBuffer[:0]
@@ -1906,6 +1958,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					werr = io.ErrShortWrite
 				}
 				if werr != nil {
+					// 写失败即连接不可用：尽早置 stalled，调度器立即停用该后端。
+					backend.markStalled()
 					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
 					conn.Close()
 					return
@@ -1936,6 +1990,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				// 的唯一成因。加超时后本端 10s 内自发现并断连。
 				refreshWriteDeadline()
 				if _, err := conn.Write(sendBuffer); err != nil {
+					backend.markStalled()
 					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
 					conn.Close()
 					return
@@ -1975,16 +2030,18 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	}
 	defer flushRxStats()
 	readDeadlineEpoch := currentDeadlineEpoch()
-	_ = conn.SetReadDeadline(time.Now().Add(16 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(datapathReadTimeout))
 	for {
 		frame, seq, err := scanner.ReadFrame()
 		if err != nil {
+			// 对端消失/读超时：尽早置 stalled，调度器立即停用该后端。
+			backend.markStalled()
 			log.Debugf("[%s] connection lost: %v", clientID, err)
 			return
 		}
 		epoch := currentDeadlineEpoch()
 		if epoch != readDeadlineEpoch {
-			_ = conn.SetReadDeadline(time.Now().Add(16 * time.Second))
+			_ = conn.SetReadDeadline(time.Now().Add(datapathReadTimeout))
 			readDeadlineEpoch = epoch
 		}
 
