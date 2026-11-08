@@ -134,6 +134,9 @@ type serverConnSnapshot struct {
 	TLSVersion string `json:"tls_version,omitempty"`
 	TLSCipher  string `json:"tls_cipher,omitempty"`
 	TLSALPN    string `json:"tls_alpn,omitempty"`
+	// Stalled 表示调度器已判定该连接不健康（读写失败/连续 RTT 采样失败），
+	// 不再向其分配数据；面板据此提示用户该路径已失效。
+	Stalled bool `json:"stalled"`
 }
 
 type fecStatsJSON struct {

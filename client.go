@@ -1639,6 +1639,9 @@ type connSnapshot struct {
 	TLSVersion string `json:"tls_version,omitempty"`
 	TLSCipher  string `json:"tls_cipher,omitempty"`
 	TLSALPN    string `json:"tls_alpn,omitempty"`
+	// Stalled 表示调度器已判定该连接不健康（读写失败/连续 RTT 采样失败），
+	// 不再向其分配数据；面板据此提示用户该路径已失效。
+	Stalled bool `json:"stalled"`
 }
 
 // snapshotConns 汇总所有物理连接明细
@@ -1727,6 +1730,9 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if br := ci.brutal.Load(); br != nil {
 			snap.BrutalApplied = br.Applied
 			snap.BrutalErr = br.Error
+		}
+		if backend := ci.backend.Load(); backend != nil {
+			snap.Stalled = backend.isStalled()
 		}
 		out = append(out, snap)
 	}
