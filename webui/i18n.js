@@ -18,7 +18,7 @@ const I18N={
  toast:{kick:'已强制断开客户端',ban:'已封禁客户端',unban:'已解除封禁',gc:'已触发 GC',reconnect:'已触发重连',loglevel:'日志级别已更新',saved:'配置已保存',applied:'配置已保存并应用',fail:'操作失败',need_id:'请输入 ClientID',clear:'日志已清空',download:'日志已导出'},
  filter_ph:'输入关键字过滤…',filter_none:'无匹配结果',filter_clear:'清除过滤',filter_tip:'按 / 快速聚焦',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',srv_only:'仅服务端模式提供',
  perm:'永久',confirm_kick:'确定要强制断开该客户端吗？',confirm_ban:'确定封禁该客户端吗？',need_id:'请输入 ClientID',
- sched:{active:'活跃',standby:'待命',paths:'{a}/{n} 活跃',queue:'队列',carry:'尾包等待'},
+ sched:{active:'活跃',standby:'待命',paths:'{a}/{n} 活跃',queue:'队列',carry:'尾包等待',stalled:'失效',stalled_tip:'该物理连接已被判定为不健康（读写失败或连续 RTT 采样失败），调度器已停止向其分配数据。',stalled_note:'已停止分配数据，等待重连'},
   st:{up:'up',connecting:'connecting',skip:'未生效'},
  badge:{dup:'复制',off:'关闭',ctr:'CTR',plain:'明文'},
  u:{day:'天',hour:'时',min:'分',sec:'秒'},updated:'更新于 {n}',footer:'数据每 {n} 秒刷新',refresh_tip:'刷新间隔',
@@ -51,7 +51,7 @@ const I18N={
  toast:{kick:'Client force-disconnected',ban:'Client banned',unban:'Ban lifted',gc:'GC triggered',reconnect:'Reconnect triggered',loglevel:'Log level updated',saved:'Config saved',applied:'Config saved & applied',fail:'Action failed',need_id:'Please enter a ClientID',clear:'Logs cleared',download:'Logs exported'},
  filter_ph:'Type to filter…',filter_none:'No matches',filter_clear:'Clear filter',filter_tip:'Press / to focus',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',srv_only:'Server mode only',
  perm:'Permanent',confirm_kick:'Force-disconnect this client?',confirm_ban:'Ban this client?',need_id:'Please enter a ClientID',
- sched:{active:'Active',standby:'Standby',paths:'{a}/{n} active',queue:'Queue',carry:'Tail carry'},
+ sched:{active:'Active',standby:'Standby',paths:'{a}/{n} active',queue:'Queue',carry:'Tail carry',stalled:'Stalled',stalled_tip:'This physical connection was judged unhealthy (read/write failure or consecutive RTT sampling failures); the scheduler stopped assigning data to it.',stalled_note:'no data assigned, awaiting reconnect'},
   st:{up:'up',connecting:'connecting',skip:'Skipped'},
  badge:{dup:'Dup',off:'Off',ctr:'CTR',plain:'Plain'},
  u:{day:'d',hour:'h',min:'m',sec:'s'},updated:'Updated at {n}',footer:'Refreshing every {n}s',refresh_tip:'Refresh interval',
@@ -78,7 +78,7 @@ const I18N={
  toast:{kick:'Client getrennt',ban:'Client gesperrt',unban:'Sperre aufgehoben',gc:'GC ausgelöst',reconnect:'Neuverbindung ausgelöst',loglevel:'Log-Level aktualisiert',saved:'Konfiguration gespeichert',applied:'Gespeichert & angewendet',fail:'Aktion fehlgeschlagen',need_id:'Bitte ClientID eingeben',clear:'Protokolle geleert',download:'Protokoll exportiert'},
  filter_ph:'Zum Filtern eingeben…',filter_none:'Keine Treffer',filter_clear:'Filter löschen',filter_tip:'/ zum Fokussieren',no_clients:'Keine Clients',no_conns:'Keine Verbindungen',no_macs:'Noch keine MACs gelernt',no_bans:'Keine Sperren',srv_only:'Nur im Server-Modus',
  perm:'Dauerhaft',confirm_kick:'Diesen Client wirklich trennen?',confirm_ban:'Diesen Client sperren?',need_id:'Bitte ClientID eingeben',
- sched:{active:'Aktiv',standby:'Standby',paths:'{a}/{n} aktiv',queue:'Warteschlange',carry:'Tail-Carry'},
+ sched:{active:'Aktiv',standby:'Standby',paths:'{a}/{n} aktiv',queue:'Warteschlange',carry:'Tail-Carry',stalled:'Gestört',stalled_tip:'Diese physische Verbindung wurde als ungesund eingestuft (Lese-/Schreibfehler oder aufeinanderfolgende RTT-Messfehler); der Scheduler weist ihr keine Daten mehr zu.',stalled_note:'keine Daten zugewiesen, warte auf Neuverbindung'},
   st:{up:'aktiv',connecting:'verbinde',skip:'Übergangen'},
  badge:{dup:'Dup',off:'Aus',ctr:'CTR',plain:'Klartext'},
  u:{day:'T',hour:'Std',min:'Min',sec:'Sek'},updated:'Aktualisiert um {n}',footer:'Aktualisierung alle {n}s',refresh_tip:'Aktualisierungsintervall',
@@ -111,7 +111,7 @@ const I18N={
  toast:{kick:'Client déconnecté',ban:'Client banni',unban:'Bannissement levé',gc:'GC déclenché',reconnect:'Reconnexion déclenchée',loglevel:'Niveau de log mis à jour',saved:'Config enregistrée',applied:'Enregistré & appliqué',fail:'Échec de l’action',need_id:'Veuillez saisir un ClientID',clear:'Journaux effacés',download:'Journal téléchargé'},
  filter_ph:'Taper pour filtrer…',filter_none:'Aucun résultat',filter_clear:'Effacer le filtre',filter_tip:'/ pour le focus',no_clients:'Aucun client',no_conns:'Aucune connexion',no_macs:'Aucune MAC apprise',no_bans:'Aucun bannissement',srv_only:'Mode serveur uniquement',
  perm:'Permanent',confirm_kick:'Déconnecter ce client de force ?',confirm_ban:'Bannir ce client ?',need_id:'Veuillez saisir un ClientID',
- sched:{active:'Actif',standby:'Veille',paths:'{a}/{n} actives',queue:'File',carry:'Reliquat'},
+ sched:{active:'Actif',standby:'Veille',paths:'{a}/{n} actives',queue:'File',carry:'Reliquat',stalled:'Défaillant',stalled_tip:'Cette connexion physique a été jugée en mauvaise santé (échec de lecture/écriture ou échecs d\'échantillonnage RTT consécutifs) ; l\'ordonnanceur a cessé de lui attribuer des données.',stalled_note:'aucune donnée attribuée, en attente de reconnexion'},
   st:{up:'actif',connecting:'connexion',skip:'Ignoré'},
  badge:{dup:'Dup',off:'Désactivé',ctr:'CTR',plain:'Clair'},
  u:{day:'j',hour:'h',min:'min',sec:'s'},updated:'Actualisé à {n}',footer:"Actualisation toutes les {n}s",refresh_tip:"Intervalle d'actualisation",
@@ -144,7 +144,7 @@ const I18N={
  toast:{kick:'クライアントを強制切断しました',ban:'クライアントを禁止しました',unban:'禁止を解除しました',gc:'GC を実行しました',reconnect:'再接続を依頼しました',loglevel:'ログレベルを更新しました',saved:'設定を保存しました',applied:'設定を保存・適用しました',fail:'操作に失敗しました',need_id:'ClientID を入力してください',clear:'ログをクリアしました',download:'ログをエクスポートしました'},
  filter_ph:'入力して絞り込み…',filter_none:'該当なし',filter_clear:'フィルタ解除',filter_tip:'/ でフォーカス',no_clients:'クライアントなし',no_conns:'接続なし',no_macs:'学習済み MAC なし',no_bans:'禁止レコードなし',srv_only:'サーバーモードのみ',
  perm:'永久',confirm_kick:'このクライアントを強制切断しますか？',confirm_ban:'このクライアントを禁止しますか？',need_id:'ClientID を入力してください',
- sched:{active:'稼働',standby:'待機',paths:'{a}/{n} 稼働',queue:'キュー',carry:'テール待機'},
+ sched:{active:'稼働',standby:'待機',paths:'{a}/{n} 稼働',queue:'キュー',carry:'テール待機',stalled:'停止',stalled_tip:'この物理接続は異常と判定されました（読み書き失敗または RTT サンプリング失敗の連続）。スケジューラーはこの接続へのデータ割り当てを停止しました。',stalled_note:'データ未割り当て、再接続待ち'},
   st:{up:'up',connecting:'connecting',skip:'未適用'},
  badge:{dup:'複製',off:'オフ',ctr:'CTR',plain:'平文'},
  u:{day:'日',hour:'時間',min:'分',sec:'秒'},updated:'更新時刻 {n}',footer:'{n} 秒ごとに更新',refresh_tip:'更新間隔',
@@ -243,6 +243,9 @@ const I18N={
       I18N['zh-TW'].ov.avgpkt = '平均接收幀大小';
       I18N['zh-TW'].ov.drop_pct = '傳送丟幀率';
       setSchedWords(I18N['zh-TW'], {assign:'分配', capacity:'路徑容量', qeta:'佇列 ETA', batches:'批次', cumulative:'累計分配', batch_unit:'批', alloc_total:'排程'});
+      I18N['zh-TW'].sched.stalled = '失效';
+      I18N['zh-TW'].sched.stalled_tip = '該實體連線已被判定為不健康（讀寫失敗或連續 RTT 取樣失敗），排程器已停止向其分配資料。';
+      I18N['zh-TW'].sched.stalled_note = '已停止分配資料，等待重連';
     }
     if (I18N.en) {
       I18N.en.ov.fec_eff = 'FEC recovery rate';
