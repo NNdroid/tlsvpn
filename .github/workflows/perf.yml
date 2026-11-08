@@ -76,7 +76,12 @@ jobs:
           PERF_PROFILE_DIR: ${{ github.workspace }}/perf-artifacts/profile-upload
           PERF_RESULT_FILE: ${{ github.workspace }}/perf-artifacts/profile-upload.tsv
         run: |
-          sudo -E bash scripts/real_tap_perf.sh
+          sudo -E env \
+            BIN="$BIN" PERF_CONNS="$PERF_CONNS" PERF_ENC_ALGO="$PERF_ENC_ALGO" \
+            PERF_PAD_MODE="$PERF_PAD_MODE" PERF_FEC="$PERF_FEC" PERF_FEC_GROUP="$PERF_FEC_GROUP" \
+            PERF_DIRECTION="$PERF_DIRECTION" PERF_SECONDS="$PERF_SECONDS" PERF_MIN_MBPS="$PERF_MIN_MBPS" \
+            PERF_PROFILE_DIR="$PERF_PROFILE_DIR" PERF_RESULT_FILE="$PERF_RESULT_FILE" \
+            bash scripts/real_tap_perf.sh
           sudo chown -R "$USER:$USER" perf-artifacts
           awk -F '\t' 'BEGIN{OFS="\t"} {print "upload", $0}' perf-artifacts/profile-upload.tsv >> perf-artifacts/profile-throughput.tsv
 
@@ -94,7 +99,12 @@ jobs:
           PERF_PROFILE_DIR: ${{ github.workspace }}/perf-artifacts/profile-download
           PERF_RESULT_FILE: ${{ github.workspace }}/perf-artifacts/profile-download.tsv
         run: |
-          sudo -E bash scripts/real_tap_perf.sh
+          sudo -E env \
+            BIN="$BIN" PERF_CONNS="$PERF_CONNS" PERF_ENC_ALGO="$PERF_ENC_ALGO" \
+            PERF_PAD_MODE="$PERF_PAD_MODE" PERF_FEC="$PERF_FEC" PERF_FEC_GROUP="$PERF_FEC_GROUP" \
+            PERF_DIRECTION="$PERF_DIRECTION" PERF_SECONDS="$PERF_SECONDS" PERF_MIN_MBPS="$PERF_MIN_MBPS" \
+            PERF_PROFILE_DIR="$PERF_PROFILE_DIR" PERF_RESULT_FILE="$PERF_RESULT_FILE" \
+            bash scripts/real_tap_perf.sh
           sudo chown -R "$USER:$USER" perf-artifacts
           awk -F '\t' 'BEGIN{OFS="\t"} {print "download", $0}' perf-artifacts/profile-download.tsv >> perf-artifacts/profile-throughput.tsv
 
