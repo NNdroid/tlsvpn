@@ -256,7 +256,7 @@ for (const deviceScaleFactor of [1,2]) {
     await chartPage.mouse.move(box.x+box.width*0.6,box.y+70);
     const linked=await chartPage.evaluate(()=>[...document.querySelectorAll('.diagnostic-card canvas')].map(c=>c.dataset.diagHover));
     if(!linked[0]||linked.some(t=>t!==linked[0]))failures.push('diagnostic hover did not synchronize');
-    const nativeVisible=await chartPage.evaluate(()=>[...document.querySelectorAll('select')].filter(s=>getComputedStyle(s).visibility!=='hidden').map(s=>s.id));
+    const nativeVisible=await chartPage.evaluate(()=>[...document.querySelectorAll('select')].filter(s=>{const c=getComputedStyle(s);return c.display!=='none'&&c.visibility!=='hidden';}).map(s=>s.id));
     if(nativeVisible.length)failures.push('native selects still visible: '+nativeVisible.join(','));
     const clientDropdown=chartPage.locator('#diag-client').locator('..');
     await clientDropdown.locator('.dl-btn').click();
