@@ -356,16 +356,23 @@ grep -Fq 'stage=complete' "$mock_log"
 # effective version (not the pre-forced release) so the SDK cache directory
 # name matches the actual build. An explicit work dir is honored as-is.
 airoha_log="$tmp/customfeed-airoha.log"
-TMPDIR="$tmp" \
-OPENWRT_APK_BUILD_SCRIPT="$mock_builder" \
-OPENWRT_FEED_OUTPUT_DIR="$tmp/airoha-output" \
-OPENWRT_FEED_SIGNING_KEY_FILE="$private_key" \
-OPENWRT_FEED_PUBLIC_KEY_FILE="$public_key" \
-OPENWRT_TARGET='airoha' \
-OPENWRT_SUBTARGET='an7581' \
-TLSVPN_SOURCE_VERSION="$(git rev-parse HEAD)" \
-TLSVPN_PKG_VERSION='1.0.0-1-gabcdef0' \
-  bash "$script" > "$airoha_log" 2>&1
+(
+  # GitHub Actions sets RUNNER_TEMP, which the builder would prefer over
+  # TMPDIR when deriving its work-dir default. Unset it inside a subshell so
+  # this run exercises the TMPDIR derivation path and the SDK lands in $tmp
+  # exactly where the assertions below expect it.
+  unset RUNNER_TEMP
+  TMPDIR="$tmp" \
+  OPENWRT_APK_BUILD_SCRIPT="$mock_builder" \
+  OPENWRT_FEED_OUTPUT_DIR="$tmp/airoha-output" \
+  OPENWRT_FEED_SIGNING_KEY_FILE="$private_key" \
+  OPENWRT_FEED_PUBLIC_KEY_FILE="$public_key" \
+  OPENWRT_TARGET='airoha' \
+  OPENWRT_SUBTARGET='an7581' \
+  TLSVPN_SOURCE_VERSION="$(git rev-parse HEAD)" \
+  TLSVPN_PKG_VERSION='1.0.0-1-gabcdef0' \
+    bash "$script" > "$airoha_log" 2>&1
+)
 test -s "$tmp/airoha-output/releases/SNAPSHOT/airoha/an7581/packages.adb"
 test -d "$tmp/tlsvpn-openwrt-customfeed/SNAPSHOT-airoha-an7581/sdk"
 grep -Fq 'stage=complete' "$airoha_log"
