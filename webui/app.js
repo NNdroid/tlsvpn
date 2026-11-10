@@ -13,6 +13,8 @@ function applyI18n(){
   applyTheme();
   // 下拉框文案取自 option 文本，换语言后要跟着重画
   syncSelects();
+  // 标签文本宽度随语言变化，指示条宽度要跟着校准
+  moveTabInd();
 }
 function fmtDur(s){s=Math.floor(s);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   if(d>0)return d+t('u.day')+h+t('u.hour');if(h>0)return h+t('u.hour')+m+t('u.min');
@@ -44,6 +46,7 @@ function showPane(id){
   document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('on',b.dataset.pane===id));
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
   document.getElementById('pane-'+id).classList.add('on');
+  moveTabInd();
   // 事件在后台一直攒着，面板不在前台时不渲染；切过来补一次全量绘制
   if(id==='events')evRender(false);
   if(id==='events')evRender(false);
@@ -51,6 +54,18 @@ function showPane(id){
   if(id==='settings')loadConfig();
   // 刚显示的面板之前在 display:none 里量不到宽度，按钮的 min-width 还是 0
   syncSelects();
+}
+// 标签页滑动指示条：跟随当前激活按钮，切换时平滑滑到新位置。
+// 容器滚动（窄屏 12 个标签溢出）时指示条相对内容定位，跟随内容滚动。
+function moveTabInd(){
+  const tabs=document.getElementById('tabs');
+  const ind=document.getElementById('tab-ind');
+  if(!tabs||!ind)return;
+  const btn=tabs.querySelector('button.on');
+  if(!btn){tabs.classList.remove('ind-on');return;}
+  ind.style.left=btn.offsetLeft+'px';
+  ind.style.width=btn.offsetWidth+'px';
+  tabs.classList.add('ind-on');
 }
 document.getElementById('tabs').addEventListener('click',function(ev){
   const btn=ev.target.closest('button');if(!btn)return;
@@ -84,30 +99,42 @@ function renderLineChart(canvasId,pts,opts){
   // Reserve the measured label width, the axis gap, and an outer gutter.
   const L=Math.max(56,Math.ceil(Math.max(...ticks.map(s=>ctx.measureText(s).width)))+14);
   const R=16,T=16,B=24,pw=W-L-R,ph=H-T-B;
-  // 网格 + 纵坐标刻度
-  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
+  // 网格 + 纵坐标刻度（虚线让网格更轻，不抢折线的视觉重心）
+  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;ctx.setLineDash([3,4]);
   ctx.fillStyle=cssv('--sub');ctx.font='10px sans-serif';ctx.textAlign='right';
   for(let g=0;g<=4;g++){
     const y=T+ph*g/4;
     ctx.beginPath();ctx.moveTo(L,y+.5);ctx.lineTo(W-R,y+.5);ctx.stroke();
     ctx.fillText(ticks[g],L-6,y+3);
   }
+  ctx.setLineDash([]);
   ctx.textAlign='left';
   if(!pts||pts.length<2){
     chartState[canvasId]={pts:[],plot:{l:L,r:W-R,t:T,b:H-B},hover:-1};
     return;
   }
-  // 上下行：面积填充 + 折线
+  // 上下行：平滑曲线（Catmull-Rom→Bezier）+ 数据点 + 柔和面积渐变
+  const pt=(p,get)=>({x:L+p.x*pw,y:T+(1-get(p)/max)*ph});
   const plot=(get,col)=>{
+    const P=pts.map(p=>pt(p,get));
+    // 平滑折线路径
     ctx.beginPath();
-    pts.forEach((p,i)=>{
-      const x=L+p.x*pw,y=T+(1-get(p)/max)*ph;
-      if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
-    });
+    ctx.moveTo(P[0].x,P[0].y);
+    for(let i=0;i<P.length-1;i++){
+      const p0=P[Math.max(0,i-1)],p1=P[i],p2=P[i+1],p3=P[Math.min(P.length-1,i+2)];
+      const c1x=p1.x+(p2.x-p0.x)/6,c1y=p1.y+(p2.y-p0.y)/6;
+      const c2x=p2.x-(p3.x-p1.x)/6,c2y=p2.y-(p3.y-p1.y)/6;
+      ctx.bezierCurveTo(c1x,c1y,c2x,c2y,p2.x,p2.y);
+    }
     ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+    // 数据点：密度大时稀疏点缀，稀疏时逐点；不抢折线视觉重心
+    const every=Math.max(1,Math.round(P.length/16));
+    ctx.fillStyle=col;
+    P.forEach((q,i)=>{if(i%every===0||i===P.length-1){ctx.beginPath();ctx.arc(q.x,q.y,1.8,0,Math.PI*2);ctx.fill();}});
+    // 面积填充：更通透的双层渐变
     const grad=ctx.createLinearGradient(0,T,0,H-B);
-    grad.addColorStop(0,col+'3d');grad.addColorStop(1,col+'00');
-    ctx.lineTo(L+pts[pts.length-1].x*pw,H-B);ctx.lineTo(L,H-B);ctx.closePath();
+    grad.addColorStop(0,col+'2e');grad.addColorStop(.55,col+'14');grad.addColorStop(1,col+'00');
+    ctx.lineTo(P[P.length-1].x,H-B);ctx.lineTo(P[0].x,H-B);ctx.closePath();
     ctx.fillStyle=grad;ctx.fill();
   };
   plot(p=>p.down,cssv('--down'));
@@ -159,7 +186,9 @@ function renderLineChart(canvasId,pts,opts){
     let bx=px+10;if(bx+bw>W-R)bx=px-10-bw;
     const by=T;
     ctx.globalAlpha=.95;ctx.fillStyle=cssv('--card');
+    ctx.shadowColor='rgba(0,0,0,.35)';ctx.shadowBlur=14;ctx.shadowOffsetY=4;
     roundRectPath(ctx,bx,by,bw,bh,7);ctx.fill();
+    ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;
     ctx.globalAlpha=1;ctx.strokeStyle=cssv('--border2');ctx.lineWidth=1;
     roundRectPath(ctx,bx,by,bw,bh,7);ctx.stroke();
     lines.forEach((s,i)=>{
@@ -2871,6 +2900,8 @@ document.getElementById('evbox').addEventListener('click',function(ev){
 });
 setRefresh(REFRESH_S);setRange(chartRange);
 window.addEventListener('resize',redrawChart);
+// 初始激活标签的指示条就位；字体/主题/语言变化会改按钮宽度，切换时再校准
+moveTabInd();
 
 
 function platformAssetName(kind,value){
