@@ -163,14 +163,14 @@ For ad-hoc SDK work the package template follows `main`; reproducible release bu
 Example for the NanoPi R5S / Rockchip ARMv8 target:
 
 ```bash
-OPENWRT_VERSION=25.12.5 \
+OPENWRT_VERSION=25.12.6 \
 OPENWRT_TARGET=rockchip \
 OPENWRT_SUBTARGET=armv8 \
 OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
 ./scripts/build_openwrt_apk.sh
 ```
 
-The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621 and ath79/generic. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
+The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621, ath79/generic, qualcommax/ipq50xx and airoha/an7581+an7583. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
 
 ### OpenWrt APK feed signing key
 

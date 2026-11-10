@@ -2,12 +2,18 @@
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"
+OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.6}"
 OPENWRT_TARGET="${OPENWRT_TARGET:-x86}"
 OPENWRT_SUBTARGET="${OPENWRT_SUBTARGET:-64}"
 OPENWRT_INCLUDE_ARCH_INDEPENDENT="${OPENWRT_INCLUDE_ARCH_INDEPENDENT:-0}"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 case "$OPENWRT_VERSION" in 25.12*|SNAPSHOT) ;; *) echo "error: OpenWrt APK builds require 25.12+" >&2; exit 2;; esac
+# Airoha AN758x targets exist only in the rolling SNAPSHOT tree; there is no
+# stable release branch for them. Force the snapshot source regardless of the
+# configured version so the SDK URL below routes to snapshots/.
+case "$OPENWRT_TARGET/$OPENWRT_SUBTARGET" in
+  airoha/an7581|airoha/an7583) OPENWRT_VERSION=SNAPSHOT ;;
+esac
 for tool in curl sha256sum tar zstd git make; do command -v "$tool" >/dev/null || exit 2; done
 SOURCE_VERSION="${TLSVPN_SOURCE_VERSION:-$(git rev-parse HEAD)}"
 SOURCE_DATE="${TLSVPN_SOURCE_DATE:-$(git show -s --format=%cs "$SOURCE_VERSION" 2>/dev/null || date -u +%Y-%m-%d)}"
@@ -18,7 +24,12 @@ PACKAGE_RELEASE="$SOURCE_EPOCH"
 source_day="$(printf '%s' "$SOURCE_DATE" | tr -d '-')"
 normalize_apk_version(){ local raw="${1#v}"; if [[ "$raw" =~ ^[0-9]+([.][0-9]+)*(_(alpha|beta|pre|rc|cvs|svn|git|hg|p)[0-9]+)?$ ]]; then printf '%s\n' "$raw"; elif [[ "$raw" =~ ^([0-9]+([.][0-9]+)*)-([0-9]+)-g[0-9A-Fa-f]+$ ]]; then printf '%s_p%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"; else printf '0.0.%s_git%s\n' "$source_day" "$SOURCE_EPOCH"; fi; }
 PACKAGE_VERSION="$(normalize_apk_version "${TLSVPN_PKG_VERSION:-0.0.${source_day}_git${SOURCE_EPOCH}}")"
-SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
+# SNAPSHOT has no release directory; the rolling build lives under snapshots/.
+if [[ "$OPENWRT_VERSION" == "SNAPSHOT" ]]; then
+  SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/snapshots/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
+else
+  SDK_BASE_URL="${OPENWRT_SDK_BASE_URL:-https://downloads.openwrt.org/releases/$OPENWRT_VERSION/targets/$OPENWRT_TARGET/$OPENWRT_SUBTARGET}"
+fi
 CACHE_HOME="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}"; WORK_DIR="${OPENWRT_WORK_DIR:-${RUNNER_TEMP:-$CACHE_HOME}/tlsvpn-openwrt-sdk/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"; DOWNLOAD_DIR="$WORK_DIR/download"; SDK_DIR="$WORK_DIR/sdk"; OUTPUT_DIR="${OPENWRT_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt/$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"; mkdir -p "$DOWNLOAD_DIR" "$OUTPUT_DIR"
 index_html="$(curl --retry 4 --retry-all-errors --fail -sSL "$SDK_BASE_URL/")"; sdk_name="$(printf '%s' "$index_html"|grep -oE 'openwrt-sdk-[^"<> ]+\.Linux-x86_64\.tar\.zst'|sort -u|head -1)"; [ -n "$sdk_name" ] || exit 1
 archive="$DOWNLOAD_DIR/$sdk_name"; sums="$DOWNLOAD_DIR/sha256sums"; [ -s "$archive" ] || curl --retry 4 --retry-all-errors --fail -L "$SDK_BASE_URL/$sdk_name" -o "$archive"; curl --fail -sSL "$SDK_BASE_URL/sha256sums" -o "$sums"; checksum_line="$(awk -v name="$sdk_name" '$2 == name || $2 == "*" name {print;exit}' "$sums")"; (cd "$DOWNLOAD_DIR"; printf '%s\n' "$checksum_line"|sha256sum -c -)

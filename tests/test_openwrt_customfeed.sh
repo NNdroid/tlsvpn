@@ -98,10 +98,12 @@ grep -Fq 'OpenWrt custom feed failure diagnostics' "$workflow"
 grep -Fq 'builder_exit=' "$workflow"
 grep -Fq 'missing SDK host tool:' "$workflow"
 
-# openwrt-feed is a generated branch. Replacing only the selected OpenWrt
-# version prevents stale package versions while preserving older releases.
+# openwrt-feed is a generated branch. The publisher mirrors every OpenWrt
+# version tree (stable releases and SNAPSHOT) so all targets are covered while
+# older releases are preserved.
 grep -Fq 'HEAD:openwrt-feed' "$workflow"
-grep -Fq 'rm -rf "releases/$OPENWRT_VERSION"' "$workflow"
+grep -Fq 'rm -rf releases' "$workflow"
+grep -Fq 'rsync -a "$GITHUB_WORKSPACE/feed-dist/releases/" releases/' "$workflow"
 grep -Fq 'raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed' "$workflow"
 grep -Fq 'group: openwrt-feed-publish' "$workflow"
 
@@ -112,7 +114,9 @@ for target in \
   'target: rockchip' \
   'target: mediatek' \
   'target: ramips' \
-  'target: ath79'; do
+  'target: ath79' \
+  'target: qualcommax' \
+  'target: airoha'; do
   grep -Fq "$target" "$workflow"
 done
 
@@ -338,7 +342,7 @@ TLSVPN_SOURCE_VERSION="$(git rev-parse HEAD)" \
 TLSVPN_PKG_VERSION='1.0.0-1-gabcdef0' \
   bash "$script" > "$mock_log" 2>&1
 
-mock_feed="$tmp/output/releases/25.12.5/x86/64"
+mock_feed="$tmp/output/releases/25.12.6/x86/64"
 test -s "$mock_feed/packages.adb"
 test -s "$mock_feed/index.json"
 test -s "$mock_feed/tlsvpn-feed.pem"
@@ -346,6 +350,25 @@ test -s "$mock_feed/SHA256SUMS"
 grep -Fq 'stage=validate-signing-keys' "$mock_log"
 grep -Fq 'derived_public_key_sha256=' "$mock_log"
 grep -Fq 'stage=complete' "$mock_log"
+
+# Airoha AN758x targets only exist in SNAPSHOT. The builder must force the
+# effective version to SNAPSHOT and derive the work-dir default from that
+# effective version (not the pre-forced release) so the SDK cache directory
+# name matches the actual build. An explicit work dir is honored as-is.
+airoha_log="$tmp/customfeed-airoha.log"
+TMPDIR="$tmp" \
+OPENWRT_APK_BUILD_SCRIPT="$mock_builder" \
+OPENWRT_FEED_OUTPUT_DIR="$tmp/airoha-output" \
+OPENWRT_FEED_SIGNING_KEY_FILE="$private_key" \
+OPENWRT_FEED_PUBLIC_KEY_FILE="$public_key" \
+OPENWRT_TARGET='airoha' \
+OPENWRT_SUBTARGET='an7581' \
+TLSVPN_SOURCE_VERSION="$(git rev-parse HEAD)" \
+TLSVPN_PKG_VERSION='1.0.0-1-gabcdef0' \
+  bash "$script" > "$airoha_log" 2>&1
+test -s "$tmp/airoha-output/releases/SNAPSHOT/airoha/an7581/packages.adb"
+test -d "$tmp/tlsvpn-openwrt-customfeed/SNAPSHOT-airoha-an7581/sdk"
+grep -Fq 'stage=complete' "$airoha_log"
 
 failure_log="$tmp/customfeed-failure.log"
 set +e
@@ -366,6 +389,6 @@ grep -Fq 'stage=build-index' "$failure_log"
 grep -Fq 'line=' "$failure_log"
 grep -Fq 'exit=17' "$failure_log"
 grep -Fq 'command=' "$failure_log"
-grep -Fq 'error: context: version=25.12.5 target=x86/64' "$failure_log"
+grep -Fq 'error: context: version=25.12.6 target=x86/64' "$failure_log"
 
 echo 'OpenWrt custom feed contract: OK'

@@ -55,7 +55,7 @@ if command -v node >/dev/null 2>&1; then
 	node --check "${luci}"
 fi
 
-grep -Fq 'OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"' "${apk_builder}"
+grep -Fq 'OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.6}"' "${apk_builder}"
 grep -Fq 'TLSVPN_SOURCE_VERSION' "${apk_builder}"
 grep -Fq 'sha256sum -c -' "${apk_builder}"
 grep -Fq 'package/tlsvpn/compile' "${apk_builder}"
@@ -127,6 +127,8 @@ grep -Fq 'scripts/build_openwrt_apk.sh' "${release_workflow}"
 grep -Fq 'rockchip' "${release_workflow}"
 grep -Fq 'mediatek' "${release_workflow}"
 grep -Fq 'ath79' "${release_workflow}"
+grep -Fq 'qualcommax' "${release_workflow}"
+grep -Fq 'airoha' "${release_workflow}"
 grep -Fq 'TLSVPN_PKG_VERSION: ${{' "${release_workflow}"
 grep -Fq "startsWith(github.ref, 'refs/tags/v') && github.ref_name" "${release_workflow}"
 grep -Fq 'VERSION: ${{' "${release_workflow}"

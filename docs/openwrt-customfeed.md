@@ -33,28 +33,33 @@ The generated branch uses this layout:
 openwrt-feed/
 ├── tlsvpn-feed.pem
 └── releases/
-    └── 25.12.5/
-        ├── x86/64/
-        │   ├── packages.adb
-        │   ├── index.json
-        │   ├── tlsvpn-<version>.apk
-        │   ├── tlsvpn-proto-<version>.apk
-        │   ├── luci-proto-tlsvpn-<version>.apk
-        │   ├── luci-i18n-tlsvpn-*.apk
-        │   ├── SHA256SUMS
-        │   └── feed-info.json
-        ├── armsr/armv8/
-        ├── armsr/armv7/
-        ├── rockchip/armv8/
-        ├── mediatek/filogic/
-        ├── ramips/mt7621/
-        └── ath79/generic/
+    ├── 25.12.6/
+    │   ├── x86/64/
+    │   │   ├── packages.adb
+    │   │   ├── index.json
+    │   │   ├── tlsvpn-<version>.apk
+    │   │   ├── tlsvpn-proto-<version>.apk
+    │   │   ├── luci-proto-tlsvpn-<version>.apk
+    │   │   ├── luci-i18n-tlsvpn-*.apk
+    │   │   ├── SHA256SUMS
+    │   │   └── feed-info.json
+    │   ├── armsr/armv8/
+    │   ├── armsr/armv7/
+    │   ├── rockchip/armv8/
+    │   ├── mediatek/filogic/
+    │   ├── ramips/mt7621/
+    │   ├── ath79/generic/
+    │   └── qualcommax/ipq50xx/
+    └── SNAPSHOT/
+        └── airoha/
+            ├── an7581/
+            └── an7583/
 ```
 
 For x86/64 the repository database URL is:
 
 ```text
-https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/25.12.5/x86/64/packages.adb
+https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/25.12.6/x86/64/packages.adb
 ```
 
 Each OpenWrt version directory is replaced atomically by the publisher when that version is rebuilt. Older OpenWrt version directories are preserved, while stale APK versions inside the currently published OpenWrt version are removed.
@@ -64,7 +69,7 @@ Each OpenWrt version directory is replaced atomically by the publisher when that
 The normal Release workflow renames APK assets to append the OpenWrt release and target/subtarget, for example:
 
 ```text
-tlsvpn-1.0.20260928-r1-openwrt-25.12.5-x86-64.apk
+tlsvpn-1.0.20260928-r1-openwrt-25.12.6-x86-64.apk
 ```
 
 That is useful for human downloads but is not the canonical repository package filename expected by apk. The custom-feed builder therefore reuses the existing OpenWrt SDK build and copies the original package files from `sdk/bin/` before creating `packages.adb`.
@@ -135,7 +140,7 @@ The target/subtarget is available as `DISTRIB_TARGET` in `/etc/openwrt_release`,
 ```sh
 . /etc/openwrt_release
 
-TLSVPN_FEED_VERSION="25.12.5"
+TLSVPN_FEED_VERSION="25.12.6"
 TLSVPN_FEED_BASE="https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed"
 
 wget -O /etc/apk/keys/tlsvpn-feed.pem \
@@ -156,7 +161,7 @@ apk add tlsvpn tlsvpn-proto luci-proto-tlsvpn
 For x86/64 the resulting entry is:
 
 ```text
-https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/25.12.5/x86/64/packages.adb
+https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/25.12.6/x86/64/packages.adb
 ```
 
 The public key can be retained explicitly over sysupgrade:

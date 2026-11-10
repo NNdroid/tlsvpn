@@ -9,7 +9,7 @@ on:
       openwrt_version:
         description: OpenWrt release used to build the APK feed
         required: true
-        default: '25.12.5'
+        default: '25.12.6'
         type: string
       publish:
         description: Publish the generated repository to the openwrt-feed branch
@@ -64,6 +64,15 @@ jobs:
           - name: ath79-generic
             target: ath79
             subtarget: generic
+          - name: qualcommax-ipq50xx
+            target: qualcommax
+            subtarget: ipq50xx
+          - name: airoha-an7581
+            target: airoha
+            subtarget: an7581
+          - name: airoha-an7583
+            target: airoha
+            subtarget: an7583
 
     steps:
       - name: Checkout code
@@ -129,10 +138,9 @@ jobs:
 
       - name: Build signed custom feed
         env:
-          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
+          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.6' }}
           OPENWRT_TARGET: ${{ matrix.target }}
           OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
-          OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-customfeed/${{ inputs.openwrt_version || '25.12.5' }}-${{ matrix.target }}-${{ matrix.subtarget }}
           OPENWRT_FEED_OUTPUT_DIR: ${{ github.workspace }}/artifact-root
           OPENWRT_FEED_SIGNING_KEY_FILE: ${{ steps.signing.outputs.key_file }}
           OPENWRT_FEED_PUBLIC_KEY_FILE: ${{ steps.signing.outputs.public_key_file }}
@@ -173,11 +181,12 @@ jobs:
           fi
 
       - name: Verify repository payload
-        env:
-          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
         run: |
           set -Eeuo pipefail
-          feed="artifact-root/releases/$OPENWRT_VERSION/${{ matrix.target }}/${{ matrix.subtarget }}"
+          # Locate the feed by target/subtarget without assuming a version tree:
+          # airoha targets build from SNAPSHOT while others use the stable release.
+          feed="$(find artifact-root/releases -type d -path "*/${{ matrix.target }}/${{ matrix.subtarget }}" | head -1)"
+          [[ -n "$feed" ]] || { echo "feed directory not found for ${{ matrix.target }}/${{ matrix.subtarget }}" >&2; exit 1; }
           test -s "$feed/packages.adb"
           test -s "$feed/index.json"
           test -s "$feed/tlsvpn-feed.pem"
@@ -258,7 +267,6 @@ jobs:
       - name: Verify configured public key across every target
         if: steps.gate.outputs.enabled == 'true'
         env:
-          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
           OPENWRT_FEED_PUBLIC_KEY_B64: ${{ vars.OPENWRT_FEED_PUBLIC_KEY_B64 }}
         run: |
           set -Eeuo pipefail
@@ -266,9 +274,11 @@ jobs:
           chmod +x scripts/prepare_openwrt_feed_keys.sh
           scripts/prepare_openwrt_feed_keys.sh public "$expected"
 
-          mapfile -t keys < <(find "feed-dist/releases/$OPENWRT_VERSION" -type f -name tlsvpn-feed.pem | sort)
-          [[ "${#keys[@]}" -eq 7 ]] || {
-            echo "expected 7 feed public keys, found ${#keys[@]}" >&2
+          # Targets may span multiple OpenWrt version trees (stable releases and
+          # SNAPSHOT); verify every published feed key regardless of version.
+          mapfile -t keys < <(find "feed-dist/releases" -type f -name tlsvpn-feed.pem | sort)
+          [[ "${#keys[@]}" -eq 10 ]] || {
+            echo "expected 10 feed public keys, found ${#keys[@]}" >&2
             exit 1
           }
           for key in "${keys[@]}"; do
@@ -283,7 +293,6 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          OPENWRT_VERSION: ${{ inputs.openwrt_version || '25.12.5' }}
         run: |
           set -Eeuo pipefail
           remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -301,10 +310,11 @@ jobs:
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
+          # Mirror every OpenWrt version tree (stable releases and SNAPSHOT) so
+          # the published feed covers all targets regardless of their source.
+          rm -rf releases
           mkdir -p releases
-          rm -rf "releases/$OPENWRT_VERSION"
-          mkdir -p "releases/$OPENWRT_VERSION"
-          rsync -a "$GITHUB_WORKSPACE/feed-dist/releases/$OPENWRT_VERSION/" "releases/$OPENWRT_VERSION/"
+          rsync -a "$GITHUB_WORKSPACE/feed-dist/releases/" releases/
           cp "$GITHUB_WORKSPACE/feed-dist/tlsvpn-feed.pem" ./tlsvpn-feed.pem
           touch .nojekyll
 
@@ -313,15 +323,15 @@ jobs:
 
           This branch is generated automatically from the repository main branch and release tags. Do not edit it by hand.
 
-          OpenWrt release: ${OPENWRT_VERSION}
+          OpenWrt releases: stable 25.12.x and rolling SNAPSHOT (Airoha AN758x)
 
           Feed layout:
 
-          \`releases/${OPENWRT_VERSION}/<target>/<subtarget>/packages.adb\`
+          \`releases/<openwrt-version>/<target>/<subtarget>/packages.adb\`
 
           Example for x86/64:
 
-          \`https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed/releases/${OPENWRT_VERSION}/x86/64/packages.adb\`
+          \`https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed/releases/<openwrt-version>/x86/64/packages.adb\`
 
           Stable public key:
 
@@ -361,6 +371,6 @@ jobs:
             echo 'Feed branch is already up to date.'
             exit 0
           fi
-          git commit -q -m "feed: publish OpenWrt ${OPENWRT_VERSION} packages from ${GITHUB_SHA::12}"
+          git commit -q -m "feed: publish OpenWrt APK packages from ${GITHUB_SHA::12}"
           git push -q "$remote" HEAD:openwrt-feed
-          echo "Published openwrt-feed for OpenWrt ${OPENWRT_VERSION}."
+          echo "Published openwrt-feed."

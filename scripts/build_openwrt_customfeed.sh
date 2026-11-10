@@ -4,10 +4,15 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.5}"
+OPENWRT_VERSION="${OPENWRT_VERSION:-25.12.6}"
 OPENWRT_TARGET="${OPENWRT_TARGET:-x86}"
 OPENWRT_SUBTARGET="${OPENWRT_SUBTARGET:-64}"
 OPENWRT_FEED_OUTPUT_DIR="${OPENWRT_FEED_OUTPUT_DIR:-$ROOT_DIR/bin/openwrt-customfeed}"
+# Track whether the caller supplied a work dir. When unset the directory is
+# derived later from the effective (post-forcing) OpenWrt version so its name
+# matches the real build; an explicit value is always honored as-is.
+OPENWRT_WORK_DIR_SET=0
+if [[ -n "${OPENWRT_WORK_DIR:-}" ]]; then OPENWRT_WORK_DIR_SET=1; fi
 OPENWRT_WORK_DIR="${OPENWRT_WORK_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tlsvpn-openwrt-customfeed/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET}"
 OPENWRT_FEED_SIGNING_KEY_FILE="${OPENWRT_FEED_SIGNING_KEY_FILE:-}"
 OPENWRT_FEED_PUBLIC_KEY_FILE="${OPENWRT_FEED_PUBLIC_KEY_FILE:-}"
@@ -83,6 +88,21 @@ case "$OPENWRT_VERSION" in
   25.12*|SNAPSHOT) ;;
   *) echo "error: custom APK feeds require OpenWrt 25.12+" >&2; exit 2 ;;
 esac
+
+# Airoha AN758x targets exist only in the rolling SNAPSHOT tree; there is no
+# stable release branch for them. Force the snapshot source so the SDK builder
+# below and the FEED_DIR path below use the same effective version.
+case "$OPENWRT_TARGET/$OPENWRT_SUBTARGET" in
+  airoha/an7581|airoha/an7583) OPENWRT_VERSION=SNAPSHOT ;;
+esac
+
+# The effective version above is what the SDK URL and FEED_DIR use. When the
+# caller did not pin a work dir, derive its default from the effective version
+# (not the pre-forced value) so the cache directory name matches the actual
+# build and the SDK is not fetched under a misleading release label.
+if [[ "$OPENWRT_WORK_DIR_SET" == "0" ]]; then
+  OPENWRT_WORK_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tlsvpn-openwrt-customfeed/$OPENWRT_VERSION-$OPENWRT_TARGET-$OPENWRT_SUBTARGET"
+fi
 
 # Build through the existing SDK path, but assemble the repository from the
 # SDK's canonical APK filenames. Release assets intentionally carry additional

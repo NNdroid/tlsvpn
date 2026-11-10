@@ -107,6 +107,18 @@ jobs:
             target: ath79
             subtarget: generic
             include_arch_independent: "0"
+          - name: qualcommax-ipq50xx
+            target: qualcommax
+            subtarget: ipq50xx
+            include_arch_independent: "0"
+          - name: airoha-an7581
+            target: airoha
+            subtarget: an7581
+            include_arch_independent: "0"
+          - name: airoha-an7583
+            target: airoha
+            subtarget: an7583
+            include_arch_independent: "0"
 
     steps:
       - name: Checkout code
@@ -123,11 +135,10 @@ jobs:
 
       - name: Build OpenWrt APK packages
         env:
-          OPENWRT_VERSION: "25.12.5"
+          OPENWRT_VERSION: "25.12.6"
           OPENWRT_TARGET: ${{ matrix.target }}
           OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
           OPENWRT_INCLUDE_ARCH_INDEPENDENT: ${{ matrix.include_arch_independent }}
-          OPENWRT_WORK_DIR: ${{ runner.temp }}/tlsvpn-openwrt-sdk/25.12.5-${{ matrix.target }}-${{ matrix.subtarget }}
           TLSVPN_SOURCE_VERSION: ${{ github.sha }}
           TLSVPN_PKG_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
           JOBS: "2"
@@ -193,7 +204,7 @@ jobs:
             `SHA256SUMS-native.txt` covers all native binaries. Higher ISA
             variants require a matching CPU; use the generic artifact when in doubt.
 
-            OpenWrt 25.12.5 APK packages are also attached. OpenWrt protocol/LuCI
+            OpenWrt 25.12.6 APK packages are also attached. OpenWrt protocol/LuCI
             packages are architecture-independent and are emitted once by the
             x86/64 SDK build; target-specific tlsvpn APKs are suffixed with their
             OpenWrt target/subtarget.
