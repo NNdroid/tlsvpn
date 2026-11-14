@@ -18,7 +18,8 @@ func parseControlKind(payload []byte) (byte, error) {
 		return 0, fmt.Errorf("empty payload is keepalive, not a typed control frame")
 	}
 	switch payload[0] {
-	case controlKindFECParity, controlKindFECMode:
+	case controlKindFECParity, controlKindFECMode,
+		controlKindRttProbe, controlKindRttReply:
 		return payload[0], nil
 	default:
 		return 0, fmt.Errorf("unsupported control kind 0x%02x", payload[0])

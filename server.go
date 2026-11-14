@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,6 +394,7 @@ func (vs *VSwitch) allowFlood(srcPortID string) bool {
 type ClientSession struct {
 	SessionID          string
 	Port               *AsyncPort
+	rttProbe           *rttProbeScheduler // 跨路径 RTT 探针（req.RTTProbe 时启用）
 	IPv4               string
 	IPv6               string
 	MAC                string
@@ -436,6 +438,8 @@ type connInfo struct {
 	tcpConn     *net.TCPConn
 	rttMeasured atomic.Bool
 	rttCache    *uint32 // 微秒（200ms 刷新）
+	minRttCache *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
+	connIndex   int     // 客户端声明的连接下标（握手 BrutalConnIndex），探针路由用
 	backend     atomic.Pointer[Backend]
 	txBytes     uint64
 	rxBytes     uint64
@@ -1615,6 +1619,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		session.ActiveConns++
 		session.sessionMu.Unlock()
 
+		// 复活会话：若此前未启用（首条连接早于协商），重新按本次请求启用探针。
+		if req.RTTProbe && session.rttProbe != nil {
+			session.rttProbe.enable()
+		}
+
 		log.Infof("[%s] 🔗 existing session gained a new physical connection (active connections: %d)", clientID, session.ActiveConns)
 	} else {
 		// 会话数与地址池双上限：达到任一即按认证失败处理（焦油坑），
@@ -1679,6 +1688,14 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			EncAlgo: encAlgo, Encrypt: encrypt, SaltA: saltA, SaltB: saltB, pskHash: pskHash, CreatedAt: time.Now(),
 			InstanceID: req.ClientInstance, Epoch: 1, ResumeToken: resumeToken,
 			conns: make(map[*connInfo]struct{}),
+		}
+		// 回程调度使用 ret（server→client）单向估计。
+		port.SetOneWayMode(oneWayModeRet)
+		// 跨路径 RTT 探针：resolver 扫本会话 conns；仅 req.RTTProbe 时启用。
+		session.rttProbe = newRttProbeScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns)
+		session.rttProbe.start()
+		if req.RTTProbe {
+			session.rttProbe.enable()
 		}
 		// 解析失败则保持零值；归属校验对 MAC 为空的会话放行（见 validateSrcMAC）
 		session.macBin, _ = parseMACKey(req.MAC)
@@ -1747,12 +1764,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	sessionEpoch := session.Epoch
 	sessionEncrypt := session.Encrypt
 	ci := &connInfo{
-		connID:   connID,
-		remote:   tcpConn.RemoteAddr().String(),
-		tcpConn:  tcpConn,
-		linkedAt: time.Now().Unix(),
-		epoch:    sessionEpoch,
-		tls:      tlsInfo,
+		connID:    connID,
+		remote:    tcpConn.RemoteAddr().String(),
+		tcpConn:   tcpConn,
+		linkedAt:  time.Now().Unix(),
+		epoch:     sessionEpoch,
+		tls:       tlsInfo,
+		connIndex: req.BrutalConnIndex, // 客户端声明的连接下标（跨路径探针路由用）
 	}
 	// 注册本物理连接到会话，供 Web 面板踢出/展示明细。清理 defer 必须在
 	// 发送握手响应之前安装：响应写失败会直接 return，不能把 ActiveConns 或
@@ -1830,7 +1848,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.RTTProbe, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -1867,17 +1885,26 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
+	minRttCache := new(uint32)
+	atomic.StoreUint32(minRttCache, 50000)
 	s.mu.Lock()
 	ci.rttCache = rttCache
+	ci.minRttCache = minRttCache
 	s.mu.Unlock()
 
 	connTxChan := make(chan *VPNFrameBatch, 32)
 	backend := port.RegisterOwnedBackend(connTxChan, rttCache)
+	backend.minRttCache = minRttCache
+	backend.probeCh = make(chan []byte, 8)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
 		port.UnregisterOwnedBackend(connTxChan)
 	}()
+	// 新物理连接加入会话：立即发起一轮跨路径探针，加速回程估计收敛。
+	if session.rttProbe != nil {
+		session.rttProbe.kick()
+	}
 
 	batchCork := newTLSBatchCork(tcpConn)
 	batchCork.BindCarryState(&backend.carryPending)
@@ -1913,8 +1940,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			case <-connCtx.Done():
 				return
 			case <-rttC:
-				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
+				if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
+					if minRtt > 0 {
+						atomic.StoreUint32(minRttCache, minRtt)
+					}
 					ci.rttMeasured.Store(true)
 					backend.noteRTTSuccess()
 				} else if err != nil {
@@ -1993,6 +2023,22 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				if _, err := conn.Write(sendBuffer); err != nil {
 					backend.markStalled()
 					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
+					conn.Close()
+					return
+				}
+			case probe := <-backend.probeCh:
+				// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
+				// 随机桶尺寸 + randomPool 覆盖字节），消除流量特征。探针（0x03）在
+				// Write 前写入 send_ts（固定偏移）。
+				sendBuffer = sendBuffer[:0]
+				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
+				if len(probe) > 0 && probe[0] == controlKindRttProbe {
+					patchRttProbeSendTS(sendBuffer, time.Now())
+				}
+				refreshWriteDeadline()
+				if _, err := conn.Write(sendBuffer); err != nil {
+					backend.markStalled()
+					log.Debugf("[%s] rtt probe write failed, closing the connection: %v", clientID, err)
 					conn.Close()
 					return
 				}
@@ -2078,6 +2124,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				frame = plain
 			}
 			if seq == 0 {
+				// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
+				// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
+				if session.rttProbe != nil && isRttProbeFrame(frame) {
+					session.rttProbe.onFrame(frame, ci.connIndex)
+					putFrame(frame)
+					continue
+				}
 				if fecDec == nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
@@ -2138,11 +2191,40 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 		session.RxReorder.Close()
 	}
 	session.Port.Close()
+	if session.rttProbe != nil {
+		session.rttProbe.stop()
+	}
 	s.retiredDropped += session.Port.Dropped()
 	s.retiredParityAttempts += session.Port.ParitySent()
 	if session.RxReorder != nil {
 		addReorderStats(&s.retiredReorder, session.RxReorder.Stats())
 	}
+}
+
+// probeResolveConn 跨路径探针解析器：本会话 connIndex → 当前 Backend。
+func (s *ClientSession) probeResolveConn(i int) *Backend {
+	s.sessionMu.RLock()
+	defer s.sessionMu.RUnlock()
+	for ci := range s.conns {
+		if ci != nil && ci.connIndex == i {
+			return ci.backend.Load()
+		}
+	}
+	return nil
+}
+
+// probeActiveConns 跨路径探针：返回本会话有存活 Backend 的 connIndex 升序列表。
+func (s *ClientSession) probeActiveConns() []int {
+	s.sessionMu.RLock()
+	defer s.sessionMu.RUnlock()
+	out := make([]int, 0, len(s.conns))
+	for ci := range s.conns {
+		if ci != nil && ci.backend.Load() != nil {
+			out = append(out, ci.connIndex)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // macToIPCleanLocked 会话销毁时回收其 MAC 绑定，防止表无限增长。
@@ -2235,7 +2317,7 @@ func handshakeEncSalts(encAlgo int, saltA, saltB [encSaltSize]byte) (string, str
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
 	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
-	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, protocolVersion int, epoch uint64,
+	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, rttProbe bool, protocolVersion int, epoch uint64,
 	tlsInfo *TLSHandshakeInfo, padRecordLimit ...int) error {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
@@ -2246,6 +2328,7 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
 		BrutalGroups: brutalGroups, BrutalTotalTx: cliTotalTx, BrutalTotalRx: srvTotalTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
+		RTTProbe: rttProbe,
 		SessionToken: sessionToken, TLS: tlsInfo,
 	}
 	if ok {
