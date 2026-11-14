@@ -95,6 +95,7 @@ func decodeTCPInfo(s *tcpSocketSnapshot, b []byte) {
 		size   int
 	}{
 		{"rtt_us", unsafe.Offsetof(info.Rtt), 4}, {"rttvar_us", unsafe.Offsetof(info.Rttvar), 4}, {"rto_us", unsafe.Offsetof(info.Rto), 4},
+		{"min_rtt_us", unsafe.Offsetof(info.Min_rtt), 4},
 		{"snd_mss_bytes", unsafe.Offsetof(info.Snd_mss), 4}, {"rcv_mss_bytes", unsafe.Offsetof(info.Rcv_mss), 4}, {"pmtu_bytes", unsafe.Offsetof(info.Pmtu), 4},
 		{"cwnd_segments", unsafe.Offsetof(info.Snd_cwnd), 4}, {"unacked_segments", unsafe.Offsetof(info.Unacked), 4}, {"retrans_segments", unsafe.Offsetof(info.Retrans), 4},
 		{"total_retrans", unsafe.Offsetof(info.Total_retrans), 4}, {"notsent_bytes", unsafe.Offsetof(info.Notsent_bytes), 4},

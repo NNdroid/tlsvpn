@@ -7,7 +7,11 @@ import (
 
 func testAdaptiveBackend(rtt uint32) *Backend {
 	r := rtt
-	return &Backend{ch: make(chan []VPNFrame, 32), rttCache: &r}
+	// 生产里 SRTT 与 tcpi_min_rtt 来自同一次 TCP_INFO 采样，故合成后端也一并
+	// 填充 minRttCache；否则 adaptiveBackendMinRTT 一律返回 unknown，资格包络
+	// 与 baseQualityUS 会落到哨兵分支而不是被测路径。
+	m := rtt
+	return &Backend{ch: make(chan []VPNFrame, 32), rttCache: &r, minRttCache: &m}
 }
 
 func TestAdaptiveActivePathTarget(t *testing.T) {
@@ -144,9 +148,15 @@ func TestSchedulerSnapshotExposesState(t *testing.T) {
 	b.etaUsec.Store(1234)
 	b.active.Store(true)
 	b.carryPending.Store(true)
+	// 跨路径探针的单向估计也要随快照上报，WebUI"去/回"列读的就是这两个字段。
+	b.fwdOneWayUS.Store(1234)
+	b.retOneWayUS.Store(5678)
 	s := schedulerSnapshot(b)
 	if s.QueuedBytes != 4096 || s.RateMbps != 1000 || s.ETAUs != 1234 || !s.Active || !s.CarryPending {
 		t.Fatalf("unexpected snapshot: %+v", s)
+	}
+	if s.FwdOneWayUS != 1234 || s.RetOneWayUS != 5678 {
+		t.Fatalf("one-way snapshot: fwd=%d ret=%d want 1234/5678", s.FwdOneWayUS, s.RetOneWayUS)
 	}
 }
 

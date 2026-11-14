@@ -11,6 +11,7 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,11 @@ type Backend struct {
 	ch       chan []VPNFrame // legacy/cold compatibility path; production uses ownedCh
 	ownedCh  chan *VPNFrameBatch
 	rttCache *uint32
+	// minRttCache 该连接的内核 tcpi_min_rtt（µs，无拥塞地板），锚定与路径质量。
+	minRttCache *uint32
+	// probeCh 跨路径 RTT 探针/回包的专用投递通道（发送 goroutine 独立 select
+	// case 处理，用 appendPaddedFrame 桶填充写出以消除流量特征）。
+	probeCh chan []byte
 
 	// Adaptive scheduler observability. queuedBytes includes channel-resident
 	// batches plus the batch currently owned by the TLS writer until Write
@@ -42,6 +48,11 @@ type Backend struct {
 	fecAssignedBatches atomic.Uint64 // FEC parity batches accepted by this backend
 	fecFenceGen        atomic.Uint64 // latest dynamic RX fence generation queued before data on this backend
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
+	// fwdOneWayUS / retOneWayUS 跨路径探针测得的去程/回程单向时延（µs，decayed-min
+	// 地板）。0=未收敛，调度器回退 min_rtt/2→SRTT/2。由 rttProbeScheduler 发布。
+	fwdOneWayUS   atomic.Uint64
+	retOneWayUS   atomic.Uint64
+	oneWayModePtr *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
 	rateSampleBytes    uint64
 	rateSampleStart    time.Time
 
@@ -52,6 +63,15 @@ type Backend struct {
 	// rttFailures 连续 RTT 采样失败计数；超过阈值即视为连接异常并置 stalled。
 	rttFailures atomic.Uint32
 }
+
+// AsyncPort 单向时延模式：决定调度器用 fwd 还是 ret 作为本端 egress 的单向
+// 估计（去程=客户端 egress 用 fwd，回程=服务端 egress 用 ret；0=roundtrip
+// 兼容模式，等价于现有 rtt/2）。
+const (
+	oneWayModeRoundtrip int32 = 0
+	oneWayModeFwd       int32 = 1
+	oneWayModeRet       int32 = 2
+)
 
 type AsyncPort struct {
 	id            string
@@ -73,6 +93,10 @@ type AsyncPort struct {
 	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
 	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
 	dataNext      uint32   // legacy/compatibility picker cursor
+
+	// oneWayMode 本端 egress 的单向时延选择（见 oneWayMode* 常量）。
+	// 设置后由所有 Backend 经 oneWayModePtr 读取；run() 每批读取。
+	oneWayMode atomic.Int32
 
 	// Adaptive multipath state. Input bytes are accounted independently from
 	// frame count so 64 tiny packets no longer look like 64 full-MTU packets.
@@ -117,6 +141,12 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	return p
 }
 
+// SetOneWayMode 设定本端 egress 使用的单向时延（fwd=去程，ret=回程）。
+// 须在端口开始承载流量前调用一次；调度器每批读取，未设=roundtrip 兼容模式。
+func (p *AsyncPort) SetOneWayMode(mode int32) {
+	p.oneWayMode.Store(mode)
+}
+
 // AttachFEC 在端口上启用 XOR 奇偶校验 FEC：每 K 个数据帧发送 1 个校验帧。
 // parity 只需由会话级 decoder 收到一份，因此在健康物理连接间轮转，而不是
 // 向 N 条连接复制 N 份；线路开销从约 N/K 降回约 1/K。
@@ -159,6 +189,7 @@ func (p *AsyncPort) RegisterBackend(ch chan []VPNFrame, rttCache *uint32) *Backe
 	p.backendsMu.Lock()
 	defer p.backendsMu.Unlock()
 	b := &Backend{ch: ch, rttCache: rttCache}
+	b.oneWayModePtr = &p.oneWayMode
 	p.backends = append(p.backends, b)
 	return b
 }
@@ -180,6 +211,7 @@ func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint3
 	p.backendsMu.Lock()
 	defer p.backendsMu.Unlock()
 	b := &Backend{ownedCh: ch, rttCache: rttCache}
+	b.oneWayModePtr = &p.oneWayMode
 	p.backends = append(p.backends, b)
 	return b
 }
@@ -900,6 +932,7 @@ type Client struct {
 	fecAlgo          int    // fecDec 绑定的加密算法（会话重建判据）
 	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
 	txPort           *AsyncPort
+	rttProbe         *rttProbeScheduler // 跨路径 RTT 探针（握手协商后启用）
 	rxReorder        *ReorderBuffer
 	rxWorker         *rxSessionWorker
 	fecDec           *fecDecoder
@@ -1196,6 +1229,7 @@ type clientConnInfo struct {
 	lastError   atomic.Value // string：最近一次失败原因
 	rttMeasured atomic.Bool
 	rttCache    *uint32 // 微秒（200ms 刷新）
+	minRttCache *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
 	backend     atomic.Pointer[Backend]
 	conn        atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
 	txBytes     uint64
@@ -1351,6 +1385,11 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 		stateFile: statePath, state: st,
 		startedAt: time.Now(),
 	}
+	// 去程调度使用 fwd（client→server）单向估计。
+	c.txPort.SetOneWayMode(oneWayModeFwd)
+	// 跨路径 RTT 探针：解析器按 connIndex 取当前 Backend，连接数随配置固定。
+	c.rttProbe = newRttProbeScheduler(ctx, c.probeResolveConn, c.probeActiveConns)
+	c.rttProbe.start()
 	lv := liveFromCfg(cfg)
 	c.bootCfg.Store(cfg)
 	c.cfgSnap.Store(cfg)
@@ -1442,6 +1481,11 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		c.rxReorder.Close()
 		c.txPort.Close()
+		// 跨路径 RTT 探针调度器：其 ctx 派生自 Run 的父 ctx，这里显式 stop 让
+		// 调度 goroutine 立即退出，不依赖 ctx 取消的传播时机。
+		if c.rttProbe != nil {
+			c.rttProbe.stop()
+		}
 	}()
 
 	go func() {
@@ -1575,6 +1619,29 @@ func (c *Client) connInfoAt(i int) *clientConnInfo {
 	c.connsMu.Lock()
 	defer c.connsMu.Unlock()
 	return c.conns[i]
+}
+
+// probeResolveConn 跨路径探针解析器：connIndex → 当前 Backend。
+func (c *Client) probeResolveConn(i int) *Backend {
+	ci := c.connInfoAt(i)
+	if ci == nil {
+		return nil
+	}
+	return ci.backend.Load()
+}
+
+// probeActiveConns 跨路径探针：返回有存活 Backend 的 connIndex 升序列表。
+func (c *Client) probeActiveConns() []int {
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+	out := make([]int, 0, len(c.conns))
+	for i, ci := range c.conns {
+		if ci != nil && ci.backend.Load() != nil {
+			out = append(out, i)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // 重连退避参数：1s 起指数增长，封顶 3s；持续在线 reconnectBackoffReset
@@ -1882,6 +1949,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		BrutalTotalRx:   lv.brutalDown,
 		BrutalConns:     lv.connsCount,
 		BrutalConnIndex: connIndex,
+		RTTProbe:        true, // 声明支持跨路径 RTT 探针；服务端同意后才启用
 		Encrypt:         lv.encrypt,
 		EncAlgo: func() int {
 			if lv.encrypt {
@@ -2093,6 +2161,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	// 而不是等 120 秒僵尸会话过期才自然恢复连通。
 	c.persistSessionState(resp.SessionID, resp.SessionToken, resp.SessionEpoch)
 
+	// 服务端同意跨路径 RTT 探针：开启探测（幂等）。旧服务端无 RTTProbe 字段则
+	// 保持关闭，不会发送 0x03/0x04 控制帧，向后兼容。
+	if resp.RTTProbe && c.rttProbe != nil {
+		c.rttProbe.enable()
+	}
+
 	c.networkSetup.Lock()
 	var lifecycleErr error
 	if !c.usesNetifd() && c.tapName != "mem" && netlinkTunnelSupported() {
@@ -2129,11 +2203,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	rttCache := new(uint32)
 	atomic.StoreUint32(rttCache, 50000)
+	minRttCache := new(uint32)
+	atomic.StoreUint32(minRttCache, 50000)
 
 	// 连接明细：握手成功，进入 up 态
 	c.connsMu.Lock()
 	ci.rttMeasured.Store(false)
 	ci.rttCache = rttCache
+	ci.minRttCache = minRttCache
 	c.connsMu.Unlock()
 	ci.conn.Store(connHolder{tlsConn})
 	atomic.StoreInt64(&ci.linkedAt, time.Now().Unix())
@@ -2143,11 +2220,17 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	errChan := make(chan error, 2)
 	connTxChan := make(chan *VPNFrameBatch, 32)
 	backend := c.txPort.RegisterOwnedBackend(connTxChan, rttCache)
+	backend.minRttCache = minRttCache
+	backend.probeCh = make(chan []byte, 8)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
 		c.txPort.UnregisterOwnedBackend(connTxChan)
 	}()
+	// 新路径注册：立即发起一轮跨路径探针，加速单向估计收敛。
+	if c.rttProbe != nil {
+		c.rttProbe.kick()
+	}
 
 	batchCork := newTLSBatchCork(rawConn)
 	batchCork.BindCarryState(&backend.carryPending)
@@ -2213,8 +2296,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			case <-runCtx.Done():
 				return
 			case <-rttC:
-				if rtt, err := getTCPRTT(tcpConn); err == nil && rtt > 0 {
+				if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
 					atomic.StoreUint32(rttCache, rtt)
+					if minRtt > 0 {
+						atomic.StoreUint32(minRttCache, minRtt)
+					}
 					ci.rttMeasured.Store(true)
 					backend.noteRTTSuccess()
 				} else if err != nil {
@@ -2286,6 +2372,26 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				// （约 15 分钟才放弃），期间心跳停发，服务端先在自己的读超时上判死
 				// 本端连接，而本端读方向可能仍在正常收帧——面板显示 tunnel up 但
 				// 链路已单向死亡。加超时后本端 10s 内自发现并重拨。
+				refreshWriteDeadline()
+				nw, err := tlsConn.Write(sendBuffer)
+				if err == nil && nw != len(sendBuffer) {
+					err = io.ErrShortWrite
+				}
+				if err != nil {
+					backend.markStalled()
+					errChan <- err
+					return
+				}
+			case probe := <-backend.probeCh:
+				// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
+				// 随机桶尺寸 + randomPool 覆盖字节），与数据记录/保活同尺寸分布，
+				// 消除流量特征。探针（0x03）在 Write 前写入 send_ts（固定偏移），
+				// 即使排队也测得精确发送时刻。
+				sendBuffer = sendBuffer[:0]
+				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
+				if len(probe) > 0 && probe[0] == controlKindRttProbe {
+					patchRttProbeSendTS(sendBuffer, time.Now())
+				}
 				refreshWriteDeadline()
 				nw, err := tlsConn.Write(sendBuffer)
 				if err == nil && nw != len(sendBuffer) {
@@ -2371,6 +2477,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					frame = plain
 				}
 				if seq == 0 {
+					// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
+					// 仅在两端握手协商 RTTProbe 后 c.rttProbe 才非空。
+					if c.rttProbe != nil && isRttProbeFrame(frame) {
+						c.rttProbe.onFrame(frame, connIndex)
+						putFrame(frame)
+						continue
+					}
 					if !useXorFec || connDecoder == nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)

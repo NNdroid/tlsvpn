@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -68,6 +69,10 @@ type schedulerConnJSON struct {
 	AssignedBatches    uint64  `json:"assigned_batches"`
 	FECAssignedBytes   uint64  `json:"fec_assigned_bytes"`
 	FECAssignedBatches uint64  `json:"fec_assigned_batches"`
+	// FwdOneWayUS / RetOneWayUS 跨路径探针测得的去程/回程单向时延（µs，地板）。
+	// 0=未收敛（WebUI 回退显示 RTT）。仅观测，不在 TLSVPN 线上。
+	FwdOneWayUS uint64 `json:"fwd_oneway_us,omitempty"`
+	RetOneWayUS uint64 `json:"ret_oneway_us,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -205,12 +210,74 @@ func adaptiveBackendRTT(b *Backend) (uint32, bool) {
 	return rtt, false
 }
 
+// adaptiveBackendMinRTT returns the connection's kernel min_rtt (无拥塞地板往返,
+// µs) + unknownRTT。min_rtt 用于路径质量/排名/资格包络：SRTT 含瞬时拥塞会搅动
+// 候选集，min_rtt 是稳定地板。未知时同样用 50000 哨兵纪律。
+//
+// 返回值约定与 adaptiveBackendRTT 完全一致：bool 为 true 表示**未知**（此时
+// 第一个返回值是 50000 哨兵，不可当作真实 RTT 使用）。
+func adaptiveBackendMinRTT(b *Backend) (uint32, bool) {
+	if b == nil || b.minRttCache == nil {
+		return adaptiveUnknownRTTUS, true
+	}
+	rtt := atomic.LoadUint32(b.minRttCache)
+	if rtt == 0 || rtt == adaptiveUnknownRTTUS {
+		// min_rtt 尚未观测到（代理/非 Linux/刚建立）：退回 SRTT 当包络参考。
+		// 不能返回 50000µs 哨兵——它会让包络地板凭空抬高 2.5 万微秒，把本来
+		// 合格的路径挡在候选集外；SRTT 至少是这条连接真实的观测值。
+		if srtt, unknownSRTT := adaptiveBackendRTT(b); !unknownSRTT {
+			return srtt, false
+		}
+		return adaptiveUnknownRTTUS, true
+	}
+	return rtt, false
+}
+
+// backendOneWayUS 返回本端 egress 方向的单向时延估计（µs）+ 是否已收敛。
+// 按所属 AsyncPort 的 oneWayMode 选择 fwd/ret；0=未收敛。
+func (b *Backend) backendOneWayUS() (uint32, bool) {
+	if b == nil {
+		return 0, false
+	}
+	mode := int32(0)
+	if b.oneWayModePtr != nil {
+		mode = b.oneWayModePtr.Load()
+	}
+	switch mode {
+	case oneWayModeFwd:
+		if v := b.fwdOneWayUS.Load(); v > 0 {
+			return uint32(min(v, math.MaxUint32)), true
+		}
+	case oneWayModeRet:
+		if v := b.retOneWayUS.Load(); v > 0 {
+			return uint32(min(v, math.MaxUint32)), true
+		}
+	}
+	return 0, false
+}
+
+// adaptiveBackendOneWayUS 返回选路用的单向时延：跨路径估计（已收敛）优先，
+// 否则回退 min_rtt/2（无拥塞地板），再退 SRTT/2。估计未收敛前与现状一致。
+func adaptiveBackendOneWayUS(b *Backend) uint64 {
+	if v, ok := b.backendOneWayUS(); ok {
+		return uint64(v)
+	}
+	// 注意：adaptiveBackendMinRTT 的 bool 是 unknownRTT（与 adaptiveBackendRTT 一致），
+	// 故这里取反；写反会让 min_rtt 恒被当成未知，回退链永远停在 SRTT/2。
+	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
+		return uint64(mr) / 2
+	}
+	rtt, _ := adaptiveBackendRTT(b)
+	return uint64(rtt) / 2
+}
+
 func (b *Backend) baseQualityUS(incomingBytes uint64) uint64 {
 	if b == nil {
 		return ^uint64(0)
 	}
-	rtt, _ := adaptiveBackendRTT(b)
-	return uint64(rtt)/2 + serviceTimeUS(incomingBytes, b.effectiveRateBytesPerSec())
+	// 无载路径质量：用单向时延估计（fwd/ret，decayed-min 地板）而非 SRTT/2，
+	// 抗瞬时拥塞；未收敛时 adaptiveBackendOneWayUS 回退 min_rtt/2→SRTT/2。
+	return adaptiveBackendOneWayUS(b) + serviceTimeUS(incomingBytes, b.effectiveRateBytesPerSec())
 }
 
 // schedulingETAUS combines kernel/user-space queued work with a virtual service
@@ -278,6 +345,8 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		AssignedBatches:    b.assignedBatches.Load(),
 		FECAssignedBytes:   b.fecAssignedBytes.Load(),
 		FECAssignedBatches: b.fecAssignedBatches.Load(),
+		FwdOneWayUS:        b.fwdOneWayUS.Load(),
+		RetOneWayUS:        b.retOneWayUS.Load(),
 	}
 }
 
@@ -419,7 +488,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			continue
 		}
 		healthy++
-		rtt, unknownRTT := adaptiveBackendRTT(b)
+		rtt, unknownRTT := adaptiveBackendMinRTT(b)
 		cold := b.rateBytesPerSec.Load() == 0
 		if unknownRTT || cold {
 			continue
@@ -454,7 +523,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		if b == nil {
 			continue
 		}
-		rtt, unknownRTT := adaptiveBackendRTT(b)
+		rtt, unknownRTT := adaptiveBackendMinRTT(b)
 		cold := b.rateBytesPerSec.Load() == 0
 		fairStart := unknownRTT || cold
 		if fairStart {
@@ -478,7 +547,10 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			}
 			continue
 		}
-		rtt, unknownRTT := adaptiveBackendRTT(b)
+		// SRTT 用于 ETA 遥测（含当前拥塞，预测更准）；min_rtt 用于资格包络与
+		// 候选排序（无拥塞地板，成员稳定）。
+		srt, _ := adaptiveBackendRTT(b)
+		rtt, unknownRTT := adaptiveBackendMinRTT(b)
 		cold := b.rateBytesPerSec.Load() == 0
 		fairStart := unknownRTT || cold
 		if fairStart {
@@ -498,7 +570,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		if etaRate == 0 {
 			etaRate = referenceRate
 		}
-		eta := uint64(rtt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, etaRate)
+		eta := uint64(srt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, etaRate)
 		if b.carryPending.Load() && eta > adaptiveCarryBonusUS {
 			eta -= adaptiveCarryBonusUS
 		}
@@ -509,7 +581,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		schedRate := uint64(adaptiveFallbackRateBytesPerSec)
 		cands = append(cands, backendCandidate{
 			backend:   b,
-			baseUS:    uint64(rtt)/2 + serviceTimeUS(incomingBytes, schedRate),
+			baseUS:    adaptiveBackendOneWayUS(b) + serviceTimeUS(incomingBytes, schedRate),
 			etaUS:     eta,
 			rttUS:     rtt,
 			schedRate: schedRate,

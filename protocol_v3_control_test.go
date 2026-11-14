@@ -9,7 +9,7 @@ func TestProtocolV3VersionAndControlKinds(t *testing.T) {
 	if protocolVersion != 3 {
 		t.Fatalf("protocolVersion=%d want=3", protocolVersion)
 	}
-	for _, kind := range []byte{controlKindFECParity, controlKindFECMode} {
+	for _, kind := range []byte{controlKindFECParity, controlKindFECMode, controlKindRttProbe, controlKindRttReply} {
 		got, err := parseControlKind([]byte{kind})
 		if err != nil || got != kind {
 			t.Fatalf("kind=0x%02x got=0x%02x err=%v", kind, got, err)

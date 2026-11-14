@@ -48,6 +48,10 @@ func getTCPRTT(conn *net.TCPConn) (uint32, error) {
 	return 0, fmt.Errorf("TCP RTT probing is only supported on Linux")
 }
 
+func getTCPRTTAndMinRTT(conn *net.TCPConn) (uint32, uint32, error) {
+	return 0, 0, fmt.Errorf("TCP RTT probing is only supported on Linux")
+}
+
 func getTCPMSS(conn *net.TCPConn) (int, error) {
 	return 0, fmt.Errorf("TCP MSS probing is only supported on Linux")
 }

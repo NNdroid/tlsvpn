@@ -609,7 +609,10 @@ type HandshakeReq struct {
 	BrutalConnIndex int    `json:"brutal_conn_index,omitempty"`
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
-	Encrypt         bool   `json:"encrypt,omitempty"`
+	// RTTProbe：本端支持跨路径 RTT 探针（方案A，去程/回程单向选路）。
+	// 仅当两端都声明支持时启用；旧端收不到 0x03/0x04 控制帧，不破坏兼容。
+	RTTProbe bool `json:"rtt_probe,omitempty"`
+	Encrypt  bool `json:"encrypt,omitempty"`
 	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM / ChaCha20-Poly1305 / XChaCha20-Poly1305）。
 	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
@@ -643,7 +646,9 @@ type HandshakeResp struct {
 	BrutalTotalRx   uint64 `json:"brutal_total_rx,omitempty"`
 	FEC             bool   `json:"fec,omitempty"`
 	FecGroup        int    `json:"fec_group,omitempty"`
-	Encrypt         bool   `json:"encrypt,omitempty"`
+	// RTTProbe：服务端是否同意启用跨路径 RTT 探针（与客户端声明取交集）。
+	RTTProbe bool `json:"rtt_probe,omitempty"`
+	Encrypt  bool `json:"encrypt,omitempty"`
 	// EncAlgo：协商选定的算法（0=无内层加密，2=AES-256-GCM，4=AES-128-GCM）。
 	// 为 GCM 时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
 	// EncSalt2 为 s2c 方向盐（服务端加密/客户端解密）。

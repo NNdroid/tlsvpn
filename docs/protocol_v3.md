@@ -94,6 +94,7 @@ The client sends a JSON object with these fields:
 | `fec` | bool | Requests XOR FEC. |
 | `fec_group` | integer | XOR FEC group size K. Protocol range is 2..64; server policy may narrow it. |
 | `encrypt` | bool | Whether inner AEAD is enabled. |
+| `rtt_probe` | bool | Declares support for cross-path RTT probes (`0x03`/`0x04`). Enabled only if the server echoes it. |
 | `enc_algo` | integer | Exact inner-AEAD algorithm identifier. |
 | `session_token` | string | Random existing-session possession token, encoded as 64 hex characters. |
 | `peer_info` | object | Diagnostic peer metadata only. |
@@ -120,6 +121,7 @@ A successful response contains:
 | `fec` | bool | Negotiated FEC enablement. |
 | `fec_group` | integer | Negotiated XOR group size K. |
 | `encrypt` | bool | Negotiated inner-AEAD enablement. |
+| `rtt_probe` | bool | Echo of the request: the server's agreement to enable cross-path RTT probes. |
 | `enc_algo` | integer | Exact selected inner-AEAD algorithm. |
 | `enc_salt` | string | 8-byte client→server inner-AEAD salt, hex encoded. |
 | `enc_salt2` | string | 8-byte server→client inner-AEAD salt, hex encoded. |
@@ -204,6 +206,8 @@ Current v3 kinds:
 ```text
 0x01  FEC_PARITY
 0x02  FEC_MODE
+0x03  RTT_PROBE
+0x04  RTT_REPLY
 ```
 
 No other kind is valid in protocol v3. Unknown kinds are protocol errors.
@@ -317,7 +321,47 @@ For one logical sender:
 
 These rules guarantee that temporary path loss can trigger RX CPU bypass without sacrificing in-flight pre-collapse recovery or reusing AEAD nonces.
 
-## 11. FEC decoder cleanup and reorder interaction
+### 10.6 RTT_PROBE and RTT_REPLY (`control_kind = 0x03 / 0x04`)
+
+Cross-path RTT probes measure each physical connection's forward and return one-way latency, so the multipath scheduler can pick the minimum-forward path for egress and the minimum-return path for ingress instead of assuming a symmetric `rtt/2`.
+
+Both kinds share one fixed 18-byte payload:
+
+```text
+0        1        2              6               10                18
++--------+--------+--------------+----------------+-----------------+
+| kind   | flags  | nonce u32 BE | reply_on u32 BE| send_ts u64 BE  |
++--------+--------+--------------+----------------+-----------------+
+```
+
+- `flags` MUST be zero. Any other value makes the frame malformed.
+- `nonce` is the initiator-local correlation id, non-zero, unique per outstanding probe.
+- `reply_on` names the physical connection index the peer MUST send `RTT_REPLY` on. In `RTT_REPLY` it MUST be zero.
+- `send_ts` is a `UnixNano()` timestamp written by the sending goroutine at write time. A probe carries zero until written; a reply echoes the value from the probe it answers. Only the initiator compares timestamps, so the clocks never have to agree.
+
+A probe sent on connection `i` and answered on connection `j` measures
+
+```text
+RTT(i,j) = fwd(i) + ret(j)
+```
+
+Both endpoints run the same machinery symmetrically. Anchoring on the reference connection `ref` (lowest live index) and taking the generating set `{RTT(i,ref)} ∪ {RTT(ref,j)}`, the relative one-way latencies follow:
+
+```text
+fwd(i) = decayed_min(RTT(i,ref)) - anchor(ref)
+ret(j) = decayed_min(RTT(ref,j)) - anchor(ref)
+anchor(ref) = tcpi_min_rtt(ref) / 2, else decayed_min(RTT(ref,ref)) / 2
+```
+
+`decayed_min` rises slowly and drops instantly, mirroring the kernel's `min_rtt` semantics. The anchor constant cancels in the argmin, so a non-symmetric reference connection biases only the displayed values, never the routing decision.
+
+Convergence is optional: until an estimate exists the scheduler falls back to `min_rtt/2` and then `srtt/2`, which is the pre-probe behaviour.
+
+Probes are negotiated: a client declares `rtt_probe` in the handshake request and the server answers with the same field. Neither side emits `0x03`/`0x04` unless both agreed, which keeps older peers safe.
+
+Timing is deliberately non-periodic: the base interval is 500 ms with uniform jitter in [250, 750] ms, and the generating set rotates one pair per interval. A backend registration or stall recovery triggers an immediate extra round.
+
+Anti-fingerprinting: probe and reply records are ordinary `seq=0` control records written through the same padded frame writer as data and keepalive records. They therefore inherit the per-frame random padding bucket and the random pool overwrite (Section 13), so their size and byte content are indistinguishable from traffic the path already carries. They carry no payload of their own beyond the 18-byte header and never enter the FEC decoder.
 
 On SUSPEND, groups wholly inside the now-unrecoverable bypass interval may be released immediately without incrementing FEC-loss counters.
 
@@ -415,6 +459,8 @@ After successful enqueue, a backend channel owns its frame descriptors/payloads.
 
 Sender backend registration/unregistration is the topology authority used by the dynamic FEC state machine.
 
+Path choice is per direction. Each sender ranks its backends by the one-way latency estimate of its own egress direction — forward for the client's transmit port, return for the server's session port — and falls back to `tcpi_min_rtt/2` and then `srtt/2` while the probe estimates have not converged (Section 10.6). Quality ranking and eligibility envelopes use `tcpi_min_rtt` rather than `srtt`, because the congestion-free floor keeps the candidate set stable; the ETA prediction still uses `srtt`.
+
 ## 15. Keepalive and failure detection
 
 A post-handshake KEEPALIVE is:
@@ -438,6 +484,7 @@ At minimum, these are protocol errors in v3:
 - unknown non-empty post-handshake `control_kind`;
 - malformed FEC_MODE payload, non-zero reserved flags, zero generation or invalid boundary;
 - malformed FEC_PARITY descriptor;
+- malformed RTT_PROBE/RTT_REPLY payload: length other than 18 bytes, or non-zero reserved flags. A malformed probe is dropped silently rather than tearing the connection, because it is measurement traffic and loss is tolerable.
 - FEC control traffic when FEC was not negotiated;
 - impossible/invalid negotiated FEC group parameters;
 - incompatible inner-encryption settings or algorithm;

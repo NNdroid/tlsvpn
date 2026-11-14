@@ -573,6 +573,9 @@ tbody tr[data-open]{cursor:pointer}
 .dc-conn-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .dc-conn-top .mono{font-size:.86em;word-break:break-all;overflow-wrap:anywhere}
 .dc-conn-rtt{font-size:.8em;color:var(--muted);font-family:ui-monospace,"Cascadia Mono",Consolas,monospace}
+/* 连接表"去/回"列：跨路径探针收敛后显示 fwd/ret 单向时延。方向明显不对称时
+   整格染成轻微琥珀色，一眼看出该走哪个方向；hover 看全量（含 roundtrip RTT）。 */
+td.rtt-asym{background:var(--warn-soft);color:var(--warn)}
 .dc-conn-rate{
   margin-left:auto;font-size:.8em;color:var(--sub);
   font-variant-numeric:tabular-nums;white-space:nowrap;
