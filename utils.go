@@ -126,8 +126,39 @@ func (s *singleConnListener) Accept() (net.Conn, error) {
 func (s *singleConnListener) Close() error   { return nil }
 func (s *singleConnListener) Addr() net.Addr { return s.conn.LocalAddr() }
 
-func serveFallbackHTTP(conn net.Conn, alpn string) {
+// publicMCPDispatcher 让 VPN 公网 listener 的 TLS 后分派能按需暴露 MCP。
+// 只持 WebManager：每次请求实时读当前配置的 deploy/path/auth_mode，
+// 配置热更即时生效，无需单独 atomic 快照。
+type publicMCPDispatcher struct {
+	w *WebManager
+}
+
+// serveMCPIfMatch 在命中配置路径时接管请求并返回 true；否则返回 false，
+// 调用方维持原有的 403 nginx 诱饵。deploy=internal 时一律 false（不暴露）。
+func (d *publicMCPDispatcher) serveMCPIfMatch(rw http.ResponseWriter, r *http.Request) bool {
+	if d == nil || d.w == nil {
+		return false
+	}
+	cfg := d.w.Config().Web.MCP
+	if !cfg.deployAllowsPublic() {
+		return false
+	}
+	if cfg.matchesPath(r.URL.Path) {
+		d.w.serveMCP(rw, r)
+		return true
+	}
+	if isMCPMetadataPath(r.URL.Path) && normalizeMCPAuthMode(cfg.AuthMode) == mcpAuthOAuthJWT {
+		d.w.serveMCPMetadata(rw, r)
+		return true
+	}
+	return false
+}
+
+func serveFallbackHTTP(conn net.Conn, alpn string, mcp *publicMCPDispatcher) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mcp.serveMCPIfMatch(w, r) {
+			return
+		}
 		w.Header().Set("Server", "nginx")
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(403)

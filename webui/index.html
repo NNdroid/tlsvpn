@@ -150,14 +150,15 @@
       <i class="tab-ind" id="tab-ind" aria-hidden="true"></i>
       <button class="on" data-pane="clients" data-i18n="tab.clients">-</button>
       <button data-pane="conns" data-i18n="tab.conns">-</button>
-      <button data-pane="macs" data-i18n="tab.macs">-</button>
-      <button data-pane="bans" data-i18n="tab.bans">-</button>
+      <button data-pane="macs" data-srv="1" data-i18n="tab.macs">-</button>
+      <button data-pane="bans" data-srv="1" data-i18n="tab.bans">-</button>
       <button data-pane="traffic" data-i18n="tab.traffic">-</button>
       <button data-pane="status" data-i18n="tab.status">-</button>
       <button data-pane="diag" data-i18n="tab.diag">-</button>
       <button data-pane="sec" data-i18n="tab.sc">-</button>
       <button data-pane="topo" data-i18n="tab.tp">-</button>
       <button data-pane="events" data-i18n="tab.ev">-</button>
+      <button data-pane="mcp" data-i18n="tab.mcp">-</button>
       <button data-pane="logs" data-i18n="tab.logs">-</button>
       <button data-pane="settings" data-i18n="tab.settings">-</button>
     </div>
@@ -396,6 +397,24 @@
         <button class="btn ghost sm" onclick="downloadLog()" data-i18n="logs.download">-</button>
       </div>
       <div id="logbox" class="term"></div>
+    </div>
+
+    <!-- 近期 MCP 访问日志：独立面板（独立内存环形缓冲 mcp_access，不混入
+         通用事件/日志面板）。SSE 通道经 mcp_logs frame 增量推送，?after 续传 -->
+    <div class="pane" id="pane-mcp">
+      <div class="toolbar">
+        <div class="search" style="width:230px">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="search-input" id="mcp-filter" data-i18n-ph="filter_ph">
+          <button class="search-clear" id="mcp-filter-clear" aria-label="clear">×</button>
+          <span class="search-count mono" id="mcp-count"></span>
+        </div>
+        <span class="spacer"></span>
+        <span class="dim" id="mcp-summary"></span>
+        <button class="btn ghost sm" onclick="clearMcpLog()" data-i18n="logs.clear">-</button>
+        <button class="btn ghost sm" onclick="downloadMcpLog()" data-i18n="logs.download">-</button>
+      </div>
+      <div id="mcpbox" class="term"></div>
     </div>
 
     <div class="pane" id="pane-settings">

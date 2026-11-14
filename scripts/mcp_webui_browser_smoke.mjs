@@ -16,7 +16,7 @@ await page.setContent(`<!doctype html><html lang="en"><head><meta charset="utf-8
 :root{--border:#444;--card:#222;--bg:#111;--text:#eee;--sub:#aaa;--warn:#f90}
 body{background:var(--bg);color:var(--text)}.btn{padding:4px 8px}
 </style></head><body>
-<div id="pane-settings"><textarea id="cfg-editor">{"web":{"mcp":{"auth_mode":"inherit_web"}}}</textarea></div>
+<div id="pane-settings"><textarea id="cfg-editor">{"web":{"mcp":{"auth_mode":"inherit_web","path":"/0123456789abcdef0123"}}}</textarea></div>
 <script>window.loadConfig=async()=>{};window.saveConfig=async()=>{};</script>
 </body></html>`);
 await page.addScriptTag({ content: settingsJS });
@@ -56,7 +56,7 @@ async function snapshot() {
 
 await selectMode('inherit_web');
 let state = await snapshot();
-if (!state.endpoint.endsWith('/mcp')) failures.push('inherit_web endpoint does not end in /mcp');
+if (!state.endpoint.endsWith('/0123456789abcdef0123')) failures.push('inherit_web endpoint does not match the configured path');
 if (!state.client.includes('BASE64_WEBUI_USER_PASSWORD') || !state.curl.includes('<WEBUI_USER>:<WEBUI_PASSWORD>')) failures.push('inherit_web examples missing WebUI Basic credentials');
 
 await selectMode('basic');

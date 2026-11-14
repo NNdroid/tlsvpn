@@ -72,6 +72,17 @@ document.getElementById('tabs').addEventListener('click',function(ev){
   showPane(btn.dataset.pane);
 });
 
+// MAC 表与封禁仅在服务端提供：客户端模式隐藏这两个页签，避免露出"仅服务端"
+// 空态。运行时 mode 由进程固定，本函数幂等，随每次 stats 快照应用。
+function applyModeTabs(isServer){
+  document.querySelectorAll('#tabs button[data-srv]').forEach(function(b){
+    b.style.display=isServer?'':'none';
+  });
+  const on=document.querySelector('#tabs button.on');
+  if(on&&on.dataset.srv&&!isServer){showPane('clients');return;}
+  moveTabInd();
+}
+
 // ---------- 通用折线图渲染：纵轴刻度 + 末端标签防裁剪 + 悬停提示 ----------
 const chartState={};
 function roundRectPath(ctx,x,y,w,h,r){
@@ -911,6 +922,7 @@ function applyStats(data){
       globalPrev={tx:tTx,rx:tRx};
     }
     const isServer=data.mode==='server';
+    applyModeTabs(isServer);
     const upSpeed=isServer?tRxS:tTxS,downSpeed=isServer?tTxS:tRxS;
     txHist.push(upSpeed);rxHist.push(downSpeed);txTimes.push(Date.now());
     if(txHist.length>MAXPTS){txHist.shift();rxHist.shift();txTimes.shift();}
@@ -2834,6 +2846,78 @@ function downloadLog(){
     timer=setTimeout(function(){logFilter=inp.value.trim();applyLogFilter();},140);
   });
   if(clr)clr.addEventListener('click',function(){inp.value='';logFilter='';clr.classList.remove('show');applyLogFilter();inp.focus();});
+  inp.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&clr)clr.click();});
+})();
+
+// ---------- 近期 MCP 访问日志：独立面板，SSE mcp_logs frame 增量 ----------
+// 与 applyLogs 同构：seq 由服务端单调编号，重连回放与轮询续传都不重不丢。
+let mcpSeq=0,mcpFilter='';
+function mcpRow(l){
+  const lv=l.level==='error'?'error':(l.level==='warn'?'warn':'info');
+  const bits=[l.time||''];
+  if(l.remote)bits.push(l.remote);
+  if(l.tool||l.method)bits.push(l.tool||l.method);
+  if(l.status)bits.push(String(l.status));
+  if(l.durMs)bits.push(l.durMs+'ms');
+  if(l.msg)bits.push(l.msg);
+  return '<div class="ln lv-'+lv+'"><span class="ts">['+esc(bits[0])+']</span><span class="lv">'+lv+'</span><span class="msg">'+esc(bits.slice(1).join(' '))+'</span></div>';
+}
+function applyMcpLogs(lines){
+  if(!Array.isArray(lines)||!lines.length)return;
+  lines=lines.filter(function(l){return l&&l.seq>mcpSeq;});
+  if(!lines.length)return;
+  const box=document.getElementById('mcpbox');
+  if(!box)return;
+  if(box.querySelector('.empty-box'))box.innerHTML='';
+  box.innerHTML+=lines.map(mcpRow).join('');
+  mcpSeq=lines[lines.length-1].seq;
+  applyMcpFilter();
+}
+function applyMcpFilter(){
+  const box=document.getElementById('mcpbox');
+  if(!box)return;
+  const f=mcpFilter.toLowerCase();
+  const all=box.querySelectorAll('.ln');
+  let shown=0;
+  all.forEach(function(l){
+    const hit=!f||l.textContent.toLowerCase().indexOf(f)>=0;
+    l.style.display=hit?'':'none';
+    if(hit)shown++;
+  });
+  const cnt=document.getElementById('mcp-count');
+  if(cnt)cnt.textContent=f?(shown+' / '+all.length):'';
+}
+function mcpEmptyBox(){
+  return '<div class="empty-box"><svg viewBox="0 0 24 24">'+EMPTY_ICON.logs+'</svg>'+
+    '<div>'+esc(t('mcp.empty'))+'</div></div>';
+}
+function clearMcpLog(){
+  mcpFilter='';
+  const inp=document.getElementById('mcp-filter');
+  const clr=document.getElementById('mcp-filter-clear');
+  if(inp)inp.value='';
+  if(clr)clr.classList.remove('show');
+  document.getElementById('mcpbox').innerHTML=mcpEmptyBox();
+  applyMcpFilter();
+  toast(t('toast.clear'),'ok');
+}
+function downloadMcpLog(){
+  const blob=new Blob([document.getElementById('mcpbox').innerText],{type:'text/plain;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='tlsvpn-mcp-access-'+new Date().toISOString().replace(/[:.]/g,'-')+'.log';a.click();
+  toast(t('toast.download'),'ok');
+}
+(function(){
+  const inp=document.getElementById('mcp-filter');
+  const clr=document.getElementById('mcp-filter-clear');
+  if(!inp)return;
+  let timer=null;
+  inp.addEventListener('input',function(){
+    if(clr)clr.classList.toggle('show',!!inp.value);
+    clearTimeout(timer);
+    timer=setTimeout(function(){mcpFilter=inp.value.trim();applyMcpFilter();},140);
+  });
+  if(clr)clr.addEventListener('click',function(){inp.value='';mcpFilter='';clr.classList.remove('show');applyMcpFilter();inp.focus();});
   inp.addEventListener('keydown',function(ev){if(ev.key==='Escape'&&clr)clr.click();});
 })();
 

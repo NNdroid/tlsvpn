@@ -110,8 +110,9 @@ func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, 
 	}
 	logAfter := dashboardQueryUint(r, "log_after")
 	eventAfter := dashboardQueryUint(r, "event_after")
+	mcpAfter := dashboardQueryUint(r, "mcp_after")
 	if id := r.URL.Query().Get("instance_id"); id != "" && id != dashboardInstanceID {
-		logAfter, eventAfter = 0, 0
+		logAfter, eventAfter, mcpAfter = 0, 0, 0
 	}
 	interval := dashboardStreamInterval(r)
 
@@ -149,6 +150,13 @@ func handleDashboardStream(w http.ResponseWriter, r *http.Request, srv *Server, 
 		if len(events) > 0 {
 			eventAfter = events[len(events)-1].Seq
 			if err := writeDashboardJSON(w, flusher, "events", events); err != nil {
+				return err
+			}
+		}
+		mcps := mcpAccess.snapshot(mcpAfter)
+		if len(mcps) > 0 {
+			mcpAfter = mcps[len(mcps)-1].Seq
+			if err := writeDashboardJSON(w, flusher, "mcp_logs", mcps); err != nil {
 				return err
 			}
 		}

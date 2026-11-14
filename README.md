@@ -244,7 +244,7 @@ When `client.interface_manager=netifd`, top-level `up`/`down` hooks are rejected
 
 ## Dashboard & Metrics
 
-Set `web.addr` to enable: live throughput and daily-traffic views, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it), the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), the current frame-format visualizer, local OS/architecture icons, and zh-CN/zh-TW/en/de/fr/ja UI.
+Set `web.addr` to enable: live throughput and daily-traffic views, FEC/loss/drop counters, per-connection details (with each link's negotiated cipher, FEC group and whether TCP Brutal actually took effect on it), the MAC table, log tail with live level switching, client kick/ban, config editor with hot-apply (`needs_restart` is reported for fields that can't), the current frame-format visualizer, local OS/architecture icons, a Model Context Protocol (MCP) administration server with independent authentication (`web.mcp.auth_mode`, default `inherit_web`) on a shared random-by-default endpoint path (`web.mcp.path`, never `/mcp`), a recent-MCP-access log panel, and zh-CN/zh-TW/en/de/fr/ja UI.
 
 The **Runtime status** tab shows what the process is really doing rather than what the config file says: the host and build (`os`/`arch`/Go version/CPU count/hostname/config path/version+uptime); the negotiated protocol (version, inner cipher, FEC group, padding mode, cipher floor, session token, and — on clients — the key epoch, the per-direction rates the server granted, and whether policy routing actually took effect or the exact `ip` error it hit); a TCP Brutal breakdown that separates *configured* Mbps from *kernel support* (current and available congestion controllers) and *per-connection applied/total*, listing the failure reason when shaping was skipped; the effective config snapshot (including the fwmark, its rule priority, the route table number, any extra routes and any source rules); and a restart banner when a hot-applied change needs a process restart. The theme follows the OS light/dark preference and can be pinned to either with a persisted choice.
 
@@ -255,6 +255,7 @@ Prometheus metrics at `/metrics` are protected by the Web UI authentication gate
 - [Dashboard accounting](docs/WEBUI_METRICS.md)
 - [Diagnostic charts](docs/WEBUI_CHARTS.md)
 - [Observed Linux TCP state](docs/WEBUI_TCP.md)
+- [MCP administration](docs/MCP.md)
 
 ## Notes
 

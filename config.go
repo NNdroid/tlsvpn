@@ -183,6 +183,8 @@ const exampleConfigJSON = `{
       "username": "",
       "credential": "",
       "api_key_header": "X-API-Key",
+      "deploy": "internal",
+      "path": "/0123456789abcdef0123",
       "oauth": {
         "jwks_url": "",
         "issuer": "",

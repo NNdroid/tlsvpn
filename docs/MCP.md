@@ -11,8 +11,10 @@ https://10.0.0.1:8080/
 then MCP is available at:
 
 ```text
-https://10.0.0.1:8080/mcp
+https://10.0.0.1:8080/<web.mcp.path>
 ```
+
+The endpoint path is not fixed to `/mcp`: it is configured under `web.mcp.path` and is generated randomly on first load (see [Deployment scope and path](#deployment-scope-and-path)). It is shared by the internal and public faces.
 
 No second listener or MCP-specific port is opened.
 
@@ -20,13 +22,41 @@ No second listener or MCP-specific port is opened.
 
 TLSVPN uses the official Go MCP SDK and Streamable HTTP transport.
 
-- Endpoint: `/mcp`
+- Endpoint: `/web.mcp.path` (random on first load, not `/mcp`)
 - Transport: Streamable HTTP
 - Server mode: stateless
 - Response mode: JSON for request/response operations
 - Maximum request body: 1 MiB
 - HTTP request cancellation is propagated for protocol revisions that support it
 - Both TLSVPN server mode and client mode expose MCP when `web.addr` enables the Web service
+
+## Deployment scope and path
+
+`web.mcp.deploy` selects which listener serves MCP. The internal face is the WebUI listener (`web.addr` + `web.cert`/`web.key`, optionally bound to the tunnel gateway IP with `web.bind: "tunnel"`). The public face is the VPN listener (`server.addr` + `server.cert`/`server.key`): its TLS post-handshake dispatch (currently a 403 nginx decoy) is extended to serve MCP **only** when the request path matches `web.mcp.path`, while every other path keeps the 403 decoy.
+
+| `web.mcp.deploy` | Internal WebUI listener | Public VPN listener |
+|---|---|---|
+| `internal` (default) | MCP served | always 403 decoy |
+| `public` | MCP not served (404 / normal Web handling) | MCP served on `path` |
+| `both` | MCP served | MCP served on `path` |
+
+### The path is part of the secret
+
+`web.mcp.path` is a single path segment shared by both faces (for example `/a1b2c3d4e5f6a7b8c9d0`). It is **not** a well-known value:
+
+- An empty `path` generates a random `/` + 20 hex characters (80 bits) on configuration load. It never falls back to `/mcp`.
+- Treat the path as part of the endpoint secret. An attacker who learns it can at least probe the endpoint and attempt credential attacks, so rotate it immediately if it leaks (WebUI → Settings → MCP → *Randomize*, or set a fresh value and **Save & apply**).
+- Validation rejects paths that do not start with `/`, contain `//`, are empty, exceed 128 characters, or contain whitespace/control characters.
+
+The default `deploy` is `internal`: MCP is not exposed on the public VPN listener unless you explicitly choose `public` or `both`. The public face serves MCP only on the exact `path` (plus an optional trailing `/`); every other path on the VPN port continues to receive the 403 decoy, so the endpoint is not discoverable by scanning.
+
+### OAuth metadata on the public face
+
+When `web.mcp.auth_mode` is `oauth_jwt` and `deploy` is `public` or `both`, the OAuth Protected Resource Metadata endpoint (`/.well-known/oauth-protected-resource`) is also served on the public VPN listener, because OAuth discovery must be reachable at the resource server. The configured `web.mcp.oauth.resource` URL should point at the MCP endpoint (with the configured `path`).
+
+### Warning: public deployment
+
+`deploy: "public"` or `"both"` combined with `web.mcp.auth_mode: "none"` exposes an unauthenticated MCP server on the public VPN port. Do not use that combination outside an isolated trusted network. Even with authentication, prefer a strong mode (`bearer`, `api_key`, or `oauth_jwt`) and HTTPS.
 
 ## Authentication
 
@@ -94,7 +124,7 @@ curl -u 'mcp-agent:a-long-random-password' \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}' \
-  https://HOST:WEB_PORT/mcp
+  https://HOST:WEB_PORT/<PATH>
 ```
 
 #### Static Bearer token
@@ -141,7 +171,7 @@ X-API-Key: a-long-random-api-key
     "jwks_url": "https://login.example.com/.well-known/jwks.json",
     "issuer": "https://login.example.com",
     "audience": "tlsvpn-mcp",
-    "resource": "https://vpn.example.com:8080/mcp",
+    "resource": "https://vpn.example.com:8080/<PATH>",
     "authorization_servers": [
       "https://login.example.com"
     ],
@@ -151,6 +181,8 @@ X-API-Key: a-long-random-api-key
   }
 }
 ```
+
+`resource` must match the actual MCP endpoint, so it uses the configured `web.mcp.path` (the WebUI example fills it automatically).
 
 Validation includes:
 
@@ -242,6 +274,15 @@ Three built-in prompts provide reusable operational workflows:
 
 The prompts explicitly prefer read-only inspection and do not authorize disruptive actions by themselves.
 
+## Recent MCP access log
+
+Every MCP request (both faces) is recorded in a dedicated in-memory ring buffer (capacity 500, oldest dropped) and surfaced in the WebUI as a separate **MCP access** panel. It does not mix into the general event or log panels.
+
+- Each entry records: sequence number, server time, remote host, JSON-RPC method (or `auth` for authentication failures), tool name for `tools/call`, HTTP status, duration in ms, and the error message when relevant.
+- Authentication failures are recorded too (`method: "auth"`), so repeated credential/path probing is observable.
+- Sources: the WebUI consumes the `mcp_logs` frame on the single `/api/stream` SSE channel (incremental via the `mcp_after` cursor); scripts/tests can use the compatibility endpoint `GET /api/mcp-logs?after=<seq>`.
+- The buffer is in-memory only; long-term retention belongs to the process log file.
+
 ## Security model
 
 MCP administration is intentionally equivalent in privilege to the existing authenticated Web control API. Anyone who can authenticate to MCP can invoke disruptive tools and can save the TLSVPN configuration.
@@ -249,8 +290,9 @@ MCP administration is intentionally equivalent in privilege to the existing auth
 Recommended deployment rules:
 
 1. keep the dashboard protected with `web.auth`;
-2. choose an MCP authentication mode appropriate for the client environment; prefer OAuth/OIDC for centrally managed remote deployments;
-3. use HTTPS whenever the Web/MCP listener crosses an untrusted network;
-4. prefer `web.bind: "tunnel"` when management should only be reachable through TLSVPN;
-5. do not use `web.mcp.auth_mode: "none"` on a public or otherwise untrusted listener; and
-6. use read-only MCP tools first and inspect `needs_restart` before applying configuration changes.
+2. keep the default `web.mcp.deploy: "internal"` unless MCP must be reachable from outside the tunnel, and rotate `web.mcp.path` whenever it is exposed publicly or suspected leaked;
+3. choose an MCP authentication mode appropriate for the client environment; prefer OAuth/OIDC for centrally managed remote deployments;
+4. use HTTPS whenever the Web/MCP listener crosses an untrusted network;
+5. prefer `web.bind: "tunnel"` when management should only be reachable through TLSVPN;
+6. do not use `web.mcp.auth_mode: "none"` on a public or otherwise untrusted listener; and
+7. use read-only MCP tools first and inspect `needs_restart` before applying configuration changes.

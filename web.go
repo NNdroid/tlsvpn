@@ -204,8 +204,6 @@ func (w *WebManager) onceWarn(key string) bool {
 	return true
 }
 
-func isMCPPath(path string) bool { return path == "/mcp" || path == "/mcp/" }
-
 func mcpBasicAuthValid(r *http.Request, expected string) bool {
 	user, pass, ok := r.BasicAuth()
 	return ok && constantTimeCredentialEqual(user+":"+pass, expected)
@@ -218,11 +216,14 @@ func mcpBasicAuthValid(r *http.Request, expected string) bool {
 // resource metadata is intentionally public when oauth_jwt mode is enabled.
 func (w *WebManager) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		if isMCPMetadataPath(r.URL.Path) {
+		mcpCfg := w.Config().Web.MCP
+		// MCP 端点与 OAuth metadata 只在内网面部署时拦截；deploy=public 时
+		// 内网 listener 不暴露 MCP，路径回落到普通 Web 处理（静态 404 / api 401）。
+		if mcpCfg.deployAllowsInternal() && isMCPMetadataPath(r.URL.Path) {
 			w.serveMCPMetadata(rw, r)
 			return
 		}
-		if isMCPPath(r.URL.Path) {
+		if mcpCfg.deployAllowsInternal() && mcpCfg.matchesPath(r.URL.Path) {
 			w.serveMCP(rw, r)
 			return
 		}

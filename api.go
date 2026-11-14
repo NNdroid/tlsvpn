@@ -426,6 +426,10 @@ func csrfGuard(next http.HandlerFunc) http.HandlerFunc {
 func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, webKey string, cfg *Config) {
 	mgr := NewWebManager(srv, cli, cfg, nil)
 	mgr.diagnostics = &diagnosticHistory{}
+	// 公网 VPN listener 的 TLS 后分派按需暴露 MCP（deploy=public|both）。
+	if srv != nil {
+		srv.SetPublicMCP(mgr)
+	}
 	mux := http.NewServeMux()
 	mgr.mux = mux
 	auth := mgr.auth // 认证串可热更：经 mgr 读取当前配置
@@ -471,6 +475,14 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		fmt.Sscanf(r.URL.Query().Get("after"), "%d", &after)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(logRing.snapshot(after))
+	}))
+
+	// MCP 访问日志（独立环形缓冲；SSE 通道走 mcp_logs frame，这里供脚本/测试）
+	mux.HandleFunc("/api/mcp-logs", auth(func(w http.ResponseWriter, r *http.Request) {
+		after := uint64(0)
+		fmt.Sscanf(r.URL.Query().Get("after"), "%d", &after)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(mcpAccess.snapshot(after))
 	}))
 
 	// 事件流：SSE 长连接，?stream=0 时为一次性增量 JSON 快照（见 handleEvents）
