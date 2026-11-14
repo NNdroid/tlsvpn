@@ -283,6 +283,20 @@ func TestRttProbeSubClamp(t *testing.T) {
 	}
 }
 
+// TestOneWayUS 探针样本为 ns、对外发布为 µs：oneWayUS 只做 /1000 换算，保证
+// fwdOneWayUS/retOneWayUS 恒为 µs（回归：混装 ns/µs 导致"去/回"列量级错乱）。
+func TestOneWayUS(t *testing.T) {
+	if got := oneWayUS(175448399); got != 175448 {
+		t.Fatalf("oneWayUS(175448399)=%d want=175448", got)
+	}
+	if got := oneWayUS(999); got != 0 {
+		t.Fatalf("oneWayUS(999)=%d want=0 (sub-µs 样本下取整)", got)
+	}
+	if got := oneWayUS(0); got != 0 {
+		t.Fatalf("oneWayUS(0)=%d want=0", got)
+	}
+}
+
 // TestRttProbeSchedulerLifecycle 调度器生命周期：ctx 取消后 goroutine 必须退出，
 // 且 enable/kick/stop 并发安全。不读内部 map（调度 goroutine 独占），只断言
 // 可观测的退出行为。
@@ -344,7 +358,7 @@ func TestRttProbeSchedulerJSONFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal schedulerSnapshot: %v", err)
 	}
-	for _, want := range []string{`"fwd_oneway_us":`, `"ret_oneway_us":`} {
+	for _, want := range []string{`"fwd_oneway_us":`, `"ret_oneway_us":`, `"min_rtt_us":`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("快照 JSON 缺少 %s：%s", want, raw)
 		}
