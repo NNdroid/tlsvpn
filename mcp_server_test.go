@@ -9,7 +9,7 @@ import (
 )
 
 func TestWebMCPUsesWebAuthOnSameHandler(t *testing.T) {
-	cfg := &Config{Web: WebConfig{Auth: "mcp-user:mcp-pass"}}
+	cfg := &Config{Web: WebConfig{Auth: "mcp-user:mcp-pass", MCP: MCPConfig{Path: "/mcp"}}}
 	mgr := NewWebManager(nil, nil, cfg, http.NewServeMux())
 	h := mgr.auth(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("/mcp must be handled by MCP, not fall through to WebUI handler")

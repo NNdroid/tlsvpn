@@ -15,12 +15,21 @@ import (
 
 const mcpInitializeBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"tlsvpn-auth-test","version":"1"}}}`
 
+// mcpReqPath 返回测试配置的 MCP 路径。直接构造的 cfg 未走 applyDefaults
+// （生产路径由 applyDefaults 保证生成），测试统一显式设 Path 并在此兜底。
+func mcpReqPath(mgr *WebManager) string {
+	if p := strings.TrimSpace(mgr.Config().Web.MCP.Path); p != "" {
+		return p
+	}
+	return "/mcp"
+}
+
 func runMCPRequest(t *testing.T, mgr *WebManager, configure func(*http.Request)) *httptest.ResponseRecorder {
 	t.Helper()
 	h := mgr.auth(func(http.ResponseWriter, *http.Request) {
 		t.Fatal("/mcp must not fall through to the dashboard handler")
 	})
-	req := httptest.NewRequest(http.MethodPost, "http://tlsvpn.local/mcp", strings.NewReader(mcpInitializeBody))
+	req := httptest.NewRequest(http.MethodPost, "http://tlsvpn.local"+mcpReqPath(mgr), strings.NewReader(mcpInitializeBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if configure != nil {
@@ -101,7 +110,9 @@ func TestMCPBasicBearerAPIKeyAndNoneAuth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &Config{Web: WebConfig{Auth: "dashboard:secret", MCP: tc.mcp}}
+			mcp := tc.mcp
+			mcp.Path = "/mcp"
+			cfg := &Config{Web: WebConfig{Auth: "dashboard:secret", MCP: mcp}}
 			mgr := NewWebManager(nil, nil, cfg, http.NewServeMux())
 			unauthorized := runMCPRequest(t, mgr, nil)
 			if tc.name == "none" {
@@ -122,7 +133,7 @@ func TestMCPBasicBearerAPIKeyAndNoneAuth(t *testing.T) {
 }
 
 func TestMCPAuthHotReloadWithoutListenerRestart(t *testing.T) {
-	cfg := &Config{Web: WebConfig{Auth: "web-user:web-pass", MCP: MCPConfig{AuthMode: mcpAuthInheritWeb}}}
+	cfg := &Config{Web: WebConfig{Auth: "web-user:web-pass", MCP: MCPConfig{AuthMode: mcpAuthInheritWeb, Path: "/mcp"}}}
 	mgr := NewWebManager(nil, nil, cfg, http.NewServeMux())
 
 	first := runMCPRequest(t, mgr, func(r *http.Request) { r.SetBasicAuth("web-user", "web-pass") })
@@ -132,7 +143,7 @@ func TestMCPAuthHotReloadWithoutListenerRestart(t *testing.T) {
 
 	updated := &Config{Web: WebConfig{
 		Auth: "web-user:web-pass",
-		MCP: MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("rotated-token")},
+		MCP: MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("rotated-token"), Path: "/mcp"},
 	}}
 	mgr.SetConfig(updated)
 
@@ -147,11 +158,11 @@ func TestMCPAuthHotReloadWithoutListenerRestart(t *testing.T) {
 }
 
 func TestMCPAuthValidation(t *testing.T) {
-	badHeader := MCPConfig{AuthMode: mcpAuthAPIKey, APIKeyHeader: "Authorization", Credential: normalizeMCPStaticCredential("key")}
+	badHeader := MCPConfig{AuthMode: mcpAuthAPIKey, APIKeyHeader: "Authorization", Credential: normalizeMCPStaticCredential("key"), Path: "/mcp"}
 	if err := badHeader.Validate(); err == nil {
 		t.Fatal("reserved API key header must be rejected")
 	}
-	badOAuth := MCPConfig{AuthMode: mcpAuthOAuthJWT, OAuth: MCPOAuthJWTConfig{
+	badOAuth := MCPConfig{AuthMode: mcpAuthOAuthJWT, Path: "/mcp", OAuth: MCPOAuthJWTConfig{
 		JWKSURL: "http://example.com/jwks", Issuer: "https://issuer.example", Audience: "tlsvpn", Resource: "https://vpn.example/mcp",
 	}}
 	if err := badOAuth.Validate(); err == nil {
@@ -180,7 +191,7 @@ func TestMCPOAuthJWTAndProtectedResourceMetadata(t *testing.T) {
 	resource := jwks.URL + "/mcp"
 	cfg := &Config{Web: WebConfig{
 		Auth: "dashboard:secret",
-		MCP: MCPConfig{AuthMode: mcpAuthOAuthJWT, OAuth: MCPOAuthJWTConfig{
+		MCP: MCPConfig{AuthMode: mcpAuthOAuthJWT, Path: "/mcp", OAuth: MCPOAuthJWTConfig{
 			JWKSURL: jwks.URL + "/jwks",
 			Issuer: issuer,
 			Audience: audience,

@@ -513,6 +513,10 @@ type Server struct {
 	protectFallbackHTTP     atomic.Uint64 // 非隧道流量落到伪装站点
 	protectFECGroupRejected atomic.Uint64 // 请求的 FEC K 超出策略区间
 
+	// publicMCP 存 *publicMCPDispatcher（web 面板注册时写入），让公网
+	// VPN listener 的 TLS 后分派能按需暴露 MCP；nil 表示公网面全 403 诱饵。
+	publicMCP atomic.Value
+
 	hooks *LifecycleHooks
 
 	tapWriteErrs atomic.Uint64 // TAP 交付失败帧数（旧实现被静默吞掉）
@@ -1310,6 +1314,24 @@ func assignTapGateway(link netlink.Link, fam, ip string, prefix int) error {
 	return nil
 }
 
+// SetPublicMCP 注册 MCP 公网分派器（由 web 面板创建后调用）。传 nil 关闭公网面。
+// 分派器持 WebManager，路径/部署面热更经其当前配置即时生效。
+func (s *Server) SetPublicMCP(w *WebManager) {
+	if w == nil {
+		s.publicMCP.Store((*publicMCPDispatcher)(nil))
+		return
+	}
+	s.publicMCP.Store(&publicMCPDispatcher{w: w})
+}
+
+func (s *Server) publicMCPDispatcher() *publicMCPDispatcher {
+	v := s.publicMCP.Load()
+	if v == nil {
+		return nil
+	}
+	return v.(*publicMCPDispatcher)
+}
+
 // serveListener 阻塞接受连接直到 ctx 取消。独立成函数以便测试进程内启动。
 func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, tlsConfig *tls.Config) {
 	go func() { <-ctx.Done(); listener.Close() }()
@@ -1337,6 +1359,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 
 		go func(c *net.TCPConn) {
 			defer limiter.release(c.RemoteAddr())
+			mcpDispatch := srv.publicMCPDispatcher()
 			peekBuf := make([]byte, 1)
 			c.SetReadDeadline(time.Now().Add(3 * time.Second))
 			n, err := c.Read(peekBuf)
@@ -1351,7 +1374,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			if peekBuf[0] != 0x16 {
 				// 非 TLS 流量（回退 HTTP / 扫描器）走默认小缓冲
 				srv.protectFallbackHTTP.Add(1)
-				serveFallbackHTTP(prefixConn, "http/1.1")
+				serveFallbackHTTP(prefixConn, "http/1.1", mcpDispatch)
 				return
 			}
 
@@ -1396,7 +1419,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			prefixConn2 := &PrefixConn{Conn: tlsConn, prefix: peekBuf2[:n2]}
 			if peekBuf2[0] >= 0x20 {
 				srv.protectFallbackHTTP.Add(1)
-				serveFallbackHTTP(prefixConn2, alpn)
+				serveFallbackHTTP(prefixConn2, alpn, mcpDispatch)
 				return
 			}
 

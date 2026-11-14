@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -38,6 +39,12 @@ const (
 	mcpDefaultAPIKeyHeader   = "X-API-Key"
 	mcpJWKSMaxBytes          = 1 << 20
 	mcpJWKSCacheTTL          = 10 * time.Minute
+
+	// MCP 端点部署面。internal=仅内网 web listener；public=仅公网 VPN listener；
+	// both=两者。空值向后兼容，视为 internal（默认不对外暴露）。
+	mcpDeployInternal = "internal"
+	mcpDeployPublic   = "public"
+	mcpDeployBoth     = "both"
 )
 
 var errMCPInsufficientScope = errors.New("mcp oauth token has insufficient scope")
@@ -57,7 +64,16 @@ type MCPConfig struct {
 	Credential string `json:"credential,omitempty"`
 	// APIKeyHeader is only used by api_key mode and defaults to X-API-Key.
 	APIKeyHeader string `json:"api_key_header,omitempty"`
-	OAuth        MCPOAuthJWTConfig `json:"oauth,omitempty"`
+	// Deploy selects which listener serves MCP: internal (web listener only,
+	// default and safest), public (VPN listener only) or both. Empty is
+	// backward-compatible and means internal.
+	Deploy string `json:"deploy,omitempty"`
+	// Path is the single MCP endpoint path shared by the internal and public
+	// faces (e.g. "/a1b2c3..."). Empty generates a random path on load; the
+	// path is part of the secret material, so never fall back to a guessable
+	// default such as /mcp.
+	Path string `json:"path,omitempty"`
+	OAuth MCPOAuthJWTConfig `json:"oauth,omitempty"`
 }
 
 // MCPOAuthJWTConfig makes TLSVPN an OAuth/OIDC resource server for MCP. Access
@@ -78,6 +94,58 @@ func normalizeMCPAuthMode(mode string) string {
 		return mcpAuthInheritWeb
 	}
 	return mode
+}
+
+// mcpRandomPath 生成 /<20 hex> 的不可猜 MCP 端点路径（80 bit 熵）。
+// 独立于 newSessionToken（64 hex 会话凭据），不复用以免弱化任一语义。
+func mcpRandomPath() (string, error) {
+	var buf [10]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("generate mcp path: %w", err)
+	}
+	return "/" + hex.EncodeToString(buf[:]), nil
+}
+
+// validMCPPath 校验配置的 MCP 端点路径：单个路径段，以 / 开头、无 //、
+// 长度 2..128、不含空白/控制字符（路径会进访问日志，防注入）。
+func validMCPPath(p string) bool {
+	if len(p) < 2 || len(p) > 128 {
+		return false
+	}
+	if p[0] != '/' {
+		return false
+	}
+	if strings.Contains(p, "//") {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		if p[i] <= 0x20 || p[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// effectivePath 返回配置的 MCP 端点路径；空表示未配置（视为不暴露，
+// 安全默认——绝不回落可猜的 /mcp）。
+func (c *MCPConfig) effectivePath() string {
+	return strings.TrimSpace(c.Path)
+}
+
+// matchesPath 判断请求路径是否命中 MCP 端点（允许尾部 "/"）。
+func (c *MCPConfig) matchesPath(requestPath string) bool {
+	p := c.effectivePath()
+	return p != "" && (requestPath == p || requestPath == p+"/")
+}
+
+// deployAllowsInternal 是否在内网 web listener 上服务 MCP。
+func (c MCPConfig) deployAllowsInternal() bool {
+	return c.Deploy != mcpDeployPublic
+}
+
+// deployAllowsPublic 是否在公网 VPN listener 上服务 MCP。
+func (c MCPConfig) deployAllowsPublic() bool {
+	return c.Deploy == mcpDeployPublic || c.Deploy == mcpDeployBoth
 }
 
 func normalizeMCPStaticCredential(value string) string {
@@ -136,6 +204,16 @@ func validHTTPHeaderName(name string) bool {
 
 func (c *MCPConfig) applyDefaults() {
 	c.AuthMode = normalizeMCPAuthMode(c.AuthMode)
+	if c.Deploy == "" {
+		c.Deploy = mcpDeployInternal
+	}
+	// Path 空则生成随机（所有 deploy 面都生成，不回落 /mcp）。生成失败保持空，
+	// 由 Validate 报错兜底——绝不静默用一个可猜路径。
+	if c.Path == "" {
+		if p, err := mcpRandomPath(); err == nil {
+			c.Path = p
+		}
+	}
 	if c.APIKeyHeader == "" {
 		c.APIKeyHeader = mcpDefaultAPIKeyHeader
 	} else {
@@ -160,6 +238,17 @@ func (c *MCPConfig) applyDefaults() {
 }
 
 func (c MCPConfig) Validate() error {
+	switch c.Deploy {
+	case "", mcpDeployInternal, mcpDeployPublic, mcpDeployBoth:
+	default:
+		return fmt.Errorf("invalid web.mcp.deploy %q (want internal, public or both)", c.Deploy)
+	}
+	if c.Path == "" {
+		return fmt.Errorf("web.mcp.path is required; a random path is generated on load, reload the configuration to materialize it")
+	}
+	if !validMCPPath(c.Path) {
+		return fmt.Errorf("invalid web.mcp.path %q (want a path starting with /, no //, length 2..128, no whitespace or control characters)", c.Path)
+	}
 	mode := normalizeMCPAuthMode(c.AuthMode)
 	switch mode {
 	case mcpAuthInheritWeb, mcpAuthNone:
@@ -285,6 +374,8 @@ func mcpBearerToken(r *http.Request) (string, bool) {
 }
 
 func (w *WebManager) serveMCP(rw http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	remote := mcpRemoteHost(r)
 	cfg := w.Config()
 	mode := normalizeMCPAuthMode(cfg.Web.MCP.AuthMode)
 	var authErr error
@@ -328,14 +419,47 @@ func (w *WebManager) serveMCP(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	if authErr != nil {
+		// 认证失败也进访问日志：谁在撞路径、撞凭据是公网暴露面最重要的审计信号。
+		status := http.StatusUnauthorized
+		if errors.Is(authErr, errMCPInsufficientScope) {
+			status = http.StatusForbidden
+		}
 		w.writeMCPAuthError(rw, r, mode, authErr)
+		mcpAccess.add(mcpAccessLine{
+			Remote: remote,
+			Level:  "warn",
+			Method: "auth",
+			Status: status,
+			DurMs:  time.Since(start).Milliseconds(),
+			Msg:    authErr.Error(),
+		})
 		return
 	}
 	if w.mcp == nil {
 		http.NotFound(rw, r)
 		return
 	}
-	w.mcp.ServeHTTP(rw, r)
+	method, tool := mcpRequestMethod(r)
+	rec := &mcpStatusWriter{ResponseWriter: rw}
+	w.mcp.ServeHTTP(rec, r)
+	status := rec.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	level := "info"
+	if status >= 500 {
+		level = "error"
+	} else if status >= 400 {
+		level = "warn"
+	}
+	mcpAccess.add(mcpAccessLine{
+		Remote: remote,
+		Level:  level,
+		Method: method,
+		Tool:   tool,
+		Status: status,
+		DurMs:  time.Since(start).Milliseconds(),
+	})
 }
 
 func (w *WebManager) writeMCPAuthError(rw http.ResponseWriter, r *http.Request, mode string, authErr error) {

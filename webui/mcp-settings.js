@@ -10,6 +10,7 @@
     'zh-CN':{
       title:'MCP 认证',sub:'与 WebUI 共用端口；认证策略可独立热更新。',mode:'认证方式',
       modes:{inherit_web:'继承 WebUI 认证',basic:'独立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'无认证'},
+      deploy:'部署方式',deploys:{internal:'仅内网',public:'仅公网',both:'内网+公网'},path:'端点路径',pathHint:'内外网共用；留空则加载时生成随机。路径是端点密钥的一部分，泄露应立即更换。',regen:'重新随机',
       username:'用户名',credential:'新密码 / Token / API Key',credentialHint:'留空表示保留当前凭据；保存后只显示 SHA-256 校验值。',configured:'已配置静态凭据',notConfigured:'尚未配置静态凭据',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'每行一个 URL',scopesHint:'空格或逗号分隔',sync:'从 JSON 刷新',generate:'生成随机凭据',generated:'已生成 32 字节随机凭据',
@@ -18,6 +19,7 @@
     'zh-TW':{
       title:'MCP 驗證',sub:'與 WebUI 共用連接埠；驗證策略可獨立熱更新。',mode:'驗證方式',
       modes:{inherit_web:'沿用 WebUI 驗證',basic:'獨立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'無驗證'},
+      deploy:'部署方式',deploys:{internal:'僅內網',public:'僅公網',both:'內網+公網'},path:'端點路徑',pathHint:'內外網共用；留空則載入時產生隨機。路徑是端點金鑰的一部分，洩漏應立即更換。',regen:'重新隨機',
       username:'使用者名稱',credential:'新密碼 / Token / API Key',credentialHint:'留空表示保留目前憑據；儲存後只顯示 SHA-256 驗證值。',configured:'已設定靜態憑據',notConfigured:'尚未設定靜態憑據',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'每行一個 URL',scopesHint:'以空格或逗號分隔',sync:'從 JSON 重新整理',generate:'產生隨機憑據',generated:'已產生 32 位元組隨機憑據',
@@ -26,6 +28,7 @@
     en:{
       title:'MCP Authentication',sub:'Shares the WebUI port; the MCP authentication policy hot-reloads independently.',mode:'Authentication mode',
       modes:{inherit_web:'Inherit WebUI auth',basic:'Independent Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'No authentication'},
+      deploy:'Deploy scope',deploys:{internal:'Internal only',public:'Public only',both:'Internal + public'},path:'Endpoint path',pathHint:'Shared by the internal and public faces. Leave empty to generate a random one on load. The path is part of the endpoint secret; rotate it immediately if leaked.',regen:'Randomize',
       username:'Username',credential:'New password / token / API key',credentialHint:'Leave empty to keep the current credential. Saved static credentials are shown only as SHA-256 verifiers.',configured:'Static credential configured',notConfigured:'No static credential configured',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'One URL per line',scopesHint:'Space or comma separated',sync:'Reload from JSON',generate:'Generate random credential',generated:'Generated a 32-byte random credential',
@@ -34,6 +37,7 @@
     de:{
       title:'MCP-Authentifizierung',sub:'Nutzt den WebUI-Port; die MCP-Authentifizierung wird unabhängig per Hot-Reload aktualisiert.',mode:'Authentifizierungsmodus',
       modes:{inherit_web:'WebUI-Authentifizierung übernehmen',basic:'Eigenes Basic',bearer:'Bearer-Token',api_key:'API-Key-Header',oauth_jwt:'OAuth / OIDC JWT',none:'Keine Authentifizierung'},
+      deploy:'Bereitstellung',deploys:{internal:'Nur intern',public:'Nur öffentlich',both:'Intern + öffentlich'},path:'Endpunktpfad',pathHint:'Von interner und öffentlicher Seite gemeinsam genutzt. Leer lassen, um beim Laden einen zufälligen Pfad zu erzeugen. Der Pfad ist Teil des Endpunkt-Geheimnisses; bei Leck sofort rotieren.',regen:'Neu zufällig',
       username:'Benutzername',credential:'Neues Passwort / Token / API-Key',credentialHint:'Leer lassen, um den aktuellen Wert zu behalten. Gespeicherte statische Zugangsdaten werden nur als SHA-256-Prüfwert angezeigt.',configured:'Statische Zugangsdaten konfiguriert',notConfigured:'Keine statischen Zugangsdaten konfiguriert',
       apiHeader:'API-Key-Header',jwks:'JWKS-URL',issuer:'Issuer',audience:'Audience',resource:'Resource-URL',servers:'Authorization Servers',scopes:'Erforderliche Scopes',
       serversHint:'Eine URL pro Zeile',scopesHint:'Durch Leerzeichen oder Komma getrennt',sync:'Aus JSON neu laden',generate:'Zufälligen Schlüssel erzeugen',generated:'32-Byte-Zufallswert erzeugt',
@@ -42,6 +46,7 @@
     fr:{
       title:'Authentification MCP',sub:'Partage le port WebUI ; la stratégie MCP est mise à jour à chaud indépendamment.',mode:"Mode d’authentification",
       modes:{inherit_web:'Hériter de WebUI',basic:'Basic indépendant',bearer:'Jeton Bearer',api_key:'En-tête API Key',oauth_jwt:'OAuth / OIDC JWT',none:'Aucune authentification'},
+      deploy:'Portée de déploiement',deploys:{internal:'Interne uniquement',public:'Public uniquement',both:'Interne + public'},path:'Chemin d’endpoint',pathHint:'Partagé par les faces interne et publique. Laisser vide pour générer un chemin aléatoire au chargement. Le chemin fait partie du secret d’endpoint ; à faire tourner immédiatement en cas de fuite.',regen:'Réaléatoriser',
       username:"Nom d’utilisateur",credential:'Nouveau mot de passe / token / clé API',credentialHint:'Laisser vide pour conserver la valeur actuelle. Les secrets statiques enregistrés ne sont affichés que sous forme de vérificateur SHA-256.',configured:'Secret statique configuré',notConfigured:'Aucun secret statique configuré',
       apiHeader:'En-tête API Key',jwks:'URL JWKS',issuer:'Issuer',audience:'Audience',resource:'URL Resource',servers:'Authorization Servers',scopes:'Scopes requis',
       serversHint:'Une URL par ligne',scopesHint:'Séparés par espace ou virgule',sync:'Recharger depuis JSON',generate:'Générer un secret aléatoire',generated:'Secret aléatoire de 32 octets généré',
@@ -50,6 +55,7 @@
     ja:{
       title:'MCP 認証',sub:'WebUI と同じポートを使用し、MCP 認証ポリシーは独立してホット更新できます。',mode:'認証方式',
       modes:{inherit_web:'WebUI 認証を継承',basic:'独立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'認証なし'},
+      deploy:'配備範囲',deploys:{internal:'内部のみ',public:'公開のみ',both:'内部＋公開'},path:'エンドポイントパス',pathHint:'内部・公開面で共有。空欄なら読込時にランダム生成します。パスはエンドポイントの秘密の一部であり、漏洩時は直ちに交換してください。',regen:'再ランダム',
       username:'ユーザー名',credential:'新しいパスワード / Token / API Key',credentialHint:'空欄なら現在の資格情報を維持します。保存後の静的秘密情報は SHA-256 検証値のみ表示されます。',configured:'静的資格情報を設定済み',notConfigured:'静的資格情報は未設定',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'1 行に 1 URL',scopesHint:'空白またはカンマ区切り',sync:'JSON から再読込',generate:'ランダム資格情報を生成',generated:'32 バイトのランダム資格情報を生成しました',
@@ -80,6 +86,10 @@
       <div class="mcp-field wide"><label data-mcp-t="mode"></label><select id="mcp-auth-mode">
         <option value="inherit_web"></option><option value="basic"></option><option value="bearer"></option><option value="api_key"></option><option value="oauth_jwt"></option><option value="none"></option>
       </select></div>
+      <div class="mcp-field"><label data-mcp-t="deploy"></label><select id="mcp-deploy">
+        <option value="internal"></option><option value="public"></option><option value="both"></option>
+      </select></div>
+      <div class="mcp-field wide"><label data-mcp-t="path"></label><div class="mcp-secret-row"><input id="mcp-path" autocomplete="off" spellcheck="false"><button type="button" class="btn ghost sm" id="mcp-path-regen"></button></div><div class="mcp-help" data-mcp-t="pathHint"></div></div>
       <div class="mcp-field" data-mcp-basic><label data-mcp-t="username"></label><input id="mcp-username" autocomplete="username"></div>
       <div class="mcp-field" data-mcp-api><label data-mcp-t="apiHeader"></label><input id="mcp-api-header" value="X-API-Key"></div>
       <div class="mcp-field wide" data-mcp-static><label data-mcp-t="credential"></label><div class="mcp-secret-row"><input id="mcp-credential" type="password" autocomplete="new-password"><button type="button" class="btn ghost sm" id="mcp-secret-show">👁</button></div><div class="mcp-status" id="mcp-credential-status"></div><div class="mcp-help" data-mcp-t="credentialHint"></div></div>
@@ -95,7 +105,8 @@
   editor.parentNode.insertBefore(root,editor);
 
   const q=id=>document.getElementById(id);
-  const mode=q('mcp-auth-mode'),username=q('mcp-username'),credential=q('mcp-credential'),apiHeader=q('mcp-api-header');
+  const mode=q('mcp-auth-mode'),deploy=q('mcp-deploy'),path=q('mcp-path');
+  const username=q('mcp-username'),credential=q('mcp-credential'),apiHeader=q('mcp-api-header');
   const jwks=q('mcp-jwks'),issuer=q('mcp-issuer'),audience=q('mcp-audience'),resource=q('mcp-resource'),servers=q('mcp-servers'),scopes=q('mcp-scopes');
   let currentVerifier='';
 
@@ -104,7 +115,8 @@
     const c=lang();
     root.querySelectorAll('[data-mcp-t]').forEach(el=>{const k=el.dataset.mcpT;if(c[k]!=null)el.textContent=c[k];});
     Array.from(mode.options).forEach(o=>o.textContent=c.modes[o.value]||o.value);
-    q('mcp-sync').textContent=c.sync;q('mcp-generate').textContent=c.generate;
+    Array.from(deploy.options).forEach(o=>o.textContent=c.deploys[o.value]||o.value);
+    q('mcp-sync').textContent=c.sync;q('mcp-generate').textContent=c.generate;q('mcp-path-regen').textContent=c.regen;
     q('mcp-credential-status').textContent=currentVerifier?c.configured:c.notConfigured;
   }
   function updateVisibility(){
@@ -120,6 +132,8 @@
     const cfg=parseEditor();if(!cfg)return false;
     const m=cfg.web?.mcp||{};
     mode.value=m.auth_mode||'inherit_web';if(!mode.value)mode.value='inherit_web';
+    deploy.value=m.deploy||'internal';if(!deploy.value)deploy.value='internal';
+    path.value=m.path||'';
     username.value=m.username||'';apiHeader.value=m.api_key_header||'X-API-Key';
     currentVerifier=m.credential||'';credential.value='';
     const o=m.oauth||{};jwks.value=o.jwks_url||'';issuer.value=o.issuer||'';audience.value=o.audience||'';resource.value=o.resource||'';
@@ -129,7 +143,7 @@
   function toEditor(){
     const cfg=parseEditor();if(!cfg)return false;
     cfg.web=cfg.web||{};cfg.web.mcp=cfg.web.mcp||{};
-    const m=cfg.web.mcp;m.auth_mode=mode.value||'inherit_web';m.username=username.value.trim();m.api_key_header=(apiHeader.value||'X-API-Key').trim();
+    const m=cfg.web.mcp;m.auth_mode=mode.value||'inherit_web';m.deploy=deploy.value||'internal';m.path=path.value.trim();m.username=username.value.trim();m.api_key_header=(apiHeader.value||'X-API-Key').trim();
     const fresh=credential.value;if(fresh)m.credential=fresh;else if(currentVerifier)m.credential=currentVerifier;
     m.oauth=m.oauth||{};m.oauth.jwks_url=jwks.value.trim();m.oauth.issuer=issuer.value.trim();m.oauth.audience=audience.value.trim();m.oauth.resource=resource.value.trim();
     m.oauth.authorization_servers=servers.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
@@ -147,6 +161,11 @@
     q('mcp-credential-status').textContent=lang().generated;
   };
   q('mcp-secret-show').onclick=()=>{credential.type=credential.type==='password'?'text':'password';};
+  q('mcp-path-regen').onclick=()=>{
+    const bytes=new Uint8Array(10);crypto.getRandomValues(bytes);
+    path.value='/'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+    toEditor();
+  };
 
   const originalLoad=window.loadConfig;
   if(typeof originalLoad==='function')window.loadConfig=async function(){const r=await originalLoad.apply(this,arguments);fromEditor();return r;};

@@ -19,7 +19,23 @@
     "bind": "tunnel",
     "auth": "admin:REPLACE-WITH-A-RANDOM-PASSWORD",
     "cert": "",
-    "key": ""
+    "key": "",
+    "mcp": {
+      "auth_mode": "inherit_web",
+      "username": "",
+      "credential": "",
+      "api_key_header": "X-API-Key",
+      "deploy": "internal",
+      "path": "/0123456789abcdef0123",
+      "oauth": {
+        "jwks_url": "",
+        "issuer": "",
+        "audience": "",
+        "resource": "",
+        "authorization_servers": [],
+        "required_scopes": []
+      }
+    }
   },
   "client": {
     "interface_manager": "self",

@@ -103,6 +103,7 @@
       <div class="mcp-endpoint-item">
         <span class="mcp-endpoint-label" data-mcp-example-t="endpoint"></span>
         <div class="mcp-copy-row"><code id="mcp-example-endpoint"></code><button type="button" class="btn ghost sm" data-copy-target="mcp-example-endpoint"></button></div>
+        <span class="mcp-help" id="mcp-example-endpoint-face"></span>
       </div>
       <div class="mcp-endpoint-item" id="mcp-metadata-wrap">
         <span class="mcp-endpoint-label" data-mcp-example-t="metadata"></span>
@@ -130,7 +131,23 @@
   if(!mode)return;
 
   function locale(){const l=document.documentElement.lang||'en';return I18N[l]||I18N.en;}
-  function endpoint(){return (window.location.origin&&window.location.origin!=='null'?window.location.origin:'http://HOST:PORT')+'/mcp';}
+  // 端点路径跟随配置：内外网面共用同一 path，绝不回落可猜的 /mcp。
+  // 未配置时显示 <PATH> 占位，提示用户在设置里生成/填写。
+  function endpointPath(){
+    const p=value('mcp-path');
+    return p||'/<PATH>';
+  }
+  function endpoint(){
+    const base=(window.location.origin&&window.location.origin!=='null'?window.location.origin:'http://HOST:PORT');
+    return base+endpointPath();
+  }
+  // 所在面标注：直接复用部署方式下拉的本地化文本，避免重复 i18n。
+  function deployFace(){
+    const el=field('mcp-deploy');
+    if(!el)return '';
+    const opt=el.selectedOptions&&el.selectedOptions[0];
+    return opt?opt.textContent:'';
+  }
   function metadataEndpoint(){return (window.location.origin&&window.location.origin!=='null'?window.location.origin:'http://HOST:PORT')+'/.well-known/oauth-protected-resource';}
   function value(id,fallback=''){const el=field(id);return el&&el.value.trim()?el.value.trim():fallback;}
   function lines(id){const el=field(id);return el?el.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean):[];}
@@ -197,6 +214,9 @@
 
   function renderExamples(){
     q('mcp-example-endpoint').textContent=endpoint();
+    const face=deployFace();
+    const faceEl=q('mcp-example-endpoint-face');
+    if(faceEl){faceEl.textContent=face;faceEl.style.display=face?'':'none';}
     q('mcp-example-metadata').textContent=metadataEndpoint();
     q('mcp-metadata-wrap').style.display=mode.value==='oauth_jwt'?'':'none';
     q('mcp-example-server').textContent=JSON.stringify(serverObject(),null,2);
@@ -231,6 +251,8 @@
   settings.addEventListener('change',renderExamples);
   const syncButton=q('mcp-sync');
   if(syncButton)syncButton.addEventListener('click',()=>setTimeout(renderExamples,0));
+  const regenButton=q('mcp-path-regen');
+  if(regenButton)regenButton.addEventListener('click',()=>setTimeout(renderExamples,0));
 
   const previousLoad=window.loadConfig;
   if(typeof previousLoad==='function')window.loadConfig=async function(){const r=await previousLoad.apply(this,arguments);renderExamples();return r;};
