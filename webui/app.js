@@ -1743,15 +1743,17 @@ function renderConnsTable(data,fresh){
     let rtt=r.rtt>=100000?'-':r.rtt+' ms',rttTip='',rttCls='';
     if(r.fwd>0||r.ret>0){
       // 半收敛（只有一侧有值）时未测得的一侧显示 '-'，不能显示 0——0 在口径里
-      // 是"未收敛"，写成 0ms 会被误读成零时延。fwd/ret 为 µs，换算成 ms 再显示。
-      const fw=r.fwd>0?Math.round(r.fwd/1000):'-',rt=r.ret>0?Math.round(r.ret/1000):'-';
+      // 是"未收敛"，写成 0ms 会被误读成零时延。fwd/ret 为 µs，换算成 ms 再显示；
+      // 亚毫秒路径用 max(1,·) 兜底，避免显示 0 与"未收敛"混淆。
+      const fw=r.fwd>0?Math.max(1,Math.round(r.fwd/1000)):'-',rt=r.ret>0?Math.max(1,Math.round(r.ret/1000)):'-';
       rtt=fw+'/'+rt;
       rttTip=t('th.rtt_tip').replace('{f}',fw).replace('{r}',rt).replace('{rt}',r.rtt);
-      if(r.fwd>0&&r.ret>0&&(fw*2>rt||rt*2>fw))rttCls=' rtt-asym';
+      // 不对称判断用原始 µs 值（比值与缩放无关），避免四舍五入在 2x 边界翻转。
+      if(r.fwd>0&&r.ret>0&&(r.fwd*2>r.ret||r.ret*2>r.fwd))rttCls=' rtt-asym';
     }
     // 内核 min_rtt 地板（µs→ms）一并显示在"去/回"旁，收敛与否都给出参考值。
     if(r.minrtt>0){
-      const mn=Math.round(r.minrtt/1000);
+      const mn=Math.max(1,Math.round(r.minrtt/1000));
       rtt+=' <span class="dim">· '+t('ov.mn')+' '+mn+'</span>';
       rttTip+=(rttTip?' · ':'')+t('ov.mn')+' '+mn+' ms';
     }
@@ -1767,11 +1769,11 @@ function renderConnsTable(data,fresh){
     // 唯独这里是个看得见的洞。
     const cerr=r.err||r.brutErr;
     const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
-    return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="hide-sm num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
-      '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td class="hide-sm">'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
-      '<td class="hide-sm num speed">'+fmtBytes(r.sx,true)+'</td><td class="hide-sm num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
+    return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+      '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td>'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
+      '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
       '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
-      '<td class="hide-sm num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
+      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+

@@ -443,7 +443,11 @@ func (s *rttProbeScheduler) anchorHalfRef(ref int) uint64 {
 		}
 	}
 	if v := s.decay[[2]uint32{uint32(ref), uint32(ref)}]; v > 0 {
-		return oneWayUS(v) / 2
+		h := oneWayUS(v) / 2
+		if h == 0 {
+			h = 1 // 亚 2µs 基线：地板 1µs，避免 halfRef=0 使 recomputeAll 提前返回
+		}
+		return h
 	}
 	return 0
 }
