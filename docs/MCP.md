@@ -40,6 +40,8 @@ TLSVPN uses the official Go MCP SDK and Streamable HTTP transport.
 | `public` | MCP not served (404 / normal Web handling) | MCP served on `path` |
 | `both` | MCP served | MCP served on `path` |
 
+The public face is defined by the server's VPN listener (`server.addr`), which only exists in **server mode**. Client mode runs no public listener, so `web.mcp.deploy` is normalized to `internal` on configuration load: the client dashboard always serves MCP on the internal face, and `public`/`both` never apply. Setting `deploy: "public"` in client mode would otherwise disable the internal face while having no public face to fall back to, making MCP unreachable.
+
 ### The path is part of the secret
 
 `web.mcp.path` is a single path segment shared by both faces (for example `/a1b2c3d4e5f6a7b8c9d0`). It is **not** a well-known value:

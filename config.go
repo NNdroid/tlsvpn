@@ -274,6 +274,13 @@ func (c *Config) applyDefaults() {
 		c.Web.Bind = "all"
 	}
 	c.Web.MCP.applyDefaults()
+	// 客户端没有公网 VPN listener：deploy 的 public/both 面只存在于服务端
+	// （server.addr 的 TLS 后分派，见 publicMCPDispatcher）。client 模式强制
+	// deploy=internal，否则 deploy=public 会让 deployAllowsInternal()=false 而
+	// 客户端又无公网面，导致客户端 MCP 整体不可达。
+	if c.Mode == "client" {
+		c.Web.MCP.Deploy = mcpDeployInternal
+	}
 	if c.Encrypt {
 		if c.EncAlgo == "" {
 			c.EncAlgo = "gcm256"

@@ -173,6 +173,46 @@ func TestInterfaceManagerDefaultsToSelf(t *testing.T) {
 	}
 }
 
+func TestClientModeForcesMCPDeployInternal(t *testing.T) {
+	for _, deploy := range []string{mcpDeployInternal, mcpDeployPublic, mcpDeployBoth, ""} {
+		cfg := &Config{
+			Mode: "client",
+			PSK:  "test-only-high-entropy-secret",
+			Addr: "1.2.3.4:4000",
+			Web:  WebConfig{Addr: "127.0.0.1:8080", Auth: "admin:x", MCP: MCPConfig{Deploy: deploy, Path: "/a1b2c3d4e5f6a7b8c9d0"}},
+		}
+		cfg.applyDefaults()
+		if cfg.Web.MCP.Deploy != mcpDeployInternal {
+			t.Fatalf("client mode with deploy=%q: got %q, want internal", deploy, cfg.Web.MCP.Deploy)
+		}
+		if !cfg.Web.MCP.deployAllowsInternal() {
+			t.Fatal("client mode should always allow the internal MCP face")
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("client mode should validate after deploy normalization: %v", err)
+		}
+	}
+}
+
+func TestServerModePreservesMCPDeploy(t *testing.T) {
+	for deploy, want := range map[string]string{
+		mcpDeployInternal: mcpDeployInternal,
+		mcpDeployPublic:   mcpDeployPublic,
+		mcpDeployBoth:     mcpDeployBoth,
+	} {
+		cfg := &Config{
+			Mode: "server",
+			PSK:  "test-only-high-entropy-secret",
+			Addr: ":4000",
+			Web:  WebConfig{Addr: ":8080", Auth: "admin:x", MCP: MCPConfig{Deploy: deploy, Path: "/a1b2c3d4e5f6a7b8c9d0"}},
+		}
+		cfg.applyDefaults()
+		if cfg.Web.MCP.Deploy != want {
+			t.Fatalf("server mode with deploy=%q: got %q, want %q", deploy, cfg.Web.MCP.Deploy, want)
+		}
+	}
+}
+
 func TestValidateNetifdInterfaceManager(t *testing.T) {
 	base := func() *Config {
 		cfg := &Config{
