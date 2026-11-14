@@ -73,6 +73,9 @@ type schedulerConnJSON struct {
 	// 0=未收敛（WebUI 回退显示 RTT）。仅观测，不在 TLSVPN 线上。
 	FwdOneWayUS uint64 `json:"fwd_oneway_us,omitempty"`
 	RetOneWayUS uint64 `json:"ret_oneway_us,omitempty"`
+	// MinRttUS 该连接的内核 min_rtt 地板（µs）；0=未知。与 fwd/ret 同列供
+	// WebUI 参考。仅观测，不在 TLSVPN 线上。
+	MinRttUS uint64 `json:"min_rtt_us,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -335,6 +338,12 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		return schedulerConnJSON{}
 	}
 	rate := b.rateBytesPerSec.Load()
+	// min_rtt 未知时 adaptiveBackendMinRTT 返回 50000 哨兵，不可当作真实值
+	// 暴露；只在上报明确已知时填充，否则省略（omitempty）。
+	var minRTT uint64
+	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
+		minRTT = uint64(mr)
+	}
 	return schedulerConnJSON{
 		QueuedBytes:        b.queuedBytes.Load(),
 		RateMbps:           float64(rate) * 8 / 1_000_000,
@@ -347,6 +356,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		FECAssignedBatches: b.fecAssignedBatches.Load(),
 		FwdOneWayUS:        b.fwdOneWayUS.Load(),
 		RetOneWayUS:        b.retOneWayUS.Load(),
+		MinRttUS:           minRTT,
 	}
 }
 

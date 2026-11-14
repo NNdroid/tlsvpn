@@ -158,6 +158,11 @@ func TestSchedulerSnapshotExposesState(t *testing.T) {
 	if s.FwdOneWayUS != 1234 || s.RetOneWayUS != 5678 {
 		t.Fatalf("one-way snapshot: fwd=%d ret=%d want 1234/5678", s.FwdOneWayUS, s.RetOneWayUS)
 	}
+	// fixture testAdaptiveBackend(10000) 设 minRttCache=10000µs（非哨兵），
+	// 快照应原样上报该内核 min_rtt 地板。
+	if s.MinRttUS != 10000 {
+		t.Fatalf("min_rtt snapshot: got=%d want=10000", s.MinRttUS)
+	}
 }
 
 func TestAdaptiveActivePathTargetByDemandRate(t *testing.T) {

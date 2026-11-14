@@ -71,6 +71,7 @@ func TestWebUIConnTableOneWayColumn(t *testing.T) {
 	for _, want := range []string{
 		"scheduler.fwd_oneway_us",
 		"scheduler.ret_oneway_us",
+		"scheduler.min_rtt_us",
 		"th.rtt_tip",
 		"rtt-asym",
 	} {

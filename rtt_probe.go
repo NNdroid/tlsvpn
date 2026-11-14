@@ -404,6 +404,8 @@ func (s *rttProbeScheduler) updateDecay(src, dst uint32, sampleNS uint64) {
 }
 
 // recomputeAll 用当前锚定重算各连接 fwd/ret 并发布到 Backend 原子。
+// 单位契约：decay 样本为 ns（updateDecay 存 sampleNS），这里统一换算成 µs
+// 再与 µs 的 halfRef 相减，故 fwdOneWayUS/retOneWayUS 恒为 µs（与字段名/注释一致）。
 func (s *rttProbeScheduler) recomputeAll() {
 	if len(s.active) == 0 {
 		return
@@ -424,10 +426,10 @@ func (s *rttProbeScheduler) recomputeAll() {
 			continue
 		}
 		if v, ok := s.decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-			b.fwdOneWayUS.Store(subClamp(v, halfRef))
+			b.fwdOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
 		}
 		if v, ok := s.decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-			b.retOneWayUS.Store(subClamp(v, halfRef))
+			b.retOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
 		}
 	}
 }
@@ -441,7 +443,7 @@ func (s *rttProbeScheduler) anchorHalfRef(ref int) uint64 {
 		}
 	}
 	if v := s.decay[[2]uint32{uint32(ref), uint32(ref)}]; v > 0 {
-		return v / 2
+		return oneWayUS(v) / 2
 	}
 	return 0
 }
@@ -459,6 +461,10 @@ func subClamp(a, b uint64) uint64 {
 	}
 	return d
 }
+
+// oneWayUS 把 ns 量级的探测样本换算成 µs：探针采样（recvNS-sendTS）与
+// decay 矩阵均为 ns，而对外发布的 fwdOneWayUS/retOneWayUS 为 µs。
+func oneWayUS(sampleNS uint64) uint64 { return sampleNS / 1000 }
 
 // decayedMinUpdate 纯函数：decayed-min 更新（供测试）。
 func decayedMinUpdate(cur uint64, elapsedNS int64, sample uint64, decayPerSecNS uint64) uint64 {
