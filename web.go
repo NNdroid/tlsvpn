@@ -112,7 +112,7 @@ func (w *WebManager) rebindIfNeeded() {
 		var err error
 		tlsCfg, err = loadWebTLS(cfg)
 		if err != nil {
-			if w.onceWarn("tls|"+cfg.Web.Cert+"|"+cfg.Web.Key) {
+			if w.onceWarn("tls|" + cfg.Web.Cert + "|" + cfg.Web.Key) {
 				log.Errorf("[Web] load TLS pair: %v (keeping current listeners)", err)
 			}
 			return
@@ -189,7 +189,7 @@ func loadWebTLS(cfg *Config) (*tls.Config, error) {
 }
 
 func (w *WebManager) serve(l net.Listener) {
-	httpSrv := &http.Server{Handler: w.mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	httpSrv := &http.Server{Handler: securityHeaders(w.mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	if err := httpSrv.Serve(l); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 		log.Warnf("[Web] serve stopped: %v", err)
 	}
@@ -207,6 +207,23 @@ func (w *WebManager) onceWarn(key string) bool {
 func mcpBasicAuthValid(r *http.Request, expected string) bool {
 	user, pass, ok := r.BasicAuth()
 	return ok && constantTimeCredentialEqual(user+":"+pass, expected)
+}
+
+// securityHeaders 统一设置 WebUI 响应的安全头。面板是管理面：即使已认证，
+// 也值得防点击劫持（frame-ancestors/X-Frame-Options）、MIME 嗅探（nosniff）
+// 与引用泄漏（Referrer-Policy）。CSP 允许 'unsafe-inline' 以兼容现有大量内联
+// onclick/style，但默认源收紧为 'self'，阻断任何外部脚本/资源注入。
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; font-src 'self'; connect-src 'self'; "+
+				"frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // auth uses an HttpOnly cookie session instead of browser Basic Auth prompts.

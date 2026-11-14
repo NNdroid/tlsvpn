@@ -8,6 +8,7 @@ package main
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -160,4 +161,41 @@ func readProcCPU() *cpuJSON {
 	cpuBsn.wall = now
 	cpuBsn.armed = true
 	return out
+}
+
+// systemMetricsSnapshot 一次采集的全部系统指标。dashboard 的每个连接每 2 秒
+// 都要出一次 stats，多个面板同屏时若各自读 /proc 并调 runtime.ReadMemStats，
+// 既放大磁盘读，又会把 readProcCPU 的差分基线在同 tick 内重复刷新——第二次
+// 调用算出的 CPU% 接近 0。用带 1 秒 TTL 的共享缓存解决两者。
+type systemMetricsSnapshot struct {
+	load *loadJSON
+	mem  *memJSON
+	fd   int
+	cpu  *cpuJSON
+	ms   runtime.MemStats
+}
+
+var (
+	sysMetricsMu   sync.Mutex
+	sysMetricsAt   time.Time
+	sysMetricsData systemMetricsSnapshot
+)
+
+// systemMetrics 返回缓存的系统指标；超过 1 秒未刷新则重新采集一次并更新基线。
+func systemMetrics() systemMetricsSnapshot {
+	sysMetricsMu.Lock()
+	defer sysMetricsMu.Unlock()
+	if time.Since(sysMetricsAt) >= time.Second {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		sysMetricsData = systemMetricsSnapshot{
+			load: readLoadAvg(),
+			mem:  readMemInfo(),
+			fd:   countFDs(),
+			cpu:  readProcCPU(),
+			ms:   ms,
+		}
+		sysMetricsAt = time.Now()
+	}
+	return sysMetricsData
 }

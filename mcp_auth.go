@@ -36,9 +36,9 @@ const (
 	mcpAuthOAuthJWT   = "oauth_jwt"
 
 	mcpCredentialHashPrefix = "sha256:"
-	mcpDefaultAPIKeyHeader   = "X-API-Key"
-	mcpJWKSMaxBytes          = 1 << 20
-	mcpJWKSCacheTTL          = 10 * time.Minute
+	mcpDefaultAPIKeyHeader  = "X-API-Key"
+	mcpJWKSMaxBytes         = 1 << 20
+	mcpJWKSCacheTTL         = 10 * time.Minute
 
 	// MCP 端点部署面。internal=仅内网 web listener；public=仅公网 VPN listener；
 	// both=两者。空值向后兼容，视为 internal（默认不对外暴露）。
@@ -72,7 +72,7 @@ type MCPConfig struct {
 	// faces (e.g. "/a1b2c3..."). Empty generates a random path on load; the
 	// path is part of the secret material, so never fall back to a guessable
 	// default such as /mcp.
-	Path string `json:"path,omitempty"`
+	Path  string            `json:"path,omitempty"`
 	OAuth MCPOAuthJWTConfig `json:"oauth,omitempty"`
 }
 
@@ -423,6 +423,26 @@ func (w *WebManager) serveMCP(rw http.ResponseWriter, r *http.Request) {
 		status := http.StatusUnauthorized
 		if errors.Is(authErr, errMCPInsufficientScope) {
 			status = http.StatusForbidden
+		} else {
+			// 仅对真实认证失败（401）限速；insufficient_scope 是配置问题而非攻击，
+			// 限速会惩罚合法但 scope 配置错的客户端。超阈值直接 429 并记日志。
+			if mcpAuthThrottler.blocked(remote) {
+				rw.Header().Set("Content-Type", "application/json")
+				rw.Header().Set("Cache-Control", "no-store")
+				rw.Header().Set("Retry-After", "60")
+				rw.WriteHeader(http.StatusTooManyRequests)
+				_, _ = rw.Write([]byte(`{"error":"too_many_attempts"}`))
+				mcpAccess.add(mcpAccessLine{
+					Remote: remote,
+					Level:  "warn",
+					Method: "auth",
+					Status: http.StatusTooManyRequests,
+					DurMs:  time.Since(start).Milliseconds(),
+					Msg:    "throttled: too many failed authentication attempts",
+				})
+				return
+			}
+			mcpAuthThrottler.record(remote)
 		}
 		w.writeMCPAuthError(rw, r, mode, authErr)
 		mcpAccess.add(mcpAccessLine{
@@ -435,6 +455,7 @@ func (w *WebManager) serveMCP(rw http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	mcpAuthThrottler.reset(remote)
 	if w.mcp == nil {
 		http.NotFound(rw, r)
 		return

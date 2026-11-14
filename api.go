@@ -108,17 +108,17 @@ type WebStats struct {
 
 // serverConnSnapshot 服务端单条物理连接的明细快照
 type serverConnSnapshot struct {
-	TCP *tcpSocketSnapshot `json:"tcp,omitempty"`
-	ClientID  string            `json:"client_id"`
-	ConnID    string            `json:"conn_id,omitempty"`
-	Remote    string            `json:"remote"`
-	RttMs     uint32            `json:"rtt_ms"`
-	Scheduler schedulerConnJSON `json:"scheduler"`
-	TxBytes   uint64            `json:"tx_bytes"`
-	RxBytes   uint64            `json:"rx_bytes"`
-	TxPackets uint64            `json:"tx_packets"`
-	RxPackets uint64            `json:"rx_packets"`
-	AgeSec    uint64            `json:"age_sec"`
+	TCP       *tcpSocketSnapshot `json:"tcp,omitempty"`
+	ClientID  string             `json:"client_id"`
+	ConnID    string             `json:"conn_id,omitempty"`
+	Remote    string             `json:"remote"`
+	RttMs     uint32             `json:"rtt_ms"`
+	Scheduler schedulerConnJSON  `json:"scheduler"`
+	TxBytes   uint64             `json:"tx_bytes"`
+	RxBytes   uint64             `json:"rx_bytes"`
+	TxPackets uint64             `json:"tx_packets"`
+	RxPackets uint64             `json:"rx_packets"`
+	AgeSec    uint64             `json:"age_sec"`
 	// 本连接的协商结果：FEC 分组、内层加密、密钥代际
 	FEC        string `json:"fec"`
 	EncAlgo    int    `json:"enc_algo"`
@@ -391,8 +391,12 @@ type runtimeNegJSON struct {
 	PolicyRoutingErr string `json:"policy_routing_error,omitempty"`
 }
 
-// basicAuthWrapper 为管理面加一层 Basic Auth；expected 为空时放行
-// （未配置 -web-auth，保持旧行为；文档强烈建议配置）。
+// csrfGuard 管理动作的跨站防护：要求请求携带自定义头 X-Requested-With。
+// Basic Auth 凭据会被浏览器自动附带，恶意网页可诱导管理员浏览器跨站 POST；
+// 自定义头无法通过跨站 <form> 携带，且其存在不会触发 CORS 预检放行
+// （响应侧不设 Access-Control-Allow-Origin，跨站脚本同样读不到结果）。
+// basicAuthWrapper 为测试/脚本构造的简单 Basic Auth 门；生产管理面走
+// WebManager.auth 的 cookie 会话中间件。expected 为空时放行。
 func basicAuthWrapper(expected string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if expected == "" {
@@ -409,10 +413,6 @@ func basicAuthWrapper(expected string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// csrfGuard 管理动作的跨站防护：要求请求携带自定义头 X-Requested-With。
-// Basic Auth 凭据会被浏览器自动附带，恶意网页可诱导管理员浏览器跨站 POST；
-// 自定义头无法通过跨站 <form> 携带，且其存在不会触发 CORS 预检放行
-// （响应侧不设 Access-Control-Allow-Origin，跨站脚本同样读不到结果）。
 func csrfGuard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Requested-With") != "tlsvpn" {
@@ -685,8 +685,7 @@ func writeOK(w http.ResponseWriter) {
 // handleMetrics 输出 Prometheus 文本格式指标
 func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
+		ms := systemMetrics().ms
 		var b strings.Builder
 		emit := func(name, help, typ, val string) {
 			b.WriteString("# HELP " + name + " " + help + "\n# TYPE " + name + " " + typ + "\n" + name + " " + val + "\n")
@@ -786,8 +785,10 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 	w.Header().Set("Content-Type", "application/json")
 	stats := WebStats{InstanceID: dashboardInstanceID, SampleTimeMs: time.Now().UnixMilli(), AccountingScope: "application_wire_excluding_heartbeat", Version: appVersion, Clients: make(map[string]interface{}), LogLevel: currentLogLevelName()}
 
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
+	// 系统指标走共享 1 秒缓存：多个 dashboard 连接同 tick 各读一遍 /proc 并
+	// 调 runtime.ReadMemStats（短暂 STW）既浪费又污染 readProcCPU 差分基线。
+	sm := systemMetrics()
+	ms := sm.ms
 	stats.Mem = memStatsJSON{
 		HeapAllocMB:  float64(ms.HeapAlloc) / 1024 / 1024,
 		SysMB:        float64(ms.Sys) / 1024 / 1024,
@@ -1016,12 +1017,12 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.System = sysInfo(cfgPath, cli.PendingRestart())
 	}
 
-	stats.System.Load = readLoadAvg()
-	stats.System.Mem = readMemInfo()
-	stats.System.FdOpen = countFDs()
+	stats.System.Load = sm.load
+	stats.System.Mem = sm.mem
+	stats.System.FdOpen = sm.fd
 	stats.System.NumGC = ms.NumGC
 	stats.System.GCPauseMs = float64(ms.PauseTotalNs) / 1e6
-	stats.CPU = readProcCPU()
+	stats.CPU = sm.cpu
 	if ct := dailyTraffic.ClientSnapshot(); len(ct) > 0 {
 		stats.ClientTraffic = ct
 	}

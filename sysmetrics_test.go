@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseLoadAvg(t *testing.T) {
 	l := parseLoadAvg([]byte("0.52 0.58 0.59 1/480 12345\n"))
@@ -54,4 +57,25 @@ func TestParseProcStatCPU(t *testing.T) {
 			t.Errorf("%s: must not parse", name)
 		}
 	}
+}
+
+func TestSystemMetricsCache(t *testing.T) {
+	// 强制过期触发一次采集
+	sysMetricsMu.Lock()
+	sysMetricsAt = time.Time{}
+	sysMetricsMu.Unlock()
+	_ = systemMetrics()
+	sysMetricsMu.Lock()
+	firstAt := sysMetricsAt
+	sysMetricsMu.Unlock()
+	if firstAt.IsZero() {
+		t.Fatal("expected a collection timestamp after forced refresh")
+	}
+	// TTL 窗口内再次调用：命中缓存，不刷新时间戳、不重读 /proc
+	_ = systemMetrics()
+	sysMetricsMu.Lock()
+	if !sysMetricsAt.Equal(firstAt) {
+		t.Fatal("within TTL should hit cache, not re-collect")
+	}
+	sysMetricsMu.Unlock()
 }

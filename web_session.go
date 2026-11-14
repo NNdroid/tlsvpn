@@ -30,6 +30,64 @@ type webSessionStore struct {
 
 var dashboardSessions = webSessionStore{sessions: make(map[string]webSession)}
 
+// ipFailThrottle 每 IP 的失败限速（滑动窗口）。窗口内失败次数达到阈值即判定
+// 为在线爆破，返回 429 直到窗口滑出或成功认证。阈值/窗口宽松，误锁正常客户
+// 端风险低，同时让远程爆破基本不可行。dashboard 登录与 MCP 认证各自独立实例。
+type ipFailThrottle struct {
+	mu    sync.Mutex
+	fails map[string][]time.Time // ip -> 最近失败时间戳
+	max   int
+	win   time.Duration
+}
+
+const (
+	loginThrottleMax = 8
+	loginThrottleWin = time.Minute
+	// MCP 认证失败阈值略宽：MCP 客户端（AI agent）可能因 token 过期重试几次，
+	// 且部分 agent 会并发多个请求。仍足以挡住对 inherit_web/basic 口令的爆破。
+	mcpAuthThrottleMax = 10
+	mcpAuthThrottleWin = time.Minute
+)
+
+var (
+	loginThrottler   = newIPFailThrottle(loginThrottleMax, loginThrottleWin)
+	mcpAuthThrottler = newIPFailThrottle(mcpAuthThrottleMax, mcpAuthThrottleWin)
+)
+
+func newIPFailThrottle(max int, win time.Duration) *ipFailThrottle {
+	return &ipFailThrottle{fails: make(map[string][]time.Time), max: max, win: win}
+}
+
+func (t *ipFailThrottle) blocked(ip string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	kept := t.fails[ip][:0]
+	for _, ts := range t.fails[ip] {
+		if now.Sub(ts) < t.win {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) == 0 {
+		delete(t.fails, ip)
+		return false
+	}
+	t.fails[ip] = kept
+	return len(kept) >= t.max
+}
+
+func (t *ipFailThrottle) record(ip string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.fails[ip] = append(t.fails[ip], time.Now())
+}
+
+func (t *ipFailThrottle) reset(ip string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.fails, ip)
+}
+
 func webAuthHash(auth string) [32]byte { return sha256.Sum256([]byte(auth)) }
 
 func (s *webSessionStore) create(auth string) (string, error) {
@@ -121,6 +179,14 @@ func handleDashboardLogin(w http.ResponseWriter, r *http.Request, expected strin
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 在线口令爆破防护：每 IP 滑动窗口内失败次数超阈值直接 429，不给 150ms
+	// 睡眠之外再给攻击者逐次试错的机会。成功登录重置该 IP 计数。
+	ip := mcpRemoteHost(r)
+	if loginThrottler.blocked(ip) {
+		w.Header().Set("Retry-After", "60")
+		http.Error(w, "Too many login attempts, try again later", http.StatusTooManyRequests)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	var req struct {
 		Username string `json:"username"`
@@ -133,10 +199,12 @@ func handleDashboardLogin(w http.ResponseWriter, r *http.Request, expected strin
 		return
 	}
 	if expected == "" || !constantTimeCredentialEqual(req.Username+":"+req.Password, expected) {
+		loginThrottler.record(ip)
 		time.Sleep(150 * time.Millisecond)
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
+	loginThrottler.reset(ip)
 	token, err := dashboardSessions.create(expected)
 	if err != nil {
 		http.Error(w, "Unable to create session", http.StatusInternalServerError)

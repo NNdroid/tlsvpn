@@ -88,23 +88,23 @@ func TestMCPBasicBearerAPIKeyAndNoneAuth(t *testing.T) {
 		configure func(*http.Request)
 	}{
 		{
-			name: "basic",
-			mcp: MCPConfig{AuthMode: mcpAuthBasic, Username: "agent", Credential: normalizeMCPStaticCredential("basic-secret")},
+			name:      "basic",
+			mcp:       MCPConfig{AuthMode: mcpAuthBasic, Username: "agent", Credential: normalizeMCPStaticCredential("basic-secret")},
 			configure: func(r *http.Request) { r.SetBasicAuth("agent", "basic-secret") },
 		},
 		{
-			name: "bearer",
-			mcp: MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("bearer-secret")},
+			name:      "bearer",
+			mcp:       MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("bearer-secret")},
 			configure: func(r *http.Request) { r.Header.Set("Authorization", "Bearer bearer-secret") },
 		},
 		{
-			name: "api-key",
-			mcp: MCPConfig{AuthMode: mcpAuthAPIKey, APIKeyHeader: "X-TLSVPN-Key", Credential: normalizeMCPStaticCredential("api-secret")},
+			name:      "api-key",
+			mcp:       MCPConfig{AuthMode: mcpAuthAPIKey, APIKeyHeader: "X-TLSVPN-Key", Credential: normalizeMCPStaticCredential("api-secret")},
 			configure: func(r *http.Request) { r.Header.Set("X-TLSVPN-Key", "api-secret") },
 		},
 		{
 			name: "none",
-			mcp: MCPConfig{AuthMode: mcpAuthNone},
+			mcp:  MCPConfig{AuthMode: mcpAuthNone},
 		},
 	}
 
@@ -143,7 +143,7 @@ func TestMCPAuthHotReloadWithoutListenerRestart(t *testing.T) {
 
 	updated := &Config{Web: WebConfig{
 		Auth: "web-user:web-pass",
-		MCP: MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("rotated-token"), Path: "/mcp"},
+		MCP:  MCPConfig{AuthMode: mcpAuthBearer, Credential: normalizeMCPStaticCredential("rotated-token"), Path: "/mcp"},
 	}}
 	mgr.SetConfig(updated)
 
@@ -192,12 +192,12 @@ func TestMCPOAuthJWTAndProtectedResourceMetadata(t *testing.T) {
 	cfg := &Config{Web: WebConfig{
 		Auth: "dashboard:secret",
 		MCP: MCPConfig{AuthMode: mcpAuthOAuthJWT, Path: "/mcp", OAuth: MCPOAuthJWTConfig{
-			JWKSURL: jwks.URL + "/jwks",
-			Issuer: issuer,
-			Audience: audience,
-			Resource: resource,
+			JWKSURL:              jwks.URL + "/jwks",
+			Issuer:               issuer,
+			Audience:             audience,
+			Resource:             resource,
 			AuthorizationServers: []string{issuer},
-			RequiredScopes: []string{"mcp:read"},
+			RequiredScopes:       []string{"mcp:read"},
 		}},
 	}}
 	if err := cfg.Web.MCP.Validate(); err != nil {
@@ -208,10 +208,10 @@ func TestMCPOAuthJWTAndProtectedResourceMetadata(t *testing.T) {
 	makeToken := func(scope string) string {
 		t.Helper()
 		claims := jwt.MapClaims{
-			"iss": issuer,
-			"aud": audience,
-			"exp": time.Now().Add(5 * time.Minute).Unix(),
-			"iat": time.Now().Add(-time.Second).Unix(),
+			"iss":   issuer,
+			"aud":   audience,
+			"exp":   time.Now().Add(5 * time.Minute).Unix(),
+			"iat":   time.Now().Add(-time.Second).Unix(),
 			"scope": scope,
 		}
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -260,5 +260,48 @@ func TestMCPOAuthJWTAndProtectedResourceMetadata(t *testing.T) {
 	}
 	if metadata.Resource != resource || len(metadata.AuthorizationServers) != 1 || metadata.AuthorizationServers[0] != issuer || len(metadata.Scopes) != 1 || metadata.Scopes[0] != "mcp:read" {
 		t.Fatalf("unexpected protected resource metadata: %+v", metadata)
+	}
+}
+
+func TestMCPAuthThrottle429(t *testing.T) {
+	old := mcpAuthThrottler
+	mcpAuthThrottler = newIPFailThrottle(mcpAuthThrottleMax, mcpAuthThrottleWin)
+	defer func() { mcpAuthThrottler = old }()
+	mcp := MCPConfig{AuthMode: mcpAuthBasic, Username: "agent", Credential: normalizeMCPStaticCredential("basic-secret"), Path: "/mcp"}
+	cfg := &Config{Web: WebConfig{Auth: "dashboard:secret", MCP: mcp}}
+	mgr := NewWebManager(nil, nil, cfg, http.NewServeMux())
+	ip := "203.0.113.77"
+	var last *httptest.ResponseRecorder
+	for i := 0; i < mcpAuthThrottleMax+2; i++ {
+		last = runMCPRequest(t, mgr, func(r *http.Request) {
+			r.SetBasicAuth("agent", "wrong-password")
+			r.RemoteAddr = ip + ":40000"
+		})
+		if last.Code == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated failures, got %d", last.Code)
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After on 429")
+	}
+	// 正确凭据不受限速影响，成功后重置该 IP 的失败计数（防止攻击者用错误口令
+	// 把合法客户端锁在窗口外——DoS 面，所以成功必须解限）。
+	ok := runMCPRequest(t, mgr, func(r *http.Request) {
+		r.SetBasicAuth("agent", "basic-secret")
+		r.RemoteAddr = ip + ":40000"
+	})
+	if ok.Code != http.StatusOK {
+		t.Fatalf("correct credentials must succeed and reset the throttle, got %d", ok.Code)
+	}
+	// 重置后下一次失败应回到 401（不再是 429）
+	afterReset := runMCPRequest(t, mgr, func(r *http.Request) {
+		r.SetBasicAuth("agent", "wrong-password")
+		r.RemoteAddr = ip + ":40000"
+	})
+	if afterReset.Code != http.StatusUnauthorized {
+		t.Fatalf("after success reset, a failure should be 401 again, got %d", afterReset.Code)
 	}
 }

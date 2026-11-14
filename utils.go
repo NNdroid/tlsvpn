@@ -155,7 +155,10 @@ func (d *publicMCPDispatcher) serveMCPIfMatch(rw http.ResponseWriter, r *http.Re
 }
 
 func serveFallbackHTTP(conn net.Conn, alpn string, mcp *publicMCPDispatcher) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 公网 VPN listener 的 TLS 后分派同样补上安全头：MCP 响应与 403 nginx
+	// 诱饵都带 nosniff/frame-ancestors/CSP，既加固公网 MCP 面，也让诱饵更
+	// 像真实站点（真实 nginx 通常也带这些头）。
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mcp.serveMCPIfMatch(w, r) {
 			return
 		}
@@ -163,7 +166,7 @@ func serveFallbackHTTP(conn net.Conn, alpn string, mcp *publicMCPDispatcher) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(403)
 		w.Write([]byte(`<html><head><title>403 Forbidden</title></head><body><center><h1>403 Forbidden</h1></center><hr><center>nginx</center></body></html>`))
-	})
+	}))
 	if alpn == "h2" {
 		srv := &http2.Server{IdleTimeout: 60 * time.Second}
 		srv.ServeConn(conn, &http2.ServeConnOpts{Handler: handler})
