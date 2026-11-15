@@ -523,3 +523,90 @@ func TestPeerCertSHA256NilSafe(t *testing.T) {
 		t.Fatalf("peerCertSHA256(nil) = %q, want empty", got)
 	}
 }
+
+// TestConnCertSHA256JSONContract 验证连接快照的 cert_sha256 字段在 JSON 序列化
+// 时按契约出现——MCP tlsvpn_connections 透传的就是这两个快照，WebUI 连接列表
+// 也读同一字段。保证客户端与服务端两侧都能向 MCP/WebUI 暴露证书指纹。
+func TestConnCertSHA256JSONContract(t *testing.T) {
+	clientSnap := connSnapshot{CertSHA256: "abc123"}
+	clientJSON, err := json.Marshal(clientSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(clientJSON), `"cert_sha256":"abc123"`) {
+		t.Fatalf("connSnapshot 缺少 cert_sha256 字段: %s", clientJSON)
+	}
+	serverSnap := serverConnSnapshot{CertSHA256: "def456"}
+	serverJSON, err := json.Marshal(serverSnap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(serverJSON), `"cert_sha256":"def456"`) {
+		t.Fatalf("serverConnSnapshot 缺少 cert_sha256 字段: %s", serverJSON)
+	}
+	// 空指纹应被 omitempty 省略（未握手/纯 PSK 连接不产生空字段）
+	emptyJSON, err := json.Marshal(connSnapshot{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(emptyJSON), "cert_sha256") {
+		t.Fatalf("空 CertSHA256 应被 omitempty 省略: %s", emptyJSON)
+	}
+}
+
+// TestMCPConfigSetCertSHA256 验证 MCP 的通用配置保存路径（mergeAndValidateConfig）
+// 能设置 client.cert_sha256 并执行长度校验——MCP tlsvpn_config_save 控制证书
+// 指纹锁定的入口。
+func TestMCPConfigSetCertSHA256(t *testing.T) {
+	old := &Config{}
+	// client 模式必填 addr/psk；用合法值填充以便仅验证 cert_sha256 的校验路径。
+	valid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) + `","client":{"cert_sha256":"` + strings.Repeat("ab", 32) + `"}}`
+	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), false, nil, nil)
+	if err != nil {
+		t.Fatalf("合法 cert_sha256 应通过: %v", err)
+	}
+	if cfg.Client.CertSHA256 != strings.Repeat("ab", 32) {
+		t.Fatalf("cert_sha256 未被设置: %q", cfg.Client.CertSHA256)
+	}
+	invalid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) + `","client":{"cert_sha256":"short"}}`
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), false, nil, nil); err == nil {
+		t.Fatal("非法 cert_sha256（非 64 hex）必须被拒绝")
+	}
+}
+
+// TestMCPConfigSchedulerFields 验证 MCP 的通用配置路径覆盖调度设置字段
+// （routing_algo / fec_strategy / fec_near_window_ms）：tlsvpn_config_get 经
+// mcpRedactedConfig 保留它们，tlsvpn_config_save 经 mergeAndValidateConfig
+// 能设置并校验。
+func TestMCPConfigSchedulerFields(t *testing.T) {
+	// 读取：mcpRedactedConfig 不得把调度字段当秘密抹掉
+	src := &Config{RoutingAlgo: string(RoutingAlgoAuto), FecStrategy: string(FecStrategyNear), FecNearWindowMs: 20}
+	redacted := mcpRedactedConfig(src)
+	if redacted.RoutingAlgo != string(RoutingAlgoAuto) || redacted.FecStrategy != string(FecStrategyNear) || redacted.FecNearWindowMs != 20 {
+		t.Fatalf("mcpRedactedConfig 丢了调度字段: %+v", redacted)
+	}
+
+	// 保存：合法调度字段应能通过并生效
+	old := &Config{}
+	valid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
+		`","routing_algo":"min_rtt_strict","fec_strategy":"near","fec_near_window_ms":15}`
+	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), false, nil, nil)
+	if err != nil {
+		t.Fatalf("合法调度字段应通过: %v", err)
+	}
+	if cfg.RoutingAlgo != "min_rtt_strict" || cfg.FecStrategy != "near" || cfg.FecNearWindowMs != 15 {
+		t.Fatalf("调度字段未被设置: routing=%q fec=%q win=%d", cfg.RoutingAlgo, cfg.FecStrategy, cfg.FecNearWindowMs)
+	}
+
+	// 非法值必须被拒
+	invalid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
+		`","routing_algo":"bogus"}`
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), false, nil, nil); err == nil {
+		t.Fatal("非法 routing_algo 必须被拒绝")
+	}
+	badWin := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
+		`","fec_near_window_ms":200}`
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(badWin), false, nil, nil); err == nil {
+		t.Fatal("越界 fec_near_window_ms 必须被拒绝")
+	}
+}
