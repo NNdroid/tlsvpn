@@ -216,7 +216,7 @@ Basic passwords, static bearer tokens, and API keys are bearer-like credentials 
 | Tool | Purpose |
 |---|---|
 | `tlsvpn_status` | Complete live status snapshot used by the WebUI |
-| `tlsvpn_connections` | Logical clients, physical connections, bans, MAC table and peer information |
+| `tlsvpn_connections` | Logical clients, physical connections, bans, MAC table and peer information. Each connection detail carries its negotiated TLS fingerprint (`fingerprint_sha256`) and, on the client side, the observed server certificate SHA-256 (`cert_sha256`) |
 | `tlsvpn_config_get` | Effective configuration with secrets redacted / static MCP credentials represented only by a SHA-256 verifier |
 | `tlsvpn_diagnostics` | Diagnostic history for `2m`, `1h`, or `24h` |
 | `tlsvpn_traffic` | Throughput/RTT trend for `2m`, `1h`, or `24h` |
@@ -224,7 +224,7 @@ Basic passwords, static bearer tokens, and API keys are bearer-like credentials 
 | `tlsvpn_events` | Incremental lifecycle/administration events using a sequence cursor |
 | `tlsvpn_config_validate` | Validate configuration and report restart-required fields without saving or applying |
 
-Configuration responses redact PSK, `web.auth`, and SOCKS5 credentials. MCP static credentials are persisted and returned only as one-way SHA-256 verifiers; OAuth configuration contains public verification/discovery data only.
+Configuration responses redact PSK, `web.auth`, and SOCKS5 credentials (and therefore preserve all other fields, including the scheduler settings `routing_algo`, `fec_strategy` and `fec_near_window_ms`). MCP static credentials are persisted and returned only as one-way SHA-256 verifiers; OAuth configuration contains public verification/discovery data only.
 
 ### Administration
 

@@ -88,6 +88,9 @@ Unknown fields are rejected (typo protection); omitted fields take the defaults 
 | `brutal` / `brutal_up` / `brutal_down` | `false` / `100` / `500` | TCP Brutal and its Mbps limits |
 | `traffic_days` | `30` | Daily traffic-accounting retention in local-calendar days (`1`–`3650`); hot-appliable from the dashboard |
 | `traffic_file` | `tlsvpn-traffic.json` beside the config | Persistent daily-traffic store. When omitted, a config-file launch resolves this path next to the JSON config |
+| `routing_algo` | `auto` | Multipath scheduler routing algorithm, hot-reloadable: `auto` (decayed-min forward floor + batch service time), `latency_strict`, `latency_sticky`, `min_rtt_strict`, `min_rtt_adaptive`, or `roundtrip_strict`. Applies to this end's egress (client uplink / server downlink) |
+| `fec_strategy` | `auto` | FEC parity distribution strategy, hot-reloadable: `auto` (rotate parity across all healthy backends, avoid data paths) or `near` (only connections whose forward one-way latency is within `fec_near_window_ms` of the data path) |
+| `fec_near_window_ms` | `10` | Near-strategy forward-latency window in milliseconds (`1`–`100`); hot-reloadable |
 
 ### `web` (dashboard off unless `addr` is set)
 
@@ -118,7 +121,7 @@ Session resume tokens are mandatory and always enabled. There is no `server.sess
 | `fec` / `fec_group` | `false` / `4` | XOR parity FEC (K = 2–64; one parity copy is rotated across healthy backends, so redundancy is ≈1/K). Sent to the server, which may refuse an out-of-policy K (see `server.fec_group_min`/`_max`) |
 | `sni` | `www.cloudflare.com` | Camouflage SNI |
 | `insecure` | `false` | Skip TLS verification (prefer `cert_sha256`) |
-| `cert_sha256` | (Empty) | Pin the server certificate fingerprint |
+| `cert_sha256` | (Empty) | Pin the server certificate fingerprint (64 hex). The client also records the actual server certificate SHA-256 it observes at handshake and exposes it per-connection as `cert_sha256` in the API/WebUI connection table and MCP `tlsvpn_connections` |
 | `req_v4` / `req_v6` | (Empty) | Request specific tunnel IPs |
 | `fwmark` | `0` | Policy routing mark for transparent-proxy setups; `0` disables the fwmark rule only — a non-empty `source_rules` still enables policy routing |
 | `fwmark_priority` | `0` | `ip rule` priority (uint32); `0` = let the kernel assign one. Use it on machines that already run policy routing to make this client's rule win or lose |
@@ -260,7 +263,7 @@ Prometheus metrics at `/metrics` are protected by the Web UI authentication gate
 ## Notes
 
 1. **Brutal** needs the `tcp_brutal` kernel module; **TAP** needs root (or `CAP_NET_ADMIN`).
-2. **Certificate pinning**: the persisted self-signed cert logs its SHA-256 fingerprint at startup — pin it with `client.cert_sha256` (colon/case tolerant).
+2. **Certificate pinning**: the persisted self-signed cert logs its SHA-256 fingerprint at startup — pin it with `client.cert_sha256` (colon/case tolerant). On the client side the handshake also records the server certificate SHA-256 it actually observed, logs it per connection (`[Conn N] TLS server certificate SHA256: ...`) and exposes it as `cert_sha256` on each connection — visible in the WebUI connection table (and connection detail drawer) and via MCP `tlsvpn_connections`. The server exposes its own certificate fingerprint the same way.
 3. **Interop**: current Go and Rust builds share protocol v2 and byte-for-byte golden vectors (including frame headers and data/FEC AEAD-domain vectors). The wire protocol supports the same four inner AEADs on both implementations. Upgrade both ends together — there is no backward compatibility by design: a server requires exactly protocol version 2, and a client rejects any other version in the handshake reply, so a mixed-version pair will not connect.
 4. **Client identity**: with `mac` empty the client generates and persists a non-zero unicast MAC, session token, and session epoch in `<config>.state` (mode `0600`). A restarted client proves ownership, rotates salts/keys, closes half-open old links, and keeps its assigned tunnel IP. Delete the file to force a fresh identity.
 
