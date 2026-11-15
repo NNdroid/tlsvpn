@@ -1743,8 +1743,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			InstanceID: req.ClientInstance, Epoch: 1, ResumeToken: resumeToken,
 			conns: make(map[*connInfo]struct{}),
 		}
-		// 回程调度使用 ret（server→client）单向估计。
-		port.SetOneWayMode(oneWayModeRet)
+		// 下行调度使用 fwd（服务端→客户端）单向估计：与客户端上行 egress 用
+		// oneWayModeFwd（客户端→服务端）语义对称——两端"去程"都是各自发送方向。
+		// 注意不要用 ret：服务端视角的 ret 是客户端→服务端（上行），用它选下行
+		// 会在非对称时延下选错路径（见 server_egress_direction_test.go）。
+		port.SetOneWayMode(oneWayModeFwd)
 		// 新会话 port 必须显式应用服务端当前调度/FEC 策略：NewAsyncPort 只默认
 		// auto，不设置则下行恒为 auto。s.cfg 是 atomic 读，持 s.mu 下安全。
 		if srvCfg := s.cfg.Load(); srvCfg != nil {
@@ -1962,7 +1965,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		ci.backend.CompareAndSwap(backend, nil)
 		port.UnregisterOwnedBackend(connTxChan)
 	}()
-	// 新物理连接加入会话：立即发起一轮跨路径探针，加速回程估计收敛。
+	// 新物理连接加入会话：立即发起一轮跨路径探针，加速单向时延（fwd/ret）收敛。
 	if session.rttProbe != nil {
 		session.rttProbe.kick()
 	}

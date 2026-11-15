@@ -85,8 +85,8 @@ type Backend struct {
 }
 
 // AsyncPort 单向时延模式：决定调度器用 fwd 还是 ret 作为本端 egress 的单向
-// 估计（去程=客户端 egress 用 fwd，回程=服务端 egress 用 ret；0=roundtrip
-// 兼容模式，等价于现有 rtt/2）。
+// 估计（去程=本端 egress 方向：客户端→服务端 或 服务端→客户端，两端都用 fwd；
+// 0=roundtrip 兼容模式，等价于现有 rtt/2）。
 const (
 	oneWayModeRoundtrip int32 = 0
 	oneWayModeFwd       int32 = 1
@@ -173,8 +173,10 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	return p
 }
 
-// SetOneWayMode 设定本端 egress 使用的单向时延（fwd=去程，ret=回程）。
-// 须在端口开始承载流量前调用一次；调度器每批读取，未设=roundtrip 兼容模式。
+// SetOneWayMode 设定本端 egress 使用的单向时延（fwd=本端发送方向=去程；ret=对端
+// 发送方向=回程）。两端 egress（客户端上行 / 服务端下行）均用 oneWayModeFwd，使
+// "去程"在两端都是各自发送方向、语义对称。须在端口开始承载流量前调用一次；
+// 调度器每批读取，未设=roundtrip 兼容模式。
 func (p *AsyncPort) SetOneWayMode(mode int32) {
 	p.oneWayMode.Store(mode)
 }
