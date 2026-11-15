@@ -1690,9 +1690,9 @@ function renderConnsTable(data,fresh){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1781,13 +1781,14 @@ function renderConnsTable(data,fresh){
     return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td>'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
-      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
-      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
+	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
+	      '<td class="hide-sm dim" title="'+esc(r.cert||'')+'">'+(r.cert?hi(esc(shortId(r.cert,16)),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
+	      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
       '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
-  }).join('')||emptyTableRow('conns',19,all);
+  }).join('')||emptyTableRow('conns',20,all);
   setCount('conn-count',f,total,all);
   renderPager('conns',total);
 }
@@ -1947,6 +1948,7 @@ function renderDrawer(){
           encBadge(xEnc)+badge(x.fec||fec)+brut+pkts+
         '</div>'+
         (x.sni?'<div class="dc-conn-sni">'+esc(t('dc.sec_sni'))+': '+esc(x.sni)+'</div>':'')+
+        (x.cert_sha256?'<div class="dc-conn-sni" title="'+esc(t('dc.sec_cert'))+'">'+esc(t('dc.sec_cert'))+': <span class="mono">'+esc(x.cert_sha256)+'</span></div>':'')+
         (x.last_error?'<div class="dc-conn-err">'+esc(x.last_error)+'</div>':'')+
       '</div>';
     }).join('');

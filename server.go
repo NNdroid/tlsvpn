@@ -1016,6 +1016,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				TLSVersion:  tlsVer,
 				TLSCipher:   tlsCipher,
 				TLSALPN:     tlsAlpn,
+				CertSHA256:  serverCertFingerprint(),
 				Stalled:     ci.backend.Load() != nil && ci.backend.Load().isStalled(),
 			})
 		}

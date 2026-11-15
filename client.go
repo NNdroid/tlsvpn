@@ -1809,6 +1809,8 @@ type connSnapshot struct {
 	TLSVersion string `json:"tls_version,omitempty"`
 	TLSCipher  string `json:"tls_cipher,omitempty"`
 	TLSALPN    string `json:"tls_alpn,omitempty"`
+	// CertSHA256 是本连接客户端观测到的服务端证书 SHA-256 指纹（hex）。
+	CertSHA256 string `json:"cert_sha256,omitempty"`
 	// Stalled 表示调度器已判定该连接不健康（读写失败/连续 RTT 采样失败），
 	// 不再向其分配数据；面板据此提示用户该路径已失效。
 	Stalled bool `json:"stalled"`
@@ -1844,7 +1846,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if !ok {
 			continue
 		}
-		var sni, tlsVer, tlsCipher, tlsAlpn string
+		var sni, tlsVer, tlsCipher, tlsAlpn, certSHA string
 		var txRate, rxRate, epoch uint64
 		var enc int
 		fec := ""
@@ -1859,6 +1861,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			}
 			if neg.TLS != nil {
 				sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
+				certSHA = neg.TLS.CertSHA256
 			}
 		}
 		var rtt uint32
@@ -1880,6 +1883,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			TLSVersion:   tlsVer,
 			TLSCipher:    tlsCipher,
 			TLSALPN:      tlsAlpn,
+			CertSHA256:   certSHA,
 		}
 		if state=="up" {snap.TCP=ci.tcpObservation.Load()}
 		if v, okv := ci.connID.Load().(string); okv {
@@ -1907,6 +1911,19 @@ func (c *Client) snapshotConns() []connSnapshot {
 		out = append(out, snap)
 	}
 	return out
+}
+
+// peerCertSHA256 返回握手完成后对端（服务端）叶子证书 DER 的 SHA-256 指纹。
+// 无对端证书（如未启用证书校验的纯 PSK 场景）时返回空串。复用 certFingerprintHex。
+func peerCertSHA256(conn *utls.UConn) string {
+	if conn == nil {
+		return ""
+	}
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return ""
+	}
+	return certFingerprintHex(state.PeerCertificates[0].Raw)
 }
 
 // negotiateUTLS 负责配置 uTLS、选择指纹并执行 TLS 握手（参数取自热更快照）
@@ -2240,6 +2257,13 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		TxRateMbps:      negTx,
 		RxRateMbps:      negRx,
 		TLS:             resp.TLS,
+	}
+	// 采集对端（服务端）证书的 SHA-256 指纹：客户端在握手完成后可从
+	// ConnectionState 读取服务端叶子证书 DER，供 WebUI 展示与日志输出。
+	// 服务端未回传 TLS 信息时 connNeg.TLS 为 nil，跳过（无法挂载指纹）。
+	if peerHash := peerCertSHA256(tlsConn); peerHash != "" && connNeg.TLS != nil {
+		connNeg.TLS.CertSHA256 = peerHash
+		log.Infof("[Conn %d] TLS server certificate SHA256: %s", connIndex, peerHash)
 	}
 	c.negInfo = connNeg
 	ci.negotiated.Store(connNeg)

@@ -110,6 +110,13 @@ func (h *diagnosticHistory) record(s WebStats) {
 		if rtt > 0 {
 			m["rtt"] = diagnosticValue(float64(rtt))
 		}
+		// 去程/回程单向时延（µs→ms）。0=未收敛，留 gap（与 rtt 同为测量值，非速率）。
+		if scheduler.FwdOneWayUS > 0 {
+			m["fwd"] = diagnosticValue(float64(scheduler.FwdOneWayUS) / 1000)
+		}
+		if scheduler.RetOneWayUS > 0 {
+			m["ret"] = diagnosticValue(float64(scheduler.RetOneWayUS) / 1000)
+		}
 		p.Conns = append(p.Conns, diagnosticConn{ID: id, Client: client, Label: label, Metrics: m})
 		next[id] = current
 	}

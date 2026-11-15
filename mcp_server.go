@@ -106,7 +106,7 @@ func registerMCPReadTools(s *mcp.Server, w *WebManager) {
 			return &mcp.CallToolResult{}, stats, err
 		})
 
-	mcp.AddTool(s, readOnlyTool("tlsvpn_connections", "Return active client/session/physical-connection information, including bans and MAC table state where available."),
+		mcp.AddTool(s, readOnlyTool("tlsvpn_connections", "Return active client/session/physical-connection information, including bans and MAC table state where available. Each connection detail carries its negotiated TLS fingerprint (fingerprint_sha256) and, on the client side, the server certificate SHA-256 (cert_sha256)."),
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpEmptyInput) (*mcp.CallToolResult, any, error) {
 			stats, err := mcpCurrentStats(ctx, w)
 			if err != nil {
