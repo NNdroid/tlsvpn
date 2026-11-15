@@ -365,3 +365,56 @@ func TestRttProbeSchedulerJSONFields(t *testing.T) {
 		}
 	}
 }
+
+// TestRttProbeRecomputeProbeScaledAnchor 锚定必须用探针基线 (ref,ref)/2，而
+// 不是内核 min_rtt/2。探针 RTT（recvAt-sendTS）含应用层处理/队列/TLS 批处理/
+// 调度延迟，显著大于物理 min_rtt；若用 min_rtt/2 锚定，fwd/ret 会被系统性
+// 抬高，且破坏自洽性 fwd[i]+ret[i]=RTT_i。本测试故意让 min_rtt=2000µs 远小于
+// 探针基线 6000µs，验证锚定仍取探针尺度（halfRef=3000µs）而非 min_rtt/2=1000µs。
+func TestRttProbeRecomputeProbeScaledAnchor(t *testing.T) {
+	// 真实（探针尺度，µs）：ref 对称 fwd=ret=3000；连接1 fwd=3000、ret=1000。
+	// decay[(s,d)] = fwd_s + ret_d，换算成 ns（*1000）。
+	dec := map[[2]uint32]uint64{
+		{0, 0}: 6000 * 1000, // RTT(ref,ref)
+		{1, 0}: 6000 * 1000, // fwd_1 + ret_0
+		{0, 1}: 4000 * 1000, // fwd_0 + ret_1
+	}
+	minRtt := uint32(2000) // 物理地板，故意远小于探针基线
+	b0 := &Backend{minRttCache: &minRtt}
+	b1 := &Backend{minRttCache: &minRtt}
+	s := &rttProbeScheduler{
+		decay:     dec,
+		lastDecay: make(map[[2]uint32]time.Time),
+		refConn:   0,
+		active:    []int{0, 1},
+	}
+	s.resolveConn = func(i int) *Backend {
+		switch i {
+		case 0:
+			return b0
+		case 1:
+			return b1
+		}
+		return nil
+	}
+	s.recomputeAll()
+
+	// halfRef=3000µs（探针基线/2）而非 min_rtt/2=1000µs。
+	if got := b1.fwdOneWayUS.Load(); got != 3000 {
+		t.Fatalf("fwd[1]=%d want 3000 (probe-scaled anchor, not min_rtt/2)", got)
+	}
+	if got := b1.retOneWayUS.Load(); got != 1000 {
+		t.Fatalf("ret[1]=%d want 1000", got)
+	}
+	// 自洽性：fwd[1]+ret[1]=RTT_1=4000µs。
+	if f, r := b1.fwdOneWayUS.Load(), b1.retOneWayUS.Load(); f+r != 4000 {
+		t.Fatalf("self-consistency broken: fwd+ret=%d want 4000 (=RTT)", f+r)
+	}
+	// ref 自身锚定为 halfRef=3000µs（对称约定）。
+	if got := b0.fwdOneWayUS.Load(); got != 3000 {
+		t.Fatalf("ref fwd=%d want 3000", got)
+	}
+	if got := b0.retOneWayUS.Load(); got != 3000 {
+		t.Fatalf("ref ret=%d want 3000", got)
+	}
+}

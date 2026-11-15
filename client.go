@@ -45,7 +45,10 @@ type Backend struct {
 	ch       chan []VPNFrame // legacy/cold compatibility path; production uses ownedCh
 	ownedCh  chan *VPNFrameBatch
 	rttCache *uint32
-	// minRttCache 该连接的内核 tcpi_min_rtt（µs，无拥塞地板），锚定与路径质量。
+	// minRttCache 该连接的内核 tcpi_min_rtt（µs，无拥塞地板），用于路径质量/
+	// 资格包络与单向回退链（adaptiveBackendMinRTT）。探针分解的锚定**不用**它：
+	// 锚定必须是探针尺度（见 rtt_probe.go anchorHalfRef），min_rtt 是物理地板，
+	// 与含处理延迟的探针 RTT 尺度错配，会破坏 fwd/ret 自洽性。
 	minRttCache *uint32
 	// probeCh 跨路径 RTT 探针/回包的专用投递通道（发送 goroutine 独立 select
 	// case 处理，用 appendPaddedFrame 桶填充写出以消除流量特征）。

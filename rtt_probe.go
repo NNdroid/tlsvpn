@@ -163,7 +163,7 @@ type rttProbeScheduler struct {
 	// 以下均为调度 goroutine 独占。
 	pending   map[uint32]pendingProbe
 	decay     map[[2]uint32]uint64 // decayed-min per (src,dst)，ns
-	lastDecay time.Time
+	lastDecay map[[2]uint32]time.Time // 每 key 独立的慢升计时（ns 地板按 key 累积）
 	nonce     uint32
 	rotate    int // 生成集轮转游标
 	refConn   int
@@ -184,7 +184,7 @@ func newRttProbeScheduler(ctx context.Context, resolveConn func(int) *Backend, a
 		cancel:      scancel,
 		pending:     make(map[uint32]pendingProbe, 16),
 		decay:       make(map[[2]uint32]uint64, 32),
-		lastDecay:   time.Now(),
+		lastDecay:   make(map[[2]uint32]time.Time, 32),
 		nonce:       0,
 		replies:     make(chan rttProbeFrame, 64),
 		kickCh:      make(chan struct{}, 1),
@@ -385,12 +385,14 @@ func (s *rttProbeScheduler) absorb(fr rttProbeFrame) {
 	s.recomputeAll()
 }
 
-// updateDecay 慢升快降的 decayed-min。
+// updateDecay 慢升快降的 decayed-min。慢升量按 (src,dst) 独立累积：用全局
+// 时钟会让多个 key 轮转更新时互相吞掉对方的慢升增量（A 在 t1、B 在 t2 更新，
+// A 下次在 t3 更新却只拿到 t2→t3，丢失 t1→t2）。每 key 记自己的上次更新时刻。
 func (s *rttProbeScheduler) updateDecay(src, dst uint32, sampleNS uint64) {
 	key := [2]uint32{src, dst}
 	now := time.Now()
-	elapsed := now.Sub(s.lastDecay)
-	s.lastDecay = now
+	elapsed := now.Sub(s.lastDecay[key])
+	s.lastDecay[key] = now
 	cur := s.decay[key]
 	if cur == 0 {
 		s.decay[key] = sampleNS
@@ -444,14 +446,13 @@ func (s *rttProbeScheduler) recomputeAll() {
 	}
 }
 
-// anchorHalfRef 锚定：参考连接 min_rtt/2；不可用时退 (ref,ref) 基线/2。
+// anchorHalfRef 锚定：只用参考连接的探针自回包基线 (ref,ref)/2。
+//
+// 不能用内核 min_rtt/2 锚定：min_rtt 是物理无拥塞地板（不含应用层处理/队列/
+// TLS 批处理/调度延迟），而 fwd/ret 全部由探针 decay（recvAt-sendTS，含完整
+// 写/读/回包路径延迟）导出。用不同尺度的量相减会让 fwd/ret 系统性偏高，且
+// 破坏自洽性 fwd[i]+ret[i]=RTT_i。锚定必须与探针同尺度，即 (ref,ref) 基线。
 func (s *rttProbeScheduler) anchorHalfRef(ref int) uint64 {
-	if b := s.resolveConn(ref); b != nil && b.minRttCache != nil {
-		mr := atomic.LoadUint32(b.minRttCache)
-		if mr > 0 && mr != adaptiveUnknownRTTUS {
-			return uint64(mr) / 2
-		}
-	}
 	if v := s.decay[[2]uint32{uint32(ref), uint32(ref)}]; v > 0 {
 		h := oneWayUS(v) / 2
 		if h == 0 {
