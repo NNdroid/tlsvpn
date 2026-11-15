@@ -415,21 +415,31 @@ func (s *rttProbeScheduler) recomputeAll() {
 	if halfRef == 0 {
 		return // 锚定尚未建立
 	}
+	// 本次重算的发布时刻：面板据此显示"上次计算时间"。同一次重算内所有连接
+	// 视为同一时刻，无需逐连接取钟。
+	nowMs := uint64(time.Now().UnixMilli())
 	for _, i := range s.active {
 		b := s.resolveConn(i)
 		if b == nil {
 			continue
 		}
+		updated := false
 		if i == ref {
 			b.fwdOneWayUS.Store(halfRef)
 			b.retOneWayUS.Store(halfRef)
-			continue
+			updated = true
+		} else {
+			if v, ok := s.decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
+				b.fwdOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
+				updated = true
+			}
+			if v, ok := s.decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
+				b.retOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
+				updated = true
+			}
 		}
-		if v, ok := s.decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-			b.fwdOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
-		}
-		if v, ok := s.decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-			b.retOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
+		if updated {
+			b.probeUpdatedAt.Store(nowMs)
 		}
 	}
 }

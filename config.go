@@ -28,6 +28,15 @@ import (
 //
 // 未指定的字段取默认值；出现未知字段直接报错（防拼写错误静默失效）。
 
+// 数据面写队列优先级默认值与范围。控制帧（心跳/RTT 探针/FEC 控制）默认
+// 高于数据帧：探针与心跳是及时性敏感的少量帧，被数据洪流压后会延迟重拨
+// 判死与单向时延收敛；数值相等则维持 select 随机竞争（现状）。
+const (
+	defaultPriorityControl = 10
+	defaultPriorityData    = 5
+	maxFramePriority       = 100
+)
+
 // Config 顶层配置
 type Config struct {
 	Mode     string `json:"mode"`                // 必填：server | client
@@ -48,6 +57,21 @@ type Config struct {
 	Brutal     bool   `json:"brutal,omitempty"`
 	BrutalUp   uint64 `json:"brutal_up,omitempty"`   // Mbps
 	BrutalDown uint64 `json:"brutal_down,omitempty"` // Mbps
+	// 数据面写队列优先级：控制帧（心跳/RTT 探针/FEC 控制）与数据帧谁先写。
+	// 数值越高越先处理；默认控制=10、数据=5（控制优先）。0=未配置（回落默认）。
+	// 仅影响同一条物理连接上两类帧的写出顺序，不进 TLSVPN 线路格式。
+	PriorityControl int `json:"priority_control,omitempty"`
+	PriorityData    int `json:"priority_data,omitempty"`
+	// RoutingAlgo 多路径调度器的选路算法（见 RoutingAlgo 常量）：auto / latency_strict /
+	// latency_sticky / min_rtt_strict / min_rtt_adaptive / roundtrip_strict。默认 auto，
+	// 可热更、无需重启。作用于本端 egress（client 上行 / server 下行）。
+	RoutingAlgo string `json:"routing_algo,omitempty"`
+	// FecStrategy parity 分发策略（见 FecStrategy 常量）：auto（所有健康后端轮转，
+	// 默认）/ near（只投到去程单程时延与数据路径相差 ≤ fec_near_window_ms 的连接）。
+	// 可热更、无需重启。作用于本端 egress。
+	FecStrategy string `json:"fec_strategy,omitempty"`
+	// FecNearWindowMs near 策略的去程时延窗口（毫秒）。默认 10，范围 [1,100]，可热更。
+	FecNearWindowMs int `json:"fec_near_window_ms,omitempty"`
 	// 按日流量统计：traffic_days 为保留天数（默认 30，最大 3650，面板热更生效）；
 	// traffic_file 为持久化文件，留空时默认放在配置文件同目录的
 	// tlsvpn-traffic.json（经命令行标志启动、无配置文件来源时仅内存统计）。
@@ -170,6 +194,9 @@ const exampleConfigJSON = `{
   "brutal_up": 100,
   "brutal_down": 500,
   "socks5": "",
+  "routing_algo": "auto",
+  "fec_strategy": "auto",
+  "fec_near_window_ms": 10,
   "tap": "tap0",
   "mac": "",
   "web": {
@@ -270,6 +297,13 @@ func (c *Config) applyDefaults() {
 	if c.BrutalDown == 0 {
 		c.BrutalDown = 500
 	}
+	// 0=未配置：回落默认（控制优先）。显式 0 无法与缺失区分，故范围下限为 1。
+	if c.PriorityControl == 0 {
+		c.PriorityControl = defaultPriorityControl
+	}
+	if c.PriorityData == 0 {
+		c.PriorityData = defaultPriorityData
+	}
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
 	}
@@ -324,6 +358,17 @@ func (c *Config) applyDefaults() {
 			c.Client.FecGroup = 4
 		}
 	}
+	// 调度/FEC 策略字段是全局的（client 上行 / server 下行都用），无 mode 语义，
+	// 放在顶层对所有 mode 无条件填充默认。
+	if c.RoutingAlgo == "" {
+		c.RoutingAlgo = string(RoutingAlgoAuto)
+	}
+	if c.FecStrategy == "" {
+		c.FecStrategy = string(FecStrategyAuto)
+	}
+	if c.FecNearWindowMs == 0 {
+		c.FecNearWindowMs = fecNearWindowDefaultMs
+	}
 }
 
 // Validate 校验配置合法性。在 applyDefaults 之后调用。
@@ -336,6 +381,14 @@ func (c *Config) Validate() error {
 	}
 	if c.BrutalUp > maxBrutalRateMbps || c.BrutalDown > maxBrutalRateMbps {
 		return fmt.Errorf("brutal_up/brutal_down must not exceed %d Mbps", maxBrutalRateMbps)
+	}
+	// 优先级范围下限 1：0 在 applyDefaults 里被当成"未配置"回落默认，
+	// 显式 0 无法与缺失区分，故不允许。
+	if c.PriorityControl < 1 || c.PriorityControl > maxFramePriority {
+		return fmt.Errorf("priority_control %d must be in [1, %d]", c.PriorityControl, maxFramePriority)
+	}
+	if c.PriorityData < 1 || c.PriorityData > maxFramePriority {
+		return fmt.Errorf("priority_data %d must be in [1, %d]", c.PriorityData, maxFramePriority)
 	}
 	if c.TrafficDays < 1 || c.TrafficDays > maxTrafficDays {
 		return fmt.Errorf("traffic_days must be between 1 and %d", maxTrafficDays)
@@ -482,6 +535,19 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("client.cert_sha256 must be 64 hex chars (sha256)")
 			}
 		}
+	}
+	// 调度/FEC 策略字段是全局的（client 上行 / server 下行都用），对所有 mode 校验。
+	if !ValidRoutingAlgo(c.RoutingAlgo) {
+		return fmt.Errorf(
+			"invalid routing_algo %q (want auto, latency_strict, latency_sticky, min_rtt_strict, min_rtt_adaptive or roundtrip_strict)",
+			c.RoutingAlgo,
+		)
+	}
+	if !ValidFecStrategy(c.FecStrategy) {
+		return fmt.Errorf("invalid fec_strategy %q (want auto or near)", c.FecStrategy)
+	}
+	if c.FecNearWindowMs < fecNearWindowMinMs || c.FecNearWindowMs > fecNearWindowMaxMs {
+		return fmt.Errorf("fec_near_window_ms must be in [%d, %d]", fecNearWindowMinMs, fecNearWindowMaxMs)
 	}
 	return nil
 }

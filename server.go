@@ -469,6 +469,9 @@ type Server struct {
 	brutalUp   uint64
 	brutalDown uint64
 	cfg        atomic.Pointer[Config] // 当前生效配置（面板热更数据源）
+	// tapPort 本机 TAP 侧的 AsyncPort（startServer 创建后赋值）。热更调度/FEC
+	// 策略字段时一并设置，保证服务端所有发送方向（含 tap→server）策略一致。
+	tapPort *AsyncPort
 
 	macAddr                                                    string
 	txBytesTotal, rxBytesTotal, txPacketsTotal, rxPacketsTotal atomic.Uint64
@@ -496,6 +499,9 @@ type Server struct {
 	// [2,64]）。请求 FEC 而越界即拒连，不夹取：对端要的是自己的编码参数，
 	// 静默改成别的 K 会让它在不知道的情况下多付 N/K 冗余开销。
 	fecGroupMin, fecGroupMax int
+	// priorityControl/Data 数据面写队列优先级（控制帧 vs 数据帧，数值高者先）。
+	// ApplyConfig 从 Config 拷贝，handleConnection 捕获进写 goroutine。
+	priorityControl, priorityData int
 	// bootCfg 启动时配置：NeedsRestart 的差异基准（当前 s.cfg 是热更后的值）
 	bootCfg  *Config
 	banned   map[string]int64 // clientID → 封禁到期 unix 毫秒（0=永久）；被 ban 连接直接进焦油坑
@@ -1053,6 +1059,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	s.minEnc = minEncRank(cfg.MinEnc)
 	s.maxSessions = cfg.Server.MaxSessions
 	s.fecGroupMin, s.fecGroupMax = cfg.Server.FecGroupMin, cfg.Server.FecGroupMax
+	s.priorityControl, s.priorityData = cfg.PriorityControl, cfg.PriorityData
 	var reconnect []*net.TCPConn
 	if brutalChanged {
 		for _, session := range s.activeClients {
@@ -1062,6 +1069,16 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 			}
 			session.sessionMu.Unlock()
 		}
+	}
+	// 调度/FEC 策略字段是纯原子热更（调度器每批读取），对所有现有会话的下行
+	// port 立即生效，无需重连。setter 是 atomic.Store，持 s.mu 下安全。
+	for _, session := range s.activeClients {
+		if session.Port == nil {
+			continue
+		}
+		session.Port.SetRoutingAlgo(cfg.RoutingAlgo)
+		session.Port.SetFecStrategy(cfg.FecStrategy)
+		session.Port.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	}
 	s.mu.Unlock()
 	// TCP congestion state is socket-local. Closing physical connections is the
@@ -1074,6 +1091,12 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	// 填充策略是全局原子量，作用于本进程的全部发送路径
 	if actual := setPadMode(cfg.PadMode); actual != cfg.PadMode {
 		log.Warnf("Invalid pad_mode %q, using %s", cfg.PadMode, actual)
+	}
+	// tapPort 与本进程全部发送方向同策：热更时一并应用。
+	if s.tapPort != nil {
+		s.tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
+		s.tapPort.SetFecStrategy(cfg.FecStrategy)
+		s.tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	}
 	s.cfg.Store(cfg)
 	return needsRestart
@@ -1195,6 +1218,12 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	tapBackend := make(chan *VPNFrameBatch, 32)
 	tapPort := NewAsyncPort(ctx, tapPortID)
 	tapPort.RegisterOwnedBackend(tapBackend, new(uint32))
+	// tapPort 是本机 TAP 侧端口：调度/FEC 策略字段同样作用于它（与 per-session
+	// port 一致），保证服务端所有发送方向策略统一。cfg 已过 applyDefaults，值合法。
+	srv.tapPort = tapPort
+	tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
+	tapPort.SetFecStrategy(cfg.FecStrategy)
+	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	srv.vswitch.AddPort(tapPort)
 
 	go func() {
@@ -1478,6 +1507,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	expectedEncAlgo := s.encAlgo
 	minEnc := s.minEnc
 	fecGroupMin, fecGroupMax := s.fecGroupMin, s.fecGroupMax
+	// 数据面写队列优先级快照：写 goroutine 每连接捕获一次，热更后新连接生效。
+	priorityControl, priorityData := s.priorityControl, s.priorityData
 	s.mu.RUnlock()
 
 	// 常量时间比较：Go 字符串 == 逐字节短路，响应时延会泄露匹配前缀长度。
@@ -1714,6 +1745,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 		// 回程调度使用 ret（server→client）单向估计。
 		port.SetOneWayMode(oneWayModeRet)
+		// 新会话 port 必须显式应用服务端当前调度/FEC 策略：NewAsyncPort 只默认
+		// auto，不设置则下行恒为 auto。s.cfg 是 atomic 读，持 s.mu 下安全。
+		if srvCfg := s.cfg.Load(); srvCfg != nil {
+			port.SetRoutingAlgo(srvCfg.RoutingAlgo)
+			port.SetFecStrategy(srvCfg.FecStrategy)
+			port.SetFecNearWindowMs(srvCfg.FecNearWindowMs)
+		}
 		// 跨路径 RTT 探针：resolver 扫本会话 conns；仅 req.RTTProbe 时启用。
 		session.rttProbe = newRttProbeScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns)
 		session.rttProbe.start()
@@ -1958,111 +1996,202 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			defer rttTicker.Stop()
 		}
 
+		// 控制帧/数据帧写队列优先级：数值高者先。相等则两者皆 false，下方
+		// 只走原 select（随机竞争，零行为变化）。
+		controlFirst, dataFirst := queuePriorityPref(priorityControl, priorityData)
+
+		// 三条写体抽成闭包复用：优先级分支与主 select 都要用到，避免重复大段
+		// 记账代码。返回 false 表示写失败（已置 stalled 并关连接），调用方应
+		// 立即退出写 goroutine。
+		sampleRTT := func() {
+			if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
+				atomic.StoreUint32(rttCache, rtt)
+				if minRtt > 0 {
+					atomic.StoreUint32(minRttCache, minRtt)
+				}
+				ci.rttMeasured.Store(true)
+				backend.noteRTTSuccess()
+			} else if err != nil {
+				// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
+				// 该后端标记为 stalled，调度器不再向其分配数据。
+				// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
+				backend.noteRTTFailure()
+			}
+		}
+		writeKeepalive := func() bool {
+			// 空心跳帧不计入填充累计：bucket 模式会给它补 118B 填充，
+			// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
+			// 流量无关的地板上。
+			sendBuffer = sendBuffer[:0]
+			sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, padRecordLimit)
+			// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
+			// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
+			// （约 15 分钟才放弃），期间心跳停发，客户端先在自己的读超时上判死
+			// 本端连接，而服务端仍自认为在线——"connection lost: i/o timeout"
+			// 的唯一成因。加超时后本端 10s 内自发现并断连。
+			refreshWriteDeadline()
+			if _, err := conn.Write(sendBuffer); err != nil {
+				backend.markStalled()
+				log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
+				conn.Close()
+				return false
+			}
+			return true
+		}
+		writeProbe := func(probe []byte) bool {
+			// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
+			// 随机桶尺寸 + randomPool 覆盖字节），消除流量特征。探针（0x03）在
+			// Write 前写入 send_ts（固定偏移）。
+			sendBuffer = sendBuffer[:0]
+			sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
+			if len(probe) > 0 && probe[0] == controlKindRttProbe {
+				patchRttProbeSendTS(sendBuffer, time.Now())
+			}
+			refreshWriteDeadline()
+			if _, err := conn.Write(sendBuffer); err != nil {
+				backend.markStalled()
+				log.Debugf("[%s] rtt probe write failed, closing the connection: %v", clientID, err)
+				conn.Close()
+				return false
+			}
+			return true
+		}
+		drainWrite := func(batch *VPNFrameBatch) bool {
+			sendBuffer = sendBuffer[:0]
+			txPackets := 0
+			var written txFrameTotals
+			padEpoch := padAccountingEpoch()
+			queuedPayload := uint64(0)
+			lastFrameStart := -1
+		drainBatches:
+			for {
+				queuedPayload += batch.Bytes
+				var n, last int
+				sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
+				txPackets += n
+				if last >= 0 {
+					lastFrameStart = last
+				}
+				if len(sendBuffer) >= maxTLSWriteBatchBytes {
+					break
+				}
+				select {
+				case batch = <-connTxChan:
+					continue
+				default:
+					break drainBatches
+				}
+			}
+			var tailPad int
+			sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
+			padTotal := uint64(tailPad)
+			refreshWriteDeadline()
+			batchCork.BeforeWrite(len(sendBuffer))
+			nw, werr := conn.Write(sendBuffer)
+			if werr == nil && nw != len(sendBuffer) {
+				werr = io.ErrShortWrite
+			}
+			if werr != nil {
+				// 写失败即连接不可用：尽早置 stalled，调度器立即停用该后端。
+				backend.markStalled()
+				log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
+				conn.Close()
+				return false
+			}
+			port.written.record(written)
+			s.written.record(written)
+			s.txBytesTotal.Add(uint64(len(sendBuffer)))
+			s.txPacketsTotal.Add(uint64(txPackets))
+			backend.completeQueuedBytes(queuedPayload)
+			backend.observeDelivered(queuedPayload)
+			// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
+			recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
+			atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
+			atomic.AddUint64(&session.TxPackets, uint64(txPackets))
+			atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
+			atomic.AddUint64(&ci.txPackets, uint64(txPackets))
+			dailyTraffic.Add(0, uint64(len(sendBuffer))) // 下行 = server→client
+			return true
+		}
+
 		for {
+			// RTT 采样（200ms ticker）与优先级无关：任何分支都要及时处理，
+			// 否则高优先级洪流会把它压到过期，调度器用陈旧 RTT 做路径决策。
+			// 非阻塞取一次，采样本身很轻，逐轮检查足够跟上 200ms 节奏。
+			select {
+			case <-rttC:
+				sampleRTT()
+			default:
+			}
+			// 优先级分支：非阻塞优先服务"此刻已就绪"的高优先级源，保证它不被
+			// 低优先级洪流长期压后；高优先级源空闲时落入下方阻塞 select，低优
+			// 先级源照常被服务 —— 任何一方都不会被饿死。
+			if controlFirst {
+				// 控制帧优先：清空当前就绪的控制源（含心跳/RTT 探针）。
+				drained := false
+				for {
+					select {
+					case <-connCtx.Done():
+						return
+					case probe := <-backend.probeCh:
+						if !writeProbe(probe) {
+							return
+						}
+						drained = true
+						continue
+					case <-keepAliveTicker.C:
+						if !writeKeepalive() {
+							return
+						}
+						drained = true
+						continue
+					default:
+					}
+					break
+				}
+				if drained {
+					continue // 已写控制帧：回到顶部，控制帧不落后于数据帧
+				}
+			} else if dataFirst {
+				// 数据帧优先：非阻塞取一个数据批；写完给控制帧一次非阻塞机会，
+				// 防止 keepalive 被数据洪流饿死（饿死会触发对端读超时判死）。
+				select {
+				case batch := <-connTxChan:
+					if !drainWrite(batch) {
+						return
+					}
+					select {
+					case probe := <-backend.probeCh:
+						if !writeProbe(probe) {
+							return
+						}
+					case <-keepAliveTicker.C:
+						if !writeKeepalive() {
+							return
+						}
+					default:
+					}
+					continue
+				default:
+				}
+			}
+
+			// 阻塞 select：等下一个事件（所有源 + 连接关闭 + RTT 采样）。
 			select {
 			case <-connCtx.Done():
 				return
 			case <-rttC:
-				if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
-					atomic.StoreUint32(rttCache, rtt)
-					if minRtt > 0 {
-						atomic.StoreUint32(minRttCache, minRtt)
-					}
-					ci.rttMeasured.Store(true)
-					backend.noteRTTSuccess()
-				} else if err != nil {
-					// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
-					// 该后端标记为 stalled，调度器不再向其分配数据。
-					// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
-					backend.noteRTTFailure()
-				}
+				sampleRTT()
 			case batch := <-connTxChan:
-				sendBuffer = sendBuffer[:0]
-				txPackets := 0
-				var written txFrameTotals
-				padEpoch := padAccountingEpoch()
-				queuedPayload := uint64(0)
-				lastFrameStart := -1
-			drainBatches:
-				for {
-					queuedPayload += batch.Bytes
-					var n, last int
-					sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
-					txPackets += n
-					if last >= 0 {
-						lastFrameStart = last
-					}
-					if len(sendBuffer) >= maxTLSWriteBatchBytes {
-						break
-					}
-					select {
-					case batch = <-connTxChan:
-						continue
-					default:
-						break drainBatches
-					}
-				}
-				var tailPad int
-				sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
-				padTotal := uint64(tailPad)
-				refreshWriteDeadline()
-				batchCork.BeforeWrite(len(sendBuffer))
-				nw, werr := conn.Write(sendBuffer)
-				if werr == nil && nw != len(sendBuffer) {
-					werr = io.ErrShortWrite
-				}
-				if werr != nil {
-					// 写失败即连接不可用：尽早置 stalled，调度器立即停用该后端。
-					backend.markStalled()
-					log.Debugf("[%s] downstream write failed, closing the connection: %v", clientID, werr)
-					conn.Close()
+				if !drainWrite(batch) {
 					return
 				}
-				port.written.record(written)
-				s.written.record(written)
-				s.txBytesTotal.Add(uint64(len(sendBuffer)))
-				s.txPacketsTotal.Add(uint64(txPackets))
-				backend.completeQueuedBytes(queuedPayload)
-				backend.observeDelivered(queuedPayload)
-				// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
-				recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
-				atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&session.TxPackets, uint64(txPackets))
-				atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
-				atomic.AddUint64(&ci.txPackets, uint64(txPackets))
-				dailyTraffic.Add(0, uint64(len(sendBuffer))) // 下行 = server→client
 			case <-keepAliveTicker.C:
-				// 空心跳帧不计入填充累计：bucket 模式会给它补 118B 填充，
-				// 那是保活代价而不是流量开销，算进去会把开销顶到一个与业务
-				// 流量无关的地板上。
-				sendBuffer = sendBuffer[:0]
-				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: nil}, nil, padRecordLimit)
-				// 心跳写必须带超时：数据帧分支写完即清成 time.Time{}，空闲期写路径上
-				// 没有任何 deadline。半开路径会让 Write 挂到 tcp_retries2 耗尽
-				// （约 15 分钟才放弃），期间心跳停发，客户端先在自己的读超时上判死
-				// 本端连接，而服务端仍自认为在线——"connection lost: i/o timeout"
-				// 的唯一成因。加超时后本端 10s 内自发现并断连。
-				refreshWriteDeadline()
-				if _, err := conn.Write(sendBuffer); err != nil {
-					backend.markStalled()
-					log.Debugf("[%s] keepalive write failed, closing the connection: %v", clientID, err)
-					conn.Close()
+				if !writeKeepalive() {
 					return
 				}
 			case probe := <-backend.probeCh:
-				// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
-				// 随机桶尺寸 + randomPool 覆盖字节），消除流量特征。探针（0x03）在
-				// Write 前写入 send_ts（固定偏移）。
-				sendBuffer = sendBuffer[:0]
-				sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
-				if len(probe) > 0 && probe[0] == controlKindRttProbe {
-					patchRttProbeSendTS(sendBuffer, time.Now())
-				}
-				refreshWriteDeadline()
-				if _, err := conn.Write(sendBuffer); err != nil {
-					backend.markStalled()
-					log.Debugf("[%s] rtt probe write failed, closing the connection: %v", clientID, err)
-					conn.Close()
+				if !writeProbe(probe) {
 					return
 				}
 			}

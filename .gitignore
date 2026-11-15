@@ -45,3 +45,6 @@ tlsvpn-selfsigned-*.pem
 *.prof
 *.test
 .prof-out/
+
+# local agent/tool workspace scratch (patches, messages, temp files) - not for VCS
+.zcode/

@@ -18,7 +18,7 @@ func TestWebUIUsesUnifiedSSEWithoutPolling(t *testing.T) {
     for _, x := range forbidden {
         if strings.Contains(s, x) { t.Fatalf("legacy polling marker remains: %s", x) }
     }
-    stream, err := os.ReadFile("webui/stream.js")
+    stream, err := os.ReadFile("webui/sse.js")
     if err != nil { t.Fatal(err) }
     ss := string(stream)
     for _, x := range []string{"/api/stream", "EventSource", "applyStats(payload)", "applyTrend(payload)", "applyLogs(payload)", "applyEvents(payload)"} {

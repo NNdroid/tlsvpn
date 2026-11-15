@@ -72,8 +72,10 @@ func TestWebUIConnTableOneWayColumn(t *testing.T) {
 		"scheduler.fwd_oneway_us",
 		"scheduler.ret_oneway_us",
 		"scheduler.min_rtt_us",
+		"scheduler.probe_at_ms", // 面板"上次计算时间"来源
 		"th.rtt_tip",
 		"rtt-asym",
+		"dg.updated", // 复用"…前"的时长文案渲染探针新鲜度
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("webui/app.js 缺少“去/回”渲染片段 %q", want)
@@ -96,5 +98,23 @@ func TestWebUIConnTableOneWayColumn(t *testing.T) {
 	}
 	if !strings.Contains(readWebUIAsset(t, "webui/style.css"), "td.rtt-asym") {
 		t.Error("style.css 缺少 rtt-asym 不对称着色规则")
+	}
+}
+
+// TestWebUIConfigPriorityLabels 数据面帧优先级字段的状态页标签契约：每个
+// locale 的 cfgk 块都要带 priority_control/priority_data（状态页按顶层 key
+// 自动渲染，缺标签时回退显示原始 key，不算错误但可读性差）。
+func TestWebUIConfigPriorityLabels(t *testing.T) {
+	i18n := readWebUIAsset(t, "webui/i18n.js")
+	blocks := regexp.MustCompile(`cfgk:\{insecure:[^}]*\}`).FindAllString(i18n, -1)
+	if len(blocks) != 5 {
+		t.Fatalf("cfgk 字典数量=%d want=5", len(blocks))
+	}
+	for i, blk := range blocks {
+		for _, want := range []string{"priority_control:'", "priority_data:'"} {
+			if !strings.Contains(blk, want) {
+				t.Errorf("第 %d 个 locale 的 cfgk 缺少 %s", i+1, want)
+			}
+		}
 	}
 }

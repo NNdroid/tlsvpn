@@ -353,12 +353,13 @@ func TestRttProbeSchedulerJSONFields(t *testing.T) {
 	b := testAdaptiveBackend(10000)
 	b.fwdOneWayUS.Store(11)
 	b.retOneWayUS.Store(22)
+	b.probeUpdatedAt.Store(123) // 面板"上次计算时间"来源，非零才出现在 omitempty JSON
 	snap := schedulerSnapshot(b)
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		t.Fatalf("marshal schedulerSnapshot: %v", err)
 	}
-	for _, want := range []string{`"fwd_oneway_us":`, `"ret_oneway_us":`, `"min_rtt_us":`} {
+	for _, want := range []string{`"fwd_oneway_us":`, `"ret_oneway_us":`, `"min_rtt_us":`, `"probe_at_ms":`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("快照 JSON 缺少 %s：%s", want, raw)
 		}

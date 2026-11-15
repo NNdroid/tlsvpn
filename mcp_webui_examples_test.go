@@ -62,9 +62,11 @@ func TestWebUIMCPDeployAndAccessPanelEmbedded(t *testing.T) {
 		wants []string
 	}{
 		{"/", []string{`data-pane="mcp"`, `id="pane-mcp"`, `id="mcpbox"`, `data-i18n="tab.mcp"`, `data-srv="1"`}},
-		{"/stream.js", []string{"mcp_logs", "mcp_after", "applyMcpLogs"}},
+		{"/sse.js", []string{"mcp_logs", "mcp_after", "applyMcpLogs"}},
 		{"/app.js", []string{"applyMcpLogs", "clearMcpLog", "downloadMcpLog", "mcpSeq", "applyModeTabs"}},
-		{"/mcp-settings.js", []string{"mcp-deploy", "mcp-path", "mcp-path-regen", "deploys"}},
+		{"/mcp-settings.js", []string{"mcp-deploy", "mcp-deploy-lock", "applyDeployLock", "deployLocked", "mcp-path", "mcp-path-regen", "deploys"}},
+		{"/scheduler-settings.js", []string{"routing-algo", "fec-strategy", "fec-near-window", "latency_strict", "min_rtt_strict", "roundtrip_strict", "fromEditor", "toEditor"}},
+		{"/i18n.js", []string{"routing_algo", "fec_strategy", "fec_near_window_ms"}},
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))

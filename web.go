@@ -271,7 +271,7 @@ func (w *WebManager) auth(next http.HandlerFunc) http.HandlerFunc {
 			next(rw, r)
 			return
 		}
-		if r.URL.Path == "/login" || r.URL.Path == "/login.html" || r.URL.Path == "/login.css" || r.URL.Path == "/login.js" {
+		if r.URL.Path == "/login" || r.URL.Path == "/login.html" {
 			next(rw, r)
 			return
 		}
