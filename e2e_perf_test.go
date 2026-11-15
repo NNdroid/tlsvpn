@@ -204,6 +204,10 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 		banned:      map[string]int64{},
 		maxSessions: cfg.Server.MaxSessions,
 		fecGroupMin: cfg.Server.FecGroupMin, fecGroupMax: cfg.Server.FecGroupMax,
+		// 与 startServer(1135) 一致：brutal 三元组必须在构造时从 cfg 初始化，
+		// 否则 Server.ApplyConfig 的 brutalChanged 会把零值(0/0)与 cfg 默认
+		// (100/500) 误判为"已变更"，每次保存配置都误触发全量 reconnect。
+		brutal: cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 	}
 	srv.cfg.Store(cfg)
 	srv.v4Gw, srv.v6Gw = getFirstIP(v4net).String(), getFirstIP(v6net).String()
@@ -215,6 +219,11 @@ func newServerForTest(ctx context.Context, cfg *Config) (*Server, error) {
 	tapBackend := make(chan []VPNFrame, 256)
 	tapPort := NewAsyncPort(ctx, tapPortID)
 	tapPort.RegisterBackend(tapBackend, new(uint32))
+	// 与 startServer 一致：测试构造也记录 tapPort 并应用调度/FEC 策略字段。
+	srv.tapPort = tapPort
+	tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
+	tapPort.SetFecStrategy(cfg.FecStrategy)
+	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	srv.vswitch.AddPort(tapPort)
 
 	// 真实系统里本机 TAP 发出的 ARP/IP 帧会让 VSwitch 学到 TAP_LOCAL 的源 MAC。

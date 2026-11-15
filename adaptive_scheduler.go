@@ -1,8 +1,6 @@
 package main
 
 import (
-	"math"
-	"sync/atomic"
 	"time"
 )
 
@@ -76,6 +74,9 @@ type schedulerConnJSON struct {
 	// MinRttUS 该连接的内核 min_rtt 地板（µs）；0=未知。与 fwd/ret 同列供
 	// WebUI 参考。仅观测，不在 TLSVPN 线上。
 	MinRttUS uint64 `json:"min_rtt_us,omitempty"`
+	// ProbeAtMs 最近一次发布 fwd/ret 的 unix 毫秒；0=尚未收敛。面板据此显示
+	// "上次计算时间"。仅观测，不在 TLSVPN 线上。
+	ProbeAtMs uint64 `json:"probe_at_ms,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -128,176 +129,6 @@ func (b *Backend) completeQueuedBytes(n uint64) {
 // observeDelivered updates a cheap per-path payload-rate EWMA. It is called by
 // that backend's sole TLS writer goroutine, so sampleBytes/sampleStart require no
 // lock or atomics; only the published EWMA is atomic for the AsyncPort reader.
-func (b *Backend) observeDelivered(n uint64) {
-	if b == nil || n == 0 {
-		return
-	}
-	b.rateSampleBytes += n
-	if b.rateSampleStart.IsZero() {
-		b.rateSampleStart = time.Now()
-		return
-	}
-	if b.rateSampleBytes < adaptiveRateSampleMinBytes {
-		return
-	}
-	now := time.Now()
-	elapsed := now.Sub(b.rateSampleStart)
-	if elapsed > adaptiveRateSampleMaxInterval {
-		// A long idle interval is not evidence that the path became slow. Restart
-		// the sample instead of poisoning the rate estimate toward zero.
-		b.rateSampleStart = now
-		b.rateSampleBytes = 0
-		return
-	}
-	if elapsed < 200*time.Microsecond {
-		return
-	}
-	inst := uint64(float64(b.rateSampleBytes) / elapsed.Seconds())
-	if inst == 0 {
-		return
-	}
-	old := b.rateBytesPerSec.Load()
-	if old == 0 {
-		b.rateBytesPerSec.Store(inst)
-	} else {
-		// 1/8 new sample, 7/8 history: stable enough for scheduling while still
-		// reacting within a few successful writes when one path degrades.
-		b.rateBytesPerSec.Store((old*7 + inst) / 8)
-	}
-	b.rateSampleBytes = 0
-	b.rateSampleStart = now
-}
-
-func (b *Backend) effectiveRateBytesPerSec() uint64 {
-	if b == nil {
-		return adaptiveFallbackRateBytesPerSec
-	}
-	rate := b.rateBytesPerSec.Load()
-	if rate == 0 {
-		return adaptiveFallbackRateBytesPerSec
-	}
-	return rate
-}
-
-func serviceTimeUS(bytes, rate uint64) uint64 {
-	if bytes == 0 {
-		return 0
-	}
-	if rate == 0 {
-		rate = adaptiveFallbackRateBytesPerSec
-	}
-	return bytes * 1_000_000 / rate
-}
-
-func serviceTimeNS(bytes, rate uint64) int64 {
-	if bytes == 0 {
-		return 0
-	}
-	if rate == 0 {
-		rate = adaptiveFallbackRateBytesPerSec
-	}
-	return int64(bytes * 1_000_000_000 / rate)
-}
-
-// adaptiveBackendRTT returns the RTT used for ordinary telemetry plus whether
-// the value is still the connection bootstrap estimate. Zero is also unknown
-// for synthetic/TAP backends and proxy cases that cannot expose TCP_INFO.
-func adaptiveBackendRTT(b *Backend) (uint32, bool) {
-	if b == nil || b.rttCache == nil {
-		return adaptiveUnknownRTTUS, true
-	}
-	rtt := atomic.LoadUint32(b.rttCache)
-	if rtt == 0 || rtt == adaptiveUnknownRTTUS {
-		return adaptiveUnknownRTTUS, true
-	}
-	return rtt, false
-}
-
-// adaptiveBackendMinRTT returns the connection's kernel min_rtt (无拥塞地板往返,
-// µs) + unknownRTT。min_rtt 用于路径质量/排名/资格包络：SRTT 含瞬时拥塞会搅动
-// 候选集，min_rtt 是稳定地板。未知时同样用 50000 哨兵纪律。
-//
-// 返回值约定与 adaptiveBackendRTT 完全一致：bool 为 true 表示**未知**（此时
-// 第一个返回值是 50000 哨兵，不可当作真实 RTT 使用）。
-func adaptiveBackendMinRTT(b *Backend) (uint32, bool) {
-	if b == nil || b.minRttCache == nil {
-		return adaptiveUnknownRTTUS, true
-	}
-	rtt := atomic.LoadUint32(b.minRttCache)
-	if rtt == 0 || rtt == adaptiveUnknownRTTUS {
-		// min_rtt 尚未观测到（代理/非 Linux/刚建立）：退回 SRTT 当包络参考。
-		// 不能返回 50000µs 哨兵——它会让包络地板凭空抬高 2.5 万微秒，把本来
-		// 合格的路径挡在候选集外；SRTT 至少是这条连接真实的观测值。
-		if srtt, unknownSRTT := adaptiveBackendRTT(b); !unknownSRTT {
-			return srtt, false
-		}
-		return adaptiveUnknownRTTUS, true
-	}
-	return rtt, false
-}
-
-// backendOneWayUS 返回本端 egress 方向的单向时延估计（µs）+ 是否已收敛。
-// 按所属 AsyncPort 的 oneWayMode 选择 fwd/ret；0=未收敛。
-func (b *Backend) backendOneWayUS() (uint32, bool) {
-	if b == nil {
-		return 0, false
-	}
-	mode := int32(0)
-	if b.oneWayModePtr != nil {
-		mode = b.oneWayModePtr.Load()
-	}
-	switch mode {
-	case oneWayModeFwd:
-		if v := b.fwdOneWayUS.Load(); v > 0 {
-			return uint32(min(v, math.MaxUint32)), true
-		}
-	case oneWayModeRet:
-		if v := b.retOneWayUS.Load(); v > 0 {
-			return uint32(min(v, math.MaxUint32)), true
-		}
-	}
-	return 0, false
-}
-
-// adaptiveBackendOneWayUS 返回选路用的单向时延：跨路径估计（已收敛）优先，
-// 否则回退 min_rtt/2（无拥塞地板），再退 SRTT/2。估计未收敛前与现状一致。
-func adaptiveBackendOneWayUS(b *Backend) uint64 {
-	if v, ok := b.backendOneWayUS(); ok {
-		return uint64(v)
-	}
-	// 注意：adaptiveBackendMinRTT 的 bool 是 unknownRTT（与 adaptiveBackendRTT 一致），
-	// 故这里取反；写反会让 min_rtt 恒被当成未知，回退链永远停在 SRTT/2。
-	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
-		return uint64(mr) / 2
-	}
-	rtt, _ := adaptiveBackendRTT(b)
-	return uint64(rtt) / 2
-}
-
-func (b *Backend) baseQualityUS(incomingBytes uint64) uint64 {
-	if b == nil {
-		return ^uint64(0)
-	}
-	// 无载路径质量：用单向时延估计（fwd/ret，decayed-min 地板）而非 SRTT/2，
-	// 抗瞬时拥塞；未收敛时 adaptiveBackendOneWayUS 回退 min_rtt/2→SRTT/2。
-	return adaptiveBackendOneWayUS(b) + serviceTimeUS(incomingBytes, b.effectiveRateBytesPerSec())
-}
-
-// schedulingETAUS combines kernel/user-space queued work with a virtual service
-// finish timestamp. The virtual debt survives a very fast writer drain, so a
-// shallow high-throughput queue still stripes consecutive batches across the
-// active set instead of repeatedly selecting the same socket.
-func (b *Backend) schedulingETAUS(incomingBytes uint64) uint64 {
-	if b == nil {
-		return ^uint64(0)
-	}
-	rtt, _ := adaptiveBackendRTT(b)
-	eta := uint64(rtt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, b.effectiveRateBytesPerSec())
-	if b.carryPending.Load() && eta > adaptiveCarryBonusUS {
-		eta -= adaptiveCarryBonusUS
-	}
-	return eta
-}
 
 func (b *Backend) addVirtualServiceAtRate(incomingBytes, rate uint64) {
 	if b == nil || incomingBytes == 0 {
@@ -319,18 +150,6 @@ func logicalDispatchScoreNS(b *Backend, rate uint64) int64 {
 		score -= int64(adaptiveCarryBonusUS) * 1_000
 	}
 	return score
-}
-
-func (b *Backend) estimatedETAUS(incomingBytes uint64) uint64 {
-	if b == nil {
-		return ^uint64(0)
-	}
-	rtt, _ := adaptiveBackendRTT(b)
-	eta := uint64(rtt)/2 + serviceTimeUS(b.queuedBytes.Load()+incomingBytes, b.effectiveRateBytesPerSec())
-	if b.carryPending.Load() && eta > adaptiveCarryBonusUS {
-		eta -= adaptiveCarryBonusUS
-	}
-	return eta
 }
 
 func schedulerSnapshot(b *Backend) schedulerConnJSON {
@@ -357,6 +176,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		FwdOneWayUS:        b.fwdOneWayUS.Load(),
 		RetOneWayUS:        b.retOneWayUS.Load(),
 		MinRttUS:           minRTT,
+		ProbeAtMs:          b.probeUpdatedAt.Load(),
 	}
 }
 
@@ -465,34 +285,60 @@ func adaptiveStickySlackUS(rtt uint32) uint64 {
 // fair-start until it has both a usable RTT and a delivery-rate sample; this
 // prevents an early/delayed TCP_INFO sample from starving a cold socket before
 // it has carried the >=64 KiB needed to measure its own writer delivery rate.
+// pickAdaptiveBackend 选路编排：按当前 routingPolicy 依次执行资格扫描、候选构建、
+// 排名与派发。策略每批读取（热更即生效）。各阶段拆分到命名 helper，语义与历史
+// 行为一致（仅结构重组）。
 func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingBytes uint64) *Backend {
-	// dispatchBatch calls the scheduler immediately before feeding the FEC encoder.
-	// Feed the encoder the *physical* backend count here rather than p.activePaths:
-	// low-load scheduling intentionally keeps activePaths==1 even when standby TCP
-	// paths exist and can carry useful parity.
-	if p != nil && p.encoder != nil {
-		p.encoder.setPhysicalPathCount(len(backends))
-	}
-
+	policy := routingPolicyForCode(p.routingAlgo.Load())
+	p.feedEncoderPathCount(len(backends))
 	if len(backends) == 0 {
-		if p != nil {
-			p.activePaths.Store(0)
-		}
+		p.activePaths.Store(0)
 		return nil
 	}
 	current := p.preferred.Load()
+	p.publishBaselineETA(backends, incomingBytes)
+
+	minMeasuredRTT, healthy := scanWarmedMinRTT(backends)
+	if healthy == 0 {
+		return p.fallbackSinglePath(backends)
+	}
+	minRTT, maxRTT, referenceRate := buildEnvelope(backends, minMeasuredRTT)
+	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate)
+	p.schedulerScratch = cands
+	if len(cands) == 0 {
+		return p.pickBackend(backends)
+	}
+	rankCandidates(cands)
+
+	active := adaptiveActivePathTarget(pressure, p.inputRateBytesPerSec.Load(), len(cands))
+	bestBase := cands[0].baseUS
+	if !policy.wfq || active == 1 {
+		return p.commitSinglePath(backends, cands, current, bestBase, policy)
+	}
+	return p.dispatchWFQ(backends, cands, active, incomingBytes)
+}
+
+// feedEncoderPathCount 把物理后端数喂给 FEC 编码器（非活跃数：低负载调度刻意
+// 保持 activePaths==1 而待命 TCP 路径仍可承载有用 parity）。
+func (p *AsyncPort) feedEncoderPathCount(n int) {
+	if p != nil && p.encoder != nil {
+		p.encoder.setPhysicalPathCount(n)
+	}
+}
+
+// publishBaselineETA 为所有后端发布保守 ETA 遥测（含当前拥塞的 SRTT 估计）。
+func (p *AsyncPort) publishBaselineETA(backends []*Backend, incomingBytes uint64) {
 	for _, b := range backends {
 		if b != nil {
 			b.etaUsec.Store(b.estimatedETAUS(incomingBytes))
 		}
 	}
+}
 
-	// Build the RTT reference only from fully warmed paths. A socket that has an
-	// RTT sample but still has rateBytesPerSec==0 has not yet carried enough
-	// egress payload to validate that sample for multipath eligibility. Counting
-	// it here can let measurement order collapse the candidate set permanently.
-	var minMeasuredRTT uint32 = ^uint32(0)
-	healthy := 0
+// scanWarmedMinRTT 只从完全"热身"路径构建 RTT 参考：有 RTT 采样且已承载足够
+// egress 载荷（rateBytesPerSec!=0）才计入，否则测量顺序可能永久压缩候选集。
+func scanWarmedMinRTT(backends []*Backend) (minMeasuredRTT uint32, healthy int) {
+	minMeasuredRTT = ^uint32(0)
 	for _, b := range backends {
 		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
 			continue
@@ -507,28 +353,35 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			minMeasuredRTT = rtt
 		}
 	}
-	if healthy == 0 {
-		b := backends[0]
-		if b != nil {
-			for _, x := range backends {
-				if x != nil {
-					x.active.Store(x == b)
-					x.virtualFinishNS.Store(0)
-				}
-			}
-			p.activePaths.Store(1)
-			p.preferred.Store(b)
-		}
-		return b
-	}
+	return minMeasuredRTT, healthy
+}
 
-	minRTT := minMeasuredRTT
+// fallbackSinglePath 无健康路径时退化为首条后端，重置活跃/债务状态。
+func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
+	b := backends[0]
+	if b != nil {
+		for _, x := range backends {
+			if x != nil {
+				x.active.Store(x == b)
+				x.virtualFinishNS.Store(0)
+			}
+		}
+		p.activePaths.Store(1)
+		p.preferred.Store(b)
+	}
+	return b
+}
+
+// buildEnvelope 计算近 MinRTT 资格包络（maxRTT）与参考速率。min_rtt 是无拥塞
+// 地板，包络用它排除明显偏离的路径以限界接收端乱序。
+func buildEnvelope(backends []*Backend, minMeasuredRTT uint32) (minRTT uint32, maxRTT uint64, referenceRate uint64) {
+	minRTT = minMeasuredRTT
 	if minRTT == ^uint32(0) {
 		minRTT = adaptiveUnknownRTTUS
 	}
 	rttSlack := max(uint32(backendRTTHysteresisMin), minRTT/4)
-	maxRTT := uint64(minRTT) + uint64(rttSlack)
-	referenceRate := uint64(adaptiveFallbackRateBytesPerSec)
+	maxRTT = uint64(minRTT) + uint64(rttSlack)
+	referenceRate = uint64(adaptiveFallbackRateBytesPerSec)
 	for _, b := range backends {
 		if b == nil {
 			continue
@@ -538,7 +391,6 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		fairStart := unknownRTT || cold
 		if fairStart {
 			// Candidate ordering uses the best warmed RTT only during bootstrap.
-			// WebUI ETA keeps the real/conservative value via estimatedETAUS.
 			rtt = minRTT
 		}
 		if !fairStart && uint64(rtt) > maxRTT {
@@ -548,6 +400,11 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			referenceRate = rate
 		}
 	}
+	return minRTT, maxRTT, referenceRate
+}
+
+// buildEligibleCandidates 构建候选集：资格包络 + stall/队满排除，按策略算主排名键。
+func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64) []backendCandidate {
 	cands := p.schedulerScratch[:0]
 	for _, b := range backends {
 		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
@@ -567,15 +424,12 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			rtt = minRTT
 		}
 		if !fairStart && uint64(rtt) > maxRTT {
-			// Clear stale membership when a previously cold path finishes warm-up
-			// and is now genuinely outside the near-MinRTT envelope.
+			// 冷路径完成热身却真正落在包络外：清掉过期成员。
 			b.active.Store(false)
 			b.virtualFinishNS.Store(0)
 			continue
 		}
-		// Writer-drain EWMA is useful telemetry but tlsConn.Write completion only
-		// means bytes entered the socket buffer; it is not a reliable estimate of
-		// end-to-end TCP delivery capacity. Use it for observational ETA only.
+		// Writer-drain EWMA 只作观测 ETA，不代表端到端 TCP 投递能力。
 		etaRate := b.rateBytesPerSec.Load()
 		if etaRate == 0 {
 			etaRate = referenceRate
@@ -585,13 +439,20 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			eta -= adaptiveCarryBonusUS
 		}
 		b.etaUsec.Store(eta)
-		// Scheduling debt is intentionally byte-fair. A common fixed rate turns
-		// virtual service time into a scaled byte counter, preventing transient
-		// userspace writer speed from creating a self-reinforcing path monopoly.
+		// 调度债务刻意字节公平：统一固定速率把虚拟服务时间变成字节计数器。
 		schedRate := uint64(adaptiveFallbackRateBytesPerSec)
+		// 主排名键按当前算法计算（candidateRankUS）；完全未测路径折到 minRTT/2。
+		oneWay := adaptiveBackendOneWayUS(b)
+		if _, ok := b.backendOneWayUS(); !ok {
+			if _, mrUnknown := adaptiveBackendMinRTT(b); mrUnknown {
+				if _, srttUnknown := adaptiveBackendRTT(b); srttUnknown {
+					oneWay = uint64(minRTT) / 2
+				}
+			}
+		}
 		cands = append(cands, backendCandidate{
 			backend:   b,
-			baseUS:    adaptiveBackendOneWayUS(b) + serviceTimeUS(incomingBytes, schedRate),
+			baseUS:    candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate),
 			etaUS:     eta,
 			rttUS:     rtt,
 			schedRate: schedRate,
@@ -599,13 +460,11 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			virtualNS: b.virtualFinishNS.Load(),
 		})
 	}
-	p.schedulerScratch = cands
-	if len(cands) == 0 {
-		return p.pickBackend(backends)
-	}
+	return cands
+}
 
-	// Stable active membership comes from unloaded path quality. Short-lived
-	// queue debt changes dispatch order inside the set, not membership itself.
+// rankCandidates 按主排名键稳定排序（rttUS 平局裁决）。
+func rankCandidates(cands []backendCandidate) {
 	for i := 1; i < len(cands); i++ {
 		x := cands[i]
 		j := i
@@ -615,43 +474,38 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		}
 		cands[j] = x
 	}
+}
 
-	demandRate := p.inputRateBytesPerSec.Load()
-	active := adaptiveActivePathTarget(pressure, demandRate, len(cands))
-	bestBase := cands[0].baseUS
-
-	if active == 1 {
-		chosen := cands[0].backend
-		if current != nil && current != chosen {
-			for i := range cands {
-				if cands[i].backend != current {
-					continue
-				}
-				if cands[i].baseUS <= bestBase+adaptiveStickySlackUS(cands[i].rttUS) {
-					chosen = current
-				}
-				break
+// commitSinglePath 单活跃路径提交：严格模式直接取 rank[0]；sticky 模式在粘滞带内
+// 保留当前路径；其余路径清为待命并重置公平债务。
+func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandidate, current *Backend, bestBase uint64, policy routingPolicy) *Backend {
+	chosen := cands[0].backend
+	if policy.sticky && current != nil && current != chosen {
+		for i := range cands {
+			if cands[i].backend != current {
+				continue
 			}
-		}
-		// Single-path interactive mode has no fairness debt. Reset it so a later
-		// expansion starts all newly-active paths from the same virtual epoch.
-		for _, b := range backends {
-			if b != nil {
-				b.active.Store(b == chosen)
-				b.virtualFinishNS.Store(0)
+			if cands[i].baseUS <= bestBase+adaptiveStickySlackUS(cands[i].rttUS) {
+				chosen = current
 			}
+			break
 		}
-		p.activePaths.Store(1)
-		p.preferred.Store(chosen)
-		return chosen
 	}
+	// 单路径交互模式无公平债务：清空以便后续扩张从同一虚拟纪元起步。
+	for _, b := range backends {
+		if b != nil {
+			b.active.Store(b == chosen)
+			b.virtualFinishNS.Store(0)
+		}
+	}
+	p.activePaths.Store(1)
+	p.preferred.Store(chosen)
+	return chosen
+}
 
-	// WFQ/stride scheduling: logical debt does NOT decay with wall-clock time.
-	// That is the crucial property for shallow high-rate queues: even if a TLS
-	// writer drains a 12 KiB batch before the next batch arrives, the scheduler
-	// remembers that the path just consumed its share and selects another active
-	// path. Faster measured paths accrue debt more slowly and naturally get a
-	// equal byte share; RTT/queue state still determines eligibility and immediate order.
+// dispatchWFQ 活跃集内按虚拟服务债务（WFQ/stride）分摊：债务不随墙钟衰减，
+// 快速写者清空浅队列后仍会把连续批次条带化到不同活跃路径。
+func (p *AsyncPort) dispatchWFQ(backends []*Backend, cands []backendCandidate, active int, incomingBytes uint64) *Backend {
 	var epoch int64
 	haveEpoch := false
 	for i := 0; i < active; i++ {
@@ -680,9 +534,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		b.active.Store(true)
 	}
 
-	// Rebase the active set every dispatch. Only relative service debt matters;
-	// keeping the minimum at zero prevents long-lived sessions from accumulating
-	// huge counters and makes newly activated paths join immediately.
+	// 每次派发重定基：只相对服务债务有意义，最小值归零防计数器无限增长。
 	minVirtual := cands[0].backend.virtualFinishNS.Load()
 	for i := 1; i < active; i++ {
 		if v := cands[i].backend.virtualFinishNS.Load(); v < minVirtual {

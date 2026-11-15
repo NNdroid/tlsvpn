@@ -16,7 +16,7 @@ func readWebUIAsset(t *testing.T, path string) string {
 }
 
 func TestWebUISchedulerUsesIntervalMetrics(t *testing.T) {
-	s := readWebUIAsset(t, "webui/metrics.js")
+	s := readWebUIAsset(t, "webui/metric-corrections.js")
 	for _, want := range []string{
 		"assigned - p.assigned",
 		"batches - p.batches",
@@ -28,7 +28,7 @@ func TestWebUISchedulerUsesIntervalMetrics(t *testing.T) {
 		"lifetime assigned",
 	} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("metrics.js missing scheduler interval semantic %q", want)
+			t.Fatalf("metric-corrections.js missing scheduler interval semantic %q", want)
 		}
 	}
 	if strings.Contains(s, "t('th.tx') + ' ' + fmtBytes(s.assigned_bytes") {
@@ -37,7 +37,7 @@ func TestWebUISchedulerUsesIntervalMetrics(t *testing.T) {
 }
 
 func TestWebUIFrameVizMatchesStreamAggregation(t *testing.T) {
-	s := readWebUIAsset(t, "webui/frameviz.js")
+	s := readWebUIAsset(t, "webui/frame-visualizer.js")
 	for _, want := range []string{
 		"12 KiB",
 		"16 KiB",
@@ -53,12 +53,12 @@ func TestWebUIFrameVizMatchesStreamAggregation(t *testing.T) {
 		"ja:",
 	} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("frameviz.js missing current framing detail %q", want)
+			t.Fatalf("frame-visualizer.js missing current framing detail %q", want)
 		}
 	}
 	for _, stale := range []string{"bucket 1600B", "padLen=60"} {
 		if strings.Contains(s, stale) {
-			t.Fatalf("frameviz.js still contains obsolete per-frame padding example %q", stale)
+			t.Fatalf("frame-visualizer.js still contains obsolete per-frame padding example %q", stale)
 		}
 	}
 }

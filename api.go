@@ -332,6 +332,8 @@ type runtimeCfgJSON struct {
 	Brutal           bool         `json:"brutal"`
 	BrutalUp         uint64       `json:"brutal_up"`
 	BrutalDown       uint64       `json:"brutal_down"`
+	PriorityControl  int          `json:"priority_control,omitempty"` // 数据面控制帧写优先级
+	PriorityData     int          `json:"priority_data,omitempty"`     // 数据面数据帧写优先级
 	Socks5           bool         `json:"socks5"`
 	FEC              bool         `json:"fec"`
 	FecGroup         int          `json:"fec_group"`
@@ -364,6 +366,9 @@ type runtimeCfgJSON struct {
 	ReqV4            string       `json:"req_v4,omitempty"`
 	ReqV6            string       `json:"req_v6,omitempty"`
 	InterfaceManager string       `json:"interface_manager,omitempty"`
+	RoutingAlgo      string       `json:"routing_algo,omitempty"`       // 本端 egress 多路径选路算法（auto/...）
+	FecStrategy      string       `json:"fec_strategy,omitempty"`       // 本端 egress parity 分发策略（auto/near）
+	FecNearWindowMs  int          `json:"fec_near_window_ms,omitempty"` // near 窗口（ms）
 	TrafficDays      int          `json:"traffic_days,omitempty"`
 	TrafficFile      string       `json:"traffic_file,omitempty"`
 	HooksUp          string       `json:"hooks_up,omitempty"`
@@ -1062,6 +1067,8 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.Brutal = cfg.Brutal
 	out.BrutalUp = cfg.BrutalUp
 	out.BrutalDown = cfg.BrutalDown
+	out.PriorityControl = cfg.PriorityControl
+	out.PriorityData = cfg.PriorityData
 	out.Socks5 = cfg.Socks5 != ""
 	out.LogLevel = cfg.LogLevel
 	out.Conns = cfg.Client.Conns
@@ -1095,6 +1102,9 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.ReqV4 = cfg.Client.ReqV4
 	out.ReqV6 = cfg.Client.ReqV6
 	out.InterfaceManager = cfg.Client.InterfaceManager
+	out.RoutingAlgo = cfg.RoutingAlgo
+	out.FecStrategy = cfg.FecStrategy
+	out.FecNearWindowMs = cfg.FecNearWindowMs
 	// 流量历史保留策略与 up/down 钩子路径（最近一次执行结果见 WebStats.Hooks）
 	out.TrafficDays = cfg.TrafficDays
 	out.TrafficFile = cfg.TrafficFile

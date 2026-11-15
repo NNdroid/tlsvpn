@@ -42,7 +42,7 @@ try{
   validate('FRAMEVIZ_I18N',exported.FRAMEVIZ_I18N);
 
   const english=flatten(exported.I18N.en);
-  for(const file of ['webui/app.js','webui/metrics.js','webui/stream.js']){
+  for(const file of ['webui/app.js','webui/metric-corrections.js','webui/sse.js']){
     const src=read(file);
     for(const m of src.matchAll(/\bt\(\s*['"]([^'"]+)['"]\s*\)/g)){
       if(!(m[1] in english))failures.push(`${file}: unknown i18n key ${m[1]}`);
@@ -54,7 +54,7 @@ try{
   }
 }catch(err){failures.push(`webui/i18n.js evaluation failed: ${err.stack||err}`);}
 
-const fvSrc=read('webui/frameviz.js');
+const fvSrc=read('webui/frame-visualizer.js');
 try{
   const decl='const FRAMEVIZ_DETAIL_I18N=';
   const start=fvSrc.indexOf(decl);
@@ -71,11 +71,11 @@ try{
     'Ethernet → AEAD (+16 B)','seq=0 handshake/control/heartbeat frames',
     'Legacy migration note:'
   ];
-  for(const text of stale)if(runtime.includes(text))failures.push(`webui/frameviz.js: hard-coded visible text remains: ${text}`);
+  for(const text of stale)if(runtime.includes(text))failures.push(`webui/frame-visualizer.js: hard-coded visible text remains: ${text}`);
   for(const key of ['kpi_header','kpi_data_len','kpi_pad_len','kpi_batch','ethernet_frame','aead_tag','header_desc','inner_aead','aead_desc','tail_desc','detail_desc','batch_limits','frame','final_frame','flow','control_note']){
-    if(!runtime.includes(`s.${key}`))failures.push(`webui/frameviz.js: translated key not rendered: ${key}`);
+    if(!runtime.includes(`s.${key}`))failures.push(`webui/frame-visualizer.js: translated key not rendered: ${key}`);
   }
-}catch(err){failures.push(`webui/frameviz.js audit failed: ${err.stack||err}`);}
+}catch(err){failures.push(`webui/frame-visualizer.js audit failed: ${err.stack||err}`);}
 
 const login=read('webui/login.html');
 for(const l of locales){

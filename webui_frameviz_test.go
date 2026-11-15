@@ -27,8 +27,8 @@ func TestWebUII18nAndFrameVisualizerAreInjected(t *testing.T) {
 	for _, want := range []string{
 		`data-v="zh-TW"`,
 		`>繁中</button>`,
-		`<script src="frameviz.js"></script>`,
-		`<script src="metrics.js"></script>`,
+		`<script src="frame-visualizer.js"></script>`,
+		`<script src="metric-corrections.js"></script>`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index response missing %q", want)
@@ -45,8 +45,8 @@ func TestWebUII18nAndFrameVisualizerAreInjected(t *testing.T) {
 		want []string
 	}{
 		{"/i18n.js", []string{"const I18N={", "const FRAMEVIZ_I18N=", "'zh-CN'", "'zh-TW'", "'de'", "'fr'", "'ja'", "Frame format example", "FEC recovery rate"}},
-		{"/frameviz.js", []string{"FRAMEVIZ_I18N[LANG]", "AES-256-GCM", "12 KiB", "16 KiB", "padLen=0", "1 MiB"}},
-		{"/metrics.js", []string{"assigned - p.assigned", "_share_pct", "_queue_eta_us"}},
+		{"/frame-visualizer.js", []string{"FRAMEVIZ_I18N[LANG]", "AES-256-GCM", "12 KiB", "16 KiB", "padLen=0", "1 MiB"}},
+		{"/metric-corrections.js", []string{"assigned - p.assigned", "_share_pct", "_queue_eta_us"}},
 	}
 	for _, a := range assets {
 		resp, err = ts.Client().Get(ts.URL + a.path)

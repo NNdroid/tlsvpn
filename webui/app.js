@@ -1690,9 +1690,9 @@ function renderConnsTable(data,fresh){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0)}));
+    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0)}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1756,6 +1756,15 @@ function renderConnsTable(data,fresh){
       const mn=Math.max(1,Math.round(r.minrtt/1000));
       rtt+=' <span class="dim">· '+t('ov.mn')+' '+mn+'</span>';
       rttTip+=(rttTip?' · ':'')+t('ov.mn')+' '+mn+' ms';
+    }
+    // 上次探针重算时刻（unix ms）：fwd/ret 同一次重算一并发布，面板把它作为
+    // 新鲜度提示显示在"去/回"旁，一眼看出这个时延是多早之前算的；0=尚未收敛
+    // （首次发布前不显示），避免把"从未算过"误读成"刚算过"。
+    if(r.probeat>0){
+      const ago=Math.max(0,Math.round((Date.now()-r.probeat)/1000));
+      const at=t('dg.updated').replace('{t}',fmtDur(ago));
+      rtt+=' <span class="dim">· '+at+'</span>';
+      rttTip+=(rttTip?' · ':'')+at;
     }
     // Brutal 列同时是"为什么没生效"的入口：速率生效显示双向速率，
     // 配置了但内核/平台不支持显示"未生效"，悬停看具体原因。

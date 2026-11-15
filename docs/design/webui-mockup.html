@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tlsvpn Dashboard · 设计稿</title>
+<style>
+:root{
+  --bg:#0a0e16; --card:#111726; --card2:#0d1320; --term:#0a0f1a;
+  --border:#1f2739; --border2:#2a3550; --grid:#1b2334;
+  --fg:#e8ecf4; --muted:#9aa2b5; --sub:#6c7488;
+  --accent:#8b7bff; --accent2:#22d3ee; --accent-soft:rgba(139,123,255,.14);
+  --up:#3ddba4; --up-soft:rgba(61,219,164,.13);
+  --down:#8b7bff; --down-soft:rgba(139,123,255,.14);
+  --warn:#f2c94c; --warn-soft:rgba(242,201,76,.12);
+  --err:#ff6b8b; --err-soft:rgba(255,107,139,.12);
+  --cyan:#38cfe8; --cyan-soft:rgba(56,207,232,.13);
+  --amber:#f0b13e; --amber-soft:rgba(240,177,62,.13);
+  --off:#39415a; --offfg:#8b93a7;
+  --grad:linear-gradient(135deg,#6d5df6 0%,#9a6bff 100%);
+  --shadow:0 1px 2px rgba(0,0,0,.35),0 10px 30px -14px rgba(0,0,0,.55);
+  --glow1:rgba(109,93,246,.16); --glow2:rgba(56,207,232,.10);
+}
+:root[data-theme=light]{
+  --bg:#f3f5fa; --card:#ffffff; --card2:#f7f9fd; --term:#0f1521;
+  --border:#e4e8f1; --border2:#d5dbe8; --grid:#e8ecf4;
+  --fg:#181d27; --muted:#5c6474; --sub:#8b93a5;
+  --accent:#6a5cf5; --accent2:#0891b2; --accent-soft:rgba(106,92,245,.10);
+  --up:#0da271; --up-soft:rgba(13,162,113,.12);
+  --down:#6a5cf5; --down-soft:rgba(106,92,245,.10);
+  --warn:#9a6d00; --warn-soft:rgba(214,158,46,.16);
+  --err:#d3315a; --err-soft:rgba(211,49,90,.10);
+  --cyan:#0891b2; --cyan-soft:rgba(8,145,178,.10);
+  --amber:#b47a07; --amber-soft:rgba(214,158,46,.16);
+  --off:#e6eaf2; --offfg:#7d8595;
+  --shadow:0 1px 2px rgba(16,24,40,.05),0 10px 30px -16px rgba(16,24,40,.18);
+  --glow1:rgba(106,92,245,.07); --glow2:rgba(8,145,178,.05);
+}
+*{box-sizing:border-box}
+html{scrollbar-color:var(--border2) transparent}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg); color:var(--fg); margin:0; font-size:15px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+body::before,body::after{
+  content:""; position:fixed; z-index:-1; border-radius:50%; filter:blur(90px); pointer-events:none;
+}
+body::before{width:640px;height:640px;left:-180px;top:-260px;background:var(--glow1)}
+body::after{width:560px;height:560px;right:-160px;bottom:-240px;background:var(--glow2)}
+.mono,code{font-family:ui-monospace,"Cascadia Mono",Consolas,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
+
+/* ---------- 顶栏 ---------- */
+.topbar{
+  position:sticky;top:0;z-index:50;
+  background:color-mix(in srgb,var(--bg) 78%,transparent);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+}
+.topbar-inner{max-width:1240px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px;min-width:0}
+.logo{
+  width:38px;height:38px;border-radius:11px;background:var(--grad);flex:none;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 14px -4px rgba(109,93,246,.55);
+}
+.logo svg{width:21px;height:21px;stroke:#fff}
+.brand-name{display:flex;align-items:center;gap:9px;font-weight:700;font-size:1.12em;letter-spacing:.02em}
+.brand-meta{color:var(--sub);font-size:.76em;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{
+  display:inline-flex;align-items:center;gap:6px;padding:2.5px 10px;border-radius:999px;
+  font-size:.66em;font-weight:700;letter-spacing:.09em;
+}
+.chip .cdot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2.2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.chip.mode{background:var(--up-soft);color:var(--up)}
+.chip.mode.client{background:var(--cyan-soft);color:var(--cyan)}
+.topctl{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.seg{display:inline-flex;background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:3px;gap:2px}
+.seg button{
+  border:none;background:transparent;color:var(--muted);font:inherit;font-size:.8em;
+  padding:4.5px 11px;border-radius:8px;cursor:pointer;transition:all .15s ease;white-space:nowrap;
+  display:inline-flex;align-items:center;gap:5px;
+}
+.seg button:hover{color:var(--fg)}
+.seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.seg svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- 布局与卡片 ---------- */
+.wrap{max-width:1240px;margin:0 auto;padding:22px 24px 10px}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow);padding:18px 20px;
+}
+.card-h{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.card-title{font-size:1em;font-weight:650;margin:0}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(256px,1fr));gap:14px;margin-bottom:14px}
+.kpi-card{display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden;transition:border-color .15s ease}
+.kpi-card:hover{border-color:var(--border2)}
+.kpi-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.kpi-ico{
+  width:30px;height:30px;border-radius:9px;flex:none;
+  display:flex;align-items:center;justify-content:center;
+}
+.kpi-ico svg{width:16px;height:16px;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.kpi-ico.violet{background:var(--accent-soft)} .kpi-ico.violet svg{stroke:var(--accent)}
+.kpi-ico.green{background:var(--up-soft)}     .kpi-ico.green svg{stroke:var(--up)}
+.kpi-ico.cyan{background:var(--cyan-soft)}    .kpi-ico.cyan svg{stroke:var(--cyan)}
+.kpi-ico.amber{background:var(--amber-soft)}  .kpi-ico.amber svg{stroke:var(--amber)}
+.kpi-label{color:var(--sub);font-size:.72em;font-weight:600;letter-spacing:.08em;text-transform:uppercase}
+.kpi-val{font-size:1.72em;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.kpi-val small{font-size:.52em;color:var(--muted);font-weight:600}
+.kpi-sub{color:var(--sub);font-size:.8em;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.kpi-sub a{color:var(--accent);text-decoration:none}
+.kpi-sub a:hover{text-decoration:underline}
+.arr-up{color:var(--up);font-weight:700}
+.arr-down{color:var(--down);font-weight:700}
+.v-num{font-variant-numeric:tabular-nums}
+
+/* ---------- 图表 ---------- */
+.chart-card{margin-bottom:14px}
+.chart-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.chart-live{margin-left:auto;display:flex;gap:16px;font-size:.86em;font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:16px;color:var(--sub);font-size:.8em;margin-top:8px;align-items:center}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+#chart{width:100%;height:216px;display:block}
+
+/* ---------- 标签页 ---------- */
+.tabs-wrap{margin-bottom:16px}
+.tabs{display:flex;gap:4px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:4px;width:fit-content;max-width:100%;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{
+  border:none;background:transparent;color:var(--muted);font:inherit;font-size:.86em;
+  padding:7px 15px;border-radius:8px;cursor:pointer;transition:all .15s ease;white-space:nowrap;flex:none;
+}
+.tabs button:hover{color:var(--fg)}
+.tabs button.on{background:var(--accent-soft);color:var(--accent);font-weight:650}
+.pane{display:none}
+.pane.on{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+
+/* ---------- 表格 ---------- */
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.search{
+  display:flex;align-items:center;gap:8px;background:var(--card2);border:1px solid var(--border);
+  border-radius:9px;padding:0 10px 0 11px;width:280px;max-width:100%;transition:border-color .15s ease;
+}
+.search:focus-within{border-color:var(--accent)}
+.search>svg{width:14px;height:14px;stroke:var(--sub);fill:none;stroke-width:2;stroke-linecap:round;flex:none}
+.search-input{flex:1;min-width:0;background:transparent;border:none;outline:none;color:var(--fg);font:inherit;font-size:.84em;padding:7px 0}
+.search-input::placeholder{color:var(--sub)}
+.search-clear{
+  display:none;align-items:center;justify-content:center;border:none;background:var(--off);color:var(--offfg);
+  border-radius:50%;width:16px;height:16px;font-size:11px;line-height:1;cursor:pointer;flex:none;padding:0;
+}
+.search-clear:hover{color:var(--fg)}
+.search-clear.show{display:flex}
+.search-count{color:var(--sub);font-size:.74em;flex:none}
+mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}
+.input{
+  background:var(--card2);border:1px solid var(--border);color:var(--fg);border-radius:9px;
+  padding:7px 12px;font:inherit;font-size:.84em;outline:none;transition:border-color .15s ease;width:230px;
+}
+.input:focus{border-color:var(--accent)}
+.input::placeholder{color:var(--sub)}
+.twrap{overflow-x:auto;margin:0 -4px;padding:0 4px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:9px 11px;text-align:left;font-size:.86em;white-space:nowrap;border-bottom:1px solid var(--border)}
+th{
+  color:var(--sub);font-weight:600;font-size:.72em;letter-spacing:.07em;text-transform:uppercase;
+  border-bottom:1px solid var(--border2);
+}
+tbody tr{transition:background .12s ease}
+tbody tr:hover{background:var(--card2)}
+tbody tr:last-child td{border-bottom:none}
+td.num{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-variant-numeric:tabular-nums}
+.speed{color:var(--up);font-weight:600}
+.speed.dn{color:var(--down)}
+td.dim, .dim{color:var(--sub)}
+.badge{
+  display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;
+  font-size:.76em;font-weight:600;letter-spacing:.02em;
+}
+.badge::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+.b-on{background:var(--up-soft);color:var(--up)}
+.b-dup{background:var(--warn-soft);color:var(--warn)}
+.b-off{background:var(--off);color:var(--offfg)}
+.b-info{background:var(--accent-soft);color:var(--accent)}
+.btn{
+  padding:5.5px 13px;border-radius:9px;border:1px solid transparent;cursor:pointer;
+  font:inherit;font-size:.8em;font-weight:600;transition:all .15s ease;line-height:1.3;
+}
+.btn.primary{background:var(--grad);color:#fff;box-shadow:0 3px 12px -4px rgba(109,93,246,.5)}
+.btn.primary:hover{filter:brightness(1.1)}
+.btn.ghost{background:transparent;border-color:var(--border2);color:var(--muted)}
+.btn.ghost:hover{color:var(--fg);border-color:var(--accent)}
+.btn.danger{background:var(--err-soft);color:var(--err)}
+.btn.danger:hover{filter:brightness(1.15)}
+.btn.sm{padding:3.5px 10px;font-size:.74em;border-radius:7px}
+.empty{color:var(--sub);text-align:center;padding:26px 0 !important;font-size:.9em}
+
+/* ---------- 运行状态 ---------- */
+.warnbar{
+  background:var(--warn-soft);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 25%,transparent);
+  border-radius:10px;padding:10px 14px;font-size:.86em;margin-bottom:14px;
+}
+.st-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.st-block{background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:14px 16px}
+.st-block h3{margin:0 0 8px;font-size:.92em;font-weight:650}
+.kv{width:100%;border-collapse:collapse}
+.kv th,.kv td{border-bottom:1px dashed var(--border);padding:6.5px 2px;font-size:.82em;font-weight:normal;text-transform:none;letter-spacing:normal;white-space:normal}
+.kv tr:last-child th,.kv tr:last-child td{border-bottom:none}
+.kv th{color:var(--sub);width:44%;text-align:left}
+.kv td{color:var(--fg);text-align:right}
+
+/* ---------- 日志 ---------- */
+.term{
+  background:var(--term);border:1px solid var(--border);border-radius:11px;padding:12px 14px;
+  height:250px;overflow-y:auto;font:12.5px/1.7 ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+.term .ln{color:var(--muted);padding:0 6px;border-radius:5px;white-space:pre-wrap;word-break:break-all}
+.term .ln:hover{background:rgba(255,255,255,.04)}
+.term .ts{color:var(--sub)}
+.term .lv{font-weight:700;padding:1px 7px;border-radius:5px;font-size:.92em;margin:0 5px}
+.lv-INFO .lv{background:var(--up-soft);color:var(--up)}
+.lv-WARN .lv{background:var(--warn-soft);color:var(--warn)}
+.lv-ERROR .lv{background:var(--err-soft);color:var(--err)}
+.lv-DEBUG .lv{background:var(--off);color:var(--offfg)}
+.term .msg{color:var(--fg)}
+
+/* ---------- 设置 ---------- */
+.editor{
+  width:100%;height:330px;background:var(--term);color:#c9d4ea;border:1px solid var(--border);
+  border-radius:11px;padding:13px 15px;font:12.5px/1.7 ui-monospace,"Cascadia Mono",Consolas,monospace;
+  outline:none;resize:vertical;tab-size:2;
+}
+.editor:focus{border-color:var(--accent)}
+.status-txt{font-size:.84em;color:var(--sub)}
+
+footer{text-align:center;color:var(--sub);font-size:.78em;padding:18px 0 26px}
+footer .sep{margin:0 8px;opacity:.5}
+
+@media (max-width:720px){
+  .topbar-inner,.wrap{padding-left:14px;padding-right:14px}
+  .hide-sm{display:none}
+  .kpi-val{font-size:1.45em}
+  .chart-live{margin-left:0}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/>
+        </svg>
+      </div>
+      <div class="brand-txt">
+        <div class="brand-name">TLSVPN <span class="chip mode" id="mode-chip"><span class="cdot"></span><span id="mode-txt">SERVER</span></span></div>
+        <div class="brand-meta" id="meta">AES-256-GCM · FEC auto · v1.1.0</div>
+      </div>
+    </div>
+    <div class="topctl">
+      <div class="seg" id="lang-seg">
+        <button data-v="zh-CN" class="on" onclick="setLang('zh-CN')">中文</button>
+        <button data-v="en" onclick="setLang('en')">EN</button>
+      </div>
+      <div class="seg" id="theme-seg" title="Theme">
+        <button data-v="system" class="on" onclick="setTheme('system')"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg><span data-i18n="theme.sys">Auto</span></button>
+        <button data-v="light" onclick="setTheme('light')"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg></button>
+        <button data-v="dark" onclick="setTheme('dark')"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+      </div>
+      <div class="seg" id="refresh-seg" title="Refresh">
+        <button data-v="2000" class="on" onclick="setRefresh(2)">2s</button>
+        <button data-v="5000" onclick="setRefresh(5)">5s</button>
+        <button data-v="10000" onclick="setRefresh(10)">10s</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- KPI -->
+  <div class="kpis">
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico violet"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span><span class="kpi-label" data-i18n="kpi.active">活跃客户端</span></div>
+      <div class="kpi-val" id="k-active">3</div>
+      <div class="kpi-sub"><span data-i18n="kpi.tcp">TCP 连接</span> <b class="v-num" id="k-tcp">8</b></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico green"><svg viewBox="0 0 24 24"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg></span><span class="kpi-label" data-i18n="kpi.tx">总发送</span></div>
+      <div class="kpi-val" id="k-tx">4.72 <small>GB</small></div>
+      <div class="kpi-sub"><span class="arr-up">↑</span> <span class="v-num" id="k-txs">4.18 MB/s</span></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico cyan"><svg viewBox="0 0 24 24"><line x1="17" y1="7" x2="7" y2="17"/><polyline points="17 17 7 17 7 7"/></svg></span><span class="kpi-label" data-i18n="kpi.rx">总接收</span></div>
+      <div class="kpi-val" id="k-rx">31.6 <small>GB</small></div>
+      <div class="kpi-sub"><span class="arr-down">↓</span> <span class="v-num" id="k-rxs">16.4 MB/s</span></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span><span class="kpi-label" data-i18n="kpi.uptime">运行时长</span></div>
+      <div class="kpi-val" id="k-uptime">3天7时</div>
+      <div class="kpi-sub"><span data-i18n="kpi.version">版本</span> 1.1.0 · <a href="#" onclick="return false" data-i18n="kpi.gc">立即回收</a></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico violet"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span><span class="kpi-label" data-i18n="kpi.fec">FEC 恢复 / 确认丢失</span></div>
+      <div class="kpi-val">1,284 <small>/</small> 37</div>
+      <div class="kpi-sub"><span data-i18n="kpi.parity">校验帧</span> <b class="v-num">42,318</b> · <span data-i18n="kpi.dropped">丢帧(队列)</span> <b class="v-num">0</b></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico cyan"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span><span class="kpi-label" data-i18n="kpi.mem">内存</span></div>
+      <div class="kpi-val">86.4 <small>MB</small></div>
+      <div class="kpi-sub"><span data-i18n="kpi.goroutines">Goroutines:</span> <b class="v-num">142</b></div>
+    </div>
+    <div class="card kpi-card">
+      <div class="kpi-top"><span class="kpi-ico green"><svg viewBox="0 0 24 24"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg></span><span class="kpi-label" data-i18n="kpi.pool">IPv4 地址池</span></div>
+      <div class="kpi-val">3 <small>/ 254</small></div>
+      <div class="kpi-sub"><span data-i18n="kpi.v6used">IPv6 已分配:</span> <b class="v-num">2</b></div>
+    </div>
+  </div>
+
+  <!-- 图表 -->
+  <section class="card chart-card">
+    <div class="chart-head">
+      <h2 class="card-title" data-i18n="chart.title">吞吐趋势</h2>
+      <span class="dim" style="font-size:.82em" data-i18n="chart.win">(近 120 秒)</span>
+      <div class="chart-live mono"><span class="arr-up">↑ <span id="live-up">4.18 MB/s</span></span><span class="arr-down">↓ <span id="live-down">16.42 MB/s</span></span></div>
+    </div>
+    <canvas id="chart"></canvas>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--up)"></i><span data-i18n="legend.up">上行</span></span>
+      <span><i class="dot" style="background:var(--down)"></i><span data-i18n="legend.down">下行</span></span>
+    </div>
+  </section>
+
+  <!-- 数据面板 -->
+  <section class="card tabs-wrap">
+    <div class="tabs" id="tabs">
+      <button class="on" data-pane="clients" data-i18n="tab.clients">客户端</button>
+      <button data-pane="conns" data-i18n="tab.conns">连接明细</button>
+      <button data-pane="macs" data-i18n="tab.macs">MAC 表</button>
+      <button data-pane="bans" data-i18n="tab.bans">封禁</button>
+      <button data-pane="status" data-i18n="tab.status">运行状态</button>
+      <button data-pane="logs" data-i18n="tab.logs">日志</button>
+      <button data-pane="settings" data-i18n="tab.settings">设置</button>
+    </div>
+
+    <div class="pane on" id="pane-clients">
+      <div class="toolbar">
+        <div class="search" id="search-clients" data-i18n-title="filter_tip" title="按 / 快速聚焦">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="search-input" id="client-filter" data-i18n-ph="filter_ph" placeholder="输入关键字过滤…">
+          <button class="search-clear" onclick="clearFilter('clients')" aria-label="clear">×</button>
+          <span class="search-count mono" id="client-count"></span>
+        </div>
+      </div>
+      <div class="twrap"><table>
+        <thead><tr>
+          <th data-i18n="th.id">ID</th><th data-i18n="th.v4">IPv4</th><th class="hide-sm" data-i18n="th.v6">IPv6</th>
+          <th class="hide-sm" data-i18n="th.mac">MAC</th><th data-i18n="th.tcp">TCP</th>
+          <th data-i18n="th.tx">TX (发)</th><th data-i18n="th.rx">RX (收)</th>
+          <th data-i18n="th.txs">↑ 速率</th><th data-i18n="th.rxs">↓ 速率</th>
+          <th class="hide-sm" data-i18n="th.fec">FEC</th><th class="hide-sm" data-i18n="th.enc">加密</th><th data-i18n="th.ops">操作</th>
+        </tr></thead>
+        <tbody id="clients-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="pane" id="pane-conns">
+      <div class="toolbar">
+        <div class="search" id="search-conns" data-i18n-title="filter_tip" title="按 / 快速聚焦">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="search-input" id="conn-filter" data-i18n-ph="filter_ph" placeholder="输入关键字过滤…">
+          <button class="search-clear" onclick="clearFilter('conns')" aria-label="clear">×</button>
+          <span class="search-count mono" id="conn-count"></span>
+        </div>
+      </div>
+      <div class="twrap"><table>
+        <thead><tr>
+          <th data-i18n="th.owner">客户端</th><th data-i18n="th.remote">对端</th><th data-i18n="th.state">状态</th>
+          <th data-i18n="th.rtt">RTT</th><th data-i18n="th.tx">TX</th><th data-i18n="th.rx">RX</th>
+          <th class="hide-sm" data-i18n="th.age">在线</th><th class="hide-sm" data-i18n="th.epoch">密钥代际</th>
+          <th class="hide-sm" data-i18n="th.enc">加密</th><th class="hide-sm" data-i18n="th.fec">FEC</th>
+          <th class="hide-sm" data-i18n="th.brutal">Brutal</th><th data-i18n="th.ops">操作</th>
+        </tr></thead>
+        <tbody id="conns-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="pane" id="pane-macs">
+      <div class="toolbar">
+        <div class="search" id="search-macs" data-i18n-title="filter_tip" title="按 / 快速聚焦">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input class="search-input" id="mac-filter" data-i18n-ph="filter_ph" placeholder="输入关键字过滤…">
+          <button class="search-clear" onclick="clearFilter('macs')" aria-label="clear">×</button>
+          <span class="search-count mono" id="mac-count"></span>
+        </div>
+      </div>
+      <div class="twrap"><table>
+        <thead><tr><th data-i18n="th.mac">MAC</th><th data-i18n="m.port">端口</th><th data-i18n="m.seen">最近活跃</th></tr></thead>
+        <tbody id="macs-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="pane" id="pane-bans">
+      <div class="toolbar">
+        <input class="input" id="ban-id" data-i18n-ph="bans.id_ph" placeholder="ClientID（可短前缀）">
+        <input class="input" id="ban-min" data-i18n-ph="bans.min_ph" placeholder="分钟（留空=永久）" style="width:170px">
+        <button class="btn primary" data-i18n="bans.add">封禁</button>
+        <button class="btn ghost" data-i18n="bans.refresh">刷新</button>
+      </div>
+      <div class="twrap"><table>
+        <thead><tr><th data-i18n="th.id">ID</th><th data-i18n="bans.left">剩余</th><th data-i18n="th.ops">操作</th></tr></thead>
+        <tbody id="bans-body"></tbody>
+      </table></div>
+    </div>
+
+    <div class="pane" id="pane-status">
+      <div class="warnbar"><b data-i18n="stt.restart">以下字段已修改，需要重启进程才能生效：</b><br><span class="mono">web_bind, web_auth</span></div>
+      <div class="st-grid">
+        <div class="st-block"><h3 data-i18n="stt.brutal">TCP Brutal 明细</h3><table class="kv" id="st-brutal"></table></div>
+        <div class="st-block"><h3 data-i18n="stt.negt">协议协商结果</h3><table class="kv" id="st-neg"></table></div>
+        <div class="st-block"><h3 data-i18n="stt.host">宿主与进程</h3><table class="kv" id="st-sys"></table></div>
+        <div class="st-block"><h3 data-i18n="stt.cfg">生效配置快照</h3><table class="kv" id="st-cfg"></table></div>
+      </div>
+    </div>
+
+    <div class="pane" id="pane-logs">
+      <div class="toolbar">
+        <span style="font-size:.84em;color:var(--sub)" data-i18n="logs.level">级别</span>
+        <div class="seg" id="log-level-seg"><button class="on" onclick="return false">info</button></div>
+        <label style="font-size:.84em;color:var(--sub);display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" checked style="accent-color:var(--accent)"> <span data-i18n="logs.autoscroll">自动滚动</span></label>
+        <span style="flex:1"></span>
+        <button class="btn ghost sm" data-i18n="logs.clear">清屏</button>
+        <button class="btn ghost sm" data-i18n="logs.download">下载日志</button>
+      </div>
+      <div class="term" id="term"></div>
+    </div>
+
+    <div class="pane" id="pane-settings">
+      <div class="toolbar">
+        <span class="status-txt" style="flex:1" data-i18n="set.hint">编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数。</span>
+        <button class="btn ghost" data-i18n="set.load">重新加载</button>
+        <button class="btn ghost" data-i18n="set.save">保存</button>
+        <button class="btn primary" data-i18n="set.apply">保存并应用</button>
+      </div>
+      <textarea class="editor" id="cfg-editor" spellcheck="false"></textarea>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span id="footer-text">数据每 2 秒刷新</span><span class="sep">·</span><span id="tls-flag">HTTPS</span>
+</footer>
+
+<script>
+'use strict';
+// ============ 设计稿用样例数据（正式实现中来自 /api/stats 轮询） ============
+var CLIENTS=[
+ {id:'a3f9c2e1b7d48e60',v4:'10.7.0.2',v6:'fd42:7::2',mac:'AA:BB:CC:1D:EE:01',conns:5,tx:2768029286,rx:21579093568,txs:3372000,rxs:13460000,fec:'auto',enc:2},
+ {id:'b7e2f0a9c4d15e33',v4:'10.7.0.3',v6:'fd42:7::3',mac:'AA:BB:CC:1D:EE:02',conns:2,tx:883437568,rx:6873000000,txs:865000,rxs:3260000,fec:'off',enc:2},
+ {id:'c1d4a8f2e6b93a77',v4:'10.7.0.4',v6:'',mac:'',conns:1,tx:13000000,rx:93200000,txs:65500,rxs:225000,fec:'dup',enc:4}
+];
+var CONNS=[
+ {owner:'a3f9c2e1',full:'a3f9c2e1b7d48e60',remote:'59.64.22.18:44312',state:'up',rtt:23,tx:2768029286,rx:21579093568,age:271211,epoch:3,enc:2,fec:'auto',brut:true,up:18,down:95},
+ {owner:'b7e2f0a9',full:'b7e2f0a9c4d15e33',remote:'112.17.90.241:28431',state:'up',rtt:47,tx:883437568,rx:6873000000,age:98211,epoch:2,enc:2,fec:'off',brut:true,up:6,down:30},
+ {owner:'c1d4a8f2',full:'c1d4a8f2e6b93a77',remote:'223.104.3.77:6120',state:'connecting',rtt:112,tx:13000000,rx:93200000,age:642,epoch:0,enc:4,fec:'dup',brut:false,brutErr:'kernel not supported',up:0,down:0}
+];
+var MACS=[
+ {mac:'AA:BB:CC:1D:EE:01',port:'tap0',age:4},
+ {mac:'AA:BB:CC:1D:EE:02',port:'tap0',age:11},
+ {mac:'FF:FF:FF:FF:FF:FF',port:'tap0',age:0}
+];
+var BANS={'9f2e3d81c0a74552':2580,'d0a1b6c4e8f29317':0};
+var LOGS=[
+ ['2026-09-25 14:02:11','INFO','client b7e2f0a9 connected from 112.17.90.241:28431 (v4 10.7.0.3)'],
+ ['2026-09-25 14:02:12','DEBUG','brutal shaping applied: 6 Mbps up / 30 Mbps down'],
+ ['2026-09-25 14:03:47','WARN','fec: 12 consecutive lost frames on client a3f9c2e1'],
+ ['2026-09-25 14:04:02','INFO','session key rotated, epoch=3 (client a3f9c2e1)'],
+ ['2026-09-25 14:05:29','ERROR','client c1d4a8f2: brutal skipped: kernel not supported'],
+ ['2026-09-25 14:06:18','INFO','client c1d4a8f2 handshake started from 223.104.3.77:6120'],
+ ['2026-09-25 14:06:19','DEBUG','tls fingerprint: tls13:A130-QUIC k=X25519 s rsa_pss_rsae_sha256'],
+ ['2026-09-25 14:07:55','INFO','health check ok: 3 clients, 0 banned listeners']
+];
+var CONFIG_SAMPLE_LINES=[
+'{',
+'  "mode": "server",',
+'  "web": {',
+'    "addr": ":8080",',
+'    "bind": "tunnel",',
+'    "auth": "admin:••••••••"',
+'  },',
+'  "v4_cidr": "10.7.0.0/24",',
+'  "v6_cidr": "fd42:7::/64",',
+'  "encrypt": true,',
+'  "enc_algo": "aes-256-gcm",',
+'  "fec": "auto",',
+'  "brutal": {',
+'    "enabled": true,',
+'    "up_mbps": 200,',
+'    "down_mbps": 1000',
+'  },',
+'  "log_level": "info"',
+'}']; // 展示用
+var CONFIG_SAMPLE=CONFIG_SAMPLE_LINES.join('\n');
+
+// ============ i18n（与现网面板同 key，便于落地复用） ============
+var I18N={
+'zh-CN':{kpi:{active:'活跃客户端',tcp:'TCP 连接',tx:'总发送',rx:'总接收',uptime:'运行时长',version:'版本',gc:'立即回收',fec:'FEC 恢复 / 确认丢失',parity:'校验帧',dropped:'丢帧(队列)',mem:'内存',goroutines:'Goroutines:',pool:'IPv4 地址池',v6used:'IPv6 已分配:'},
+ theme:{sys:'Auto'},
+ chart:{title:'吞吐趋势',win:'(近 120 秒)'},legend:{up:'上行',down:'下行'},
+ tab:{clients:'客户端',conns:'连接明细',macs:'MAC 表',bans:'封禁',status:'运行状态',logs:'日志',settings:'设置'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX (发)',rx:'RX (收)',txs:'↑ 速率',rxs:'↓ 速率',fec:'FEC',enc:'加密',brutal:'Brutal',ops:'操作',kick:'踢出',ban:'封禁',unban:'解封',owner:'客户端',remote:'对端',state:'状态',rtt:'RTT',age:'在线',epoch:'密钥代际'},
+ m:{port:'端口',seen:'最近活跃'},bans:{id_ph:'ClientID（可短前缀）',min_ph:'分钟（留空=永久）',add:'封禁',refresh:'刷新',left:'剩余'},
+ logs:{level:'级别',autoscroll:'自动滚动',clear:'清屏',download:'下载日志'},
+ filter_ph:'输入关键字过滤…',filter_none:'无匹配结果',filter_clear:'清除过滤',filter_tip:'按 / 快速聚焦',no_clients:'暂无客户端',no_conns:'无连接',no_macs:'尚未学习到 MAC',no_bans:'无封禁记录',
+ perm:'永久',st:{up:'up',connecting:'connecting'},
+ badge:{dup:'复制',off:'关闭',plain:'明文'},
+ footer:'数据每 {n} 秒刷新',
+ stt:{restart:'以下字段已修改，需要重启进程才能生效：',host:'宿主与进程',negt:'协议协商结果',brutal:'TCP Brutal 明细',cfg:'生效配置快照',noerr:'全部生效',kern_yes:'内核已支持',kern_no:'内核不支持',
+  sys:{os:'操作系统',go:'Go 版本',cpu:'CPU 核数',host:'主机名',cfgpath:'配置文件',ver:'程序版本'},
+  neg:{proto:'协议版本',fec:'FEC',grp:'FEC 分组',enc:'内层加密',pad:'填充模式',minenc:'最低加密要求',stoken:'Session Token'},
+  brut:{en:'开关',up:'上行总量',down:'下行总量',kern:'内核支持',cur:'当前拥塞控制',applied:'已生效 / 总数',perconn:'每连接速率',errs:'失败原因'}},
+ set:{hint:'编辑 JSON 配置。保存：写回配置文件；保存并应用：写回并立即热更运行参数。',load:'重新加载',save:'保存',apply:'保存并应用'}},
+'en':{kpi:{active:'Active clients',tcp:'TCP connections',tx:'Total sent',rx:'Total received',uptime:'Uptime',version:'Version',gc:'GC now',fec:'FEC recovered / lost',parity:'Parity frames',dropped:'Dropped (queue)',mem:'Memory',goroutines:'Goroutines:',pool:'IPv4 pool',v6used:'IPv6 allocated:'},
+ theme:{sys:'Auto'},
+ chart:{title:'Throughput',win:'(last 120s)'},legend:{up:'Up',down:'Down'},
+ tab:{clients:'Clients',conns:'Connections',macs:'MAC table',bans:'Bans',status:'Runtime status',logs:'Logs',settings:'Settings'},
+ th:{id:'ID',v4:'IPv4',v6:'IPv6',mac:'MAC',tcp:'TCP',tx:'TX',rx:'RX',txs:'↑ Rate',rxs:'↓ Rate',fec:'FEC',enc:'Encrypt',brutal:'Brutal',ops:'Actions',kick:'Kick',ban:'Ban',unban:'Unban',owner:'Client',remote:'Remote',state:'State',rtt:'RTT',age:'Uptime',epoch:'Epoch'},
+ m:{port:'Port',seen:'Last seen'},bans:{id_ph:'ClientID (short prefix ok)',min_ph:'Minutes (empty = permanent)',add:'Ban',refresh:'Refresh',left:'Remaining'},
+ logs:{level:'Level',autoscroll:'Auto scroll',clear:'Clear',download:'Download'},
+ filter_ph:'Type to filter…',filter_none:'No matches',filter_clear:'Clear filter',filter_tip:'Press / to focus',no_clients:'No clients yet',no_conns:'No connections',no_macs:'No MACs learned yet',no_bans:'No banned clients',
+ perm:'Permanent',st:{up:'up',connecting:'connecting'},
+ badge:{dup:'Dup',off:'Off',plain:'Plain'},
+ footer:'Refreshing every {n}s',
+ stt:{restart:'These fields changed and require a process restart:',host:'Host & process',negt:'Negotiated protocol',brutal:'TCP Brutal detail',cfg:'Effective config snapshot',noerr:'All applied',kern_yes:'Kernel supported',kern_no:'Not supported by kernel',
+  sys:{os:'OS',go:'Go version',cpu:'CPU cores',host:'Hostname',cfgpath:'Config file',ver:'App version'},
+  neg:{proto:'Protocol version',fec:'FEC',grp:'FEC group',enc:'Inner cipher',pad:'Padding mode',minenc:'Minimum cipher',stoken:'Session token'},
+  brut:{en:'Enabled',up:'Upstream total',down:'Downstream total',kern:'Kernel support',cur:'Current CC',applied:'Applied / total',perconn:'Per-conn rate',errs:'Failure reasons'}},
+ set:{hint:'Edit the JSON config. Save: write back. Save & apply: hot-apply runtime parameters.',load:'Reload',save:'Save',apply:'Save & apply'}}};
+var LANG=localStorage.getItem('tlsvpn_lang')||'zh-CN';
+function t(path){var o=I18N[LANG],parts=path.split('.'),i;for(i=0;i<parts.length;i++){o=o?o[parts[i]]:undefined;}if(o!==undefined)return o;o=I18N.en;for(i=0;i<parts.length;i++){o=o?o[parts[i]]:undefined;}return o!==undefined?o:path;}
+function applyI18n(){
+  document.documentElement.lang=LANG;
+  var els=document.querySelectorAll('[data-i18n]');for(var i=0;i<els.length;i++)els[i].textContent=t(els[i].getAttribute('data-i18n'));
+  els=document.querySelectorAll('[data-i18n-ph]');for(i=0;i<els.length;i++)els[i].placeholder=t(els[i].getAttribute('data-i18n-ph'));
+  document.getElementById('footer-text').textContent=t('footer').replace('{n}',REFRESH);
+  document.getElementById('lang-seg').querySelectorAll('button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-v')===LANG);});
+}
+function setLang(v){LANG=v;localStorage.setItem('tlsvpn_lang',v);applyI18n();renderAll();}
+
+// ============ 主题 ============
+var THEME=localStorage.getItem('tlsvpn_theme')||'system';
+function sysDark(){return matchMedia('prefers-color-scheme: dark').matches;}
+function isDark(){return THEME==='dark'||(THEME==='system'&&sysDark());}
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme',isDark()?'dark':'light');
+  document.getElementById('theme-seg').querySelectorAll('button').forEach(function(b){b.classList.toggle('on',b.getAttribute('data-v')===THEME);});
+  drawChart();
+}
+function setTheme(v){THEME=v;localStorage.setItem('tlsvpn_theme',v);applyTheme();}
+matchMedia('prefers-color-scheme: dark').addEventListener('change',function(){if(THEME==='system')applyTheme();});
+function setRefresh(n){REFRESH=n;applyI18n();
+  document.getElementById('refresh-seg').querySelectorAll('button').forEach(function(b){b.classList.toggle('on',parseInt(b.getAttribute('data-v'),10)===n*1000);});}
+var REFRESH=2;
+
+// ============ 工具 ============
+function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/\'/g,'&#39;');}
+function fmtBytes(b,s){
+  if(!isFinite(b)||b<=0)return '0 '+(s?'B/s':'B');
+  var u=['B','KB','MB','GB','TB'],i=Math.min(Math.floor(Math.log(b)/Math.log(1024)),4);
+  return parseFloat((b/Math.pow(1024,i)).toFixed(2))+' '+u[i]+(s?'/s':'');
+}
+function fmtDur(s){s=Math.floor(s);var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  var D=d>0?d+'天':(h>0?h+'时':(m>0?m+'分':s+'秒'));var E=d>0?d+'d':(h>0?h+'h':(m>0?m+'m':s+'s'));return LANG==='zh-CN'?D:E;}
+function shortId(id,n){return id.length>n?id.slice(0,n)+'…':id;}
+function badge(f){if(!f||f==='off')return '<span class="badge b-off">'+t('badge.off')+'</span>';
+  if(f==='dup')return '<span class="badge b-dup">'+t('badge.dup')+'</span>';return '<span class="badge b-on">'+esc(f)+'</span>';}
+function encBadge(a){if(a===2)return '<span class="badge b-on">AES-256-GCM</span>';
+  if(a===4)return '<span class="badge b-on">AES-128-GCM</span>';
+  return '<span class="badge b-off">'+t('badge.plain')+'</span>';}
+function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
+  if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
+  return '<span class="badge b-off">'+esc(s||'-')+'</span>';}
+
+// ============ 渲染 ============
+function passFilter(obj,f){return !f||JSON.stringify(obj).toLowerCase().indexOf(f)>=0;}
+// hi 在已转义的文本上包一层 <mark> 高亮首个命中（查询词已小写）
+function hi(s,q){
+  if(!q)return s;
+  var i=s.toLowerCase().indexOf(q);
+  return i<0?s:s.slice(0,i)+'<mark>'+s.slice(i,i+q.length)+'</mark>'+s.slice(i+q.length);
+}
+// 过滤基于当前渲染缓存做纯本地匹配（正式实现中亦如此：输入不再触发 /api/stats 重拉），
+// 140ms 防抖，Escape 或 × 一键清空；计数徽章显示 命中/总数。
+var Q={clients:'',conns:'',macs:''};
+var RENDER={};
+function emptyRow(cols,key,totalKey){
+  if(!DATA[totalKey].length)return '<tr><td class="empty" colspan="'+cols+'">'+t('no_'+key)+'</td></tr>';
+  return '<tr><td class="empty" colspan="'+cols+'">'+t('filter_none')+
+    ' <button class="btn ghost sm" onclick="clearFilter(\''+key+'\')">'+t('filter_clear')+'</button></td></tr>';
+}
+var DATA={clients:CLIENTS,conns:CONNS,macs:MACS};
+function setSearchCount(key,shown,total){
+  var el=document.getElementById(key==='clients'?'client-count':(key==='conns'?'conn-count':'mac-count'));
+  el.textContent=Q[key]?(shown+' / '+total):'';
+}
+function renderClients(){
+  var f=Q.clients,rows='',shown=0;
+  CLIENTS.forEach(function(c){
+    if(!passFilter(Object.assign({id:c.id},c),f))return;
+    shown++;
+    rows+='<tr>'+
+      '<td class="num dim" title="'+esc(c.id)+'">'+hi(esc(shortId(c.id,10)),f)+'</td>'+
+      '<td class="num">'+hi(esc(c.v4),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(c.v6||'-'),f)+'</td>'+
+      '<td class="hide-sm num dim">'+hi(esc(c.mac||'-'),f)+'</td>'+
+      '<td class="num">'+c.conns+'</td>'+
+      '<td class="num">'+fmtBytes(c.tx)+'</td><td class="num">'+fmtBytes(c.rx)+'</td>'+
+      '<td class="num speed">'+fmtBytes(c.txs,true)+'</td><td class="num speed dn">'+fmtBytes(c.rxs,true)+'</td>'+
+      '<td class="hide-sm">'+badge(c.fec)+'</td><td class="hide-sm">'+encBadge(c.enc)+'</td>'+
+      '<td><button class="btn danger sm">'+t('th.kick')+'</button> <button class="btn ghost sm">'+t('th.ban')+'</button></td></tr>';
+  });
+  document.getElementById('clients-body').innerHTML=rows||emptyRow(12,'clients','clients');
+  setSearchCount('clients',shown,CLIENTS.length);
+}
+function renderConns(){
+  var f=Q.conns,rows='',shown=0;
+  CONNS.forEach(function(r){
+    if(!passFilter(r,f))return;
+    shown++;
+    var brut=brutCell(r);
+    rows+='<tr>'+
+      '<td class="num dim" title="'+esc(r.full)+'">'+hi(esc(r.owner),f)+'</td>'+
+      '<td class="num">'+hi(esc(r.remote),f)+'</td><td>'+stBadge(r.state)+'</td>'+
+      '<td class="num'+(r.rtt>100?' speed dn':'')+'" style="'+(r.rtt>100?'':'color:var(--up);font-weight:600')+'">'+r.rtt+' ms</td>'+
+      '<td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
+      '<td class="hide-sm num dim">'+fmtDur(r.age)+'</td>'+
+      '<td class="hide-sm num dim">'+(r.epoch||'-')+'</td>'+
+      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
+      '<td class="hide-sm">'+brut+'</td>'+
+      '<td><button class="btn danger sm">'+t('th.kick')+'</button></td></tr>';
+  });
+  document.getElementById('conns-body').innerHTML=rows||emptyRow(12,'conns','conns');
+  setSearchCount('conns',shown,CONNS.length);
+}
+function brutCell(r){
+  if(r.brutErr)return '<span class="badge b-dup" title="brutal skipped: '+esc(r.brutErr)+'">'+t('badge.off')+'</span>';
+  if(r.brut)return '<span class="badge b-on">'+r.up+'↑ / '+r.down+'↓</span>';
+  return '<span class="badge b-off">-</span>';
+}
+function renderMacs(){
+  var f=Q.macs,rows='',shown=0;
+  MACS.forEach(function(e){
+    if(!passFilter(e,f))return;
+    shown++;
+    rows+='<tr><td class="num">'+hi(esc(e.mac),f)+'</td><td class="num dim">'+hi(esc(e.port),f)+'</td><td class="num dim">'+e.age+'s</td></tr>';
+  });
+  document.getElementById('macs-body').innerHTML=rows||emptyRow(3,'macs','macs');
+  setSearchCount('macs',shown,MACS.length);
+}
+function renderBans(){
+  var rows='';
+  Object.keys(BANS).forEach(function(id){
+    var left=BANS[id];
+    rows+='<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
+      '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-info">'+fmtDur(left)+'</span>')+'</td>'+
+      '<td><button class="btn ghost sm">'+t('th.unban')+'</button></td></tr>';
+  });
+  document.getElementById('bans-body').innerHTML=rows||'<tr><td class="empty" colspan="3">'+t('no_bans')+'</td></tr>';
+}
+function kv(el,rows){el.innerHTML=rows.map(function(r){return '<tr><th>'+r[0]+'</th><td>'+r[1]+'</td></tr>';}).join('');}
+function yn(v){return '<span class="badge '+(v?'b-on':'b-off')+'">'+(v?'是':'否')+'</span>';}
+function renderStatus(){
+  kv(document.getElementById('st-brutal'),[
+    [t('stt.brut.en'),yn(true)],
+    [t('stt.brut.up'),'200 Mbps'],[t('stt.brut.down'),'1000 Mbps'],
+    [t('stt.brut.kern'),'<span class="badge b-on">'+t('stt.kern_yes')+'</span>'],
+    [t('stt.brut.cur'),'<span class="mono">bbr</span>'],
+    [t('stt.brut.applied'),'2 / 3'],
+    [t('stt.brut.perconn'),'<span class="mono">10~40 / 50~200 Mbps</span>'],
+    [t('stt.brut.errs'),'<span class="badge b-on">'+t('stt.noerr')+'</span>']
+  ]);
+  kv(document.getElementById('st-neg'),[
+    [t('stt.neg.proto'),'v1'],
+    [t('stt.neg.enc'),'<span class="mono">AES-256-GCM</span>'],
+    [t('stt.neg.fec'),yn(true)],
+    [t('stt.neg.grp'),'8'],
+    [t('stt.neg.pad'),'<span class="mono">mtu</span>'],
+    [t('stt.neg.minenc'),'<span class="mono">aes-128-gcm</span>'],
+    [t('stt.neg.stoken'),yn(true)]
+  ]);
+  kv(document.getElementById('st-sys'),[
+    [t('stt.sys.os'),'Linux 6.8.0-45-generic <span class="mono">x86_64</span>'],
+    [t('stt.sys.go'),'<span class="mono">go1.22.5</span>'],
+    [t('stt.sys.cpu'),'8'],
+    [t('stt.sys.host'),'<span class="mono">vpn-gw-01</span>'],
+    [t('stt.sys.cfgpath'),'<span class="mono">/etc/tlsvpn/server.json</span>'],
+    [t('stt.sys.ver'),'<span class="mono">1.1.0</span> · 3天7时']
+  ]);
+  kv(document.getElementById('st-cfg'),[
+    ['mode','<span class="mono">server</span>'],
+    ['encrypt',yn(true)],
+    ['enc_algo','<span class="mono">aes-256-gcm</span>'],
+    ['fec','<span class="mono">auto</span>'],
+    ['v4_cidr','<span class="mono">10.7.0.0/24</span>'],
+    ['v6_cidr','<span class="mono">fd42:7::/64</span>'],
+    ['max_sessions','<span class="mono">64</span>'],
+    ['log_level','<span class="mono">info</span>']
+  ]);
+}
+function renderLogs(){
+  document.getElementById('term').innerHTML=LOGS.map(function(l){
+    return '<div class="ln lv-'+l[1]+'"><span class="ts">'+l[0]+'</span><span class="lv">'+l[1]+'</span><span class="msg">'+esc(l[2])+'</span></div>';
+  }).join('');
+}
+document.getElementById('cfg-editor').value=CONFIG_SAMPLE;
+
+// ============ 标签页 ============
+document.getElementById('tabs').addEventListener('click',function(ev){
+  var btn=ev.target.closest('button');if(!btn)return;
+  document.querySelectorAll('#tabs button').forEach(function(b){b.classList.remove('on');});
+  document.querySelectorAll('.pane').forEach(function(p){p.classList.remove('on');});
+  btn.classList.add('on');
+  document.getElementById('pane-'+btn.getAttribute('data-pane')).classList.add('on');
+});
+
+// ============ 图表 ============
+var txHist=[],rxHist=[],MAXPTS=60;
+(function seed(){
+  for(var i=0;i<MAXPTS;i++){
+    var base=3.6+2.4*Math.sin(i/7)+1.2*Math.sin(i/3.1)+(i>44?2.2:0);
+    txHist.push(Math.max(0.4,base+(i%5===0?0.9:0)));
+    rxHist.push(Math.max(1,base*3.4+4*Math.sin(i/9+1)+(i%7===0?2.4:0)));
+  }
+})();
+function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function drawChart(){
+  var c=document.getElementById('chart');
+  var dpr=window.devicePixelRatio||1;
+  var W=c.clientWidth||1100,H=c.clientHeight||216;
+  if(c.width!==Math.round(W*dpr)){c.width=Math.round(W*dpr);c.height=Math.round(H*dpr);}
+  var ctx=c.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  ctx.strokeStyle=cssv('--grid');ctx.lineWidth=1;
+  for(var g=1;g<4;g++){ctx.beginPath();ctx.moveTo(0,H*g/4+.5);ctx.lineTo(W,H*g/4+.5);ctx.stroke();}
+  if(txHist.length<2)return;
+  var max=Math.max.apply(null,txHist.concat(rxHist));
+  function series(h,col){
+    var pts=h.map(function(v,i){return {x:i/(MAXPTS-1)*W,y:H-10-(v/max)*(H-30)};});
+    var grad=ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0,col+'3d');grad.addColorStop(1,col+'00');
+    ctx.beginPath();ctx.moveTo(pts[0].x,pts[0].y);
+    for(var i=1;i<pts.length-1;i++){var xc=(pts[i].x+pts[i+1].x)/2,yc=(pts[i].y+pts[i+1].y)/2;ctx.quadraticCurveTo(pts[i].x,pts[i].y,xc,yc);}
+    ctx.lineTo(pts[pts.length-1].x,pts[pts.length-1].y);
+    ctx.strokeStyle=col;ctx.lineWidth=2;ctx.lineJoin='round';ctx.lineCap='round';ctx.stroke();
+    ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();ctx.fillStyle=grad;ctx.fill();
+  }
+  series(rxHist,cssv('--down').replace('#','#'));
+  series(txHist,cssv('--up'));
+  ctx.fillStyle=cssv('--sub');ctx.font='11px ui-monospace,Consolas,monospace';
+  ctx.fillText(fmtBytes(max*1024*1024)+'/s',6,14);
+}
+window.addEventListener('resize',drawChart);
+
+// ============ 过滤框交互（正式实现同款行为） ============
+function attachSearch(key,render){
+  var box=document.getElementById('search-'+key);
+  var input=box.querySelector('.search-input');
+  var clear=box.querySelector('.search-clear');
+  var timer=null;
+  input.addEventListener('input',function(){
+    clear.classList.toggle('show',!!input.value);
+    clearTimeout(timer);
+    timer=setTimeout(function(){Q[key]=input.value.trim().toLowerCase();render();},140);
+  });
+  clear.addEventListener('click',function(){input.value='';Q[key]='';clear.classList.remove('show');render();input.focus();});
+  input.addEventListener('keydown',function(e){if(e.key==='Escape')clear.click();});
+}
+function clearFilter(key){
+  var box=document.getElementById('search-'+key);
+  box.querySelector('.search-input').value='';
+  box.querySelector('.search-clear').classList.remove('show');
+  Q[key]='';
+  RENDER[key]();
+}
+RENDER={clients:renderClients,conns:renderConns,macs:renderMacs};
+attachSearch('clients',renderClients);
+attachSearch('conns',renderConns);
+attachSearch('macs',renderMacs);
+// "/" 聚焦当前页签的过滤框（输入控件已聚焦时不拦截）
+document.addEventListener('keydown',function(e){
+  if(e.key!=='/'||/INPUT|TEXTAREA/.test(document.activeElement.tagName))return;
+  var pane=document.querySelector('.pane.on').id.replace('pane-','');
+  if(RENDER[pane]){document.getElementById('search-'+pane).querySelector('.search-input').focus();e.preventDefault();}
+});
+
+function renderAll(){renderClients();renderConns();renderMacs();renderBans();renderStatus();renderLogs();drawChart();}
+applyTheme();applyI18n();renderAll();
+</script>
+</body>
+</html>

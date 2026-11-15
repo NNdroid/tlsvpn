@@ -11,6 +11,9 @@
   "brutal": true,
   "brutal_up": 100,
   "brutal_down": 500,
+  "routing_algo": "auto",
+  "fec_strategy": "auto",
+  "fec_near_window_ms": 10,
   "tap": "tap0",
   "mac": "",
   "web": {
