@@ -6,7 +6,7 @@ const nodes={};let now=1000;
 const ctx={performance:{now:()=>now},document:{getElementById:id=>nodes[id]||(nodes[id]={innerText:'',innerHTML:'',textContent:''})},rttStats:()=>null,dgRun:()=>({}),renderConnQuality:()=>{},renderConnsTable:()=>{},schedulerCell:()=>{},t:x=>x,chip:()=>'',fmtBytes:x=>String(x),fmtNum:x=>String(x),esc:x=>String(x),encName:x=>String(x),fmtSchedulerEta:x=>String(x),dgLevel:()=> 'ok'};
 vm.createContext(ctx);
 vm.runInContext(app.slice(app.indexOf('function dgRun(data)'),app.indexOf('function renderDiag(data)')),ctx);
-vm.runInContext(fs.readFileSync('webui/metrics.js','utf8'),ctx);
+vm.runInContext(fs.readFileSync('webui/metric-corrections.js','utf8'),ctx);
 const data={mode:'client',global_tx_packets:128,global_rx_packets:10,global_rx_bytes:1000,clients:{local:{tx_packets:125}},fec:{enabled:true,counter_domain:'written',data_tx:100,parity_tx:25,control_tx:3,data_wire_bytes:10000,parity_wire_bytes:2500},conns:[]};
 ctx.renderConnQuality(data,null);
 assert.equal(nodes['fec-overhead'].innerText,'25.0%');
