@@ -43,7 +43,7 @@ func TestWebDiagnosticsSSEAndBackgroundSampling(t *testing.T) {
 
 func diagnosticFixture(at int64, n uint64) WebStats {
 	return WebStats{InstanceID: "process-a", SampleTimeMs: at, Mode: "client", LiveConns: 1,
-		Conns: []connSnapshot{{ConnID: "physical-a", State: "up", Target: "peer", TxBytes: n * 1000, RxBytes: n * 2000, Scheduler: schedulerConnJSON{AssignedBytes: n * 800, QueuedBytes: 128}}},
+		Conns: []connSnapshot{{ConnID: "physical-a", State: "up", Target: "peer", TxBytes: n * 1000, RxBytes: n * 2000, Scheduler: schedulerConnJSON{AssignedBytes: n * 800, QueuedBytes: 128, FwdOneWayUS: 15000, RetOneWayUS: 25000}}},
 		Fec:   fecStatsJSON{DataWireBytes: n * 1000, ParityWireBytes: n * 250, Recovered: n * 2, Lost: n},
 		Pad:   &padStatsJSON{Epoch: 1, WireBytes: n * 1000, PadBytes: n * 100}, ReconnectAttempts: n, Dropped: n * 2, TapErrors: n,
 	}
@@ -71,6 +71,8 @@ func TestWebDiagnosticsRatesDirectionsAndBoundaries(t *testing.T) {
 	if p.Conns[0].Metrics["rtt"] != nil {
 		t.Fatal("unknown RTT fabricated")
 	}
+	diagnosticAssert(t, p.Conns[0].Metrics, "fwd", 15)
+	diagnosticAssert(t, p.Conns[0].Metrics, "ret", 25)
 	diagnosticAssert(t, p.Metrics, "fec_pct", 25)
 	diagnosticAssert(t, p.Metrics, "pad_pct", 10)
 	diagnosticAssert(t, p.Metrics, "recovered", 1)
@@ -111,6 +113,9 @@ func TestWebDiagnosticsRatesDirectionsAndBoundaries(t *testing.T) {
 	diagnosticAssert(t, c.Metrics, "up", 300)
 	diagnosticAssert(t, c.Metrics, "down", 200)
 	diagnosticAssert(t, c.Metrics, "rtt", 22)
+	if c.Metrics["fwd"] != nil || c.Metrics["ret"] != nil {
+		t.Fatal("unconverged one-way delay fabricated")
+	}
 	a.SampleTimeMs = 64000
 	a.ServerConns = nil
 	a.LiveConns = 0

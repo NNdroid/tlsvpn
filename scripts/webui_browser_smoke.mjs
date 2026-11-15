@@ -59,8 +59,8 @@ function statsFixture(mode='client',stage=1,instance='browser-smoke') {
 function diagnosticsFixture(instance='browser-smoke') {
   return {instance_id:instance,step_sec:2,points:[0,1,2].map(i=>({t:1700000000000+i*2000,
     metrics:{online:2,fec_data:100000,fec_parity:25000,fec_pct:25,recovered:i,lost:0,pad:2000,pad_wire:100000,pad_pct:2,reconnect:0,drop:0,tap_error:0},
-    conns:[{id:'conn-a',client:'local',label:'peer-a',metrics:{up:i?32.38*1024**2:null,down:i?10*1024**2:null,rtt:i?20:null,queue:128,assigned:i?30*1024**2:null}},
-      {id:'conn-b',client:'other',label:'peer-b',metrics:{up:1000,down:2000,rtt:40,queue:4096,assigned:1000}}]}))};
+    conns:[{id:'conn-a',client:'local',label:'peer-a',metrics:{up:i?32.38*1024**2:null,down:i?10*1024**2:null,rtt:i?20:null,fwd:i?10:null,ret:i?15:null,queue:128,assigned:i?30*1024**2:null}},
+      {id:'conn-b',client:'other',label:'peer-b',metrics:{up:1000,down:2000,rtt:40,fwd:22,ret:28,queue:4096,assigned:1000}}]}))};
 }
 
 const server = http.createServer(async (req, res) => {
@@ -167,7 +167,7 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
   if (!state.framevizCard) failures.push(`[${lang}] frame visualizer did not render`);
   const diagnosticsState=await page.evaluate(()=>({cards:document.querySelectorAll('.diagnostic-card').length,
     sampled:document.getElementById('diag-throughput')?.diagPlot?.first,title:document.getElementById('diag-title')?.textContent}));
-  if(diagnosticsState.cards!==6||diagnosticsState.sampled!==1700000000000||!diagnosticsState.title)
+  if(diagnosticsState.cards!==7||diagnosticsState.sampled!==1700000000000||!diagnosticsState.title)
     failures.push('['+lang+'] diagnostic charts did not receive SSE history');
   await page.evaluate(()=>{document.getElementById('pane-conns').style.display='block';renderConnsTable(lastStats,false);});
   await page.locator('[data-tcp-id="a"]').click();
