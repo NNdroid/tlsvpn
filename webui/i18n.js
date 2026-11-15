@@ -295,9 +295,11 @@ const STATS_LABELS={
 };
 Object.keys(STATS_LABELS).forEach(function(lang){const x=STATS_LABELS[lang],d=I18N[lang];d.kpi.overhead=x[0];d.dg.fecovh=x[0];d.stats={fec_state:x[1],fec_mixed:{'zh-CN':'多个分组（按会话）','zh-TW':'多個分組（依工作階段）',en:'Mixed groups (per session)',de:'Gemischte Gruppen (pro Sitzung)',fr:'Groupes mixtes (par session)',ja:'混在グループ（セッション別）'}[lang]};d.sched.active=x[2];d.sched.standby=x[3];d.sched.capacity=x[4];d.sched.assign=x[5];d.kpi.tx=x[6];d.kpi.rx=x[7];});
 
-// 浏览器语言 → 面板语言：前缀匹配，zh 系一律落到 zh-CN（简体）
+// 浏览器语言 → 面板语言：前缀匹配。繁体中文（zh-TW/zh-HK/zh-MO/zh-Hant）落到
+// zh-TW，其余 zh 系一律落到 zh-CN（简体）。
 function detectLang(){
   const l=(navigator.language||'en').toLowerCase();
+  if(l.startsWith('zh-tw')||l.startsWith('zh-hk')||l.startsWith('zh-mo')||l.startsWith('zh-hant'))return 'zh-TW';
   if(l.startsWith('zh'))return 'zh-CN';
   if(l.startsWith('de'))return 'de';
   if(l.startsWith('fr'))return 'fr';

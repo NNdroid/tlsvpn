@@ -38,15 +38,22 @@ const editor = { value: '', parentNode: { insertBefore() {} } };
 elements['cfg-editor'] = editor;
 
 let changeHandler = null;
+// translate() 会把文案写进 [data-rts-t] 元素；预定义这些捕获元素以验证 zh-TW 生效。
+const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint'];
+const i18nEls = i18nKeys.map(k => ({ dataset: { rtsT: k }, textContent: '' }));
 const rootStub = {
   className: '', innerHTML: '', style: {},
-  querySelectorAll() { return []; },
+  querySelectorAll(sel) {
+    if (sel === '[data-rts-t]') return i18nEls;
+    return []; // [data-fec-near] 等
+  },
   appendChild() {},
   addEventListener(ev, fn) { if (ev === 'change') changeHandler = fn; },
 };
 
 global.document = {
-  documentElement: { lang: 'en' },
+  // 模拟繁体中文面板：lang() 读 documentElement.lang，translate() 须用 zh-TW 字典。
+  documentElement: { lang: 'zh-TW' },
   head: { appendChild() {} },
   createElement(tag) {
     if (tag === 'style') return { textContent: '' };
@@ -101,6 +108,17 @@ windowEl.value = '500'; // 越界
 changeHandler && changeHandler({ target: windowEl });
 out = JSON.parse(editor.value);
 assert(out.fec_near_window_ms === 10, 'toEditor clamps out-of-range window to 10, got "' + out.fec_near_window_ms + '"');
+
+// ---- 用例 4：zh-TW（繁中）翻译生效 ----
+// documentElement.lang='zh-TW'，translate() 必须用 zh-TW 字典而非回退 en。
+function txt(key) { const e = i18nEls.find(x => x.dataset.rtsT === key); return e ? e.textContent : ''; }
+assert(txt('title') === '排程設定', 'zh-TW title translated, got "' + txt('title') + '"');
+assert(txt('labelAlgo') === '選路演算法', 'zh-TW labelAlgo translated, got "' + txt('labelAlgo') + '"');
+assert(txt('labelFec') === 'FEC 同位元分發策略', 'zh-TW labelFec translated, got "' + txt('labelFec') + '"');
+assert(txt('labelWindow') === 'near 視窗 (ms)', 'zh-TW labelWindow translated, got "' + txt('labelWindow') + '"');
+// 下拉选项的 textContent 也须为繁中（而非英文/原值）。
+const autoOpt = algo.options.find(o => o.value === 'auto');
+assert(autoOpt && autoOpt.textContent.indexOf('預設') !== -1, 'zh-TW auto option label uses traditional Chinese, got "' + (autoOpt && autoOpt.textContent) + '"');
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');
 process.exit(failures === 0 ? 0 : 1);

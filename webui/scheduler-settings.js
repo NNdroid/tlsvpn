@@ -17,6 +17,14 @@
       algos:{auto:'auto（默认，粘滞+WFQ）',latency_strict:'latency_strict（严格最低去程）',latency_sticky:'latency_sticky（最低去程+粘滞）',min_rtt_strict:'min_rtt_strict（严格最低无拥塞地板）',min_rtt_adaptive:'min_rtt_adaptive（无拥塞地板+粘滞+WFQ）',roundtrip_strict:'roundtrip_strict（严格最低当前往返）'},
       fecs:{auto:'auto（所有健康后端轮转）',near:'near（去程时延 ≤ 数据路径 + 窗口）'},
     },
+    'zh-TW':{
+      title:'排程設定',sub:'選路演算法與 FEC 同位元分發。熱更新生效，無需重新啟動。',labelAlgo:'選路演算法',labelFec:'FEC 同位元分發策略',labelWindow:'near 視窗 (ms)',
+      hint:'auto=去程穩定地板+服務時間（黏滯+WFQ）；*_strict=嚴格取最低延遲路徑（劣化即切換）；*_sticky/*_adaptive=帶黏滯與 WFQ 位元組公平分攤。',
+      fecHint:'auto=所有健康後端輪轉（預設）；near=只投到去程單程延遲與資料路徑相差 ≤ 視窗的連線，抑制慢備援鏈路的同位元洩漏。',
+      windowHint:'僅 near 生效：同位元只發給與資料路徑去程延遲相差 ≤ N ms 的連線。範圍 1-100。',
+      algos:{auto:'auto（預設，黏滯+WFQ）',latency_strict:'latency_strict（嚴格最低去程）',latency_sticky:'latency_sticky（最低去程+黏滯）',min_rtt_strict:'min_rtt_strict（嚴格最低無壅塞地板）',min_rtt_adaptive:'min_rtt_adaptive（無壅塞地板+黏滯+WFQ）',roundtrip_strict:'roundtrip_strict（嚴格最低目前來回）'},
+      fecs:{auto:'auto（所有健康後端輪轉）',near:'near（去程延遲 ≤ 資料路徑 + 視窗）'},
+    },
     'en':{
       title:'Scheduler settings',sub:'Routing algorithm & FEC parity distribution. Hot-applied, no restart.',labelAlgo:'Routing algorithm',labelFec:'FEC parity strategy',labelWindow:'near window (ms)',
       hint:'auto = stable forward floor + service time (sticky+WFQ); *_strict = strictly pick the lowest-latency path (switch on degradation); *_sticky/*_adaptive = with sticky hysteresis and WFQ byte fairness.',
