@@ -19,10 +19,6 @@ func webuiHandler() http.Handler {
 	login, err := fs.ReadFile(sub, "login.html")
 	if err != nil { panic(err) }
 	indexHTML := string(index)
-	indexHTML = strings.Replace(indexHTML,
-		`<button data-v="zh-CN" onclick="setLang('zh-CN')">中文</button>`,
-		`<button data-v="zh-CN" onclick="setLang('zh-CN')">简中</button>
-        <button data-v="zh-TW" onclick="setLang('zh-TW')">繁中</button>`, 1)
 	indexHTML = strings.Replace(indexHTML, "</body>",
 		"<script src=\"frame-visualizer.js\"></script>\n<script src=\"metric-corrections.js\"></script>\n<script src=\"sse.js\"></script>\n<script src=\"scheduler-settings.js\"></script>\n<script src=\"mcp-settings.js\"></script>\n<script src=\"mcp-examples.js\"></script>\n</body>", 1)
 

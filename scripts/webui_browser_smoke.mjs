@@ -17,12 +17,6 @@ const framevizExpect = {
 
 function renderedIndex(src) {
   let html = src;
-  if (!html.includes('data-v="zh-TW"')) {
-    html = html.replace(
-      '<button data-v="zh-CN" onclick="setLang(\'zh-CN\')">中文</button>',
-      '<button data-v="zh-CN" onclick="setLang(\'zh-CN\')">简中</button>\n        <button data-v="zh-TW" onclick="setLang(\'zh-TW\')">繁中</button>'
-    );
-  }
   for (const asset of ['frame-visualizer.js', 'metric-corrections.js', 'sse.js']) {
     if (!html.includes(`src="${asset}"`)) {
       html = html.replace('</body>', `<script src="${asset}"></script>\n</body>`);
