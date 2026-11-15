@@ -31,11 +31,26 @@ import (
 // 数据面写队列优先级默认值与范围。控制帧（心跳/RTT 探针/FEC 控制）默认
 // 高于数据帧：探针与心跳是及时性敏感的少量帧，被数据洪流压后会延迟重拨
 // 判死与单向时延收敛；数值相等则维持 select 随机竞争（现状）。
+//
+// 范围 [0,10]，数值越大优先级越高（帧越先处理）。0 是合法的**最低**优先级
+// （不再当"未配置"哨兵）：nil 指针表示未配置并回落默认，显式 0 表示明确
+// 最低。默认 control=7、data=5 保持"控制优先"语义，同时给两个方向都留出
+// 调高空间（control 可到 8-10 更控制优先，data 可到 8-10 数据优先），避免
+// 默认值落在边界上使"反方向"配置被默认值压制。
 const (
-	defaultPriorityControl = 10
+	defaultPriorityControl = 7
 	defaultPriorityData    = 5
-	maxFramePriority       = 100
+	maxFramePriority       = 10
 )
+
+// intValue 解引用可选优先级指针；nil（未配置，理论不应出现于已归一化配置）
+// 返回 0，即最低优先级。
+func intValue(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
 
 // Config 顶层配置
 type Config struct {
@@ -58,10 +73,13 @@ type Config struct {
 	BrutalUp   uint64 `json:"brutal_up,omitempty"`   // Mbps
 	BrutalDown uint64 `json:"brutal_down,omitempty"` // Mbps
 	// 数据面写队列优先级：控制帧（心跳/RTT 探针/FEC 控制）与数据帧谁先写。
-	// 数值越高越先处理；默认控制=10、数据=5（控制优先）。0=未配置（回落默认）。
+	// 范围 [0,10]，数值越高越先处理；默认控制=7、数据=5（控制优先）。
+	// nil=未配置（回落默认）；显式 0=最低优先级（合法，不再当"未配置"）。
+	// 指针区分"未配置"与"显式 0"：JSON 省略时 nil，序列化为 0 时非 nil，
+	// 保证面板回传"priority_control:0"不会被静默改成默认值。
 	// 仅影响同一条物理连接上两类帧的写出顺序，不进 TLSVPN 线路格式。
-	PriorityControl int `json:"priority_control,omitempty"`
-	PriorityData    int `json:"priority_data,omitempty"`
+	PriorityControl *int `json:"priority_control,omitempty"`
+	PriorityData    *int `json:"priority_data,omitempty"`
 	// RoutingAlgo 多路径调度器的选路算法（见 RoutingAlgo 常量）：auto / latency_strict /
 	// latency_sticky / min_rtt_strict / min_rtt_adaptive / roundtrip_strict。默认 auto，
 	// 可热更、无需重启。作用于本端 egress（client 上行 / server 下行）。
@@ -297,12 +315,15 @@ func (c *Config) applyDefaults() {
 	if c.BrutalDown == 0 {
 		c.BrutalDown = 500
 	}
-	// 0=未配置：回落默认（控制优先）。显式 0 无法与缺失区分，故范围下限为 1。
-	if c.PriorityControl == 0 {
-		c.PriorityControl = defaultPriorityControl
+	// nil=未配置：回落默认（控制优先）。显式 0 是合法的最低优先级，与缺失
+	// 区分开（指针非 nil），applyDefaults 不得覆盖。
+	if c.PriorityControl == nil {
+		v := defaultPriorityControl
+		c.PriorityControl = &v
 	}
-	if c.PriorityData == 0 {
-		c.PriorityData = defaultPriorityData
+	if c.PriorityData == nil {
+		v := defaultPriorityData
+		c.PriorityData = &v
 	}
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
@@ -382,13 +403,13 @@ func (c *Config) Validate() error {
 	if c.BrutalUp > maxBrutalRateMbps || c.BrutalDown > maxBrutalRateMbps {
 		return fmt.Errorf("brutal_up/brutal_down must not exceed %d Mbps", maxBrutalRateMbps)
 	}
-	// 优先级范围下限 1：0 在 applyDefaults 里被当成"未配置"回落默认，
-	// 显式 0 无法与缺失区分，故不允许。
-	if c.PriorityControl < 1 || c.PriorityControl > maxFramePriority {
-		return fmt.Errorf("priority_control %d must be in [1, %d]", c.PriorityControl, maxFramePriority)
+	// 优先级范围 [0,10]，0=最低（合法）。负值越界，>maxFramePriority 越界；
+	// nil 只在绕过 applyDefaults 直接 Validate 时出现，同样拒绝。
+	if c.PriorityControl == nil || *c.PriorityControl < 0 || *c.PriorityControl > maxFramePriority {
+		return fmt.Errorf("priority_control must be in [0, %d]", maxFramePriority)
 	}
-	if c.PriorityData < 1 || c.PriorityData > maxFramePriority {
-		return fmt.Errorf("priority_data %d must be in [1, %d]", c.PriorityData, maxFramePriority)
+	if c.PriorityData == nil || *c.PriorityData < 0 || *c.PriorityData > maxFramePriority {
+		return fmt.Errorf("priority_data must be in [0, %d]", maxFramePriority)
 	}
 	if c.TrafficDays < 1 || c.TrafficDays > maxTrafficDays {
 		return fmt.Errorf("traffic_days must be between 1 and %d", maxTrafficDays)

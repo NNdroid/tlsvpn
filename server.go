@@ -1069,7 +1069,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	s.minEnc = minEncRank(cfg.MinEnc)
 	s.maxSessions = cfg.Server.MaxSessions
 	s.fecGroupMin, s.fecGroupMax = cfg.Server.FecGroupMin, cfg.Server.FecGroupMax
-	s.priorityControl, s.priorityData = cfg.PriorityControl, cfg.PriorityData
+	s.priorityControl, s.priorityData = intValue(cfg.PriorityControl), intValue(cfg.PriorityData)
 	var reconnect []*net.TCPConn
 	if brutalChanged {
 		for _, session := range s.activeClients {

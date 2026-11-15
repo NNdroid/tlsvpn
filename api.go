@@ -338,8 +338,8 @@ type runtimeCfgJSON struct {
 	Brutal           bool         `json:"brutal"`
 	BrutalUp         uint64       `json:"brutal_up"`
 	BrutalDown       uint64       `json:"brutal_down"`
-	PriorityControl  int          `json:"priority_control,omitempty"` // 数据面控制帧写优先级
-	PriorityData     int          `json:"priority_data,omitempty"`     // 数据面数据帧写优先级
+	PriorityControl  *int         `json:"priority_control,omitempty"` // 数据面控制帧写优先级（nil=未配置）
+	PriorityData     *int         `json:"priority_data,omitempty"`     // 数据面数据帧写优先级（nil=未配置）
 	Socks5           bool         `json:"socks5"`
 	FEC              bool         `json:"fec"`
 	FecGroup         int          `json:"fec_group"`

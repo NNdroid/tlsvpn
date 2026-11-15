@@ -1110,7 +1110,7 @@ func liveFromCfg(cfg *Config) *liveConfig {
 		brutal:      cfg.Brutal, brutalUp: cfg.BrutalUp, brutalDown: cfg.BrutalDown,
 		connsCount: cfg.Client.Conns, fecMode: cfg.Client.FEC, fecGroup: cfg.Client.FecGroup,
 		encrypt: cfg.Encrypt, encAlgo: encAlgoFromConfig(cfg.EncAlgo), minEnc: minEncRank(cfg.MinEnc),
-		priorityControl: cfg.PriorityControl, priorityData: cfg.PriorityData,
+		priorityControl: intValue(cfg.PriorityControl), priorityData: intValue(cfg.PriorityData),
 	}
 }
 
