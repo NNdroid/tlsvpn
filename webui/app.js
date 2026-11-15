@@ -31,6 +31,20 @@ function encBadge(a){if(a===null||a===undefined)return '<span class="badge b-off
   if(a===5)return '<span class="badge b-on">ChaCha20-Poly1305</span>';
   if(a===6)return '<span class="badge b-on">XChaCha20-Poly1305</span>';
   return '<span class="badge b-off">'+t('badge.plain')+'</span>';}
+// FEC parity 分发策略小徽章（auto/near），与 FEC 分组徽章并列显示。空/未知不显示。
+function fecStratBadge(strategy){
+  if(!strategy)return '';
+  const label=t('fecstrat.'+strategy)||strategy;
+  const cls=strategy==='near'?'b-dup':'b-off';
+  return ' <span class="badge '+cls+'" style="font-size:.66em;padding:1px 6px">'+esc(label)+'</span>';
+}
+// FEC 策略 tooltip 描述：策略全名 +（near 时）窗口。
+function fecStratTip(strategy,windowMs){
+  if(!strategy)return '';
+  const desc=t('fecstrat.'+strategy+'_desc')||strategy;
+  if(strategy==='near'&&windowMs>0)return desc+' · '+t('fecstrat.win').replace('{n}',String(windowMs));
+  return desc;
+}
 function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
@@ -1690,9 +1704,9 @@ function renderConnsTable(data,fresh){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',fecStrategy:c.fec_strategy||'',fecNearWindowMs:c.fec_near_window_ms||0,sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),fecStrategy:c.fec_strategy||data.fec_strategy||'',fecNearWindowMs:(c.fec_near_window_ms!==undefined?c.fec_near_window_ms:(data.fec_near_window_ms||0)),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1785,7 +1799,7 @@ function renderConnsTable(data,fresh){
 	      '<td class="hide-sm dim" title="'+esc(r.cert||'')+'">'+(r.cert?hi(esc(shortId(r.cert,16)),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
 	      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
-      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm">'+badge(r.fec)+'</td>'+
+	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecStratTip(r.fecStrategy,r.fecNearWindowMs))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
   }).join('')||emptyTableRow('conns',20,all);

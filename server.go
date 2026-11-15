@@ -1025,21 +1025,30 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 	// 会话级协商结果需要第二个临界区：per-conn 字段在上面已经取到，
 	// 这里只补 FEC/加密算法等只在会话上保存的字段。
 	type sessSnap struct {
-		fec   string
-		enc   int
-		encOn bool
+		fec             string
+		enc             int
+		encOn           bool
+		fecStrategy     string
+		fecNearWindowMs int
 	}
 	s.mu.RLock()
 	snaps := make(map[string]*sessSnap, len(s.activeClients))
 	for id, session := range s.activeClients {
 		session.sessionMu.Lock()
-		snaps[id] = &sessSnap{fec: session.FecMode, enc: session.EncAlgo, encOn: session.Encrypt}
+		snap := &sessSnap{fec: session.FecMode, enc: session.EncAlgo, encOn: session.Encrypt}
+		// FEC 策略是该会话下行端口的运行时状态，供连接明细展示（nil 防未接线端口）。
+		if session.Port != nil {
+			snap.fecStrategy = string(session.Port.FecStrategy())
+			snap.fecNearWindowMs = session.Port.FecNearWindowMs()
+		}
+		snaps[id] = snap
 		session.sessionMu.Unlock()
 	}
 	s.mu.RUnlock()
 	for i := range out {
 		if sn := snaps[out[i].ClientID]; sn != nil {
 			out[i].FEC, out[i].EncAlgo, out[i].SessionEnc = sn.fec, sn.enc, sn.encOn
+			out[i].FecStrategy, out[i].FecNearWindowMs = sn.fecStrategy, sn.fecNearWindowMs
 		}
 	}
 	return out

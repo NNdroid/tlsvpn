@@ -204,6 +204,16 @@ func (p *AsyncPort) SetFecNearWindowMs(ms int) {
 	p.fecNearWindowUS.Store(uint64(ms) * 1000)
 }
 
+// FecStrategy 返回当前 parity 分发策略（供快照/面板展示）。热路径零分配读取。
+func (p *AsyncPort) FecStrategy() FecStrategy {
+	return fecStrategyForCode(p.fecStrategy.Load())
+}
+
+// FecNearWindowMs 返回 near 策略的去程时延窗口（毫秒）。供快照/面板展示。
+func (p *AsyncPort) FecNearWindowMs() int {
+	return int(p.fecNearWindowUS.Load() / 1000)
+}
+
 // AttachFEC 在端口上启用 XOR 奇偶校验 FEC：每 K 个数据帧发送 1 个校验帧。
 // parity 只需由会话级 decoder 收到一份，因此在健康物理连接间轮转，而不是
 // 向 N 条连接复制 N 份；线路开销从约 N/K 降回约 1/K。
@@ -1786,6 +1796,10 @@ type connSnapshot struct {
 	SessionEpoch uint64            `json:"session_epoch"`
 	EncAlgo      int               `json:"enc_algo"`
 	FEC          string            `json:"fec"`
+	// FecStrategy 本端 egress 的 FEC parity 分发策略（auto/near），与 FEC 分组
+	// （"xor K=N"）正交，来源是本端 AsyncPort 的运行时状态。面板展示用。
+	FecStrategy     string `json:"fec_strategy,omitempty"`
+	FecNearWindowMs int    `json:"fec_near_window_ms,omitempty"`
 	Index        int               `json:"index"`
 	ConnID       string            `json:"conn_id,omitempty"`
 	Target       string            `json:"target"`
@@ -1884,6 +1898,11 @@ func (c *Client) snapshotConns() []connSnapshot {
 			TLSCipher:    tlsCipher,
 			TLSALPN:      tlsAlpn,
 			CertSHA256:   certSHA,
+		}
+		// FEC 策略是端口级状态（所有物理连接共享 txPort），nil 防测试直构 Client。
+		if c.txPort != nil {
+			snap.FecStrategy = string(c.txPort.FecStrategy())
+			snap.FecNearWindowMs = c.txPort.FecNearWindowMs()
 		}
 		if state=="up" {snap.TCP=ci.tcpObservation.Load()}
 		if v, okv := ci.connID.Load().(string); okv {

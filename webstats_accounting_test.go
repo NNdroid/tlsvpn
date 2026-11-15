@@ -194,6 +194,11 @@ func TestWebStatsRetiredSessionKeepsProcessTotals(t *testing.T) {
 
 func TestWebStatsConnectionOwnsNegotiation(t *testing.T) {
 	c := &Client{connsCount: 2, conns: map[int]*clientConnInfo{}, negInfo: &sessionNeg{TxRateMbps: 999}}
+	// FEC 策略是端口级状态；测试直构 Client（无 txPort）时快照应留空而非 panic，
+	// 这里显式挂一个端口验证策略能同步进连接快照。
+	c.txPort = &AsyncPort{}
+	c.txPort.fecStrategy.Store(fecStrategyCode(string(FecStrategyNear)))
+	c.txPort.fecNearWindowUS.Store(uint64(15) * 1000)
 	for i := 0; i < 2; i++ {
 		ci := &clientConnInfo{rttCache: new(uint32)}
 		ci.state.Store("up")
@@ -203,6 +208,10 @@ func TestWebStatsConnectionOwnsNegotiation(t *testing.T) {
 	got := c.snapshotConns()
 	if got[0].BrutalTxMbps != 10 || got[1].BrutalTxMbps != 11 || got[0].SNI == got[1].SNI || got[0].TLSVersion == got[1].TLSVersion || got[0].SessionEpoch == got[1].SessionEpoch || got[0].EncAlgo == got[1].EncAlgo || got[0].FEC == got[1].FEC {
 		t.Fatalf("shared negotiation leaked: %+v", got)
+	}
+	// FEC 策略来自共享 txPort，所有连接应同步出 near/15ms。
+	if got[0].FecStrategy != "near" || got[1].FecStrategy != "near" || got[0].FecNearWindowMs != 15 || got[1].FecNearWindowMs != 15 {
+		t.Fatalf("fec strategy not synced from txPort: %+v", got)
 	}
 	c.conns[0].state.Store("retrying")
 	got = c.snapshotConns()

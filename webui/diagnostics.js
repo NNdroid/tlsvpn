@@ -11,7 +11,11 @@
   };
   const text=i=>(words[typeof LANG==='string'?LANG:'en']||words.en)[i];
   let history=null,hoverTime=null;
-  const colors=['#6554ff','#08a579','#cf8200','#dc5478','#2589c7','#9868b8','#6e9835','#bd6940'];
+  const colors=['#6554ff','#08a579','#cf8200','#2589c7','#dc5478','#9868b8','#6e9835','#bd6940'];
+  // 各连接单向时延：去程/回程各用一族颜色（冷/暖）以便一眼分清方向，
+  // 族内仍按连接索引错开，保证同方向多条连接彼此可辨。
+  const fwdColors=['#4da3ff','#2ec4b6','#8b7bff','#39a8d8','#6b9bff','#00b3a4','#a78bfa','#2f7fd4'];
+  const retColors=['#ff9f45','#f25c5c','#e0a800','#ff7ab8','#d94f9e','#ff8a5c','#c25e3a','#b8860b'];
   const section=document.createElement('section');section.className='card diagnostic-section';section.id='diagnostic-section';
   section.innerHTML='<div class="chart-head"><h2 class="card-title" id="diag-title"></h2><span id="diag-at" class="dim mono"></span><div class="seg" id="diag-range"><button data-v="2m" data-diag-range="2m"></button><button data-v="1h" data-diag-range="1h"></button><button data-v="24h" data-diag-range="24h"></button></div><label><span id="diag-client-label"></span> <select id="diag-client"></select></label><label><span id="diag-conn-label"></span> <select id="diag-conn"></select></label></div><p class="dim" id="diag-note"></p><p class="dim" id="diag-scope"></p><p class="dim" id="diag-aggregate"></p><p id="diag-limit" class="dim"></p><div class="diagnostic-grid">'+[4,5,6,7,8,9,29].map((title,i)=>'<article class="diagnostic-card"><h3 data-diag-title="'+title+'"></h3><div id="diag-body-'+i+'"></div></article>').join('')+'</div>';
   document.querySelector('.chart-card').after(section);
@@ -52,7 +56,7 @@
       // 悬停数据点圆标
       series.forEach((s,j)=>{const v=s.value(selected);if(v==null||!Number.isFinite(v))return;ctx.beginPath();ctx.arc(x(selected.t),y(v),3.5,0,Math.PI*2);ctx.fillStyle=s.color||colors[j%colors.length];ctx.fill();ctx.strokeStyle=cssv('--card');ctx.lineWidth=1.5;ctx.stroke();});
       // 悬停提示框（系列过多时靠图例显示数值，避免遮挡）
-      if(series.length<=6){const lines=series.map(s=>s.name+' '+format(s.value(selected),unit));ctx.font='11px sans-serif';let bw=0;lines.forEach(s=>{bw=Math.max(bw,ctx.measureText(s).width);});bw+=16;const bh=lines.length*15+10;let bx=x(selected.t)+10;if(bx+bw>W-R)bx=x(selected.t)-10-bw;const by=T;ctx.globalAlpha=.95;ctx.fillStyle=cssv('--card');ctx.shadowColor='rgba(0,0,0,.35)';ctx.shadowBlur=14;ctx.shadowOffsetY=4;roundRectPath(ctx,bx,by,bw,bh,7);ctx.fill();ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;ctx.globalAlpha=1;ctx.strokeStyle=cssv('--border2');ctx.lineWidth=1;roundRectPath(ctx,bx,by,bw,bh,7);ctx.stroke();lines.forEach((s,i)=>{ctx.fillStyle=cssv('--sub');ctx.fillText(s,bx+8,by+18+i*15);});}
+      if(series.length<=6){const lines=series.map(s=>s.name+' '+format(s.value(selected),unit));ctx.font='11px sans-serif';ctx.textAlign='left';let bw=0;lines.forEach(s=>{bw=Math.max(bw,ctx.measureText(s).width);});bw+=16;const bh=lines.length*15+10;let bx=x(selected.t)+10;if(bx+bw>W-R)bx=x(selected.t)-10-bw;const by=T;ctx.globalAlpha=.95;ctx.fillStyle=cssv('--card');ctx.shadowColor='rgba(0,0,0,.35)';ctx.shadowBlur=14;ctx.shadowOffsetY=4;roundRectPath(ctx,bx,by,bw,bh,7);ctx.fill();ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;ctx.globalAlpha=1;ctx.strokeStyle=cssv('--border2');ctx.lineWidth=1;roundRectPath(ctx,bx,by,bw,bh,7);ctx.stroke();lines.forEach((s,i)=>{ctx.fillStyle=cssv('--sub');ctx.fillText(s,bx+8,by+18+i*15);});}
     }
     if(!pts.length){ctx.textAlign='center';ctx.fillText(text(24),W/2,T+ph/2,W-16);}
     else if(!series.some(s=>pts.some(p=>s.value(p)!=null))){ctx.textAlign='center';ctx.fillText('—',W/2,T+ph/2);}
@@ -63,11 +67,11 @@
     setSeg('diag-range',chartRange);section.querySelectorAll('[data-diag-range]').forEach(b=>b.textContent=t('chart.r'+b.dataset.diagRange));
     document.getElementById('diag-limit').textContent=history?.points.some(p=>p.truncated)?text(26):'';
     const ids=identities().filter(c=>(!client.value||c.client===client.value)&&(!conn.value||c.id===conn.value)).slice(0,8);
-    const connectionSeries=(metric,label,dash=false)=>ids.map((c,i)=>({name:c.id.slice(0,8)+' '+text(label),color:colors[i],dash,value:p=>p.conns?.find(x=>x.id===c.id)?.metrics?.[metric]??null}));
+    const connectionSeries=(metric,label,dash=false,palette=colors)=>ids.map((c,i)=>({name:c.id.slice(0,8)+' '+text(label),color:palette[i%palette.length],dash,value:p=>p.conns?.find(x=>x.id===c.id)?.metrics?.[metric]??null}));
     const metric=(key,label)=>({name:text(label),value:p=>p.metrics?.[key]??null});
     panel(0,'throughput',[...connectionSeries('up',10),...connectionSeries('down',11,true)],'bytes');
     panel(1,'rtt',connectionSeries('rtt',5),'ms');
-    panel(6,'oneway',[...connectionSeries('fwd',30),...connectionSeries('ret',31,true)],'ms');
+    panel(6,'oneway',[...connectionSeries('fwd',30,false,fwdColors),...connectionSeries('ret',31,true,retColors)],'ms');
     panel(2,'assigned',connectionSeries('assigned',12),'bytes');panel(2,'queue',connectionSeries('queue',13),'queue');
     panel(3,'fec-pct',[metric('fec_pct',14)],'pct');panel(3,'fec-recovery',[metric('recovered',15),metric('lost',16)],'rate');panel(3,'fec-parity',[metric('fec_parity',17)],'bytes');
     panel(4,'pad-rate',[metric('pad',18)],'bytes');panel(4,'pad-pct',[metric('pad_pct',19)],'pct');

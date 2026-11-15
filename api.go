@@ -123,6 +123,10 @@ type serverConnSnapshot struct {
 	FEC        string `json:"fec"`
 	EncAlgo    int    `json:"enc_algo"`
 	SessionEnc bool   `json:"session_encrypt"`
+	// FecStrategy 该会话下行（服务端 egress）的 FEC parity 分发策略（auto/near），
+	// 与 FEC 分组（"xor K=N"）正交，来源是该会话 Port 的运行时状态。
+	FecStrategy     string `json:"fec_strategy,omitempty"`
+	FecNearWindowMs int    `json:"fec_near_window_ms,omitempty"`
 	Epoch      uint64 `json:"session_epoch"`
 	// TCP Brutal：本连接实际生效的整形速率与生效结果
 	BrutalApplied bool   `json:"brutal_applied"`
