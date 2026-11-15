@@ -36,7 +36,7 @@ function contentType(file) {
 
 function statsFixture(mode='client',stage=1,instance='browser-smoke') {
   const client={tx_bytes:stage*12600,rx_bytes:stage*6300,tx_packets:stage*126,rx_packets:stage*50,active_conns:2,ipv4:'10.0.0.2',fec:'xor K=4',enc_algo:2};
-  const conn=(id,owner)=>({conn_id:id,client_id:owner,index:0,target:'test.example:443',remote:'127.0.0.1:443',state:'up',tx_bytes:stage*6300,rx_bytes:stage*3150,rtt_ms:20,age_sec:10,fec:'xor K=4',enc_algo:2,tls_version:'TLS 1.3',scheduler:{active:true,queued_bytes:0,rate_mbps:8,assigned_bytes:stage*1000,assigned_batches:stage,fec_assigned_bytes:0,fec_assigned_batches:0}});
+  const conn=(id,owner)=>({conn_id:id,client_id:owner,index:0,target:'test.example:443',remote:'127.0.0.1:443',state:'up',tx_bytes:stage*6300,rx_bytes:stage*3150,rtt_ms:20,age_sec:10,fec:'xor K=4',fec_strategy:'near',fec_near_window_ms:10,enc_algo:2,tls_version:'TLS 1.3',cert_sha256:'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b',scheduler:{active:true,queued_bytes:0,rate_mbps:8,assigned_bytes:stage*1000,assigned_batches:stage,fec_assigned_bytes:0,fec_assigned_batches:0}});
   const fixture={
     mode,version:'ci-smoke',instance_id:instance,sample_time_ms:1000+stage*1000,uptime_sec:10+stage,
     accounting_scope:'application_wire_excluding_heartbeat',active_clients:1,retained_sessions:1,live_conns:2,
@@ -46,7 +46,7 @@ function statsFixture(mode='client',stage=1,instance='browser-smoke') {
     global_tx_bytes:stage*12600,global_rx_bytes:stage*6300,global_tx_packets:stage*126,global_rx_packets:stage*50,
     dropped_frames:0,tap_write_errors:0,reconnect_attempts:0,
     fec:{enabled:true,counter_domain:'written',parity_tx:stage*25,parity_attempts:stage*25,data_tx:stage*100,control_tx:stage,data_wire_bytes:stage*10000,parity_wire_bytes:stage*2500,recovered:stage,lost:0,enabled_sessions:1,tx_active_sessions:1,rx_bypass_sessions:0,group:4},
-    fec_mode:'xor K=4',enc_algo:2,
+    fec_mode:'xor K=4',fec_strategy:'near',fec_near_window_ms:10,enc_algo:2,
     reorder:{dropped_frames:0,skipped_frames:0,gap_events:0},drop_breakdown:{backpressure:0,reorder:0},
     pad:{mode:'bucket',epoch:1,wire_bytes:stage*1000,pad_bytes:stage*20,overhead_pct:stage?2:0},
     sessions:{active:2,max:2},cfg:{fec:true,fec_mode:'xor K=4',encrypt:true,conns:2},negotiate:{fec:true,fec_group:4},
@@ -170,6 +170,20 @@ for (const lang of ['zh-CN', 'zh-TW', 'en', 'de', 'fr', 'ja']) {
   if(diagnosticsState.cards!==7||diagnosticsState.sampled!==1700000000000||!diagnosticsState.title)
     failures.push('['+lang+'] diagnostic charts did not receive SSE history');
   await page.evaluate(()=>{document.getElementById('pane-conns').style.display='block';renderConnsTable(lastStats,false);});
+  const fecCell=await page.evaluate(()=>{
+    const row=document.querySelector('[data-conn-id="a"]');
+    const td=row&&[...row.querySelectorAll('td')].find(x=>x.textContent.includes('xor K=4')&&x.title);
+    return td?{title:td.title,text:td.textContent}:null;
+  });
+  if(!fecCell||!fecCell.text.includes('near')||!fecCell.title.includes('near'))
+    failures.push('['+lang+'] conns FEC cell missing strategy badge/tooltip');
+  const certCell=await page.evaluate(()=>{
+    const row=document.querySelector('[data-conn-id="a"]');
+    const td=row&&[...row.querySelectorAll('td')].find(x=>x.title==='a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b');
+    return td?{title:td.title,text:td.textContent.trim()}:null;
+  });
+  if(!certCell||!certCell.text.startsWith('a1b2c3d4e5f6a7b8')||!certCell.title.startsWith('a1b2c3d4e5f6a7b8'))
+    failures.push('['+lang+'] conns certificate fingerprint cell missing/truncated');
   await page.locator('[data-tcp-id="a"]').click();
   const tcpState=await page.evaluate(()=>({open:document.getElementById('tcp-dialog').open,nodelay:document.querySelector('[data-tcp-field="nodelay"]').textContent,keepalive:document.querySelector('[data-tcp-field="keepalive"]').textContent,congestion:document.querySelector('[data-tcp-field="congestion"]').textContent,unavailable:document.querySelector('[data-tcp-field="delivery_rate_Bps"]').textContent}));
   if(!tcpState.open||tcpState.congestion!=='cubic'||tcpState.nodelay===tcpState.keepalive||!tcpState.unavailable.includes('unsupported_short_tcp_info'))failures.push('['+lang+'] TCP kernel facts were not displayed');
