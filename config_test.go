@@ -492,3 +492,34 @@ func TestEncAlgoDefaultsAndValidation(t *testing.T) {
 		t.Fatal("enc_algo with encrypt=false must be rejected")
 	}
 }
+
+// TestServerCertFingerprintSnapshot 验证 getServerTLSConfig 会把本机证书的
+// SHA-256 指纹填入全局快照，供服务端 WebUI 连接列表展示 cert_sha256。
+func TestServerCertFingerprintSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldWd)
+
+	cfg := getServerTLSConfig("", "")
+	if len(cfg.Certificates) == 0 {
+		t.Fatal("证书链为空")
+	}
+	want := certFingerprintHex(cfg.Certificates[0].Certificate[0])
+	if got := serverCertFingerprint(); got != want {
+		t.Fatalf("serverCertFingerprint() = %q, want %q", got, want)
+	}
+	if want == "" {
+		t.Fatal("证书指纹不应为空")
+	}
+}
+
+// TestPeerCertSHA256NilSafe 验证 peerCertSHA256 对 nil 连接返回空串（无对端
+// 证书场景不 panic），采集函数可安全用于未握手/纯 PSK 连接。
+func TestPeerCertSHA256NilSafe(t *testing.T) {
+	if got := peerCertSHA256(nil); got != "" {
+		t.Fatalf("peerCertSHA256(nil) = %q, want empty", got)
+	}
+}

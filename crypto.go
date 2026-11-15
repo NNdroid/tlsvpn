@@ -331,6 +331,11 @@ func getServerTLSConfig(certFile, keyFile string) *tls.Config {
 
 	// 有效期快照供面板显示"证书剩余天数"：过期前运维就能看到，而不是等客户端全挂
 	serverCertExp.Store(certExpiryInfo(&cert, certFile == "" || keyFile == ""))
+	// 本机证书指纹快照：服务端 WebUI 连接列表展示对端应锁定的证书 SHA-256。
+	if len(cert.Certificate) > 0 {
+		hash := certFingerprintHex(cert.Certificate[0])
+		serverCertSHA256.Store(&hash)
+	}
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -348,6 +353,19 @@ type certExpiry struct {
 }
 
 var serverCertExp atomic.Pointer[certExpiry]
+
+// serverCertSHA256 是本机 TLS 证书叶子证书 DER 的 SHA-256 指纹（hex）。
+// 服务端启动时由 getServerTLSConfig 填充；客户端 WebUI 展示的是对端（服务端）
+// 证书指纹，由客户端握手后本地采集，不依赖此变量。
+var serverCertSHA256 atomic.Pointer[string]
+
+// serverCertFingerprint 返回本机证书指纹（nil-safe，未初始化时为空串）。
+func serverCertFingerprint() string {
+	if p := serverCertSHA256.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
 
 // certExpiryInfo 解析证书有效期。LoadX509KeyPair 会填 Leaf，自签生成的证书
 // 只有 DER，两种都要处理；解析失败返回零值，面板按"未知"渲染。

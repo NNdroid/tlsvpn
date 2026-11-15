@@ -134,6 +134,8 @@ type serverConnSnapshot struct {
 	TLSVersion string `json:"tls_version,omitempty"`
 	TLSCipher  string `json:"tls_cipher,omitempty"`
 	TLSALPN    string `json:"tls_alpn,omitempty"`
+	// CertSHA256 是服务端本机证书的 SHA-256 指纹（hex），客户端应以此锁定 -cert-sha256。
+	CertSHA256 string `json:"cert_sha256,omitempty"`
 	// Stalled 表示调度器已判定该连接不健康（读写失败/连续 RTT 采样失败），
 	// 不再向其分配数据；面板据此提示用户该路径已失效。
 	Stalled bool `json:"stalled"`

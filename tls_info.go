@@ -22,6 +22,9 @@ const tlsClientHelloFingerprintKind = "tls-clienthello-v1"
 type TLSHandshakeInfo struct {
 	FingerprintKind         string   `json:"fingerprint_kind,omitempty"`
 	FingerprintSHA256       string   `json:"fingerprint_sha256,omitempty"`
+	// CertSHA256 是客户端观测到的对端（服务端）证书叶子证书 DER 的 SHA-256
+	// 指纹（hex）。服务端侧无对端证书（未启用 ClientAuth），此字段为空。
+	CertSHA256              string   `json:"cert_sha256,omitempty"`
 	VersionID               uint16   `json:"version_id,omitempty"`
 	Version                 string   `json:"version,omitempty"`
 	CipherSuiteID           uint16   `json:"cipher_suite_id,omitempty"`
