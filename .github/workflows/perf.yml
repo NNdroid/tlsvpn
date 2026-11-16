@@ -356,7 +356,9 @@ jobs:
               if set(off) != set(pgo):
                   raise SystemExit(f'PGO A/B matrix mismatch in round {round_no}')
               for key in sorted(off):
-                  b, c = off[key], pgo[key]
+                  # load() 现在返回样本列表（主/FEC 矩阵多轮交错）；PGO 单轮文件
+                  # 每格恰一个样本，中位数即原值——统一走 median 防列表直接除法。
+                  b, c = statistics.median(off[key]), statistics.median(pgo[key])
                   ratio = c / b if b else 1.0
                   pgo_rows.append((round_no, key[-1], b, c, (ratio-1.0)*100.0, ratio))
 
