@@ -306,7 +306,7 @@ func TestRttProbeSchedulerLifecycle(t *testing.T) {
 	resolve := func(int) *Backend { return nil }
 	active := func() []int { return []int{0, 1, 2} }
 	ctx, cancel := context.WithCancel(t.Context())
-	s := newRttProbeScheduler(ctx, resolve, active)
+	s := newRttProbeScheduler(ctx, resolve, active, nil, nil)
 	s.start()
 	s.kick()
 	s.enable()
@@ -324,7 +324,7 @@ func TestRttProbeSchedulerLifecycle(t *testing.T) {
 // TestRttProbePendingSweep 过期与超量 pending 必须被清掉（防泄漏）：这里直接
 // 驱动 sweepPending，它是调度 goroutine 独占路径，单 goroutine 调用即无竞态。
 func TestRttProbePendingSweep(t *testing.T) {
-	s := newRttProbeScheduler(context.Background(), func(int) *Backend { return nil }, func() []int { return nil })
+	s := newRttProbeScheduler(context.Background(), func(int) *Backend { return nil }, func() []int { return nil }, nil, nil)
 
 	// 未过期：保留
 	s.pending[1] = pendingProbe{srcConn: 0, replyOn: 0, issued: time.Now()}

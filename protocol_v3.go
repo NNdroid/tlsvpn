@@ -19,7 +19,8 @@ func parseControlKind(payload []byte) (byte, error) {
 	}
 	switch payload[0] {
 	case controlKindFECParity, controlKindFECMode,
-		controlKindRttProbe, controlKindRttReply:
+		controlKindRttProbe, controlKindRttReply,
+		controlKindClockProbe, controlKindClockReply:
 		return payload[0], nil
 	default:
 		return 0, fmt.Errorf("unsupported control kind 0x%02x", payload[0])

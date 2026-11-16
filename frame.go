@@ -634,6 +634,10 @@ type HandshakeReq struct {
 	// RTTProbe：本端支持跨路径 RTT 探针（方案A，去程/回程单向选路）。
 	// 仅当两端都声明支持时启用；旧端收不到 0x03/0x04 控制帧，不破坏兼容。
 	RTTProbe bool `json:"rtt_probe,omitempty"`
+	// ClockOffset：本端支持双向时钟偏移探针（0x05/0x06），用于解出参考连接的
+	// 去/回程不对称度，去掉单向时延分解里的公共偏移 δ、恢复 fwd+ret=RTT 自洽。
+	// 仅当两端都声明支持时启用；与 RTTProbe 独立协商（偏移估计可选叠加）。
+	ClockOffset bool `json:"clock_offset,omitempty"`
 	Encrypt  bool `json:"encrypt,omitempty"`
 	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM / ChaCha20-Poly1305 / XChaCha20-Poly1305）。
 	// 服务端要求与配置完全相等，不做隐式降级。
@@ -670,6 +674,9 @@ type HandshakeResp struct {
 	FecGroup        int    `json:"fec_group,omitempty"`
 	// RTTProbe：服务端是否同意启用跨路径 RTT 探针（与客户端声明取交集）。
 	RTTProbe bool `json:"rtt_probe,omitempty"`
+	// ClockOffset：服务端是否同意启用双向时钟偏移探针（与客户端声明取交集）。
+	// 未协商成功时 rttProbe 仍按现有锚定法 + δ 工作，行为不变。
+	ClockOffset bool `json:"clock_offset,omitempty"`
 	Encrypt  bool `json:"encrypt,omitempty"`
 	// EncAlgo：协商选定的算法（0=无内层加密，2=AES-256-GCM，4=AES-128-GCM）。
 	// 为 GCM 时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），

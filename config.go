@@ -43,6 +43,15 @@ const (
 	maxFramePriority       = 10
 )
 
+// defaultProbeMinHalfRTTUs 单向时延分解的物理锚定下界（µs），默认 1000µs(1ms)。
+//
+// 参考连接 ref 的自回包探针 decay 会被 decayed-min 采到极小极值（同机回环、
+// 批处理对齐、亚毫秒采样），使 halfRef 地板成亚毫秒伪值，ref 自己的去/回程被
+// 钉成"去程 1ms"这类物理上不可能（跨境最低光速延迟远超此）的读数。抬到应用层
+// 最小可能的半程下界可消掉该伪值；不抬到内核 min_rtt/2 是为了避免跨尺度混用
+// （探针尺度 vs 物理地板），后者会重新引入系统性偏高。
+const defaultProbeMinHalfRTTUs = 1000
+
 // intValue 解引用可选优先级指针；nil（未配置，理论不应出现于已归一化配置）
 // 返回 0，即最低优先级。
 func intValue(p *int) int {
@@ -80,6 +89,12 @@ type Config struct {
 	// 仅影响同一条物理连接上两类帧的写出顺序，不进 TLSVPN 线路格式。
 	PriorityControl *int `json:"priority_control,omitempty"`
 	PriorityData    *int `json:"priority_data,omitempty"`
+	// ProbeMinHalfRTTUs 单向时延分解的物理锚定下界（µs）。参考连接 ref 的自回包
+	// decayed-min 可能采到亚毫秒极值，使 halfRef 地板成伪值，令 ref 自身去/回程
+	// 显示成物理上不可能的小值。该下界防止锚定被污染。
+	// nil=未配置（回落默认 1000µs）；0=显式禁用下界（不推荐，会复现伪值）。
+	// 仅观测/分解用，不进 TLSVPN 线路格式。
+	ProbeMinHalfRTTUs *int `json:"probe_min_half_rtt_us,omitempty"`
 	// RoutingAlgo 多路径调度器的选路算法（见 RoutingAlgo 常量）：auto / latency_strict /
 	// latency_sticky / min_rtt_strict / min_rtt_adaptive / roundtrip_strict。默认 auto，
 	// 可热更、无需重启。作用于本端 egress（client 上行 / server 下行）。
@@ -325,6 +340,12 @@ func (c *Config) applyDefaults() {
 		v := defaultPriorityData
 		c.PriorityData = &v
 	}
+	// nil=未配置：回落默认 1000µs(1ms)。显式 0 是合法值（禁用下界），指针非
+	// nil，applyDefaults 不得覆盖——与优先级字段的"未配置 vs 显式 0"纪律一致。
+	if c.ProbeMinHalfRTTUs == nil {
+		v := defaultProbeMinHalfRTTUs
+		c.ProbeMinHalfRTTUs = &v
+	}
 	if c.Web.Bind == "" {
 		c.Web.Bind = "all"
 	}
@@ -410,6 +431,11 @@ func (c *Config) Validate() error {
 	}
 	if c.PriorityData == nil || *c.PriorityData < 0 || *c.PriorityData > maxFramePriority {
 		return fmt.Errorf("priority_data must be in [0, %d]", maxFramePriority)
+	}
+	// 物理锚定下界非负：负值无物理意义；nil 只在绕过 applyDefaults 直接 Validate
+	// 时出现，拒绝。上限 3_600_000µs(1 小时)防误配成天文数字把选路全废。
+	if c.ProbeMinHalfRTTUs == nil || *c.ProbeMinHalfRTTUs < 0 || *c.ProbeMinHalfRTTUs > 3_600_000 {
+		return fmt.Errorf("probe_min_half_rtt_us must be in [0, 3600000]")
 	}
 	if c.TrafficDays < 1 || c.TrafficDays > maxTrafficDays {
 		return fmt.Errorf("traffic_days must be between 1 and %d", maxTrafficDays)

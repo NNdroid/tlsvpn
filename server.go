@@ -395,6 +395,7 @@ type ClientSession struct {
 	SessionID          string
 	Port               *AsyncPort
 	rttProbe           *rttProbeScheduler // 跨路径 RTT 探针（req.RTTProbe 时启用）
+	clockOffset        *clockOffsetScheduler // 双向时钟偏移探针（req.ClockOffset 时启用）
 	IPv4               string
 	IPv6               string
 	MAC                string
@@ -1089,6 +1090,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		session.Port.SetRoutingAlgo(cfg.RoutingAlgo)
 		session.Port.SetFecStrategy(cfg.FecStrategy)
 		session.Port.SetFecNearWindowMs(cfg.FecNearWindowMs)
+		session.Port.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
 	}
 	s.mu.Unlock()
 	// TCP congestion state is socket-local. Closing physical connections is the
@@ -1107,6 +1109,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		s.tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
 		s.tapPort.SetFecStrategy(cfg.FecStrategy)
 		s.tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
+		s.tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
 	}
 	s.cfg.Store(cfg)
 	return needsRestart
@@ -1239,6 +1242,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
 	tapPort.SetFecStrategy(cfg.FecStrategy)
 	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
+	tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
 	srv.vswitch.AddPort(tapPort)
 
 	goSafe(func() {
@@ -1694,6 +1698,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if req.RTTProbe && session.rttProbe != nil {
 			session.rttProbe.enable()
 		}
+		if req.ClockOffset && session.clockOffset != nil {
+			session.clockOffset.enable()
+		}
 
 		log.Infof("[%s] 🔗 existing session gained a new physical connection (active connections: %d)", clientID, session.ActiveConns)
 	} else {
@@ -1784,9 +1791,27 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			port.SetRoutingAlgo(srvCfg.RoutingAlgo)
 			port.SetFecStrategy(srvCfg.FecStrategy)
 			port.SetFecNearWindowMs(srvCfg.FecNearWindowMs)
+			port.SetProbeMinHalfRTTUs(intValue(srvCfg.ProbeMinHalfRTTUs))
 		}
+		// 双向时钟偏移探针：先建以便 rttProbe 的 clockTheta 闭包读到收敛结果。
+		session.clockOffset = newClockOffsetScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns)
+		session.clockOffset.start()
+		if req.ClockOffset {
+			session.clockOffset.enable()
+		}
+		// 把 θ 读取器挂到本会话 port，使 Backend 快照能暴露虚拟时钟收敛状态。
+		port.SetClockOffsetTheta(func() (int64, uint64, bool) { return session.clockOffset.thetaNS() })
 		// 跨路径 RTT 探针：resolver 扫本会话 conns；仅 req.RTTProbe 时启用。
-		session.rttProbe = newRttProbeScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns)
+		// minHalfRefUS 从本会话 port 原子读取，配置热更后下一轮收敛即生效；
+		// clockTheta 提供偏移估计，可信时去 δ、恢复 fwd+ret=RTT 自洽。
+		session.rttProbe = newRttProbeScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns,
+			func() uint64 { return port.probeMinHalfRTTUS.Load() },
+			func() (int64, uint64, bool) {
+				if session.clockOffset == nil {
+					return 0, 0, false
+				}
+				return session.clockOffset.thetaNS()
+			})
 		session.rttProbe.start()
 		if req.RTTProbe {
 			session.rttProbe.enable()
@@ -1948,7 +1973,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	respErr := s.sendResp(conn, true, "OK", clientID, sessionID, v4cidr, v6cidr,
 		groupOffer, clientTxRate, serverTxRate,
-		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.RTTProbe, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
+		req.FEC, uint32(fecEncK), encAlgo, encSalt, encSalt2, resumeToken, sessionEncrypt, req.RTTProbe, req.ClockOffset, protocolVersion, sessionEpoch, tlsInfo, padRecordLimit)
 	conn.SetWriteDeadline(time.Time{})
 	if respErr != nil {
 		log.Debugf("[%s] failed to send handshake response: %v", clientID, respErr)
@@ -2078,12 +2103,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			return true
 		}
 		writeProbe := func(probe []byte) bool {
-			// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
-			// 随机桶尺寸 + randomPool 覆盖字节），消除流量特征。探针（0x03）在
-			// Write 前写入 send_ts（固定偏移）。
+			// 跨路径 RTT 探针/回包 + 时钟偏移探针/回包：与 keepalive 同路
+			// （appendPaddedFrame 逐帧随机桶尺寸 + randomPool 覆盖字节），消除流量
+			// 特征。探针（0x03/0x05）在 Write 前写入 send_ts（固定偏移 20，两者
+			// 共用），即使排队也测得精确发送时刻。
 			sendBuffer = sendBuffer[:0]
 			sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
-			if len(probe) > 0 && probe[0] == controlKindRttProbe {
+			if len(probe) > 0 && (probe[0] == controlKindRttProbe || probe[0] == controlKindClockProbe) {
 				patchRttProbeSendTS(sendBuffer, time.Now())
 			}
 			refreshWriteDeadline()
@@ -2316,15 +2342,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 				frame = plain
 			}
-			if seq == 0 {
-				// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
-				// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
-				if session.rttProbe != nil && isRttProbeFrame(frame) {
-					session.rttProbe.onFrame(frame, ci.connIndex)
-					putFrame(frame)
-					continue
-				}
-				if fecDec == nil {
+				if seq == 0 {
+					// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
+					// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
+					if session.rttProbe != nil && isRttProbeFrame(frame) {
+						session.rttProbe.onFrame(frame, ci.connIndex)
+						putFrame(frame)
+						continue
+					}
+					// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
+					if session.clockOffset != nil && isClockOffsetFrame(frame) {
+						session.clockOffset.onFrame(frame, ci.connIndex)
+						putFrame(frame)
+						continue
+					}
+					if fecDec == nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
 					return
@@ -2510,7 +2542,7 @@ func handshakeEncSalts(encAlgo int, saltA, saltB [encSaltSize]byte) (string, str
 
 func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr, v6cidr string,
 	brutalGroups bool, cliTotalTx, srvTotalTx uint64,
-	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, rttProbe bool, protocolVersion int, epoch uint64,
+	fec bool, fecGroup uint32, encAlgo int, encSalt, encSalt2, sessionToken string, encrypt bool, rttProbe bool, clockOffset bool, protocolVersion int, epoch uint64,
 	tlsInfo *TLSHandshakeInfo, padRecordLimit ...int) error {
 	resp := HandshakeResp{
 		ProtocolVersion: protocolVersion, SessionEpoch: epoch,
@@ -2521,7 +2553,7 @@ func (s *Server) sendResp(w io.Writer, ok bool, msg, clientID, sessionID, v4cidr
 		GwV4: s.v4Gw, GwV6: s.v6Gw, Padding: generatePadding(100, 500),
 		BrutalGroups: brutalGroups, BrutalTotalTx: cliTotalTx, BrutalTotalRx: srvTotalTx,
 		FEC: fec, FecGroup: int(fecGroup), Encrypt: encrypt, EncAlgo: encAlgo, EncSalt: encSalt, EncSalt2: encSalt2,
-		RTTProbe: rttProbe,
+		RTTProbe: rttProbe, ClockOffset: clockOffset,
 		SessionToken: sessionToken, TLS: tlsInfo,
 	}
 	if ok {

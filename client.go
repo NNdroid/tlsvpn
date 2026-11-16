@@ -76,6 +76,10 @@ type Backend struct {
 	// 显示"上次计算时间"，判断跨路径 RTT 探针是否仍在刷新。
 	probeUpdatedAt atomic.Uint64
 	oneWayModePtr *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
+	// clockOffsetTheta 提供所属会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
+	// 是否收敛。由 Client/ServerSession 在初始化 Backend 时注入，使快照可暴露
+	// θ/U 收敛状态。nil=未注入（快照省略这些字段）。
+	clockOffsetTheta func() (thetaNS int64, uncUS uint64, ok bool)
 	rateSampleBytes    uint64
 	rateSampleStart    time.Time
 
@@ -130,6 +134,17 @@ type AsyncPort struct {
 	fecStrategy atomic.Int32
 	// fecNearWindowUS near 策略的去程时延窗口（µs）。热更生效。
 	fecNearWindowUS atomic.Uint64
+
+	// probeMinHalfRTTUS 单向时延分解的物理锚定下界（µs）。跨路径探针的参考
+	// 连接 ref 自回包 decayed-min 可能采到亚毫秒极值，使锚点 halfRef 地板成伪值
+	// （ref 自身去/回程被钉成"去程 1ms"这类物理上不可能的读数）。调度器每次重算
+	// 读取该下界抬升 halfRef。热更生效。
+	probeMinHalfRTTUS atomic.Uint64
+
+	// clockOffsetTheta 提供本端会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
+	// 是否收敛。由 Client/ServerSession 注入所属 clockOffsetScheduler 的读取器；
+	// Register*Backend 复制到每个 Backend，使快照可暴露 θ/U 收敛状态。nil=未注入。
+	clockOffsetTheta func() (thetaNS int64, uncUS uint64, ok bool)
 
 	// Adaptive multipath state. Input bytes are accounted independently from
 	// frame count so 64 tiny packets no longer look like 64 full-MTU packets.
@@ -207,6 +222,21 @@ func (p *AsyncPort) SetFecNearWindowMs(ms int) {
 	p.fecNearWindowUS.Store(uint64(ms) * 1000)
 }
 
+// SetProbeMinHalfRTTUs 设定单向时延分解的物理锚定下界（µs）。可随时热更。
+// 传负值按 0（禁用下界）处理；调用方应在配置校验层拦住负值。
+func (p *AsyncPort) SetProbeMinHalfRTTUs(us int) {
+	if us < 0 {
+		us = 0
+	}
+	p.probeMinHalfRTTUS.Store(uint64(us))
+}
+
+// SetClockOffsetTheta 注入双向时钟偏移 θ 的读取器（供快照暴露收敛状态）。
+// 在端口承载 Backend 前调用；后续注册的 Backend 即带上该读取器。
+func (p *AsyncPort) SetClockOffsetTheta(f func() (int64, uint64, bool)) {
+	p.clockOffsetTheta = f
+}
+
 // FecStrategy 返回当前 parity 分发策略（供快照/面板展示）。热路径零分配读取。
 func (p *AsyncPort) FecStrategy() FecStrategy {
 	return fecStrategyForCode(p.fecStrategy.Load())
@@ -260,6 +290,7 @@ func (p *AsyncPort) RegisterBackend(ch chan []VPNFrame, rttCache *uint32) *Backe
 	defer p.backendsMu.Unlock()
 	b := &Backend{ch: ch, rttCache: rttCache}
 	b.oneWayModePtr = &p.oneWayMode
+	b.clockOffsetTheta = p.clockOffsetTheta
 	p.backends = append(p.backends, b)
 	return b
 }
@@ -282,6 +313,7 @@ func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint3
 	defer p.backendsMu.Unlock()
 	b := &Backend{ownedCh: ch, rttCache: rttCache}
 	b.oneWayModePtr = &p.oneWayMode
+	b.clockOffsetTheta = p.clockOffsetTheta
 	p.backends = append(p.backends, b)
 	return b
 }
@@ -1036,6 +1068,7 @@ type Client struct {
 	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
 	txPort           *AsyncPort
 	rttProbe         *rttProbeScheduler // 跨路径 RTT 探针（握手协商后启用）
+	clockOffset      *clockOffsetScheduler // 双向时钟偏移探针（握手协商后启用）
 	rxReorder        *ReorderBuffer
 	rxWorker         *rxSessionWorker
 	fecDec           *fecDecoder
@@ -1304,6 +1337,8 @@ func (c *Client) ApplyConfig(cfg *Config) {
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
+	// 单向时延物理锚定下界热更：recomputeAll 每次读取，下一次探针收敛即生效。
+	c.txPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
 	if int32(lv.connsCount) != c.connsCount {
 		// 监督器数量属于进程拓扑，当前实现不在运行中增删 goroutine。保留启动
 		// 值并由 NeedsRestart 明确报告，避免面板声称已热更但实际没有生效。
@@ -1514,8 +1549,25 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
+	// 单向时延物理锚定下界（µs），抑制 ref 自回包亚毫秒极值造成的锚定伪值。
+	c.txPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
+	// 双向时钟偏移探针：与 RTT 探针同纪律，独立协商、独立定时。先建以便
+	// rttProbe 的 clockTheta 闭包能读到它的收敛结果。
+	c.clockOffset = newClockOffsetScheduler(ctx, c.probeResolveConn, c.probeActiveConns)
+	c.clockOffset.start()
+	// 把 θ 读取器挂到 tx 端口，使 Backend 快照能暴露虚拟时钟收敛状态。
+	c.txPort.SetClockOffsetTheta(func() (int64, uint64, bool) { return c.clockOffset.thetaNS() })
 	// 跨路径 RTT 探针：解析器按 connIndex 取当前 Backend，连接数随配置固定。
-	c.rttProbe = newRttProbeScheduler(ctx, c.probeResolveConn, c.probeActiveConns)
+	// minHalfRefUS 从端口原子读取，使配置热更在下一轮收敛即生效；clockTheta 提供
+	// 偏移估计，可信时 rttProbe 去 δ、恢复 fwd+ret=RTT 自洽。
+	c.rttProbe = newRttProbeScheduler(ctx, c.probeResolveConn, c.probeActiveConns,
+		func() uint64 { return c.txPort.probeMinHalfRTTUS.Load() },
+		func() (int64, uint64, bool) {
+			if c.clockOffset == nil {
+				return 0, 0, false
+			}
+			return c.clockOffset.thetaNS()
+		})
 	c.rttProbe.start()
 	lv := liveFromCfg(cfg)
 	c.bootCfg.Store(cfg)
@@ -2112,6 +2164,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		BrutalConns:     lv.connsCount,
 		BrutalConnIndex: connIndex,
 		RTTProbe:        true, // 声明支持跨路径 RTT 探针；服务端同意后才启用
+		ClockOffset:     true, // 声明支持双向时钟偏移探针；服务端同意后才启用
 		Encrypt:         lv.encrypt,
 		EncAlgo: func() int {
 			if lv.encrypt {
@@ -2343,6 +2396,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	if resp.RTTProbe && c.rttProbe != nil {
 		c.rttProbe.enable()
 	}
+	// 服务端同意双向时钟偏移探针：开启偏移探测（幂等）。未协商成功时 rttProbe
+	// 仍按锚定法 + δ 工作，单向时延行为不变。
+	if resp.ClockOffset && c.clockOffset != nil {
+		c.clockOffset.enable()
+	}
 
 	c.networkSetup.Lock()
 	var lifecycleErr error
@@ -2514,13 +2572,15 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			return true
 		}
 		writeProbe := func(probe []byte) bool {
-			// 跨路径 RTT 探针/回包：与 keepalive 同路（appendPaddedFrame 逐帧
-			// 随机桶尺寸 + randomPool 覆盖字节），与数据记录/保活同尺寸分布，
-			// 消除流量特征。探针（0x03）在 Write 前写入 send_ts（固定偏移），
-			// 即使排队也测得精确发送时刻。
+			// 跨路径 RTT 探针/回包 + 时钟偏移探针/回包：与 keepalive 同路
+			// （appendPaddedFrame 逐帧随机桶尺寸 + randomPool 覆盖字节），与数据
+			// 记录/保活同尺寸分布，消除流量特征。探针（0x03/0x05）在 Write 前写入
+			// send_ts（固定偏移），即使排队也测得精确发送时刻。
 			sendBuffer = sendBuffer[:0]
 			sendBuffer, _ = appendPaddedFrame(sendBuffer, VPNFrame{Seq: 0, Data: probe}, nil, padRecordLimit)
-			if len(probe) > 0 && probe[0] == controlKindRttProbe {
+			// 两种探针的 send_ts 都在偏移 20（帧头 10 + 载荷偏移 10），
+			// 故共用同一 patch 路径；写两次无副作用。
+			if len(probe) > 0 && (probe[0] == controlKindRttProbe || probe[0] == controlKindClockProbe) {
 				patchRttProbeSendTS(sendBuffer, time.Now())
 			}
 			refreshWriteDeadline()
@@ -2749,6 +2809,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					// 仅在两端握手协商 RTTProbe 后 c.rttProbe 才非空。
 					if c.rttProbe != nil && isRttProbeFrame(frame) {
 						c.rttProbe.onFrame(frame, connIndex)
+						putFrame(frame)
+						continue
+					}
+					// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
+					if c.clockOffset != nil && isClockOffsetFrame(frame) {
+						c.clockOffset.onFrame(frame, connIndex)
 						putFrame(frame)
 						continue
 					}

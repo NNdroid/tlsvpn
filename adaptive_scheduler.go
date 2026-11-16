@@ -77,6 +77,16 @@ type schedulerConnJSON struct {
 	// ProbeAtMs 最近一次发布 fwd/ret 的 unix 毫秒；0=尚未收敛。面板据此显示
 	// "上次计算时间"。仅观测，不在 TLSVPN 线上。
 	ProbeAtMs uint64 `json:"probe_at_ms,omitempty"`
+	// ClockOffsetNS 双向时钟偏移探针解出的时钟偏移 θ（ns，客户端视角相对服务端）。
+	// 非零表示 θ 已收敛，去/回程不对称度已被解出（fwd+ret=RTT 严格自洽）；
+	// 0=未收敛（仍走锚定法 + δ）。仅观测，不在 TLSVPN 线上。
+	ClockOffsetNS int64 `json:"clock_offset_ns,omitempty"`
+	// ClockOffsetUncUS θ 的残余不确定度（µs）。越大表示两端时钟/路径抖动越大，
+	// 0=尚未收敛。仅观测，不在 TLSVPN 线上。
+	ClockOffsetUncUS uint64 `json:"clock_offset_unc_us,omitempty"`
+	// ClockOffsetConverged θ 是否可信（样本充分且不确定度在阈内）。面板据此
+	// 显示"虚拟时钟已同步"状态。仅观测，不在 TLSVPN 线上。
+	ClockOffsetConverged bool `json:"clock_offset_converged,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -163,7 +173,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
 		minRTT = uint64(mr)
 	}
-	return schedulerConnJSON{
+	snap := schedulerConnJSON{
 		QueuedBytes:        b.queuedBytes.Load(),
 		RateMbps:           float64(rate) * 8 / 1_000_000,
 		ETAUs:              b.etaUsec.Load(),
@@ -178,6 +188,15 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		MinRttUS:           minRTT,
 		ProbeAtMs:          b.probeUpdatedAt.Load(),
 	}
+	// 时钟偏移 θ/U：仅当注入且已收敛时暴露，面板据此显示"虚拟时钟已同步"。
+	if b.clockOffsetTheta != nil {
+		if th, unc, ok := b.clockOffsetTheta(); ok {
+			snap.ClockOffsetNS = th
+			snap.ClockOffsetUncUS = unc
+			snap.ClockOffsetConverged = true
+		}
+	}
+	return snap
 }
 
 func (p *AsyncPort) noteInputQueued(n int) {

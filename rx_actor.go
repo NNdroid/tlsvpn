@@ -189,6 +189,9 @@ func (d *fecDecoder) OnControlActorWithScratch(payload []byte, scratch *nonceAAD
 	case controlKindRttProbe, controlKindRttReply:
 		// 探针/回包由读循环在 FEC 门控之前拦截；防御性 no-op。
 		return 0, nil, nil
+	case controlKindClockProbe, controlKindClockReply:
+		// 时钟偏移探针/回包同样在 FEC 门控之前拦截；防御性 no-op。
+		return 0, nil, nil
 	default:
 		return 0, nil, fmt.Errorf("unsupported control kind 0x%02x", kind)
 	}
