@@ -1781,6 +1781,22 @@ function renderConnsTable(data,fresh){
     lastConnSpeeds={};
     rows.forEach(function(r){lastConnSpeeds[r.key]={sx:r.sx,sr:r.sr};});
   }
+  // 去/回显示重定基（纯前端，零后端/JSON 改动）：各连接的显示值共享同一次
+  // 重算的 δ 公共位移，列内相减即精确消掉——显示的是"比本组最快方向慢多少"
+  // 的纯差值（F_i−F_min / B_i−B_min，锚点半程偏移 θ 也一并消掉）。此前把
+  // 最快方向钉在 0.001ms（δ 抬到 1µs 的显示契约），读起来像物理不可能的
+  // 伪值。绝对单程本身受信息论极限限制（2N 方程对 2N+1 未知数），任何
+  // "绝对 ms"读数都必然携带未知偏移——绝对量级请看旁边的内核 min_rtt。
+  // 未收敛（0）不参与取最小；重定基只作用于本帧已收敛连接（同轮共享 δ）。
+  let minFwd=Infinity,minRet=Infinity;
+  rows.forEach(function(r){
+    if(r.fwd>0&&r.fwd<minFwd)minFwd=r.fwd;
+    if(r.ret>0&&r.ret<minRet)minRet=r.ret;
+  });
+  rows.forEach(function(r){
+    r.fwdRel=r.fwd>0?r.fwd-minFwd:0;
+    r.retRel=r.ret>0?r.ret-minRet:0;
+  });
   const f=Q.conns;
   const all=rows.length;
   // 质量指标基于过滤前的全量行：过滤条件不该改变统计口径。
@@ -1810,15 +1826,16 @@ function renderConnsTable(data,fresh){
     // 显示 '-'；>=100000 是未知哨兵。
     let rtt=r.rtt>0&&r.rtt<100000?r.rtt+' ms':'-',rttTip='',rttCls='';
     if(r.fwd>0||r.ret>0){
-      // 0 仅表示未收敛（无探针样本）：分解保证所有已测量方向都有非负相对值，
-      // 不再因"该方向比参考连接快"而压 0。未收敛方向显示 '-'，不能显示 0——
-      // 0 在口径里不是零时延。fwd/ret 为 µs，按 fmtMsUs 自适应精度转 ms 显示
-      // （不做 max(1,·) 地板：那会把亚毫秒真实值全部显示成"1 ms"伪读数）。
-      const fw=r.fwd>0?fmtMsUs(r.fwd):'-',rt=r.ret>0?fmtMsUs(r.ret):'-';
+      // 重定基后的纯差值（µs）：最快方向显示 0（本组基准），其余带 + 号标明
+      // "比最快慢多少"。未收敛显示 '-'。绝对单程无法显示（信息论极限），绝对
+      // 量级请看旁边的内核 min_rtt。0 不是零时延——它是"本组最快方向"。
+      const fw=r.fwd>0?(r.fwdRel===0?'0':'+'+fmtMsUs(r.fwdRel)):'-';
+      const rt=r.ret>0?(r.retRel===0?'0':'+'+fmtMsUs(r.retRel)):'-';
       rtt=fw+'/'+rt;
       // tooltip 里 '-' 写成可读词"不可测"，避免用户把 '-' 当零时延或缺失数据。
-      // 可测值自带 ms 后缀（模板 {f}/{r} 不再带 ms），不可测值用纯词。
-      const fwTxt=fw==='-'?t('th.meas_na'):fw+'ms',rtTxt=rt==='-'?t('th.meas_na'):rt+'ms';
+      // 基准方向写成可读词"最快（基准）"。可测值自带 ms 后缀。
+      const fwTxt=fw==='-'?t('th.meas_na'):(fw==='0'?t('th.rtt_base'):fw+'ms');
+      const rtTxt=rt==='-'?t('th.meas_na'):(rt==='0'?t('th.rtt_base'):rt+'ms');
       rttTip=t('th.rtt_tip').replace('{f}',fwTxt).replace('{r}',rtTxt).replace('{rt}',r.rtt);
       // 不对称判断用原始 µs 值（比值与缩放无关），避免四舍五入在 2x 边界翻转。
       if(r.fwd>0&&r.ret>0&&(r.fwd*2>r.ret||r.ret*2>r.fwd))rttCls=' rtt-asym';
