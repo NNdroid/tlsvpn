@@ -46,7 +46,7 @@ const (
 
 type backendCandidate struct {
 	backend   *Backend
-	baseUS    uint64 // unloaded path quality: RTT/2 + this batch service time
+	baseUS    int64  // unloaded path quality: oneWay probe + this batch service time; signed (probe raw may be negative)
 	etaUS     uint64 // observational queued completion estimate for WebUI
 	rttUS     uint32
 	schedRate uint64 // fair-start rate used only by this scheduling decision
@@ -461,11 +461,13 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Ba
 		// 调度债务刻意字节公平：统一固定速率把虚拟服务时间变成字节计数器。
 		schedRate := uint64(adaptiveFallbackRateBytesPerSec)
 		// 主排名键按当前算法计算（candidateRankUS）；完全未测路径折到 minRTT/2。
+		// oneWay 为有符号原始相对量（探针已收敛时，负值=快于 ref 基准），显示层
+		// 的 δ 抬升不参与选路——回退候选不带 δ，混排时不抵消会扭曲排名。
 		oneWay := adaptiveBackendOneWayUS(b)
 		if _, ok := b.backendOneWayUS(); !ok {
 			if _, mrUnknown := adaptiveBackendMinRTT(b); mrUnknown {
 				if _, srttUnknown := adaptiveBackendRTT(b); srttUnknown {
-					oneWay = uint64(minRTT) / 2
+					oneWay = int64(minRTT) / 2
 				}
 			}
 		}
@@ -497,14 +499,14 @@ func rankCandidates(cands []backendCandidate) {
 
 // commitSinglePath 单活跃路径提交：严格模式直接取 rank[0]；sticky 模式在粘滞带内
 // 保留当前路径；其余路径清为待命并重置公平债务。
-func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandidate, current *Backend, bestBase uint64, policy routingPolicy) *Backend {
+func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandidate, current *Backend, bestBase int64, policy routingPolicy) *Backend {
 	chosen := cands[0].backend
 	if policy.sticky && current != nil && current != chosen {
 		for i := range cands {
 			if cands[i].backend != current {
 				continue
 			}
-			if cands[i].baseUS <= bestBase+adaptiveStickySlackUS(cands[i].rttUS) {
+			if cands[i].baseUS <= bestBase+int64(adaptiveStickySlackUS(cands[i].rttUS)) {
 				chosen = current
 			}
 			break

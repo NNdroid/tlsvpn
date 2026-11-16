@@ -69,9 +69,14 @@ type Backend struct {
 	fecFenceGen        atomic.Uint64 // latest dynamic RX fence generation queued before data on this backend
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
 	// fwdOneWayUS / retOneWayUS 跨路径探针测得的去程/回程单向时延（µs，decayed-min
-	// 地板）。0=未收敛，调度器回退 min_rtt/2→SRTT/2。由 rttProbeScheduler 发布。
+	// 地板，δ 抬升非负）——仅供面板/快照显示。0=未收敛。由 rttProbeScheduler 发布。
 	fwdOneWayUS atomic.Uint64
 	retOneWayUS atomic.Uint64
+	// fwdRankUS / retRankUS 选路专用：原始有符号相对量按 raw+oneWayRankZeroUS
+	// 编码（恒 >0，故 0=未收敛）。刻意不带显示层的 δ——δ 进选路会在与 min_rtt/2
+	// 回退候选混排时不抵消，扭曲排名。与显示字段同轮发布（见 recomputeAll）。
+	fwdRankUS atomic.Uint64
+	retRankUS atomic.Uint64
 	// probeUpdatedAt 最近一次发布 fwd/ret 的 unix 毫秒（0=尚未收敛）。面板用它
 	// 显示"上次计算时间"，判断跨路径 RTT 探针是否仍在刷新。
 	probeUpdatedAt atomic.Uint64
@@ -749,15 +754,16 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 }
 
 // parityNearEligible 报告候选后端是否落在 near 窗口内：其去程单程时延 ≤ 数据路径
-// fwd + 窗口。用 adaptiveBackendOneWayUS（与选路同一估计）；数据路径或候选未收敛时
-// 宽松返回 true，避免启动期或探针未收敛时误伤 parity（此时两者近等，本就无慢链之分）。
+// fwd + 窗口。用 adaptiveBackendOneWayUS（与选路同一估计，原始有符号相对量、不带
+// 显示层 δ）；数据路径或候选未收敛时宽松返回 true，避免启动期或探针未收敛时误伤
+// parity（此时两者近等，本就无慢链之分）。
 func (p *AsyncPort) parityNearEligible(b, dataBest *Backend) bool {
 	if b == nil {
 		return false
 	}
 	ref := adaptiveBackendOneWayUS(dataBest)
 	fwd := adaptiveBackendOneWayUS(b)
-	return fwd <= ref+p.fecNearWindowUS.Load()
+	return fwd <= ref+int64(p.fecNearWindowUS.Load())
 }
 
 // tryQueueOwnedBatch transfers batch ownership on success and leaves ownership

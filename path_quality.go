@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"sync/atomic"
 	"time"
 )
@@ -114,9 +113,14 @@ func adaptiveBackendMinRTT(b *Backend) (uint32, bool) {
 	return rtt, false
 }
 
-// backendOneWayUS 返回本端 egress 方向的单向时延估计（µs）+ 是否已收敛。
-// 按所属 AsyncPort 的 oneWayMode 选择 fwd/ret；0=未收敛。
-func (b *Backend) backendOneWayUS() (uint32, bool) {
+// backendOneWayUS 返回本端 egress 方向的原始单向时延相对量（µs，有符号，可负）
+// + 是否已收敛。按所属 AsyncPort 的 oneWayMode 选择 fwd/ret。
+//
+// 值来自 fwdRankUS/retRankUS（raw+oneWayRankZeroUS 编码，恒 >0，故字段 0=未
+// 收敛），解码回有符号 µs：负值 = 该方向快于 ref 对称基准，是真实信息，选路
+// argmin 依赖完整序。显示层走另一对字段（fwdOneWayUS，δ 抬升非负），两条路径
+// 互不污染——δ 若进选路，与 min_rtt/2 回退候选混排时不抵消，会扭曲排名。
+func (b *Backend) backendOneWayUS() (int64, bool) {
 	if b == nil {
 		return 0, false
 	}
@@ -126,30 +130,32 @@ func (b *Backend) backendOneWayUS() (uint32, bool) {
 	}
 	switch mode {
 	case oneWayModeFwd:
-		if v := b.fwdOneWayUS.Load(); v > 0 {
-			return uint32(min(v, math.MaxUint32)), true
+		if v := b.fwdRankUS.Load(); v > 0 {
+			return oneWayRankDecode(v), true
 		}
 	case oneWayModeRet:
-		if v := b.retOneWayUS.Load(); v > 0 {
-			return uint32(min(v, math.MaxUint32)), true
+		if v := b.retRankUS.Load(); v > 0 {
+			return oneWayRankDecode(v), true
 		}
 	}
 	return 0, false
 }
 
-// adaptiveBackendOneWayUS 返回选路用的单向时延：跨路径估计（已收敛）优先，
-// 否则回退 min_rtt/2（无拥塞地板），再退 SRTT/2。估计未收敛前与现状一致。
-func adaptiveBackendOneWayUS(b *Backend) uint64 {
+// adaptiveBackendOneWayUS 返回选路用的单向时延（µs，有符号）：跨路径原始相对
+// 量（已收敛）优先，否则回退 min_rtt/2（无拥塞地板），再退 SRTT/2。回退值与
+// 探针原始值同尺度（绝对单程估计），无需任何公共偏移即可混排比较。估计未收敛
+// 前与既有行为一致。
+func adaptiveBackendOneWayUS(b *Backend) int64 {
 	if v, ok := b.backendOneWayUS(); ok {
-		return uint64(v)
+		return v
 	}
 	// 注意：adaptiveBackendMinRTT 的 bool 是 unknownRTT（与 adaptiveBackendRTT 一致），
 	// 故这里取反；写反会让 min_rtt 恒被当成未知，回退链永远停在 SRTT/2。
 	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
-		return uint64(mr) / 2
+		return int64(mr) / 2
 	}
 	rtt, _ := adaptiveBackendRTT(b)
-	return uint64(rtt) / 2
+	return int64(rtt) / 2
 }
 
 func (b *Backend) estimatedETAUS(incomingBytes uint64) uint64 {

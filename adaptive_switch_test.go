@@ -7,11 +7,12 @@ import (
 
 // oneWayBackend 构造一个带单向时延估计（fwd/ret，µs）与 min_rtt 的合成后端，
 // 模拟 WebUI 连接表里的真实路径。egress 方向按 oneWayModeFwd（客户端上行），
-// 使 adaptiveBackendOneWayUS 使用 fwd 而非回退 min_rtt/2。
+// 使 adaptiveBackendOneWayUS 使用 fwd 而非回退 min_rtt/2。选路值写入编码字段
+// fwdRankUS/retRankUS（与 recomputeAll 发布路径一致），显示字段与此测试无关。
 func oneWayBackend(minRTT, fwdUS, retUS uint32, rate uint64) *Backend {
 	b := testAdaptiveBackend(minRTT)
-	b.fwdOneWayUS.Store(uint64(fwdUS))
-	b.retOneWayUS.Store(uint64(retUS))
+	b.fwdRankUS.Store(oneWayRankEncode(int64(fwdUS)))
+	b.retRankUS.Store(oneWayRankEncode(int64(retUS)))
 	if rate > 0 {
 		b.rateBytesPerSec.Store(rate)
 	}

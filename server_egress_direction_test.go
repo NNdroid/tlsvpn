@@ -20,17 +20,18 @@ func TestServerEgressUsesForwardDirection(t *testing.T) {
 	// 非对称时延（µs）：path0 下行（服务端→客户端）快 5µs、上行慢 10000µs；
 	// path1 下行慢 5000µs、上行快 5µs。
 	// 服务端下行应选 path0（下行快），但若用 ret（上行）会错选 path1。
-	mk := func(fwd, ret uint64) *Backend {
+	mk := func(fwd, ret int64) *Backend {
 		b := &Backend{}
-		b.fwdOneWayUS.Store(fwd)
-		b.retOneWayUS.Store(ret)
+		// 选路读编码字段（recomputeAll 的发布路径）；显示字段与此测试无关。
+		b.fwdRankUS.Store(oneWayRankEncode(fwd))
+		b.retRankUS.Store(oneWayRankEncode(ret))
 		mode := &atomic.Int32{}
 		b.oneWayModePtr = mode
 		return b
 	}
 
-	path0 := mk(5, 10000)  // 下行快、上行慢
-	path1 := mk(5000, 5)   // 下行慢、上行快
+	path0 := mk(5, 10000) // 下行快、上行慢
+	path1 := mk(5000, 5)  // 下行慢、上行快
 
 	// 当前 server.go 用的模式：oneWayModeRet（回程）。
 	// 服务端视角 ret = 客户端→服务端 = 上行。会选"上行快"的 path1 —— 选错下行方向。

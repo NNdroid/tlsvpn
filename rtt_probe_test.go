@@ -109,7 +109,7 @@ func uint64At(buf []byte, off int) uint64 {
 }
 
 // TestRttProbeRecomputePreservesOrdering 估算器核心：合成矩阵（非对称 fwd/ret）
-// 下 fwd/ret 的相对排序必须与真实单向时延一致——这正是选路依赖的性质。
+// 下原始有符号相对量的完整排序必须与真实单向时延一致——这正是选路依赖的性质。
 func TestRttProbeRecomputePreservesOrdering(t *testing.T) {
 	// 真实单向时延（µs）：path0 fwd 5 / ret 10000；path1 fwd 5000 / ret 5。
 	// ref=0，RTT(i,j) = fwd_i + ret_j。decay 矩阵单位为 ns（= µs × 1000），
@@ -119,24 +119,31 @@ func TestRttProbeRecomputePreservesOrdering(t *testing.T) {
 		{1, 0}: (5000 + 10000) * 1000, // RTT(i=1, ref=0) → fwd_1
 		{0, 1}: (5 + 5) * 1000,        // RTT(ref=0, j=1) → ret_1
 	}
-	fwd, ret := recomputeOneWay(dec, []int{0, 1}, 0, (5+10000)/2)
+	fwd, ret := decomposeOneWay(dec, []int{0, 1}, 0, (5+10000)/2)
 
-	// 100% 可探测：每个已测量方向都必须给出正的单向时延（非 0 非下溢），
-	// 不再把"比 ref 对称基准快"的方向压成 0（旧契约）。
-	if fwd[0] == 0 || fwd[0] > 1<<40 || ret[0] == 0 || ret[0] > 1<<40 {
-		t.Fatalf("ref not measurable: fwd=%d ret=%d", fwd[0], ret[0])
+	// 100% 方向可探测：每个已测量方向都必须出现在解里（不再压 0/丢弃）。
+	if _, ok := fwd[0]; !ok {
+		t.Fatal("ref forward missing")
 	}
-	if fwd[1] == 0 || fwd[1] > 1<<40 || ret[1] == 0 || ret[1] > 1<<40 {
-		t.Fatalf("conn1 not measurable: fwd=%d ret=%d", fwd[1], ret[1])
+	if _, ok := ret[1]; !ok {
+		t.Fatal("conn1 return missing")
+	}
+	// 原始有符号相对量：ref 自身恒为 halfRef；比 ref 基准快的方向为负（真实
+	// 信息，选路 argmin 依赖完整序，压非负会让快路径并列）。
+	if fwd[0] != 5002 || ret[0] != 5002 {
+		t.Fatalf("ref anchor: fwd=%d ret=%d want 5002/5002", fwd[0], ret[0])
 	}
 	// 相对序保留（选路核心）：
 	//   去程：path0 真实 5µs < path1 5000µs → fwd[0] < fwd[1]
-	//   回程：path1 真实 5µs < path0 10000µs → ret[1] < ret[0]
+	//   回程：path1 真实 5µs < path0 10000µs → ret[1] < ret[0]（且为负）
 	if fwd[0] >= fwd[1] {
 		t.Fatalf("forward ordering broken: fwd[0]=%d fwd[1]=%d (path0 forward must be faster)", fwd[0], fwd[1])
 	}
 	if ret[1] >= ret[0] {
 		t.Fatalf("return ordering broken: ret[0]=%d ret[1]=%d (path1 return must be faster)", ret[0], ret[1])
+	}
+	if ret[1] >= 0 {
+		t.Fatalf("faster-than-anchor direction must stay negative: ret[1]=%d", ret[1])
 	}
 }
 
@@ -186,8 +193,8 @@ func TestAdaptiveBackendOneWayUSFallback(t *testing.T) {
 	if got := adaptiveBackendOneWayUS(b); got != 6000 {
 		t.Fatalf("min_rtt fallback: got=%d want=6000", got)
 	}
-	// 已收敛 → 估计值优先于 min_rtt
-	b.fwdOneWayUS.Store(300)
+	// 已收敛 → 原始相对量优先于 min_rtt（选路值走 fwdRankUS 编码字段，不带 δ）。
+	b.fwdRankUS.Store(oneWayRankEncode(300))
 	mode := &atomic.Int32{}
 	mode.Store(oneWayModeFwd)
 	b.oneWayModePtr = mode
@@ -196,7 +203,7 @@ func TestAdaptiveBackendOneWayUSFallback(t *testing.T) {
 	}
 	// 方向不匹配（ret 模式只有 fwd 估计）→ 退回 min_rtt/2
 	mode.Store(oneWayModeRet)
-	b.retOneWayUS.Store(0)
+	b.retRankUS.Store(0)
 	if got := adaptiveBackendOneWayUS(b); got != 6000 {
 		t.Fatalf("wrong direction not honoured: got=%d want=6000", got)
 	}
@@ -204,6 +211,104 @@ func TestAdaptiveBackendOneWayUSFallback(t *testing.T) {
 	mode.Store(oneWayModeRoundtrip)
 	if got := adaptiveBackendOneWayUS(b); got != 6000 {
 		t.Fatalf("roundtrip mode: got=%d want=6000", got)
+	}
+}
+
+// TestOneWayRankExcludesDelta 核心回归：δ 抬升只进显示层，绝不进选路。
+//
+// 场景（快路径部署的典型形态）：ref 基线 1ms，候选 Y 的探针样本 0.5ms 快于
+// 基准 → raw fwd = -500µs，联合最小为 -500 → δ = 501。此时显示层 fwd 全体
+// 被 +501 抬升（面板契约，非负），但选路层必须仍是 raw——否则与未收敛候选
+// （min_rtt/2 回退，不带 δ）混排时排名被系统性扭曲。
+func TestOneWayRankExcludesDelta(t *testing.T) {
+	us := func(v uint64) uint64 { return v * 1000 } // µs→ns
+	dec := map[[2]uint32]uint64{
+		{0, 0}: us(2000), // ref 基线 RTT 2ms → halfRef=1000µs
+		{1, 0}: us(1400), // X：fwd 样本 1.4ms → raw 400µs
+		{2, 0}: us(500),  // Y：fwd 样本 0.5ms → raw -500µs（快于基准）
+	}
+	fwdRaw, retRaw := decomposeOneWay(dec, []int{0, 1, 2}, 0, 1000)
+	if fwdRaw[1] != 400 || fwdRaw[2] != -500 {
+		t.Fatalf("raw decompose wrong: fwd=%v", fwdRaw)
+	}
+	delta := displayDeltaUS(fwdRaw, retRaw)
+	if delta != 501 {
+		t.Fatalf("delta=%d want 501 (min raw -500 lifted to 1µs)", delta)
+	}
+
+	// 显示层：δ 抬升后全体非负且最小方向恰为 1µs（面板契约）。
+	if disp := uint64(fwdRaw[2] + delta); disp != 1 {
+		t.Fatalf("display min: %d want 1", disp)
+	}
+	if fwdRaw[1]+delta <= 0 {
+		t.Fatalf("display must stay non-negative: %d", fwdRaw[1]+delta)
+	}
+
+	// 选路层：原始值保序，Y(-500) < X(400)——真实序不得被 δ 抬升破坏。
+	if fwdRaw[2] >= fwdRaw[1] {
+		t.Fatalf("raw ordering broken: Y=%d X=%d", fwdRaw[2], fwdRaw[1])
+	}
+
+	// 编码往返：负 raw 编码后恒 >0（与 0=未收敛哨兵不冲突），解码无损。
+	for _, raw := range []int64{-500, 0, 400, 3_600_000} {
+		enc := oneWayRankEncode(raw)
+		if enc == 0 {
+			t.Fatalf("encoded value must never be 0 (sentinel clash): raw=%d", raw)
+		}
+		if got := oneWayRankDecode(enc); got != raw {
+			t.Fatalf("roundtrip: raw=%d got=%d", raw, got)
+		}
+	}
+}
+
+// TestBackendOneWayRankEncoding Backend 编码字段纪律：零值 = 未收敛（编码恒 >0
+// 保证），解码回有符号 raw 供选路；显示字段与选路字段互不读取。
+func TestBackendOneWayRankEncoding(t *testing.T) {
+	b := &Backend{}
+	mode := &atomic.Int32{}
+	mode.Store(oneWayModeFwd)
+	b.oneWayModePtr = mode
+	// 零值 Backend：两个方向都必须报告未收敛，绝不能把 0 当成"0µs 的快路径"。
+	if v, ok := b.backendOneWayUS(); ok {
+		t.Fatalf("zero value must be unconverged: v=%d ok=%v", v, ok)
+	}
+	// 负 raw（快于 ref 基准）经编码存储后解码无损。
+	b.fwdRankUS.Store(oneWayRankEncode(-500))
+	if v, ok := b.backendOneWayUS(); !ok || v != -500 {
+		t.Fatalf("decode negative: v=%d ok=%v want -500,true", v, ok)
+	}
+	b.fwdRankUS.Store(oneWayRankEncode(400))
+	if v, ok := b.backendOneWayUS(); !ok || v != 400 {
+		t.Fatalf("decode positive: v=%d ok=%v want 400,true", v, ok)
+	}
+	// ret 模式读 ret 字段。
+	mode.Store(oneWayModeRet)
+	if v, ok := b.backendOneWayUS(); ok {
+		t.Fatalf("ret unconverged: v=%d ok=%v", v, ok)
+	}
+	b.retRankUS.Store(oneWayRankEncode(-700))
+	if v, ok := b.backendOneWayUS(); !ok || v != -700 {
+		t.Fatalf("ret decode: v=%d ok=%v want -700,true", v, ok)
+	}
+}
+
+// TestAdaptiveOneWayMixedConvergence 混排一致性（回归）：已收敛候选的选路值
+// 不得携带显示层 δ。若无此隔离，快路径部署下 δ（可达 halfRef 量级）会把已
+// 收敛候选整体抬高，输给未收敛的 min_rtt/2 回退候选。
+func TestAdaptiveOneWayMixedConvergence(t *testing.T) {
+	b := testAdaptiveBackend(20000)
+	c := new(uint32)
+	*c = 12000
+	b.minRttCache = c
+	mode := &atomic.Int32{}
+	mode.Store(oneWayModeFwd)
+	b.oneWayModePtr = mode
+	// TestOneWayRankExcludesDelta 场景中的 X：raw fwd=400µs，δ=501。
+	// 显示层会显示 901µs，但选路必须用 400µs（δ 只进显示）。
+	b.fwdRankUS.Store(oneWayRankEncode(400))
+	b.fwdOneWayUS.Store(901) // 显示字段带 δ，选路必须无视它
+	if got := adaptiveBackendOneWayUS(b); got != 400 {
+		t.Fatalf("rank must exclude display delta: got=%d want=400", got)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	mathrand "math/rand/v2"
 	"sync/atomic"
 	"time"
@@ -425,7 +426,9 @@ func (s *rttProbeScheduler) updateDecay(src, dst uint32, sampleNS uint64) {
 
 // recomputeAll 用当前锚定重算各连接 fwd/ret 并发布到 Backend 原子。
 // 单位契约：decay 样本为 ns（updateDecay 存 sampleNS），这里统一换算成 µs
-// 再与 µs 的 halfRef 相减，故 fwdOneWayUS/retOneWayUS 恒为 µs（与字段名/注释一致）。
+// 再与 µs 的 halfRef 相减。同一原始值双路发布：fwdOneWayUS/retOneWayUS 为
+// δ 抬升非负的显示值；fwdRankUS/retRankUS 为 raw+oneWayRankZeroUS 编码的
+// 选路值（backendOneWayUS 解码使用）。
 func (s *rttProbeScheduler) recomputeAll() {
 	if len(s.active) == 0 {
 		return
@@ -441,21 +444,27 @@ func (s *rttProbeScheduler) recomputeAll() {
 
 	// 相对时延分解：decay[(i,ref)]=F_i+B_ref 中 B_ref 是公共常数，在去程选路的
 	// argmin 里抵消；decay[(ref,i)]=F_ref+B_i 中 F_ref 同理。不假设任何连接对称
-	// 或相互相等，绝对单程不对称（去直回绕）免疫。代价是 fwd+ret=RTT 带一个公共
-	// 偏移 δ（见 decomposeOneWay 注释），面板应把 fwd/ret 当相对值展示而非绝对毫秒。
-	// θ 探针（0x05/0x06）仅作两端时钟偏移的观测展示，不参与分解——绝对分解欠定
-	// （2N 方程对 2N+1 未知数），强行代入会产生 259/5 这类物理不可能的伪值。
-	fwdX, retX := decomposeOneWay(s.decay, s.active, ref, halfRef)
+	// 或相互相等，绝对单程不对称（去直回绕）免疫。θ 探针（0x05/0x06）仅作两端
+	// 时钟偏移的观测展示，不参与分解——绝对分解欠定（2N 方程对 2N+1 未知数），
+	// 强行代入会产生 259/5 这类物理不可能的伪值。
+	//
+	// 双路发布：原始有符号相对量（可负）供选路，δ 抬升非负副本供面板显示。
+	// δ 只进显示层——选路回退链（min_rtt/2、SRTT/2）不带 δ，混排时不抵消会
+	// 扭曲排名（见 decomposeOneWay/displayDeltaUS 注释）。
+	fwdRaw, retRaw := decomposeOneWay(s.decay, s.active, ref, halfRef)
+	delta := displayDeltaUS(fwdRaw, retRaw)
 	for _, i := range s.active {
 		b := s.resolveConn(i)
 		if b == nil {
 			continue
 		}
-		if f, ok := fwdX[i]; ok {
-			b.fwdOneWayUS.Store(f)
+		if f, ok := fwdRaw[i]; ok {
+			b.fwdOneWayUS.Store(uint64(f + delta)) // 显示层：≥1µs
+			b.fwdRankUS.Store(oneWayRankEncode(f)) // 选路层：raw 编码
 		}
-		if r, ok := retX[i]; ok {
-			b.retOneWayUS.Store(r)
+		if r, ok := retRaw[i]; ok {
+			b.retOneWayUS.Store(uint64(r + delta)) // 显示层：≥1µs
+			b.retRankUS.Store(oneWayRankEncode(r)) // 选路层：raw 编码
 		}
 		b.probeUpdatedAt.Store(nowMs)
 	}
@@ -496,9 +505,10 @@ func (s *rttProbeScheduler) anchorHalfRef(ref int) uint64 {
 //
 // 返回 0 表示“低于锚定精度/不可测”，而不是 1µs 伪值：当 b>=a（矩阵反转，
 // 该方向时延不比参考连接大，即它比 ref 更快或与之持平）时，我们无法给出
-// 一个有物理意义的下界——真实差值≤0，任何正值都是编造。0 同时是调用方
-// 的“未收敛/不可测”哨兵（backendOneWayUS 的 v>0 过滤、前端 r.ret>0 判 '-'），
-// 使选路回退到 min_rtt/2 地板、显示层显示 '-' 而非伪造的 1ms。
+// 一个有物理意义的下界——真实差值≤0，任何正值都是编造。0 同时是调用方的
+// “未收敛/不可测”哨兵（前端 r.ret>0 判 '-'），
+// 使显示层显示 '-' 而非伪造的 1ms。选路侧已改用 decomposeOneWay 的有符号
+// 相对量（负值保留真实序），不再经由此函数。
 //
 // 注意：旧实现把反转压成 1µs，前端 max(1,·) 会把它显示成“回程 1ms”，
 // 且 adaptiveBackendOneWayUS 会把 1µs 当真实值用于回程选路（超快路径抢槽位），
@@ -513,6 +523,39 @@ func subClamp(a, b uint64) uint64 {
 // oneWayUS 把 ns 量级的探测样本换算成 µs：探针采样（recvNS-sendTS）与
 // decay 矩阵均为 ns，而对外发布的 fwdOneWayUS/retOneWayUS 为 µs。
 func oneWayUS(sampleNS uint64) uint64 { return sampleNS / 1000 }
+
+// oneWayRankZeroUS 选路层编码零点（µs）。原始相对量可为负（快于 ref 基准），
+// 而 Backend 的原子字段以 0 表示"未收敛"，故选路值按 raw+oneWayRankZeroUS
+// 编码存储、读取时解码回有符号值。零点必须大于 |raw| 的可能上界：halfRef 受
+// ProbeMinHalfRTTUs 配置上限 3_600_000µs 约束，探针样本受 pending 超时 2s
+// （→2e6µs）约束，故 raw ∈ [-3.6e6, +3.6e6]，取 4e6 保证编码值恒 >0，与
+// 未收敛哨兵（0）永不冲突。
+const oneWayRankZeroUS = 4_000_000
+
+// oneWayRankEncode / oneWayRankDecode 选路层编码与解码（见 oneWayRankZeroUS）。
+func oneWayRankEncode(rawUS int64) uint64 { return uint64(rawUS + oneWayRankZeroUS) }
+func oneWayRankDecode(enc uint64) int64   { return int64(enc) - oneWayRankZeroUS }
+
+// displayDeltaUS 显示层 δ 抬升量：所有有测量方向（fwd/ret 联合，与分解同轮
+// 同基准）的最小值抬到 1µs 所需的公共偏移。仅用于 fwdOneWayUS/retOneWayUS
+// 显示发布，选路层不得使用——回退链不带 δ，混排时不抵消会扭曲排名。
+func displayDeltaUS(fwdRaw, retRaw map[int]int64) int64 {
+	min := int64(math.MaxInt64)
+	for _, v := range fwdRaw {
+		if v < min {
+			min = v
+		}
+	}
+	for _, v := range retRaw {
+		if v < min {
+			min = v
+		}
+	}
+	if min == math.MaxInt64 || min >= 1 {
+		return 0
+	}
+	return 1 - min
+}
 
 // decayedMinUpdate 纯函数：decayed-min 更新（供测试）。
 func decayedMinUpdate(cur uint64, elapsedNS int64, sample uint64, decayPerSecNS uint64) uint64 {
@@ -530,63 +573,42 @@ func decayedMinUpdate(cur uint64, elapsedNS int64, sample uint64, decayPerSecNS 
 	return cur
 }
 
-// decomposeOneWay 核心分解：由 decay 矩阵 + 锚定计算每条连接有测量值的
-// 去/回程单向时延（µs）。返回两个 map，仅包含"该方向已有探针测量"的连接。
+// decomposeOneWay 核心分解：由 decay 矩阵 + 锚定计算每条连接有测量方向的
+// 原始有符号相对量（µs，可负）。返回两个 map，仅包含"该方向已有探针测量"的
+// 连接。
 //
 // 以 ref 对称基准（halfRef）锚定，独立解出每条连接的去/回程相对量：
 //
-//	fwd_i = decay[(i,ref)] - halfRef   （以 ref 回程 B_ref=halfRef 为基准）
-//	ret_i = decay[(ref,i)] - halfRef   （以 ref 去程 F_ref=halfRef 为基准）
+//	fwd_i = decay[(i,ref)] - halfRef  （= F_i + (B_ref-F_ref)/2，即绝对去程
+//	                                   在 ref 不对称度 θ 下的最优估计）
+//	ret_i = decay[(ref,i)] - halfRef  （= B_i - θ，同理）
 //
 // ref 自身 = halfRef。相对量可为负（该方向比 ref 对称基准更快），保留真实
-// 相对序（选路 argmin 依赖）。最后整体加一个公共偏移 δ，使所有有测量方向
-// 显示值 ≥1µs——100% 方向可探测，不再像旧 subClamp 那样把"比基准快"压成 0。
+// 完整序（选路 argmin 依赖；压非负会毁掉快路径之间的排序，旧 subClamp 教训）。
 //
-// 公共偏移 δ 的必要性：单靠跨路径探针无法解出 ref 的不对称度（F→F+c, B→B-c
-// 下 decay 矩阵不变），这是物理信息论极限；选 δ 使最小有测量方向=1µs，得到
-// "最小非负相对表示"。δ 同时加给所有连接的 fwd 与 ret，相对序与选路不受
-// 影响；代价是自洽 fwd+ret=RTT 被放宽 +2δ（δ 通常 ≤halfRef，仅当有连接远快
-// 于 ref 时显著，此时面板以可探测的相对量为准——选路只依赖相对序）。
-func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwdX, retX map[int]uint64) {
-	fwdX = make(map[int]uint64, len(active))
-	retX = make(map[int]uint64, len(active))
-
-	// 独立有符号相对量（可为负），同时追踪全局最小值。
-	var globalMin *int64
-	set := func(m *map[int]int64, i int, v int64) {
-		(*m)[i] = v
-		if globalMin == nil || v < *globalMin {
-			nv := v
-			globalMin = &nv
-		}
-	}
-	f := make(map[int]int64, len(active))
-	r := make(map[int]int64, len(active))
+// 返回值直接供两路消费，本函数不做任何非负化：
+//   - 选路层（fwdRankUS/retRankUS）：直接用原始有符号值，负值是真实信息。
+//   - 显示层（fwdOneWayUS/retOneWayUS）：由调用方加 displayDeltaUS 抬到 ≥1µs，
+//     面板不出现负值，也不与 0=未收敛哨兵混淆。
+//
+// δ 只进显示，绝不进选路：选路回退链（min_rtt/2、SRTT/2）不带 δ，"已收敛
+// (带δ)"与"未收敛"候选混排时 δ 不抵消——δ 可达 halfRef 量级（快路径部署下
+// halfRef 常被 minHalfRefUS 地板抬高），足以系统性扭曲排名。
+func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwdX, retX map[int]int64) {
+	fwdX = make(map[int]int64, len(active))
+	retX = make(map[int]int64, len(active))
 	for _, i := range active {
 		if i == ref {
-			set(&f, i, int64(halfRef))
-			set(&r, i, int64(halfRef))
+			fwdX[i] = int64(halfRef)
+			retX[i] = int64(halfRef)
 			continue
 		}
 		if v, ok := decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-			set(&f, i, int64(oneWayUS(v))-int64(halfRef))
+			fwdX[i] = int64(oneWayUS(v)) - int64(halfRef)
 		}
 		if v, ok := decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-			set(&r, i, int64(oneWayUS(v))-int64(halfRef))
+			retX[i] = int64(oneWayUS(v)) - int64(halfRef)
 		}
-	}
-
-	// 公共偏移 δ：所有有测量方向发布值 ≥1µs。
-	delta := int64(0)
-	if globalMin != nil && *globalMin < 1 {
-		delta = 1 - *globalMin
-	}
-
-	for i, v := range f {
-		fwdX[i] = uint64(v + delta)
-	}
-	for i, v := range r {
-		retX[i] = uint64(v + delta)
 	}
 	return fwdX, retX
 }
@@ -597,18 +619,3 @@ func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef 
 // 产生"去程 259ms/回程 5ms"这类物理不可能伪值。相对分解 decomposeOneWay 才是
 // 正确路径：公共常数 B_ref/F_ref 在选路 argmin 中抵消，无需假设对称或连接相等，
 // 对绝对单程不对称（去直回绕）免疫。)
-
-// recomputeOneWay 纯函数：由 decay 矩阵 + 锚定计算 fwd/ret（供测试）。
-// 与 recomputeAll 相同的 decomposeOneWay 分解。
-func recomputeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwd, ret map[int]uint64) {
-	fwdX, retX := decomposeOneWay(decay, active, ref, halfRef)
-	fwd = make(map[int]uint64, len(active))
-	ret = make(map[int]uint64, len(active))
-	for i, v := range fwdX {
-		fwd[i] = v
-	}
-	for i, v := range retX {
-		ret[i] = v
-	}
-	return fwd, ret
-}

@@ -108,20 +108,22 @@ func routingAlgoList() []RoutingAlgo {
 	}
 }
 
-// candidateRankUS 按策略计算候选的主排名键（µs）。
+// candidateRankUS 按策略计算候选的主排名键（µs，有符号）。
 //
-// oneWay 为已归一化的单向时延（完全未测路径已折到参考 minRTT/2），rttUS 为已归一化
-// 的 min_rtt（fairStart 路径取参考 minRTT），srttUS 为原始 SRTT（未知时可能为
-// adaptiveUnknownRTTUS 哨兵，仅观测用），schedRate 为调度速率。
-func candidateRankUS(p routingPolicy, oneWay uint64, rttUS uint32, srttUS uint32, incomingBytes, schedRate uint64) uint64 {
+// oneWay 为探针分解的原始相对量（可为负：快于 ref 对称基准的方向），完全未测
+// 路径已折到参考 minRTT/2；rttUS 为已归一化的 min_rtt（fairStart 路径取参考
+// minRTT），srttUS 为原始 SRTT（未知时可能为 adaptiveUnknownRTTUS 哨兵，仅观测
+// 用），schedRate 为调度速率。有符号保证快路径（负值）与慢路径的完整序参与
+// argmin——压非负会让快路径并列，选路退化（旧 subClamp 教训）。
+func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32, incomingBytes, schedRate uint64) int64 {
 	switch p.rank {
 	case rankOneWay:
 		return oneWay
 	case rankMinRTTHalf:
-		return uint64(rttUS) / 2
+		return int64(rttUS) / 2
 	case rankSRTTHalf:
-		return uint64(srttUS) / 2
+		return int64(srttUS) / 2
 	default: // rankOneWayPlusService
-		return oneWay + serviceTimeUS(incomingBytes, schedRate)
+		return oneWay + int64(serviceTimeUS(incomingBytes, schedRate))
 	}
 }
