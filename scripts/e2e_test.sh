@@ -189,7 +189,7 @@ stop_server() {
 # Uses the in-memory TAP backend so it runs without CAP_NET_ADMIN.
 run_client() {
   local bin="$1" port="$2" addr="$3"; shift 3
-  local log socks="" psk web_port web_auth stats
+  local log socks="" psk web_port web_auth stats fp
   log="$TEST_DIR/cli_$(basename "$bin")_$port.log"
   if [[ "${1:-}" == "-socks5" || "${1:-}" == "--socks5" ]]; then
     socks="\"${2:-}\""; shift 2
@@ -201,8 +201,20 @@ run_client() {
   # E2E uses an ephemeral self-signed certificate. Certificate validation is not
   # under test here; explicitly disable it so readiness measures the TLSVPN
   # application handshake rather than local PKI/SNI setup.
+  #
+  # insecure=true 必须同时锁定服务端证书指纹（config.Validate 强制：二者二选
+  # 一，否则对端证书完全不受验证）。e2e 全程使用 per-env 自签证书，这里现场
+  # 计算指纹（小写 hex、无冒号，与 group L 的口径一致）——既满足校验，又让
+  # e2e 走"显式锁定指纹"的真实部署姿势。此前缺这一项，Go 客户端在配置校验
+  # 就被拒绝、进程秒退，六个 go-client 组在 CI 上被误判为 flaky 两天。
+  fp="$(openssl x509 -in "$TEST_DIR/e2e_cert.pem" -noout -fingerprint -sha256 2>/dev/null \
+    | sed -n 's/.*Fingerprint=//p' | tr -d ':' | tr 'A-Z' 'a-z')"
+  if [[ ! "$fp" =~ ^[0-9a-f]{64}$ ]]; then
+    err "could not compute e2e cert fingerprint (openssl missing or failed)"
+    return 1
+  fi
   write_config "$cfg" mode='"client"' addr="\"$addr\"" tap='"mem"' psk="\"$psk\"" \
-    client.insecure=true socks5="$socks" web.addr="\"127.0.0.1:$web_port\"" web.auth="\"$web_auth\"" "$@"
+    client.insecure=true 'client.cert_sha256="'"$fp"'"' socks5="$socks" web.addr="\"127.0.0.1:$web_port\"" web.auth="\"$web_auth\"" "$@"
   "$bin" -c "$cfg" >"$log" 2>&1 &
   local pid=$!
   echo "$pid" >"$TEST_DIR/cli_$port.pid"

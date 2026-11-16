@@ -233,7 +233,10 @@ wait_for_port() {
     [[ $(date +%s) -lt $deadline ]] || return 1
     sleep 0.3
   done
-  exec 3>&- 2>/dev/null || true
+  # 绝不能在这里 exec 2>/dev/null：那会把整个脚本的 stderr 永久重定向到
+  # /dev/null，此后所有 err/诊断输出全部蒸发（go 客户端配置校验失败的真实
+  # 原因因此被藏了两天，故障被误判为 flaky）。fd3 的探测在子 shell 里打开、
+  # 随子 shell 退出自动关闭，无需在此清理。
   return 0
 }
 
