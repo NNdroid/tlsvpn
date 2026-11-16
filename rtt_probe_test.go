@@ -159,6 +159,15 @@ func TestDecayedMinUpdate(t *testing.T) {
 	if got := decayedMinUpdate(100, 0, 999_999_999, rttProbeDecayPerSecNS); got != 100 {
 		t.Fatalf("zero elapsed: got=%d want=100", got)
 	}
+	// 时钟回拨（elapsedNS<0）不抬升也不 wrap：uint64(负) 会污染到接近 2^64，
+	// 曾致 decay 爆炸、fwd/ret 显示 1.7e13 伪值。负 elapsed 应等效于零流逝。
+	if got := decayedMinUpdate(100, -500_000_000, 999_999_999, rttProbeDecayPerSecNS); got != 100 {
+		t.Fatalf("clock rollback: got=%d want=100 (uint64 negative wrap polluted cur)", got)
+	}
+	// 时钟回拨后新样本更小仍快降（自愈路径不受负 elapsed 影响）。
+	if got := decayedMinUpdate(100, -500_000_000, 50, rttProbeDecayPerSecNS); got != 50 {
+		t.Fatalf("rollback + faster sample: got=%d want=50", got)
+	}
 }
 
 // TestAdaptiveBackendOneWayUSFallback 回退链：估计优先，其次 min_rtt/2，再退
@@ -306,7 +315,7 @@ func TestRttProbeSchedulerLifecycle(t *testing.T) {
 	resolve := func(int) *Backend { return nil }
 	active := func() []int { return []int{0, 1, 2} }
 	ctx, cancel := context.WithCancel(t.Context())
-	s := newRttProbeScheduler(ctx, resolve, active, nil, nil)
+	s := newRttProbeScheduler(ctx, resolve, active, nil)
 	s.start()
 	s.kick()
 	s.enable()
@@ -324,7 +333,7 @@ func TestRttProbeSchedulerLifecycle(t *testing.T) {
 // TestRttProbePendingSweep 过期与超量 pending 必须被清掉（防泄漏）：这里直接
 // 驱动 sweepPending，它是调度 goroutine 独占路径，单 goroutine 调用即无竞态。
 func TestRttProbePendingSweep(t *testing.T) {
-	s := newRttProbeScheduler(context.Background(), func(int) *Backend { return nil }, func() []int { return nil }, nil, nil)
+	s := newRttProbeScheduler(context.Background(), func(int) *Backend { return nil }, func() []int { return nil }, nil)
 
 	// 未过期：保留
 	s.pending[1] = pendingProbe{srcConn: 0, replyOn: 0, issued: time.Now()}
@@ -418,5 +427,47 @@ func TestRttProbeRecomputeProbeScaledAnchor(t *testing.T) {
 	}
 	if got := b0.retOneWayUS.Load(); got != 3000 {
 		t.Fatalf("ref ret=%d want 3000", got)
+	}
+}
+
+// TestDecomposeOneWayRankingImmuneToAsymmetry 验证相对分解的排序不受绝对单程
+// 不对称影响：去直回绕（去程 30ms、回程 300ms）下，选路仍按相对序正确。
+//
+// 三条连接，ref=0。真实单程（完全不对称）：
+//
+//	conn0: F=30ms  B=300ms（去直回绕）
+//	conn1: F=60ms  B=200ms
+//	conn2: F=100ms B=150ms
+//
+// 跨路径探针测得 decay[(i,ref)]=F_i+B_ref、decay[(ref,i)]=F_ref+B_i。
+// 相对分解应给出：去程排序 conn0<conn1<conn2，回程排序 conn2<conn1<conn0。
+func TestDecomposeOneWayRankingImmuneToAsymmetry(t *testing.T) {
+	ms := func(v uint64) uint64 { return v * 1_000_000 } // ms→ns
+	// 真实单程（ns）。
+	F := []uint64{ms(30), ms(60), ms(100)}
+	B := []uint64{ms(300), ms(200), ms(150)}
+	const ref = 0
+
+	decay := map[[2]uint32]uint64{}
+	// 自回包 + 跨路径矩阵（模拟探针 decayed-min 收敛到真实值）。
+	for i := 0; i < 3; i++ {
+		decay[[2]uint32{uint32(i), uint32(ref)}] = F[i] + B[ref]
+		decay[[2]uint32{uint32(ref), uint32(i)}] = F[ref] + B[i]
+	}
+	halfRef := oneWayUS(decay[[2]uint32{uint32(ref), uint32(ref)}]) / 2
+	if halfRef == 0 {
+		halfRef = oneWayUS(ms(330)) / 2 // (30+300)/2
+	}
+	decay[[2]uint32{uint32(ref), uint32(ref)}] = F[ref] + B[ref]
+
+	fwd, ret := decomposeOneWay(decay, []int{0, 1, 2}, ref, halfRef)
+
+	// 去程：conn0 < conn1 < conn2（相对 ref）。
+	if !(fwd[1] > fwd[0] && fwd[2] > fwd[1]) {
+		t.Fatalf("forward ranking wrong: fwd=%v, want strictly increasing", fwd)
+	}
+	// 回程：conn2 < conn1 < conn0（相对 ref）。
+	if !(ret[2] < ret[1] && ret[1] < ret[0]) {
+		t.Fatalf("return ranking wrong: ret=%v, want strictly decreasing", ret)
 	}
 }

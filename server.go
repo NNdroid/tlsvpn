@@ -394,7 +394,7 @@ func (vs *VSwitch) allowFlood(srcPortID string) bool {
 type ClientSession struct {
 	SessionID          string
 	Port               *AsyncPort
-	rttProbe           *rttProbeScheduler // 跨路径 RTT 探针（req.RTTProbe 时启用）
+	rttProbe           *rttProbeScheduler    // 跨路径 RTT 探针（req.RTTProbe 时启用）
 	clockOffset        *clockOffsetScheduler // 双向时钟偏移探针（req.ClockOffset 时启用）
 	IPv4               string
 	IPv6               string
@@ -434,25 +434,25 @@ type ClientSession struct {
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
 type connInfo struct {
 	tcpObservation atomic.Pointer[tcpSocketSnapshot]
-	connID      string
-	remote      string
-	tcpConn     *net.TCPConn
-	rttMeasured atomic.Bool
-	rttCache    *uint32 // 微秒（200ms 刷新）
-	minRttCache *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
-	connIndex   int     // 客户端声明的连接下标（握手 BrutalConnIndex），探针路由用
-	backend     atomic.Pointer[Backend]
-	txBytes     uint64
-	rxBytes     uint64
-	txPackets   uint64
-	rxPackets   uint64
-	brutal      atomic.Pointer[brutalApplyResult] // 内核实际状态；nil=尚未尝试
-	brutalCfg   atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
-	linkedAt    int64                             // 建立时间（unix 秒）
-	brutalTx    uint64
-	brutalRx    uint64
-	epoch       uint64
-	tls         *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
+	connID         string
+	remote         string
+	tcpConn        *net.TCPConn
+	rttMeasured    atomic.Bool
+	rttCache       *uint32 // 微秒（200ms 刷新）
+	minRttCache    *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
+	connIndex      int     // 客户端声明的连接下标（握手 BrutalConnIndex），探针路由用
+	backend        atomic.Pointer[Backend]
+	txBytes        uint64
+	rxBytes        uint64
+	txPackets      uint64
+	rxPackets      uint64
+	brutal         atomic.Pointer[brutalApplyResult]  // 内核实际状态；nil=尚未尝试
+	brutalCfg      atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
+	linkedAt       int64                              // 建立时间（unix 秒）
+	brutalTx       uint64
+	brutalRx       uint64
+	epoch          uint64
+	tls            *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
 }
 
 type Server struct {
@@ -991,7 +991,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				rtt = atomic.LoadUint32(ci.rttCache) / 1000
 			}
 			out = append(out, serverConnSnapshot{
-				TCP: ci.tcpObservation.Load(),
+				TCP:       ci.tcpObservation.Load(),
 				ClientID:  id,
 				ConnID:    ci.connID,
 				Remote:    ci.remote,
@@ -1802,16 +1802,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 把 θ 读取器挂到本会话 port，使 Backend 快照能暴露虚拟时钟收敛状态。
 		port.SetClockOffsetTheta(func() (int64, uint64, bool) { return session.clockOffset.thetaNS() })
 		// 跨路径 RTT 探针：resolver 扫本会话 conns；仅 req.RTTProbe 时启用。
-		// minHalfRefUS 从本会话 port 原子读取，配置热更后下一轮收敛即生效；
-		// clockTheta 提供偏移估计，可信时去 δ、恢复 fwd+ret=RTT 自洽。
+		// minHalfRefUS 从本会话 port 原子读取，配置热更后下一轮收敛即生效。
 		session.rttProbe = newRttProbeScheduler(parentCtx, session.probeResolveConn, session.probeActiveConns,
-			func() uint64 { return port.probeMinHalfRTTUS.Load() },
-			func() (int64, uint64, bool) {
-				if session.clockOffset == nil {
-					return 0, 0, false
-				}
-				return session.clockOffset.thetaNS()
-			})
+			func() uint64 { return port.probeMinHalfRTTUS.Load() })
 		session.rttProbe.start()
 		if req.RTTProbe {
 			session.rttProbe.enable()
@@ -2342,21 +2335,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 				frame = plain
 			}
-				if seq == 0 {
-					// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
-					// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
-					if session.rttProbe != nil && isRttProbeFrame(frame) {
-						session.rttProbe.onFrame(frame, ci.connIndex)
-						putFrame(frame)
-						continue
-					}
-					// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
-					if session.clockOffset != nil && isClockOffsetFrame(frame) {
-						session.clockOffset.onFrame(frame, ci.connIndex)
-						putFrame(frame)
-						continue
-					}
-					if fecDec == nil {
+			if seq == 0 {
+				// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
+				// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
+				if session.rttProbe != nil && isRttProbeFrame(frame) {
+					session.rttProbe.onFrame(frame, ci.connIndex)
+					putFrame(frame)
+					continue
+				}
+				// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
+				if session.clockOffset != nil && isClockOffsetFrame(frame) {
+					session.clockOffset.onFrame(frame, ci.connIndex)
+					putFrame(frame)
+					continue
+				}
+				if fecDec == nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)
 					return

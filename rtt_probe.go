@@ -158,11 +158,6 @@ type rttProbeScheduler struct {
 	// 下一次重算即生效。nil 表示未注入（回落默认 0=不抬升，仅测试构造）。
 	minHalfRefUS func() uint64
 
-	// clockTheta 提供可信的时钟偏移 θ（ns，A 相对 B）+ 不确定度 U（µs）+ 是否可信。
-	// 可信时 recomputeAll 用 θ 解出 ref 的不对称度 F_ref≠B_ref，去掉公共偏移 δ，
-	// 恢复 fwd+ret=RTT 严格自洽；不可信时回退现有锚定法 + δ。nil=未注入（测试）。
-	clockTheta func() (thetaNS int64, uncUS uint64, ok bool)
-
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -185,14 +180,12 @@ type rttProbeScheduler struct {
 
 // newRttProbeScheduler 创建调度器（不启动探测；enabled 由握手协商后置 true）。
 // minHalfRefUS 提供物理锚定下界的当前值（µs），每次重算读取；nil 时不抬升。
-// clockTheta 提供可信时钟偏移；nil 时恒走 δ 回退路径。
-func newRttProbeScheduler(ctx context.Context, resolveConn func(int) *Backend, activeConns func() []int, minHalfRefUS func() uint64, clockTheta func() (int64, uint64, bool)) *rttProbeScheduler {
+func newRttProbeScheduler(ctx context.Context, resolveConn func(int) *Backend, activeConns func() []int, minHalfRefUS func() uint64) *rttProbeScheduler {
 	sctx, scancel := context.WithCancel(ctx)
 	s := &rttProbeScheduler{
 		resolveConn:  resolveConn,
 		activeConns:  activeConns,
 		minHalfRefUS: minHalfRefUS,
-		clockTheta:   clockTheta,
 		ctx:          sctx,
 		cancel:       scancel,
 		pending:      make(map[uint32]pendingProbe, 16),
@@ -417,7 +410,13 @@ func (s *rttProbeScheduler) updateDecay(src, dst uint32, sampleNS uint64) {
 		s.decay[key] = sampleNS
 		return
 	}
-	cur += uint64(float64(elapsed.Nanoseconds()) / 1e9 * float64(rttProbeDecayPerSecNS))
+	// 时钟回拨（elapsed<0）时不做慢升：decayed-min 的慢升是"允许最小值随物理
+	// 时间缓慢抬升"，时钟回拨不是路径变慢，不应触发抬升，更不可让 uint64(负)
+	// wrap 成接近 2^64 的污染值——曾致 decay 爆炸、halfRef 巨大、δ 被抬到 1.7e13
+	// 这类 fwd/ret 伪值。快降（sample<cur）仍生效，新样本一到即自愈。
+	if elapsed > 0 {
+		cur += uint64(float64(elapsed.Nanoseconds()) / 1e9 * float64(rttProbeDecayPerSecNS))
+	}
 	if sampleNS < cur {
 		cur = sampleNS
 	}
@@ -440,18 +439,13 @@ func (s *rttProbeScheduler) recomputeAll() {
 	// 视为同一时刻，无需逐连接取钟。
 	nowMs := uint64(time.Now().UnixMilli())
 
-	var fwdX, retX map[int]uint64
-	// θ 可信：用时钟偏移解出 ref 的不对称度，去掉 δ，恢复 fwd+ret=RTT 严格自洽。
-	if thetaNS, _, ok := s.clockOffset(); ok {
-		refRTTNS := s.decay[[2]uint32{uint32(ref), uint32(ref)}]
-		if refRTTNS > 0 {
-			fwdX, retX = decomposeOneWayWithTheta(s.decay, s.active, ref, refRTTNS, thetaNS)
-		}
-	}
-	// 回退：θ 不可信（未注入/样本不足/U 超阈）或 ref 自回包缺失，走既有锚定法 + δ。
-	if fwdX == nil {
-		fwdX, retX = decomposeOneWay(s.decay, s.active, ref, halfRef)
-	}
+	// 相对时延分解：decay[(i,ref)]=F_i+B_ref 中 B_ref 是公共常数，在去程选路的
+	// argmin 里抵消；decay[(ref,i)]=F_ref+B_i 中 F_ref 同理。不假设任何连接对称
+	// 或相互相等，绝对单程不对称（去直回绕）免疫。代价是 fwd+ret=RTT 带一个公共
+	// 偏移 δ（见 decomposeOneWay 注释），面板应把 fwd/ret 当相对值展示而非绝对毫秒。
+	// θ 探针（0x05/0x06）仅作两端时钟偏移的观测展示，不参与分解——绝对分解欠定
+	// （2N 方程对 2N+1 未知数），强行代入会产生 259/5 这类物理不可能的伪值。
+	fwdX, retX := decomposeOneWay(s.decay, s.active, ref, halfRef)
 	for _, i := range s.active {
 		b := s.resolveConn(i)
 		if b == nil {
@@ -465,14 +459,6 @@ func (s *rttProbeScheduler) recomputeAll() {
 		}
 		b.probeUpdatedAt.Store(nowMs)
 	}
-}
-
-// clockOffset 读取可信时钟偏移；未注入或未收敛时 ok=false。
-func (s *rttProbeScheduler) clockOffset() (int64, uint64, bool) {
-	if s.clockTheta == nil {
-		return 0, 0, false
-	}
-	return s.clockTheta()
 }
 
 // anchorHalfRef 锚定：只用参考连接的探针自回包基线 (ref,ref)/2。
@@ -533,7 +519,11 @@ func decayedMinUpdate(cur uint64, elapsedNS int64, sample uint64, decayPerSecNS 
 	if cur == 0 {
 		return sample
 	}
-	cur += uint64(float64(elapsedNS) / 1e9 * float64(decayPerSecNS))
+	// 时钟回拨（elapsedNS<0）不做慢升，与 updateDecay 一致；uint64(负) wrap 会
+	// 把 cur 污染到接近 2^64，故必须 clamp。
+	if elapsedNS > 0 {
+		cur += uint64(float64(elapsedNS) / 1e9 * float64(decayPerSecNS))
+	}
 	if sample < cur {
 		cur = sample
 	}
@@ -601,75 +591,12 @@ func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef 
 	return fwdX, retX
 }
 
-// decomposeOneWayWithTheta 用可信时钟偏移 θ 分解单向时延，去掉公共偏移 δ。
-//
-// 数学：θ = (B_ref - F_ref)/2（A=客户端视角，B=服务端视角，θ>0 表 A 时钟超前）。
-// 由 ref 自回包 RTT 与 θ 解出 ref 自身的去/回程：
-//
-//	refRTT = F_ref + B_ref，θ = (B_ref - F_ref)/2
-//	  ⟹ B_ref = refRTT/2 + θ，F_ref = refRTT/2 - θ
-//
-// 于是对任意 i：
-//
-//	decay[(i,ref)] = fwd_i + B_ref ⟹ fwd_i = decay[(i,ref)] - B_ref
-//	decay[(ref,i)] = F_ref + ret_i ⟹ ret_i = decay[(ref,i)] - F_ref
-//
-// ref 自身 fwd=F_ref、ret=B_ref，两者之和恰为 refRTT——严格自洽，无需 δ。
-// 这是 decomposeOneWay（假设 F_ref==B_ref、被迫加 δ）的精确替代。
-//
-// 单位：decay 为 ns，refRTTNS 为 ns，thetaNS 为 ns；输出 µs（与
-// fwdOneWayUS/retOneWayUS 契约一致）。结果可能为负（该方向比 ref 同方向更快），
-// 用 δ 抬到 ≥1µs 仅做发布层非负化——不影响相对序与自洽性检验（fwd+ret=RTT 用
-// 未抬升的有符号值仍严格成立）。
-func decomposeOneWayWithTheta(decay map[[2]uint32]uint64, active []int, ref int, refRTTNS uint64, thetaNS int64) (fwdX, retX map[int]uint64) {
-	fwdX = make(map[int]uint64, len(active))
-	retX = make(map[int]uint64, len(active))
-
-	// ref 自身的去/回程（ns→µs，四舍五入）。
-	fRefUS := oneWayUS(refRTTNS/2) - uint64(thetaNS)/1000
-	bRefUS := oneWayUS(refRTTNS/2) + uint64(thetaNS)/1000
-	if fRefUS > oneWayUS(refRTTNS) {
-		fRefUS = oneWayUS(refRTTNS) // 防 θ 负溢出
-	}
-
-	var globalMin *int64
-	set := func(m *map[int]int64, i int, v int64) {
-		(*m)[i] = v
-		if globalMin == nil || v < *globalMin {
-			nv := v
-			globalMin = &nv
-		}
-	}
-	f := make(map[int]int64, len(active))
-	r := make(map[int]int64, len(active))
-	set(&f, ref, int64(fRefUS))
-	set(&r, ref, int64(bRefUS))
-
-	for _, i := range active {
-		if i == ref {
-			continue
-		}
-		if v, ok := decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-			set(&f, i, int64(oneWayUS(v))-int64(bRefUS))
-		}
-		if v, ok := decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-			set(&r, i, int64(oneWayUS(v))-int64(fRefUS))
-		}
-	}
-
-	// 发布层非负化：仅抬到 ≥1µs，不改变相对序；自洽性用原始有符号值检验。
-	delta := int64(0)
-	if globalMin != nil && *globalMin < 1 {
-		delta = 1 - *globalMin
-	}
-	for i, v := range f {
-		fwdX[i] = uint64(v + delta)
-	}
-	for i, v := range r {
-		retX[i] = uint64(v + delta)
-	}
-	return fwdX, retX
-}
+// (decomposeOneWayWithTheta 已移除：绝对单程分解欠定——跨路径探针测的是
+// F_i+B_ref 这类和，2N 个方程对 2N+1 个未知数（N 条连接的 F_i、B_i 加唯一时钟
+// 偏移 θ），无法唯一解出绝对单程。强行代入 θ 会把 ref 的不对称度双重污染，
+// 产生"去程 259ms/回程 5ms"这类物理不可能伪值。相对分解 decomposeOneWay 才是
+// 正确路径：公共常数 B_ref/F_ref 在选路 argmin 中抵消，无需假设对称或连接相等，
+// 对绝对单程不对称（去直回绕）免疫。)
 
 // recomputeOneWay 纯函数：由 decay 矩阵 + 锚定计算 fwd/ret（供测试）。
 // 与 recomputeAll 相同的 decomposeOneWay 分解。

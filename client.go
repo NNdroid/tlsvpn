@@ -70,18 +70,18 @@ type Backend struct {
 	virtualFinishNS    atomic.Int64  // scheduler-only service debt, published atomically for race safety
 	// fwdOneWayUS / retOneWayUS 跨路径探针测得的去程/回程单向时延（µs，decayed-min
 	// 地板）。0=未收敛，调度器回退 min_rtt/2→SRTT/2。由 rttProbeScheduler 发布。
-	fwdOneWayUS   atomic.Uint64
-	retOneWayUS   atomic.Uint64
+	fwdOneWayUS atomic.Uint64
+	retOneWayUS atomic.Uint64
 	// probeUpdatedAt 最近一次发布 fwd/ret 的 unix 毫秒（0=尚未收敛）。面板用它
 	// 显示"上次计算时间"，判断跨路径 RTT 探针是否仍在刷新。
 	probeUpdatedAt atomic.Uint64
-	oneWayModePtr *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
+	oneWayModePtr  *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
 	// clockOffsetTheta 提供所属会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
 	// 是否收敛。由 Client/ServerSession 在初始化 Backend 时注入，使快照可暴露
 	// θ/U 收敛状态。nil=未注入（快照省略这些字段）。
 	clockOffsetTheta func() (thetaNS int64, uncUS uint64, ok bool)
-	rateSampleBytes    uint64
-	rateSampleStart    time.Time
+	rateSampleBytes  uint64
+	rateSampleStart  time.Time
 
 	// stalled 标记该后端对应的物理连接已被判定为不健康（写/读失败、或连续多次
 	// RTT 采样失败）。调度器跳过 stalled 后端，使其不再接收新的数据，避免把
@@ -1067,7 +1067,7 @@ type Client struct {
 	fecAlgo          int    // fecDec 绑定的加密算法（会话重建判据）
 	fecSaltKey       string // fecDec 绑定的盐（会话重建判据）
 	txPort           *AsyncPort
-	rttProbe         *rttProbeScheduler // 跨路径 RTT 探针（握手协商后启用）
+	rttProbe         *rttProbeScheduler    // 跨路径 RTT 探针（握手协商后启用）
 	clockOffset      *clockOffsetScheduler // 双向时钟偏移探针（握手协商后启用）
 	rxReorder        *ReorderBuffer
 	rxWorker         *rxSessionWorker
@@ -1376,26 +1376,26 @@ type brutalRebalanceCfg struct {
 
 // clientConnInfo 单条物理连接的运行明细（面板展示 + 强制重连句柄）
 type clientConnInfo struct {
-	observedTCP atomic.Pointer[net.TCPConn]
-	observedProxy atomic.Bool
+	observedTCP    atomic.Pointer[net.TCPConn]
+	observedProxy  atomic.Bool
 	tcpObservation atomic.Pointer[tcpSocketSnapshot]
-	target      string
-	connID      atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
-	remote      atomic.Value // string：对端地址（握手后可得）
-	state       atomic.Value // string：connecting / up / retrying
-	lastError   atomic.Value // string：最近一次失败原因
-	rttMeasured atomic.Bool
-	rttCache    *uint32 // 微秒（200ms 刷新）
-	minRttCache *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
-	backend     atomic.Pointer[Backend]
-	conn        atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
-	txBytes     uint64
-	rxBytes     uint64
-	retries     uint64
-	brutal      atomic.Pointer[brutalApplyResult] // 本连接的内核实际状态；nil=尚未尝试
-	brutalCfg   atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
-	negotiated  atomic.Pointer[sessionNeg]
-	linkedAt    int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
+	target         string
+	connID         atomic.Value // string：本次物理连接握手 ID；每次重拨都会更新
+	remote         atomic.Value // string：对端地址（握手后可得）
+	state          atomic.Value // string：connecting / up / retrying
+	lastError      atomic.Value // string：最近一次失败原因
+	rttMeasured    atomic.Bool
+	rttCache       *uint32 // 微秒（200ms 刷新）
+	minRttCache    *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
+	backend        atomic.Pointer[Backend]
+	conn           atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
+	txBytes        uint64
+	rxBytes        uint64
+	retries        uint64
+	brutal         atomic.Pointer[brutalApplyResult]  // 本连接的内核实际状态；nil=尚未尝试
+	brutalCfg      atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
+	negotiated     atomic.Pointer[sessionNeg]
+	linkedAt       int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
@@ -1551,23 +1551,16 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	// 单向时延物理锚定下界（µs），抑制 ref 自回包亚毫秒极值造成的锚定伪值。
 	c.txPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
-	// 双向时钟偏移探针：与 RTT 探针同纪律，独立协商、独立定时。先建以便
-	// rttProbe 的 clockTheta 闭包能读到它的收敛结果。
+	// 双向时钟偏移探针：与 RTT 探针同纪律，独立协商、独立定时。仅作两端时钟偏移
+	// 的观测展示（快照 clock_offset_ns），不参与单向时延分解——绝对分解欠定。
 	c.clockOffset = newClockOffsetScheduler(ctx, c.probeResolveConn, c.probeActiveConns)
 	c.clockOffset.start()
-	// 把 θ 读取器挂到 tx 端口，使 Backend 快照能暴露虚拟时钟收敛状态。
+	// 把 θ 读取器挂到 tx 端口，使 Backend 快照能暴露时钟偏移观测值。
 	c.txPort.SetClockOffsetTheta(func() (int64, uint64, bool) { return c.clockOffset.thetaNS() })
 	// 跨路径 RTT 探针：解析器按 connIndex 取当前 Backend，连接数随配置固定。
-	// minHalfRefUS 从端口原子读取，使配置热更在下一轮收敛即生效；clockTheta 提供
-	// 偏移估计，可信时 rttProbe 去 δ、恢复 fwd+ret=RTT 自洽。
+	// minHalfRefUS 从端口原子读取，使配置热更在下一轮收敛即生效。
 	c.rttProbe = newRttProbeScheduler(ctx, c.probeResolveConn, c.probeActiveConns,
-		func() uint64 { return c.txPort.probeMinHalfRTTUS.Load() },
-		func() (int64, uint64, bool) {
-			if c.clockOffset == nil {
-				return 0, 0, false
-			}
-			return c.clockOffset.thetaNS()
-		})
+		func() uint64 { return c.txPort.probeMinHalfRTTUS.Load() })
 	c.rttProbe.start()
 	lv := liveFromCfg(cfg)
 	c.bootCfg.Store(cfg)
@@ -1787,9 +1780,9 @@ func (c *Client) Run(ctx context.Context) {
 					}
 				}
 				timer.Stop()
-			poll.Stop()
-		}
-	})
+				poll.Stop()
+			}
+		})
 	}
 	wg.Wait()
 }
@@ -1858,31 +1851,31 @@ func reconnectBackoffDelay(attempt int) time.Duration {
 
 // connSnapshot 面板用连接明细快照
 type connSnapshot struct {
-	TCP *tcpSocketSnapshot `json:"tcp,omitempty"`
-	Negotiated   bool              `json:"negotiated"`
-	SessionEpoch uint64            `json:"session_epoch"`
-	EncAlgo      int               `json:"enc_algo"`
-	FEC          string            `json:"fec"`
+	TCP          *tcpSocketSnapshot `json:"tcp,omitempty"`
+	Negotiated   bool               `json:"negotiated"`
+	SessionEpoch uint64             `json:"session_epoch"`
+	EncAlgo      int                `json:"enc_algo"`
+	FEC          string             `json:"fec"`
 	// FecStrategy 本端 egress 的 FEC parity 分发策略（auto/near），与 FEC 分组
 	// （"xor K=N"）正交，来源是本端 AsyncPort 的运行时状态。面板展示用。
 	FecStrategy     string `json:"fec_strategy,omitempty"`
 	FecNearWindowMs int    `json:"fec_near_window_ms,omitempty"`
-	Index        int               `json:"index"`
-	ConnID       string            `json:"conn_id,omitempty"`
-	Target       string            `json:"target"`
-	Remote       string            `json:"remote"`
+	Index           int    `json:"index"`
+	ConnID          string `json:"conn_id,omitempty"`
+	Target          string `json:"target"`
+	Remote          string `json:"remote"`
 	// ServerSeenAddr 是服务端视角看到的客户端来源地址（握手返回，含 NAT 后
 	// 出口）。客户端连接明细的"目标/对端"在直连时是同一服务器地址，这一列
 	// 才反映本连接实际出现在服务端面前的来源，用于诊断出口/NAT。空=未取得。
 	ServerSeenAddr string            `json:"server_seen_addr,omitempty"`
-	State        string            `json:"state"`
-	LastError    string            `json:"last_error,omitempty"`
-	RttMs        uint32            `json:"rtt_ms"`
-	Scheduler    schedulerConnJSON `json:"scheduler"`
-	TxBytes      uint64            `json:"tx_bytes"`
-	RxBytes      uint64            `json:"rx_bytes"`
-	Retries      uint64            `json:"retries"`
-	AgeSec       uint64            `json:"age_sec"`
+	State          string            `json:"state"`
+	LastError      string            `json:"last_error,omitempty"`
+	RttMs          uint32            `json:"rtt_ms"`
+	Scheduler      schedulerConnJSON `json:"scheduler"`
+	TxBytes        uint64            `json:"tx_bytes"`
+	RxBytes        uint64            `json:"rx_bytes"`
+	Retries        uint64            `json:"retries"`
+	AgeSec         uint64            `json:"age_sec"`
 	// TCP Brutal 生效结果（客户端本地整形）
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
@@ -1960,24 +1953,26 @@ func (c *Client) snapshotConns() []connSnapshot {
 			Target:         ci.target,
 			ServerSeenAddr: serverSeen,
 			RttMs:          rtt,
-			Scheduler:    schedulerSnapshot(ci.backend.Load()),
-			TxBytes:      atomic.LoadUint64(&ci.txBytes),
-			RxBytes:      atomic.LoadUint64(&ci.rxBytes),
-			Retries:      atomic.LoadUint64(&ci.retries),
-			BrutalTxMbps: txRate,
-			BrutalRxMbps: rxRate,
-			SNI:          sni,
-			TLSVersion:   tlsVer,
-			TLSCipher:    tlsCipher,
-			TLSALPN:      tlsAlpn,
-			CertSHA256:   certSHA,
+			Scheduler:      schedulerSnapshot(ci.backend.Load()),
+			TxBytes:        atomic.LoadUint64(&ci.txBytes),
+			RxBytes:        atomic.LoadUint64(&ci.rxBytes),
+			Retries:        atomic.LoadUint64(&ci.retries),
+			BrutalTxMbps:   txRate,
+			BrutalRxMbps:   rxRate,
+			SNI:            sni,
+			TLSVersion:     tlsVer,
+			TLSCipher:      tlsCipher,
+			TLSALPN:        tlsAlpn,
+			CertSHA256:     certSHA,
 		}
 		// FEC 策略是端口级状态（所有物理连接共享 txPort），nil 防测试直构 Client。
 		if c.txPort != nil {
 			snap.FecStrategy = string(c.txPort.FecStrategy())
 			snap.FecNearWindowMs = c.txPort.FecNearWindowMs()
 		}
-		if state=="up" {snap.TCP=ci.tcpObservation.Load()}
+		if state == "up" {
+			snap.TCP = ci.tcpObservation.Load()
+		}
 		if v, okv := ci.connID.Load().(string); okv {
 			snap.ConnID = v
 		}
@@ -2087,10 +2082,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		return 0, err
 	}
 	ci.remote.Store(rawConn.RemoteAddr().String())
-	if observed,ok:=rawConn.(*observedProxyTransport);ok {
+	if observed, ok := rawConn.(*observedProxyTransport); ok {
 		ci.observedTCP.Store(observed.tcp)
 		ci.observedProxy.Store(true)
-	} else {ci.observedTCP.Store(underlyingTCPConn(rawConn))}
+	} else {
+		ci.observedTCP.Store(underlyingTCPConn(rawConn))
+	}
 	ci.conn.Store(connHolder{rawConn})
 
 	// 保留 TCP_NODELAY；不要用 SO_RCVBUF/SO_SNDBUF 固定窗口。

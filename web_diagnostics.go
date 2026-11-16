@@ -117,14 +117,11 @@ func (h *diagnosticHistory) record(s WebStats) {
 		if scheduler.RetOneWayUS > 0 {
 			m["ret"] = diagnosticValue(float64(scheduler.RetOneWayUS) / 1000)
 		}
-		// 虚拟时钟收敛度：θ 可信时为 1，否则 0/缺省。面板据此标注 fwd/ret 是
-		// "已解不对称度（fwd+ret=RTT 自洽）"还是"锚定法近似（含 δ 放宽）"。
+		// 时钟偏移 θ 与不确定度 U（ns→ms）。θ>0 表本端时钟超前对端。0=未收敛。
+		// 纯观测值：θ 不参与单向时延分解（绝对分解欠定），只作两端时钟偏移参考。
+		// U 暴露供置信度判断——单程时延测量精度受时钟同步误差约束。
 		if scheduler.ClockOffsetConverged {
 			m["clk_sync"] = diagnosticValue(1)
-		}
-		// 时钟偏移 θ 与不确定度 U（ns→ms）。θ>0 表本端时钟超前对端。0=未收敛。
-		// 仅当 θ 可信时暴露数值；U 单独暴露供置信度判断。
-		if scheduler.ClockOffsetConverged {
 			m["clk_off"] = diagnosticValue(float64(scheduler.ClockOffsetNS) / 1_000_000)
 			m["clk_unc"] = diagnosticValue(float64(scheduler.ClockOffsetUncUS) / 1000)
 		}
