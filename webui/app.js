@@ -45,6 +45,26 @@ function fecStratTip(strategy,windowMs){
   if(strategy==='near'&&windowMs>0)return desc+' · '+t('fecstrat.win').replace('{n}',String(windowMs));
   return desc;
 }
+// 本连接承载的 FEC parity 占比（%）：fec_assigned_bytes / assigned_bytes。
+// 真实可归因到单条连接（该连接实际送出的 parity 占其总负载比例）。
+// 0=尚无分配（连接建立初期或 FEC 未启用）；null=缺数据。保留 1 位小数。
+function fecParityPct(fecAssigned,assigned){
+  if(!assigned||assigned<=0)return null;
+  if(!fecAssigned)return 0;
+  return Math.min(100,fecAssigned/assigned*100);
+}
+// FEC 列 tooltip：分组徽章 + 策略 + parity 占比 + 会话级 recover/lost。
+// fecText 为 "xor K=4" 徽章文本；fecStats 为会话级 {recovered,lost}（或空）。
+function fecCellTip(fecText,strategy,windowMs,parityPct,fecStats){
+  const parts=[];
+  if(fecText&&fecText!=='off')parts.push(fecText);
+  const s=fecStratTip(strategy,windowMs);
+  if(s)parts.push(s);
+  if(parityPct!==null&&parityPct!==undefined)parts.push(t('fecstrat.parity').replace('{n}',parityPct.toFixed(1)));
+  if(fecStats&&(fecStats.recovered||fecStats.lost))
+    parts.push(t('fecstrat.rec').replace('{r}',String(fecStats.recovered||0)).replace('{l}',String(fecStats.lost||0)));
+  return parts.join(' · ');
+}
 function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
@@ -1704,9 +1724,9 @@ function renderConnsTable(data,fresh){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,serverSeen:'',state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',fecStrategy:c.fec_strategy||'',fecNearWindowMs:c.fec_near_window_ms||0,sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,serverSeen:'',state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',fecStrategy:c.fec_strategy||'',fecNearWindowMs:c.fec_near_window_ms||0,sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0),fecAsg:((c.scheduler&&c.scheduler.fec_assigned_bytes)||0),asg:((c.scheduler&&c.scheduler.assigned_bytes)||0)}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,serverSeen:c.server_seen_addr||'',state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),fecStrategy:c.fec_strategy||data.fec_strategy||'',fecNearWindowMs:(c.fec_near_window_ms!==undefined?c.fec_near_window_ms:(data.fec_near_window_ms||0)),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,serverSeen:c.server_seen_addr||'',state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),fecStrategy:c.fec_strategy||data.fec_strategy||'',fecNearWindowMs:(c.fec_near_window_ms!==undefined?c.fec_near_window_ms:(data.fec_near_window_ms||0)),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0),fecAsg:((c.scheduler&&c.scheduler.fec_assigned_bytes)||0),asg:((c.scheduler&&c.scheduler.assigned_bytes)||0)}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1803,7 +1823,7 @@ function renderConnsTable(data,fresh){
 	      '<td class="hide-sm dim" title="'+esc(r.cert||'')+'">'+(r.cert?hi(esc(shortId(r.cert,16)),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
 	      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
-	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecStratTip(r.fecStrategy,r.fecNearWindowMs))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
+	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecCellTip(r.fec,r.fecStrategy,r.fecNearWindowMs,fecParityPct(r.fecAsg,r.asg),data&&data.fec))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
   }).join('')||emptyTableRow('conns',21,all);
@@ -1963,7 +1983,9 @@ function renderDrawer(){
         '<div class="dc-conn-meta">'+
           '<span class="dc-conn-k">'+esc(t('th.age'))+' '+(x.age_sec?fmtDur(x.age_sec):'-')+'</span>'+
           '<span class="dc-conn-k">'+esc(t('th.epoch'))+' '+(x.session_epoch!==undefined?x.session_epoch:(data.session_epoch||0))+'</span>'+
-          encBadge(xEnc)+badge(x.fec||fec)+brut+pkts+
+          encBadge(xEnc)+
+          '<span title="'+esc(fecCellTip(x.fec||fec,x.fec_strategy||c.fec_strategy,x.fec_near_window_ms||c.fec_near_window_ms,fecParityPct((x.scheduler&&x.scheduler.fec_assigned_bytes)||0,(x.scheduler&&x.scheduler.assigned_bytes)||0),data.fec))+'">'+badge(x.fec||fec)+fecStratBadge(x.fec_strategy||c.fec_strategy)+'</span>'+
+          brut+pkts+
         '</div>'+
         (x.sni?'<div class="dc-conn-sni">'+esc(t('dc.sec_sni'))+': '+esc(x.sni)+'</div>':'')+
         (x.cert_sha256?'<div class="dc-conn-sni" title="'+esc(t('dc.sec_cert'))+'">'+esc(t('dc.sec_cert'))+': <span class="mono">'+esc(x.cert_sha256)+'</span></div>':'')+
@@ -1980,7 +2002,15 @@ function renderDrawer(){
   sr.push([t('dc.sec_enc'),encBadge(neg.enc_algo!==undefined?neg.enc_algo:data.enc_algo)]);
   sr.push([t('dc.sec_sess'),neg.session_encrypt===undefined?mtxt('-'):yn(!!neg.session_encrypt)]);
   sr.push([t('dc.sec_epoch'),mtxt(String(neg.session_epoch||data.session_epoch||0))]);
-  sr.push([t('dc.sec_fec'),badge(neg.fec||fec)]);
+  // FEC 安全行：协商徽章 + 分发策略徽章 + 会话级 recover/lost（FEC 解码是会话
+  // 级的，恢复跨连接合成，故 recover/lost 按会话统计而非单条连接）。策略取
+  // 首条连接的运行时值（neg.fec_strategy），比配置快照更准确。
+  const sFecStats=data.fec;
+  const sFecStrat=neg.fec_strategy||c.fec_strategy||data.fec_strategy||'';
+  let sFecVal=badge(neg.fec||fec)+fecStratBadge(sFecStrat);
+  if(sFecStats&&(sFecStats.recovered||sFecStats.lost))
+    sFecVal+=' <span class="dim" title="'+esc(t('fecstrat.rec').replace('{r}',String(sFecStats.recovered||0)).replace('{l}',String(sFecStats.lost||0)))+'">'+t('fecstrat.rec').replace('{r}',String(sFecStats.recovered||0)).replace('{l}',String(sFecStats.lost||0))+'</span>';
+  sr.push([t('dc.sec_fec'),sFecVal]);
   if(neg.tls_version||neg.tls_cipher||neg.tls_alpn||neg.sni){
     sr.push([t('dc.sec_tls'),mtxt(neg.tls_version||'-')]);
     sr.push([t('dc.sec_cipher'),mtxt(neg.tls_cipher||'-')]);
