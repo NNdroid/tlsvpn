@@ -135,7 +135,7 @@ func TestAdaptiveLatencyStickyKeepsWithinSlack(t *testing.T) {
 
 // TestConfigRoutingAlgoValidation 配置校验：合法值通过，非法值拒绝。
 func TestConfigRoutingAlgoValidation(t *testing.T) {
-	base := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 2}}
+	base := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 2}}
 	base.applyDefaults()
 	for _, v := range []string{"auto", "latency_strict", "latency_sticky", "min_rtt_strict", "min_rtt_adaptive", "roundtrip_strict"} {
 		c := *base

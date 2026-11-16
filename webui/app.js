@@ -796,7 +796,7 @@ const SORTCOLS={
     tx:function(r){return r.c.tx_bytes;},rx:function(r){return r.c.rx_bytes;},txs:function(r){return r.sx;},rxs:function(r){return r.sr;}
   },
   conns:{
-    owner:function(r){return r.owner;},target:function(r){return r.target||'';},remote:function(r){return r.remote||'';},
+    owner:function(r){return r.owner;},target:function(r){return r.target||'';},serverSeen:function(r){return r.serverSeen||'';},remote:function(r){return r.remote||'';},
     rtt:function(r){return r.rtt;},tx:function(r){return r.tx;},rx:function(r){return r.rx;},
     txs:function(r){return r.sx;},rxs:function(r){return r.sr;},age:function(r){return r.age;}
   },
@@ -1704,9 +1704,9 @@ function renderConnsTable(data,fresh){
   const tb=document.getElementById('conns-body');
   let rows=[];
   if(data.mode==='server'){
-    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',fecStrategy:c.fec_strategy||'',fecNearWindowMs:c.fec_near_window_ms||0,sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.server_conns||[]).forEach(c=>rows.push({key:(c.conn_id||c.client_id+'|'+c.remote),owner:shortId(c.client_id,10),fullId:c.client_id,connid:c.conn_id||'',target:'',remote:c.remote,serverSeen:'',state:'up',rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,age:c.age_sec,epoch:c.session_epoch||0,err:'',enc:c.enc_algo,fec:c.fec||'',fecStrategy:c.fec_strategy||'',fecNearWindowMs:c.fec_near_window_ms||0,sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_cli_tx_mbps||0,down:c.brutal_srv_tx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }else{
-    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),fecStrategy:c.fec_strategy||data.fec_strategy||'',fecNearWindowMs:(c.fec_near_window_ms!==undefined?c.fec_near_window_ms:(data.fec_near_window_ms||0)),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
+    (data.conns||[]).forEach((c,i)=>rows.push({key:(c.conn_id||i+'|'+(c.target||'')+'|'+(c.remote||'')),owner:'local',fullId:null,connid:c.conn_id||'',target:c.target,remote:c.remote,serverSeen:c.server_seen_addr||'',state:c.state,rtt:c.rtt_ms,sched:c.scheduler||{},stalled:!!c.stalled,tx:c.tx_bytes,rx:c.rx_bytes,retries:c.retries,age:c.age_sec,epoch:c.session_epoch!==undefined?c.session_epoch:(data.session_epoch||0),err:c.last_error||'',enc:c.negotiated===false?null:(c.enc_algo!==undefined?c.enc_algo:data.enc_algo),fec:c.fec!==undefined?c.fec:(data.fec_mode||''),fecStrategy:c.fec_strategy||data.fec_strategy||'',fecNearWindowMs:(c.fec_near_window_ms!==undefined?c.fec_near_window_ms:(data.fec_near_window_ms||0)),sni:c.sni||'',tlsVer:c.tls_version||'',tlsCipher:c.tls_cipher||'',tlsAlpn:c.tls_alpn||'',cert:c.cert_sha256||'',brut:c.brutal_applied,brutErr:c.brutal_error||'',up:c.brutal_tx_mbps||0,down:c.brutal_rx_mbps||0,fwd:((c.scheduler&&c.scheduler.fwd_oneway_us)||0),ret:((c.scheduler&&c.scheduler.ret_oneway_us)||0),minrtt:((c.scheduler&&c.scheduler.min_rtt_us)||0),probeat:((c.scheduler&&c.scheduler.probe_at_ms)||0)}));
   }
   // 速率差分：fresh=true 仅在拿到新快照时（fetchStats），过滤重渲染沿用缓存
   const now=data.sample_time_ms===undefined?Date.now():Number(data.sample_time_ms);
@@ -1753,15 +1753,19 @@ function renderConnsTable(data,fresh){
       r.state==='connecting'?'<span class="badge b-dup">'+t('st.connecting')+'</span>':
       '<span class="badge b-off">'+esc(r.state||'-')+'</span>';
     // 跨路径 RTT 探针收敛后显示去/回单向时延（fwd/ret，µs→ms），一眼看出方向
-    // 不对称：较大的一侧加 .rtt-asym 轻着色。未收敛（0）退回显示 roundtrip RTT。
+    // 不对称：较大的一侧加 .rtt-asym 轻着色。两侧都未收敛（0）退回显示 roundtrip RTT。
     let rtt=r.rtt>=100000?'-':r.rtt+' ms',rttTip='',rttCls='';
     if(r.fwd>0||r.ret>0){
-      // 半收敛（只有一侧有值）时未测得的一侧显示 '-'，不能显示 0——0 在口径里
-      // 是"未收敛"，写成 0ms 会被误读成零时延。fwd/ret 为 µs，换算成 ms 再显示；
-      // 亚毫秒路径用 max(1,·) 兜底，避免显示 0 与"未收敛"混淆。
+      // 0 仅表示未收敛（无探针样本）：decomposeOneWay 用公共偏移保证所有已
+      // 测量方向都 >0（100% 可探测），不再因"该方向比参考连接快"而压 0。
+      // 未收敛方向显示 '-'，不能显示 0——0 在口径里不是零时延。fwd/ret 为 µs；
+      // 真实亚毫秒值（>0）用 max(1,·) 兜底显示 1，避免与"不可测"混淆。
       const fw=r.fwd>0?Math.max(1,Math.round(r.fwd/1000)):'-',rt=r.ret>0?Math.max(1,Math.round(r.ret/1000)):'-';
       rtt=fw+'/'+rt;
-      rttTip=t('th.rtt_tip').replace('{f}',fw).replace('{r}',rt).replace('{rt}',r.rtt);
+      // tooltip 里 '-' 写成可读词"不可测"，避免用户把 '-' 当零时延或缺失数据。
+      // 可测值自带 ms 后缀（模板 {f}/{r} 不再带 ms），不可测值用纯词。
+      const fwTxt=fw==='-'?t('th.meas_na'):fw+'ms',rtTxt=rt==='-'?t('th.meas_na'):rt+'ms';
+      rttTip=t('th.rtt_tip').replace('{f}',fwTxt).replace('{r}',rtTxt).replace('{rt}',r.rtt);
       // 不对称判断用原始 µs 值（比值与缩放无关），避免四舍五入在 2x 边界翻转。
       if(r.fwd>0&&r.ret>0&&(r.fwd*2>r.ret||r.ret*2>r.fwd))rttCls=' rtt-asym';
     }
@@ -1792,7 +1796,7 @@ function renderConnsTable(data,fresh){
     // 唯独这里是个看得见的洞。
     const cerr=r.err||r.brutErr;
     const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
-    return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+    return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td>'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
@@ -1802,7 +1806,7 @@ function renderConnsTable(data,fresh){
 	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecStratTip(r.fecStrategy,r.fecNearWindowMs))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
-  }).join('')||emptyTableRow('conns',20,all);
+  }).join('')||emptyTableRow('conns',21,all);
   setCount('conn-count',f,total,all);
   renderPager('conns',total);
 }

@@ -14,13 +14,13 @@ var deadlineClockEpoch atomic.Uint64
 
 func init() {
 	deadlineClockEpoch.Store(1)
-	go func() {
+	goSafe(func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			deadlineClockEpoch.Add(1)
 		}
-	}()
+	})
 }
 
 func currentDeadlineEpoch() uint64 {

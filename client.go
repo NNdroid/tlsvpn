@@ -172,7 +172,7 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	}
 	// near 窗口默认 10ms，防止未配置时策略读到 0 而把 parity 限制到恰好同速。
 	p.fecNearWindowUS.Store(uint64(fecNearWindowDefaultMs) * 1000)
-	go p.run()
+	goSafe(p.run)
 	return p
 }
 
@@ -246,7 +246,7 @@ func (p *AsyncPort) nextSeq() (uint32, bool) {
 	// channel 在同一 goroutine 串行执行，因此无需每个数据帧做原子 CAS。
 	if p.txSeq == ^uint32(0) {
 		if p.exhausted.CompareAndSwap(false, true) && p.onExhaust != nil {
-			go p.onExhaust()
+			goSafe(p.onExhaust)
 		}
 		return 0, false
 	}
@@ -384,10 +384,21 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 
 		// Fast path: dispatchBatch keeps the preferred backend in an atomic
 		// pointer. When that queue has room, no backend-list lock/scan is needed.
-		if b := p.preferred.Load(); b != nil && b.queueHasRoom() {
-			return true
+		if b := p.preferred.Load(); b != nil {
+			if b.queueHasRoom() {
+				return true
+			}
+			// 拥塞：preferred（最近一次 dispatch 选中的最佳后端）已满。此时
+			// 只退避重试，不扫描全部 backends 也不持 backendsMu——其余后端
+			// 在拥塞下大概率同样已满，扫描徒增锁竞争（Register/Unregister
+			// 写锁会等待读锁），还拖慢本数据生产 goroutine。若确有后端空出，
+			// 下一次 dispatch 的 pickAdaptiveBackend 会更新 preferred。
+			time.Sleep(50 * time.Microsecond)
+			continue
 		}
 
+		// preferred 为 nil（尚未 dispatch 过，或全部后端已注销）：需要扫描
+		// backends 确认是否一个都没有。此刻不忙等，仅做一次发现。
 		p.backendsMu.RLock()
 		n := len(p.backends)
 		ready := false
@@ -1557,7 +1568,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 
 	// Web 面板（可选，web.addr 未指定时不启动）；携带完整配置供面板热更
 	if cfg.Web.Addr != "" {
-		go startWebServer(cfg.Web.Addr, nil, c, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
+		goSafe(func() { startWebServer(cfg.Web.Addr, nil, c, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg) })
 	}
 
 	// 连接明细注册表初始化
@@ -1604,7 +1615,7 @@ func (c *Client) Run(ctx context.Context) {
 		}
 	}()
 
-	go func() {
+	goSafe(func() {
 		readSize, pooledRead := tapReadBufferSize(c.tapName)
 		if pooledRead {
 			log.Debugf("[Client] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
@@ -1653,13 +1664,14 @@ func (c *Client) Run(ctx context.Context) {
 				_ = c.txPort.WriteFrame(buf[:rn])
 			}
 		}
-	}()
+	})
 
 	var wg sync.WaitGroup
 	lv0 := c.live.Load()
 	for i := 0; i < lv0.connsCount; i++ {
 		wg.Add(1)
-		go func(connIndex int) {
+		goSafe(func() {
+			connIndex := i
 			defer wg.Done()
 			var seenGen uint64 = atomic.LoadUint64(&c.forceGen)
 			attempt := 0
@@ -1723,9 +1735,9 @@ func (c *Client) Run(ctx context.Context) {
 					}
 				}
 				timer.Stop()
-				poll.Stop()
-			}
-		}(i)
+			poll.Stop()
+		}
+	})
 	}
 	wg.Wait()
 }
@@ -1807,6 +1819,10 @@ type connSnapshot struct {
 	ConnID       string            `json:"conn_id,omitempty"`
 	Target       string            `json:"target"`
 	Remote       string            `json:"remote"`
+	// ServerSeenAddr 是服务端视角看到的客户端来源地址（握手返回，含 NAT 后
+	// 出口）。客户端连接明细的"目标/对端"在直连时是同一服务器地址，这一列
+	// 才反映本连接实际出现在服务端面前的来源，用于诊断出口/NAT。空=未取得。
+	ServerSeenAddr string            `json:"server_seen_addr,omitempty"`
 	State        string            `json:"state"`
 	LastError    string            `json:"last_error,omitempty"`
 	RttMs        uint32            `json:"rtt_ms"`
@@ -1863,7 +1879,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 		if !ok {
 			continue
 		}
-		var sni, tlsVer, tlsCipher, tlsAlpn, certSHA string
+		var sni, tlsVer, tlsCipher, tlsAlpn, certSHA, serverSeen string
 		var txRate, rxRate, epoch uint64
 		var enc int
 		fec := ""
@@ -1879,6 +1895,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			if neg.TLS != nil {
 				sni, tlsVer, tlsCipher, tlsAlpn = neg.TLS.SNI, neg.TLS.Version, neg.TLS.CipherSuite, neg.TLS.ALPN
 				certSHA = neg.TLS.CertSHA256
+				serverSeen = neg.TLS.ClientAddr
 			}
 		}
 		var rtt uint32
@@ -1887,9 +1904,10 @@ func (c *Client) snapshotConns() []connSnapshot {
 		}
 		snap := connSnapshot{
 			Negotiated: negotiated, SessionEpoch: epoch, EncAlgo: enc, FEC: fec,
-			Index:        i,
-			Target:       ci.target,
-			RttMs:        rtt,
+			Index:          i,
+			Target:         ci.target,
+			ServerSeenAddr: serverSeen,
+			RttMs:          rtt,
 			Scheduler:    schedulerSnapshot(ci.backend.Load()),
 			TxBytes:      atomic.LoadUint64(&ci.txBytes),
 			RxBytes:      atomic.LoadUint64(&ci.rxBytes),
@@ -2056,6 +2074,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	scanner := NewFrameScanner(tlsConn)
 	// 首帧是握手响应（<2KB）：用小上限防畸形帧头撑大缓冲，认证完成后恢复
 	scanner.SetMaxDataLen(maxHandshakeDataLen)
+	// 握手帧不含填充：rawDataLen+padLen 同样收紧，防 padLen 绕过 dataLen 上限
+	scanner.SetMaxTotalLen(maxHandshakeDataLen)
 	fecGroupReq := 0
 	if lv.fecMode {
 		fecGroupReq = clampFecGroup(lv.fecGroup)
@@ -2128,6 +2148,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	}
 	// 握手完成：后续数据帧恢复线路全量上限
 	scanner.SetMaxDataLen(maxWireDataLen)
+	// 认证后放开到线路全量上限+最大填充，容纳合法 jumbo 帧与混淆填充
+	scanner.SetMaxTotalLen(maxWireDataLen + maxWirePadLen)
 	log.Debugf("[Conn %d] <= handshake response conn_id=%s session=%s proto=%d epoch=%d fec=%v/%d enc=%v/%d token_present=%v",
 		connIndex, connID, resp.SessionID, resp.ProtocolVersion, resp.SessionEpoch, resp.FEC, resp.FecGroup, resp.Encrypt, resp.EncAlgo, resp.SessionToken != "")
 	if resp.ProtocolVersion != protocolVersion {
@@ -2194,8 +2216,14 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		if errTx != nil || errRx != nil {
 			return 0, fmt.Errorf("inner AEAD init failed: %v/%v", errTx, errRx)
 		}
-		fecTx, _ = newInnerCipherDomainForAlgo(lv.psk, saltTx, "fec", resp.EncAlgo)
-		fecRx, _ = newInnerCipherDomainForAlgo(lv.psk, saltRx, "fec", resp.EncAlgo)
+		// FEC 域与数据域同 salt/algo，派生失败理论上只可能由内部错误引起；
+		// 仍不静默忽略——FEC 帧走独立 key domain，若派生失败后续解密会错乱。
+		var errFecTx, errFecRx error
+		fecTx, errFecTx = newInnerCipherDomainForAlgo(lv.psk, saltTx, "fec", resp.EncAlgo)
+		fecRx, errFecRx = newInnerCipherDomainForAlgo(lv.psk, saltRx, "fec", resp.EncAlgo)
+		if errFecTx != nil || errFecRx != nil {
+			return 0, fmt.Errorf("inner FEC AEAD init failed: %v/%v", errFecTx, errFecRx)
+		}
 		encAlgo = resp.EncAlgo
 	}
 
@@ -2411,7 +2439,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		c.rebalanceBrutalRates(connIndex)
 	}()
 
-	go func() {
+	goSafe(func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(keepaliveInterval)
@@ -2644,12 +2672,12 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				}
 			}
 		}
-	}()
+	})
 
 	c.sessionMu.Lock()
 	connDecoder, connWorker, connReorder := c.fecDec, c.rxWorker, c.rxReorder
 	c.sessionMu.Unlock()
-	go func() {
+	goSafe(func() {
 		var rxBytesBatch, rxPacketsBatch uint64
 		var rxAEADScratch nonceAADScratch
 		var rxProducer *rxBatchProducer
@@ -2758,7 +2786,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 				connReorder.Insert(seq, frame)
 			}
 		}
-	}()
+	})
 
 	select {
 	case err := <-errChan:

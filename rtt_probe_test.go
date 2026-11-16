@@ -112,30 +112,31 @@ func uint64At(buf []byte, off int) uint64 {
 // 下 fwd/ret 的相对排序必须与真实单向时延一致——这正是选路依赖的性质。
 func TestRttProbeRecomputePreservesOrdering(t *testing.T) {
 	// 真实单向时延（µs）：path0 fwd 5 / ret 10000；path1 fwd 5000 / ret 5。
-	// ref=0，RTT(i,j) = fwd_i + ret_j，故矩阵对角/交叉值如下。
+	// ref=0，RTT(i,j) = fwd_i + ret_j。decay 矩阵单位为 ns（= µs × 1000），
+	// 故对角/交叉值乘 1000，halfRef 以 µs 传入（5002µs）。
 	dec := map[[2]uint32]uint64{
-		{0, 0}: 5 + 10000,    // RTT(ref,ref)
-		{1, 0}: 5000 + 10000, // RTT(i=1, ref=0) → fwd_1
-		{0, 1}: 5 + 5,        // RTT(ref=0, j=1) → ret_1
+		{0, 0}: (5 + 10000) * 1000,    // RTT(ref,ref)
+		{1, 0}: (5000 + 10000) * 1000, // RTT(i=1, ref=0) → fwd_1
+		{0, 1}: (5 + 5) * 1000,        // RTT(ref=0, j=1) → ret_1
 	}
 	fwd, ret := recomputeOneWay(dec, []int{0, 1}, 0, (5+10000)/2)
 
-	if fwd[0] != (5+10000)/2 || ret[0] != (5+10000)/2 {
-		t.Fatalf("ref not anchored: fwd=%d ret=%d", fwd[0], ret[0])
+	// 100% 可探测：每个已测量方向都必须给出正的单向时延（非 0 非下溢），
+	// 不再把"比 ref 对称基准快"的方向压成 0（旧契约）。
+	if fwd[0] == 0 || fwd[0] > 1<<40 || ret[0] == 0 || ret[0] > 1<<40 {
+		t.Fatalf("ref not measurable: fwd=%d ret=%d", fwd[0], ret[0])
 	}
-	// fwd_1 = RTT(1,0) - RTT(ref,ref)/2 = 5000 + 10000 - 5002 = 9998（去程主导）
-	// ret_1 = RTT(0,1) - RTT(ref,ref)/2 = 10 - 5002 → 反转，落 1µs 地板
-	if fwd[1] < 9000 {
-		t.Fatalf("fwd[1]=%d, asymmetric forward latency lost", fwd[1])
+	if fwd[1] == 0 || fwd[1] > 1<<40 || ret[1] == 0 || ret[1] > 1<<40 {
+		t.Fatalf("conn1 not measurable: fwd=%d ret=%d", fwd[1], ret[1])
 	}
-	if ret[1] != 1 {
-		t.Fatalf("ret[1]=%d, inverted matrix should clamp to the 1µs floor", ret[1])
+	// 相对序保留（选路核心）：
+	//   去程：path0 真实 5µs < path1 5000µs → fwd[0] < fwd[1]
+	//   回程：path1 真实 5µs < path0 10000µs → ret[1] < ret[0]
+	if fwd[0] >= fwd[1] {
+		t.Fatalf("forward ordering broken: fwd[0]=%d fwd[1]=%d (path0 forward must be faster)", fwd[0], fwd[1])
 	}
-	// 选路性质：去程应选 path0（fwd 小），回程应选 path1（ret 小）
-	if fwd[0] <= fwd[1] && ret[1] <= ret[0] {
-		// 两侧 argmin 一致：去程 0、回程 1，跨路径分解生效
-	} else {
-		t.Fatalf("ordering broken: fwd=%v ret=%v", fwd, ret)
+	if ret[1] >= ret[0] {
+		t.Fatalf("return ordering broken: ret[0]=%d ret[1]=%d (path1 return must be faster)", ret[0], ret[1])
 	}
 }
 
@@ -266,17 +267,18 @@ func TestRttProbePaddingIndistinguishable(t *testing.T) {
 	}
 }
 
-// TestRttProbeSubClamp 保证 subClamp 非零且保留真实量级：0 是"未收敛"哨兵，
-// 不能被合法的零差值占用；矩阵反转时落到 1µs 地板。
+// TestRttProbeSubClamp 保证 subClamp 非零且保留真实量级：正常差值原样返回，
+// 矩阵反转（b>=a，该方向不比锚定快）返回 0——0 是"不可测"哨兵，选路回退
+// min_rtt/2、前端显示 '-'，绝不能伪装成 1µs（旧实现压成 1 会让前端显示"1ms"）。
 func TestRttProbeSubClamp(t *testing.T) {
 	if got := subClamp(12000, 5000); got != 7000 {
 		t.Fatalf("subClamp(12000,5000)=%d want=7000", got)
 	}
-	if got := subClamp(5000, 5000); got != 1 {
-		t.Fatalf("zero difference must stay non-zero: got=%d", got)
+	if got := subClamp(5000, 5000); got != 0 {
+		t.Fatalf("zero difference must be 'unmeasurable' (0), not a fake 1: got=%d", got)
 	}
-	if got := subClamp(4000, 5000); got != 1 {
-		t.Fatalf("inverted matrix: got=%d want=1", got)
+	if got := subClamp(4000, 5000); got != 0 {
+		t.Fatalf("inverted matrix: got=%d want=0", got)
 	}
 	if got := subClamp(math.MaxUint64, 0); got != math.MaxUint64 {
 		t.Fatalf("max range: got=%d", got)

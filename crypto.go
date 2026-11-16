@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -108,11 +109,21 @@ func newInnerCipherDomainForAlgo(psk string, salt []byte, domain string, algo in
 	if domain == "fec" {
 		label += "_fec"
 	}
-	keyHash := sha256.Sum256([]byte(psk + label))
-	key := keyHash[:keyLen]
+	// HKDF-SHA256(ikm=psk, salt=encSalt, info=label)。旧实现用裸
+	// SHA-256(psk||label) 无盐派生，域分离弱：不同 label/方向的密钥共享同一
+	// PSK 前缀，若泄露一个 key 的中间状态可能被关联到其他 key。加盐后每个
+	// 方向（EncSalt/EncSalt2）、每个会话、每个 domain 的密钥彼此独立。
+	//
+	// 兼容性注意：这是数据面不兼容变更。握手认证（hashPSK）不变，所以新旧
+	// 端仍能完成应用层握手，但派生出的 AEAD 密钥不同——旧 client 连新 server
+	// （或反之）会握手成功后在数据面解密失败。升级需 client/server 同步，
+	// 且旧会话的加密数据无法被新端解密。
+	key, err := hkdf.Key(sha256.New, []byte(psk), salt, label, keyLen)
+	if err != nil {
+		return nil, fmt.Errorf("derive inner key: %w", err)
+	}
 
 	var aead cipher.AEAD
-	var err error
 	switch algo {
 	case encAlgoGCM, encAlgoGCM128:
 		var block cipher.Block
@@ -296,15 +307,19 @@ func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]by
 }
 
 // verifyCertHash 用服务器证书叶子证书的 SHA-256 指纹校验 -cert-sha256。
-// expected 为 hex 编码（大小写不敏感、允许冒号分隔格式）。
+// expected 为 hex 编码（大小写不敏感、允许冒号分隔格式）。返回的 mismatch
+// 用常量时间比较（hmac.Equal），避免指纹比较的时序侧信道。
 func verifyCertHash(rawCerts [][]byte, expected string) error {
 	if len(rawCerts) == 0 {
 		return fmt.Errorf("no certificates provided")
 	}
+	want := strings.ToLower(strings.ReplaceAll(expected, ":", ""))
+	if len(want) != sha256.Size*2 {
+		return fmt.Errorf("invalid cert SHA-256 fingerprint %q (want 64 hex chars)", expected)
+	}
 	sum := sha256.Sum256(rawCerts[0])
 	got := hex.EncodeToString(sum[:])
-	want := strings.ToLower(strings.ReplaceAll(expected, ":", ""))
-	if got != want {
+	if !hmac.Equal([]byte(got), []byte(want)) {
 		return fmt.Errorf("cert SHA-256 mismatch: expected %s, got %s", want, got)
 	}
 	return nil

@@ -50,7 +50,7 @@ func TestClientRecoversAfterServerRestart(t *testing.T) {
 func runRestartCase(t *testing.T, tc restartCase) {
 	port := nextPerfPort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	const psk = "restart-psk"
+	const psk = "test-only-high-entropy-secret"
 
 	// ---- 客户端（长生命周期，跨服务端重启，模拟用户"不重启客户端"）----
 	cliCtx, cliCancel := context.WithCancel(context.Background())
@@ -58,7 +58,7 @@ func runRestartCase(t *testing.T, tc restartCase) {
 	cliCfg := &Config{
 		Mode: "client", PSK: psk, Tap: "mem", Addr: addr,
 		Encrypt: tc.encrypt,
-		Client:  ClientConfig{Conns: tc.conns, FEC: tc.fecMode, FecGroup: tc.fecGroup, Insecure: true, ReqV4: tc.reqV4},
+		Client:  ClientConfig{Conns: tc.conns, FEC: tc.fecMode, FecGroup: tc.fecGroup, Insecure: true, CertSHA256: e2eServerCertFingerprint(), ReqV4: tc.reqV4},
 	}
 	cliCfg.applyDefaults()
 	if err := cliCfg.Validate(); err != nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sync"
 	"sync/atomic"
 )
 
@@ -25,14 +24,13 @@ func (s *txFrameTotals) add(v VPNFrame, wire int) {
 }
 
 type txFrameCounters struct {
-	mu                                      sync.Mutex
+	// 全部字段已是 atomic.Uint64，record/snapshot 直接原子累加/读取即可，无需
+	// 额外互斥锁——锁只串行化了原本就原子的操作，徒增写路径开销。
 	dataFrames, parityFrames, controlFrames atomic.Uint64
 	dataWireBytes, parityWireBytes          atomic.Uint64
 }
 
 func (c *txFrameCounters) record(s txFrameTotals) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.dataFrames.Add(s.DataFrames)
 	c.parityFrames.Add(s.ParityFrames)
 	c.controlFrames.Add(s.ControlFrames)
@@ -40,8 +38,6 @@ func (c *txFrameCounters) record(s txFrameTotals) {
 	c.parityWireBytes.Add(s.ParityWireBytes)
 }
 func (c *txFrameCounters) snapshot() txFrameTotals {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return txFrameTotals{c.dataFrames.Load(), c.parityFrames.Load(), c.controlFrames.Load(), c.dataWireBytes.Load(), c.parityWireBytes.Load()}
 }
 func (f *fecStatsJSON) setWritten(s txFrameTotals) {

@@ -746,10 +746,18 @@ func TestFrameScannerMaxDataLen(t *testing.T) {
 		binary.BigEndian.PutUint32(hdr[6:10], 1)
 		return hdr
 	}
+	mkStreamPad := func(dataLen, padLen int) []byte {
+		hdr := make([]byte, 10)
+		binary.BigEndian.PutUint32(hdr[0:4], uint32(dataLen))
+		binary.BigEndian.PutUint16(hdr[4:6], uint16(padLen))
+		binary.BigEndian.PutUint32(hdr[6:10], 1)
+		return hdr
+	}
 
 	// 超过 maxHandshakeDataLen：立即报错且不分配大缓冲
 	fs := NewFrameScanner(bytes.NewReader(mkStream(maxHandshakeDataLen + 1)))
 	fs.SetMaxDataLen(maxHandshakeDataLen)
+	fs.SetMaxTotalLen(maxHandshakeDataLen)
 	if _, _, err := fs.ReadFrame(); err == nil {
 		t.Fatal("超过认证前上限的帧应被拒绝")
 	}
@@ -757,18 +765,44 @@ func TestFrameScannerMaxDataLen(t *testing.T) {
 		t.Fatalf("拒绝帧不应把缓冲扩到 %.1fKB, 实际 cap=%d", float64(cap(fs.buf))/1024, cap(fs.buf))
 	}
 
+	// 认证前 padLen 不能绕过 dataLen 上限：dataLen=0 但 padLen 很大时，
+	// rawDataLen+padLen 超过 maxHandshakeDataLen 也应被拒绝，防内存放大。
+	for _, padLen := range []int{maxHandshakeDataLen, maxWirePadLen} {
+		fsPad := NewFrameScanner(bytes.NewReader(mkStreamPad(0, padLen)))
+		fsPad.SetMaxDataLen(maxHandshakeDataLen)
+		fsPad.SetMaxTotalLen(maxHandshakeDataLen)
+		if _, _, err := fsPad.ReadFrame(); err == nil {
+			t.Fatalf("认证前 padLen=%d 绕过 dataLen 上限应被拒绝", padLen)
+		}
+		if cap(fsPad.buf) > maxHandshakeDataLen*2 {
+			t.Fatalf("拒绝 padLen 帧不应把缓冲扩到 %d, 实际 cap=%d", maxHandshakeDataLen, cap(fsPad.buf))
+		}
+	}
+
 	// 认证后恢复全量上限：小于 maxWireDataLen 的大帧正常读取
 	big := 20 * 1024
 	stream := append(mkStream(big), make([]byte, big)...)
 	fs2 := NewFrameScanner(bytes.NewReader(stream))
 	fs2.SetMaxDataLen(maxHandshakeDataLen)
+	fs2.SetMaxTotalLen(maxHandshakeDataLen)
 	fs2.SetMaxDataLen(maxWireDataLen) // 认证通过后放开
+	fs2.SetMaxTotalLen(maxWireDataLen + maxWirePadLen)
 	frame, _, err := fs2.ReadFrame()
 	if err != nil {
 		t.Fatalf("放开上限后大帧应正常读取: %v", err)
 	}
 	if len(frame) != big {
 		t.Fatalf("大帧长度不符: %d", len(frame))
+	}
+
+	// 认证后合法的大 dataLen+padLen 组合（jumbo 帧+填充）不应被误拒
+	bigPad := maxWireDataLen/2 + 4096
+	streamPad := append(mkStreamPad(maxWireDataLen/2, bigPad), make([]byte, maxWireDataLen/2+bigPad)...)
+	fsPadOK := NewFrameScanner(bytes.NewReader(streamPad))
+	fsPadOK.SetMaxDataLen(maxWireDataLen)
+	fsPadOK.SetMaxTotalLen(maxWireDataLen + maxWirePadLen)
+	if _, _, err := fsPadOK.ReadFrame(); err != nil {
+		t.Fatalf("认证后 dataLen+padLen 合法组合应可读取: %v", err)
 	}
 
 	// 默认上限为线路全量（不破坏既有行为）
@@ -826,4 +860,16 @@ func BenchmarkProtocolThroughput(b *testing.B) {
 		}
 		putFrame(data)
 	}
+}
+
+// e2eServerCertFingerprint 预生成/加载服务端自签证书并返回其 SHA-256 指纹。
+//
+// e2e 测试的服务端用 getServerTLSConfig("", "")（自签证书，持久化到包目录，
+// 进程内复用同一份），客户端配置在 insecure=true 时必须 pin 该指纹，以满足
+// Validate 的"insecure 必须配合 cert_sha256"安全约束（防中间人）。调用此
+// helper 会在客户端 Validate 之前同步生成证书，保证 server 启动复用的正是
+// 这份指纹对应的证书。
+func e2eServerCertFingerprint() string {
+	getServerTLSConfig("", "") // 幂等：磁盘缓存的自签证书已存在则直接加载
+	return serverCertFingerprint()
 }

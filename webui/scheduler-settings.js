@@ -11,7 +11,7 @@
   const COPY={
     'zh-CN':{
       title:'调度设置',sub:'选路算法与 FEC parity 分发。热更生效，无需重启。',labelAlgo:'选路算法',labelFec:'FEC parity 分发策略',labelWindow:'near 窗口 (ms)',
-      hint:'auto=去程稳定地板+服务时间（粘滞+WFQ）；*_strict=严格取最低时延路径（劣化即切换）；*_sticky/*_adaptive=带粘滞与 WFQ 字节公平分摊。',
+      hint:'auto=去程稳定地板+服务时间（粘滞+WFQ）；latency_strict=严格最低去程地板；latency_sticky=最低去程地板+粘滞；min_rtt_strict=严格最低无拥塞地板；min_rtt_adaptive=无拥塞地板+粘滞+WFQ；roundtrip_strict=严格最低当前往返。',
       fecHint:'auto=所有健康后端轮转（默认）；near=只投到去程单程时延与数据路径相差 ≤ 窗口的连接，抑制慢备链路的 parity 泄漏。',
       windowHint:'仅 near 生效：parity 只发给与数据路径去程时延相差 ≤ N ms 的连接。范围 1-100。',
       algos:{auto:'auto（默认，粘滞+WFQ）',latency_strict:'latency_strict（严格最低去程）',latency_sticky:'latency_sticky（最低去程+粘滞）',min_rtt_strict:'min_rtt_strict（严格最低无拥塞地板）',min_rtt_adaptive:'min_rtt_adaptive（无拥塞地板+粘滞+WFQ）',roundtrip_strict:'roundtrip_strict（严格最低当前往返）'},
@@ -19,7 +19,7 @@
     },
     'zh-TW':{
       title:'排程設定',sub:'選路演算法與 FEC 同位元分發。熱更新生效，無需重新啟動。',labelAlgo:'選路演算法',labelFec:'FEC 同位元分發策略',labelWindow:'near 視窗 (ms)',
-      hint:'auto=去程穩定地板+服務時間（黏滯+WFQ）；*_strict=嚴格取最低延遲路徑（劣化即切換）；*_sticky/*_adaptive=帶黏滯與 WFQ 位元組公平分攤。',
+      hint:'auto=去程穩定地板+服務時間（黏滯+WFQ）；latency_strict=嚴格最低去程地板；latency_sticky=最低去程地板+黏滯；min_rtt_strict=嚴格最低無壅塞地板；min_rtt_adaptive=無壅塞地板+黏滯+WFQ；roundtrip_strict=嚴格最低目前來回。',
       fecHint:'auto=所有健康後端輪轉（預設）；near=只投到去程單程延遲與資料路徑相差 ≤ 視窗的連線，抑制慢備援鏈路的同位元洩漏。',
       windowHint:'僅 near 生效：同位元只發給與資料路徑去程延遲相差 ≤ N ms 的連線。範圍 1-100。',
       algos:{auto:'auto（預設，黏滯+WFQ）',latency_strict:'latency_strict（嚴格最低去程）',latency_sticky:'latency_sticky（最低去程+黏滯）',min_rtt_strict:'min_rtt_strict（嚴格最低無壅塞地板）',min_rtt_adaptive:'min_rtt_adaptive（無壅塞地板+黏滯+WFQ）',roundtrip_strict:'roundtrip_strict（嚴格最低目前來回）'},
@@ -27,7 +27,7 @@
     },
     'en':{
       title:'Scheduler settings',sub:'Routing algorithm & FEC parity distribution. Hot-applied, no restart.',labelAlgo:'Routing algorithm',labelFec:'FEC parity strategy',labelWindow:'near window (ms)',
-      hint:'auto = stable forward floor + service time (sticky+WFQ); *_strict = strictly pick the lowest-latency path (switch on degradation); *_sticky/*_adaptive = with sticky hysteresis and WFQ byte fairness.',
+      hint:'auto = stable forward floor + service time (sticky+WFQ); latency_strict = strictly lowest forward floor; latency_sticky = lowest forward floor + sticky; min_rtt_strict = strictly lowest congestion-free floor; min_rtt_adaptive = floor + sticky+WFQ; roundtrip_strict = strictly lowest current RTT.',
       fecHint:'auto = rotate across all healthy backends (default); near = only to backends within the window of the data path fwd, suppressing parity leakage to slower standby links.',
       windowHint:'Only for near: parity goes only to connections within N ms of the data path forward latency. Range 1-100.',
       algos:{auto:'auto (default, sticky+WFQ)',latency_strict:'latency_strict (strict lowest forward)',latency_sticky:'latency_sticky (lowest forward + sticky)',min_rtt_strict:'min_rtt_strict (strict lowest congestion-free floor)',min_rtt_adaptive:'min_rtt_adaptive (floor + sticky+WFQ)',roundtrip_strict:'roundtrip_strict (strict lowest current RTT)'},
@@ -35,7 +35,7 @@
     },
     'de':{
       title:'Scheduler-Einstellungen',sub:'Routing-Algorithmus & FEC-Parity-Verteilung. Heiß angewendet, kein Neustart.',labelAlgo:'Routing-Algorithmus',labelFec:'FEC-Parity-Strategie',labelWindow:'near-Fenster (ms)',
-      hint:'auto = stabiler Vorwärts-Boden + Servicezeit (Sticky+WFQ); *_strict = strikt niedrigste Latenz (Wechsel bei Verschlechterung); *_sticky/*_adaptive = mit Sticky und WFQ-Byte-Fairness.',
+      hint:'auto = stabiler Vorwärts-Boden + Servicezeit (Sticky+WFQ); latency_strict = strikt niedrigster Vorwärts-Boden; latency_sticky = niedrigster Vorwärts-Boden + Sticky; min_rtt_strict = strikt niedrigster staufreier Boden; min_rtt_adaptive = Boden + Sticky+WFQ; roundtrip_strict = strikt niedrigste aktuelle RTT.',
       fecHint:'auto = Rotation über alle gesunden Backends (Standard); near = nur zu Backends im Fenster der Datenpfad-Fwd, unterdrückt Parity-Leck auf langsamere Standby-Links.',
       windowHint:'Nur für near: Parity nur zu Verbindungen innerhalb N ms der Vorwärts-Latenz des Datenpfads. Bereich 1-100.',
       algos:{auto:'auto (Standard, Sticky+WFQ)',latency_strict:'latency_strict (strikt niedrigste Vorwärts-Latenz)',latency_sticky:'latency_sticky (niedrigste Vorwärts-Latenz + Sticky)',min_rtt_strict:'min_rtt_strict (strikt niedrigster staufreier Boden)',min_rtt_adaptive:'min_rtt_adaptive (Boden + Sticky+WFQ)',roundtrip_strict:'roundtrip_strict (strikt niedrigste aktuelle RTT)'},
@@ -43,7 +43,7 @@
     },
     'fr':{
       title:'Paramètres de l’ordonnanceur',sub:'Algorithme de routage & distribution de parité FEC. Appliqué à chaud, sans redémarrage.',labelAlgo:'Algorithme de routage',labelFec:'Stratégie de parité FEC',labelWindow:'fenêtre near (ms)',
-      hint:'auto = plancher avant stable + temps de service (sticky+WFQ) ; *_strict = choisir strictement le chemin le moins latence (bascule en cas de dégradation) ; *_sticky/*_adaptive = avec hystérésis sticky et équité WFQ.',
+      hint:'auto = plancher avant stable + temps de service (sticky+WFQ) ; latency_strict = strictement le plancher avant le plus bas ; latency_sticky = plancher avant le plus bas + sticky ; min_rtt_strict = strictement le plancher sans congestion le plus bas ; min_rtt_adaptive = plancher + sticky+WFQ ; roundtrip_strict = strictement la RTT actuelle la plus basse.',
       fecHint:'auto = rotation sur tous les backends sains (défaut) ; near = uniquement aux backends dans la fenêtre de la fwd du chemin de données, supprime la fuite de parité vers les liens standby plus lents.',
       windowHint:'Uniquement pour near : parité envoyée aux connexions à N ms de la latence aller du chemin de données. Plage 1-100.',
       algos:{auto:'auto (défaut, sticky+WFQ)',latency_strict:'latency_strict (strictement le plus bas aller)',latency_sticky:'latency_sticky (plus bas aller + sticky)',min_rtt_strict:'min_rtt_strict (strictement le plus bas plancher sans congestion)',min_rtt_adaptive:'min_rtt_adaptive (plancher + sticky+WFQ)',roundtrip_strict:'roundtrip_strict (strictement la plus basse RTT actuelle)'},
@@ -51,7 +51,7 @@
     },
     'ja':{
       title:'スケジューラ設定',sub:'選路アルゴリズムと FEC パリティ配布。ホット適用、再起動不要。',labelAlgo:'選路アルゴリズム',labelFec:'FEC パリティ戦略',labelWindow:'near ウィンドウ (ms)',
-      hint:'auto=安定した往路フロア＋サービス時間（スティッキー+WFQ）；*_strict=厳密に最低遅延経路（劣化で即切替）；*_sticky/*_adaptive=スティッキーと WFQ バイト公平性付き。',
+      hint:'auto=安定した往路フロア＋サービス時間（スティッキー+WFQ）；latency_strict=厳密に最低の往路フロア；latency_sticky=最低の往路フロア＋スティッキー；min_rtt_strict=厳密に最低の輻輳なしフロア；min_rtt_adaptive=フロア＋スティッキー+WFQ；roundtrip_strict=厳密に最低の現在 RTT。',
       fecHint:'auto=全健全バックエンドでローテーション（デフォルト）；near=データパス fwd のウィンドウ内のみ、遅いスタンバイリンクへのパリティ漏れを抑制。',
       windowHint:'near のみ：データパスの往路遅延から N ms 以内の接続にのみパリティを送信。範囲 1-100。',
       algos:{auto:'auto（デフォルト、スティッキー+WFQ）',latency_strict:'latency_strict（厳密に最低の往路）',latency_sticky:'latency_sticky（最低往路＋スティッキー）',min_rtt_strict:'min_rtt_strict（厳密に最低の輻輳なしフロア）',min_rtt_adaptive:'min_rtt_adaptive（フロア＋スティッキー+WFQ）',roundtrip_strict:'roundtrip_strict（厳密に最低の現在RTT）'},

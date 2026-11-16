@@ -637,7 +637,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 	})))
 
 	log.Infof("🚀 Web Dashboard manager started (bind=%s, tls=%v)", mgr.Config().Web.Bind, webCert != "")
-	go mgr.Run()
+	goSafe(mgr.Run)
 }
 
 // mergeAndValidateConfig 解析面板提交的新配置，校验并计算需重启字段。
@@ -1131,10 +1131,8 @@ func padOverhead(wire, pad uint64) float64 {
 // 返回全零（mode 仍如实报告）而不是 nil：面板据此显示 0.0%，而不是"未启用"——
 // 后者会把"填充已正确关闭"说成"没配置"。
 func padStatsJSONPtr() *padStatsJSON {
-	padStatsMu.Lock()
-	defer padStatsMu.Unlock()
 	wire, pad := padWireC.v.Load(), padPadC.v.Load()
-	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad), Epoch: padStatsEpoch}
+	return &padStatsJSON{Mode: padModeName(), WireBytes: wire, PadBytes: pad, OverheadPct: padOverhead(wire, pad), Epoch: padStatsEpoch.Load()}
 }
 
 // certInfoSnapshot 证书有效期换算成面板可直接读的形式；证书信息不可用时返回

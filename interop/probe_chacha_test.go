@@ -22,8 +22,11 @@ func TestProbeChaChaKnownAnswerVectors(t *testing.T) {
 		algo int
 		want string
 	}{
-		{5, "720c46b7bdec71fd38fbde65073f9bab7b0f40fa6bed33a973127531ce7f14d5"},
-		{6, "dab95dcd60c7526fea52c69928fcce4fe639b2d03e02e543dc5158522649d397"},
+		// KDF 自 v2 起为 HKDF-SHA256(ikm=psk, salt=encSalt, info=label)（见
+		// crypto.go newInnerCipherDomainForAlgo）。这些是加盐派生后的已知答案
+		// 向量，跨语言实现必须复现。
+		{5, "6c8cfe69b7093e921a6dbb35a2079b3c9636dc3ea4b91a8a33f8968524516c9f"},
+		{6, "22d72483819893a0dc0e40f9e64e9fed1178928504a377529bf8f01b6cee8e09"},
 	}
 	for _, tc := range cases {
 		c, err := newProbeCipher(psk, salt, tc.algo)

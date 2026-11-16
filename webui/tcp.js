@@ -45,10 +45,10 @@
       const cell=document.createElement('td');cell.dataset.tcpCell='';const button=document.createElement('button');button.className='btn ghost sm tcp-button';button.dataset.tcpId=id;
       button.textContent=tr(0);cell.append(button);
       const s=c.tcp;if(s){const summary=document.createElement('small');summary.className='dim';summary.textContent=(s.values?.congestion||'—')+' · NoDelay '+value(s,'nodelay');cell.append(summary);}
-      row.children[4].after(cell);
+      row.children[5].after(cell);
     });renderDetail();
-    let th=document.getElementById('tcp-heading');if(!th){th=document.createElement('th');th.id='tcp-heading';tbody.closest('table').querySelector('thead tr').children[4].after(th);}th.textContent=tr(0);
-    const empty=tbody.querySelector('tr:not([data-conn-id]) td[colspan]');if(empty)empty.colSpan=21;
+    let th=document.getElementById('tcp-heading');if(!th){th=document.createElement('th');th.id='tcp-heading';tbody.closest('table').querySelector('thead tr').children[5].after(th);}th.textContent=tr(0);
+    const empty=tbody.querySelector('tr:not([data-conn-id]) td[colspan]');if(empty)empty.colSpan=22;
   }
   document.getElementById('conns-body').addEventListener('click',ev=>{const button=ev.target.closest('[data-tcp-id]');if(!button)return;selected=button.dataset.tcpId;renderDetail();if(!dialog.open)dialog.showModal();});
   const original=renderConnsTable;renderConnsTable=function(data,fresh){const result=original(data,fresh);augment(data);return result;};

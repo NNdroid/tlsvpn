@@ -206,7 +206,7 @@ func (s *rttProbeScheduler) kick() {
 }
 
 // start 启动调度 goroutine。
-func (s *rttProbeScheduler) start() { go s.run() }
+func (s *rttProbeScheduler) start() { goSafe(s.run) }
 
 // stop 终止调度 goroutine。
 func (s *rttProbeScheduler) stop() { s.cancel() }
@@ -381,6 +381,9 @@ func (s *rttProbeScheduler) absorb(fr rttProbeFrame) {
 		return // 无有效 send_ts 或时钟异常，丢弃
 	}
 	rtt := recvNS - fr.sendTS
+	if rtt == 0 {
+		rtt = 1 // 同机回环/同纳秒收发：clamp 到 1ns，防止 decay 存 0 与"未测量"哨兵混淆
+	}
 	s.updateDecay(uint32(p.srcConn), uint32(p.replyOn), rtt)
 	s.recomputeAll()
 }
@@ -389,6 +392,9 @@ func (s *rttProbeScheduler) absorb(fr rttProbeFrame) {
 // 时钟会让多个 key 轮转更新时互相吞掉对方的慢升增量（A 在 t1、B 在 t2 更新，
 // A 下次在 t3 更新却只拿到 t2→t3，丢失 t1→t2）。每 key 记自己的上次更新时刻。
 func (s *rttProbeScheduler) updateDecay(src, dst uint32, sampleNS uint64) {
+	if sampleNS == 0 {
+		sampleNS = 1 // 防御：0 与"未测量"哨兵（decay[key]==0）混淆
+	}
 	key := [2]uint32{src, dst}
 	now := time.Now()
 	elapsed := now.Sub(s.lastDecay[key])
@@ -420,29 +426,20 @@ func (s *rttProbeScheduler) recomputeAll() {
 	// 本次重算的发布时刻：面板据此显示"上次计算时间"。同一次重算内所有连接
 	// 视为同一时刻，无需逐连接取钟。
 	nowMs := uint64(time.Now().UnixMilli())
+
+	fwdX, retX := decomposeOneWay(s.decay, s.active, ref, halfRef)
 	for _, i := range s.active {
 		b := s.resolveConn(i)
 		if b == nil {
 			continue
 		}
-		updated := false
-		if i == ref {
-			b.fwdOneWayUS.Store(halfRef)
-			b.retOneWayUS.Store(halfRef)
-			updated = true
-		} else {
-			if v, ok := s.decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-				b.fwdOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
-				updated = true
-			}
-			if v, ok := s.decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-				b.retOneWayUS.Store(subClamp(oneWayUS(v), halfRef))
-				updated = true
-			}
+		if f, ok := fwdX[i]; ok {
+			b.fwdOneWayUS.Store(f)
 		}
-		if updated {
-			b.probeUpdatedAt.Store(nowMs)
+		if r, ok := retX[i]; ok {
+			b.retOneWayUS.Store(r)
 		}
+		b.probeUpdatedAt.Store(nowMs)
 	}
 }
 
@@ -463,18 +460,26 @@ func (s *rttProbeScheduler) anchorHalfRef(ref int) uint64 {
 	return 0
 }
 
-// subClamp 计算 a-b 且保证非零：0 是“未收敛”哨兵，不能被一个合法的
-// 零差值占用。仅当矩阵反转（锚定被低估/瞬时乱序采样）时才落到 1µs 地板，
-// 正常样本保留真实量级，否则所有方向都被压成 1µs、argmin 退化。
+// subClamp 计算 a-b，返回该方向相对锚定的单向时延（µs）。
+//
+// 注意：已不再用于探针分解——decomposeOneWay 用独立有符号相对解替代，使
+// 100% 方向可探测（不再把"比锚定快"的方向压成 0）。此函数保留供通用
+// saturating 减法用途（b>=a 返回 0），测试仍覆盖其行为。
+//
+// 返回 0 表示“低于锚定精度/不可测”，而不是 1µs 伪值：当 b>=a（矩阵反转，
+// 该方向时延不比参考连接大，即它比 ref 更快或与之持平）时，我们无法给出
+// 一个有物理意义的下界——真实差值≤0，任何正值都是编造。0 同时是调用方
+// 的“未收敛/不可测”哨兵（backendOneWayUS 的 v>0 过滤、前端 r.ret>0 判 '-'），
+// 使选路回退到 min_rtt/2 地板、显示层显示 '-' 而非伪造的 1ms。
+//
+// 注意：旧实现把反转压成 1µs，前端 max(1,·) 会把它显示成“回程 1ms”，
+// 且 adaptiveBackendOneWayUS 会把 1µs 当真实值用于回程选路（超快路径抢槽位），
+// 两处都是失真。改为 0 后由调用方统一按“不可测”处理。
 func subClamp(a, b uint64) uint64 {
-	if b > a {
-		return 1
+	if b >= a {
+		return 0
 	}
-	d := a - b
-	if d == 0 {
-		d = 1
-	}
-	return d
+	return a - b
 }
 
 // oneWayUS 把 ns 量级的探测样本换算成 µs：探针采样（recvNS-sendTS）与
@@ -493,23 +498,78 @@ func decayedMinUpdate(cur uint64, elapsedNS int64, sample uint64, decayPerSecNS 
 	return cur
 }
 
-// recomputeOneWay 纯函数：由 decay 矩阵 + 锚定计算 fwd/ret（供测试）。
-// 返回每 index 的 fwd/ret；ref 本身 = halfRef。
-func recomputeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwd, ret map[int]uint64) {
-	fwd = make(map[int]uint64, len(active))
-	ret = make(map[int]uint64, len(active))
+// decomposeOneWay 核心分解：由 decay 矩阵 + 锚定计算每条连接有测量值的
+// 去/回程单向时延（µs）。返回两个 map，仅包含"该方向已有探针测量"的连接。
+//
+// 以 ref 对称基准（halfRef）锚定，独立解出每条连接的去/回程相对量：
+//
+//	fwd_i = decay[(i,ref)] - halfRef   （以 ref 回程 B_ref=halfRef 为基准）
+//	ret_i = decay[(ref,i)] - halfRef   （以 ref 去程 F_ref=halfRef 为基准）
+//
+// ref 自身 = halfRef。相对量可为负（该方向比 ref 对称基准更快），保留真实
+// 相对序（选路 argmin 依赖）。最后整体加一个公共偏移 δ，使所有有测量方向
+// 显示值 ≥1µs——100% 方向可探测，不再像旧 subClamp 那样把"比基准快"压成 0。
+//
+// 公共偏移 δ 的必要性：单靠跨路径探针无法解出 ref 的不对称度（F→F+c, B→B-c
+// 下 decay 矩阵不变），这是物理信息论极限；选 δ 使最小有测量方向=1µs，得到
+// "最小非负相对表示"。δ 同时加给所有连接的 fwd 与 ret，相对序与选路不受
+// 影响；代价是自洽 fwd+ret=RTT 被放宽 +2δ（δ 通常 ≤halfRef，仅当有连接远快
+// 于 ref 时显著，此时面板以可探测的相对量为准——选路只依赖相对序）。
+func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwdX, retX map[int]uint64) {
+	fwdX = make(map[int]uint64, len(active))
+	retX = make(map[int]uint64, len(active))
+
+	// 独立有符号相对量（可为负），同时追踪全局最小值。
+	var globalMin *int64
+	set := func(m *map[int]int64, i int, v int64) {
+		(*m)[i] = v
+		if globalMin == nil || v < *globalMin {
+			nv := v
+			globalMin = &nv
+		}
+	}
+	f := make(map[int]int64, len(active))
+	r := make(map[int]int64, len(active))
 	for _, i := range active {
 		if i == ref {
-			fwd[i] = halfRef
-			ret[i] = halfRef
+			set(&f, i, int64(halfRef))
+			set(&r, i, int64(halfRef))
 			continue
 		}
 		if v, ok := decay[[2]uint32{uint32(i), uint32(ref)}]; ok {
-			fwd[i] = subClamp(v, halfRef)
+			set(&f, i, int64(oneWayUS(v))-int64(halfRef))
 		}
 		if v, ok := decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
-			ret[i] = subClamp(v, halfRef)
+			set(&r, i, int64(oneWayUS(v))-int64(halfRef))
 		}
+	}
+
+	// 公共偏移 δ：所有有测量方向发布值 ≥1µs。
+	delta := int64(0)
+	if globalMin != nil && *globalMin < 1 {
+		delta = 1 - *globalMin
+	}
+
+	for i, v := range f {
+		fwdX[i] = uint64(v + delta)
+	}
+	for i, v := range r {
+		retX[i] = uint64(v + delta)
+	}
+	return fwdX, retX
+}
+
+// recomputeOneWay 纯函数：由 decay 矩阵 + 锚定计算 fwd/ret（供测试）。
+// 与 recomputeAll 相同的 decomposeOneWay 分解。
+func recomputeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef uint64) (fwd, ret map[int]uint64) {
+	fwdX, retX := decomposeOneWay(decay, active, ref, halfRef)
+	fwd = make(map[int]uint64, len(active))
+	ret = make(map[int]uint64, len(active))
+	for i, v := range fwdX {
+		fwd[i] = v
+	}
+	for i, v := range retX {
+		ret[i] = v
 	}
 	return fwd, ret
 }

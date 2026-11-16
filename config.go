@@ -431,6 +431,12 @@ func (c *Config) Validate() error {
 	if psk == "" {
 		return fmt.Errorf("psk is required; generate a high-entropy random secret")
 	}
+	// 最小 16 字节（128 位熵下限）。PSK 是隧道唯一的认证与加密输入，短密钥
+	// 可被离线暴力破解；长度校验基于 trim 后的有效字节（首尾空格不贡献熵）。
+	// 推荐 32+ 字节随机；此处只设下限，上界由用户自行把握。
+	if len(psk) < 16 {
+		return fmt.Errorf("psk must be at least 16 bytes (got %d); generate a high-entropy random secret", len(psk))
+	}
 	switch strings.ToLower(psk) {
 	case "quic_secret", "change-me", "change-me-please", "replace-with-a-random-secret":
 		return fmt.Errorf("psk uses a known placeholder; replace it with a high-entropy random secret")
@@ -555,6 +561,12 @@ func (c *Config) Validate() error {
 			if len(cleaned) != 64 {
 				return fmt.Errorf("client.cert_sha256 must be 64 hex chars (sha256)")
 			}
+		}
+		// insecure=true 跳过系统 CA 校验；若无 cert_sha256 指纹锁定，对端证书
+		// 完全不受验证，任何能劫持连接的中间人都能伪装服务端。强制要求两者
+		// 二选一：要么走系统 CA（insecure=false），要么显式锁定证书指纹。
+		if c.Client.Insecure && c.Client.CertSHA256 == "" {
+			return fmt.Errorf("client.insecure=true requires client.cert_sha256 (disable insecure or pin the server certificate fingerprint)")
 		}
 	}
 	// 调度/FEC 策略字段是全局的（client 上行 / server 下行都用），对所有 mode 校验。

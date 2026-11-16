@@ -116,7 +116,7 @@ func TestPickParityBackendAutoStrategy(t *testing.T) {
 }
 
 func TestConfigFecStrategyValidation(t *testing.T) {
-	base := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 2}}
+	base := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 2}}
 	base.applyDefaults()
 	if base.FecStrategy != string(FecStrategyAuto) {
 		t.Fatalf("applyDefaults should normalize empty fec_strategy to auto, got %q", base.FecStrategy)

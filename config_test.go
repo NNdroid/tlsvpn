@@ -16,9 +16,9 @@ import (
 )
 
 func TestMergeConfigRejectsTrailingJSON(t *testing.T) {
-	old := &Config{Mode: "client", PSK: "old-secret", Addr: "127.0.0.1:4000"}
+	old := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000"}
 	old.applyDefaults()
-	posted := json.RawMessage(`{"mode":"client","psk":"new-secret","addr":"127.0.0.1:4000"} {}`)
+	posted := json.RawMessage(`{"mode":"client","psk":"test-only-high-entropy-secret","addr":"127.0.0.1:4000"} {}`)
 	if _, _, err := mergeAndValidateConfig(old, posted, false, nil, nil); err == nil {
 		t.Fatal("config endpoint must reject a second trailing JSON value")
 	}
@@ -68,7 +68,7 @@ func writeTempConfig(t *testing.T, content string) string {
 func TestLoadConfigFileValid(t *testing.T) {
 	p := writeTempConfig(t, `{
 		"mode": "client",
-		"psk": "my-secret",
+		"psk": "test-only-high-entropy-secret",
 		"addr": "1.2.3.4:4000",
 		"encrypt": true,
 		"web": {"addr": "127.0.0.1:8080", "auth": "admin:pw"},
@@ -82,7 +82,7 @@ func TestLoadConfigFileValid(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.PSK != "my-secret" || cfg.Client.Conns != 4 || cfg.Client.FecGroup != 8 {
+	if cfg.PSK != "test-only-high-entropy-secret" || cfg.Client.Conns != 4 || cfg.Client.FecGroup != 8 {
 		t.Fatalf("字段解析不符: %+v", cfg)
 	}
 	if cfg.Client.SNI != "www.cloudflare.com" {
@@ -128,7 +128,7 @@ func TestLoadConfigBadMode(t *testing.T) {
 }
 
 func TestValidateServerBadCIDR(t *testing.T) {
-	cfg := &Config{Mode: "server", PSK: "k", Addr: ":4000",
+	cfg := &Config{Mode: "server", PSK: "test-only-high-entropy-secret", Addr: ":4000",
 		Server: ServerConfig{V4CIDR: "not-a-cidr", V6CIDR: "fd00::/64"}}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err == nil {
@@ -137,7 +137,7 @@ func TestValidateServerBadCIDR(t *testing.T) {
 }
 
 func TestValidateWebAuthFormat(t *testing.T) {
-	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000",
+	cfg := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000",
 		Web: WebConfig{Addr: ":8080", Auth: "no-colon-here"}}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err == nil {
@@ -146,7 +146,7 @@ func TestValidateWebAuthFormat(t *testing.T) {
 }
 
 func TestValidateCertSHA256Length(t *testing.T) {
-	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000",
+	cfg := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000",
 		Client: ClientConfig{CertSHA256: "aabb"}}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err == nil {
@@ -155,6 +155,53 @@ func TestValidateCertSHA256Length(t *testing.T) {
 	cfg.Client.CertSHA256 = strings.Repeat("ab", 32)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("64 位 hex 指纹应通过: %v", err)
+	}
+}
+
+// TestValidateInsecureRequiresCertSHA256 验证 insecure=true 的安全约束：
+// 跳过系统 CA 校验却未锁定证书指纹，等于完全不验证对端身份，存在中间人
+// 风险，必须在配置期就拒绝；提供 cert_sha256 后应通过。
+func TestValidateInsecureRequiresCertSHA256(t *testing.T) {
+	base := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000",
+		Client: ClientConfig{Insecure: true}}
+	base.applyDefaults()
+	if err := base.Validate(); err == nil {
+		t.Fatal("insecure=true 且无 cert_sha256 应校验失败（防中间人）")
+	}
+	// 显式锁定指纹后放行。
+	base.Client.CertSHA256 = strings.Repeat("ab", 32)
+	if err := base.Validate(); err != nil {
+		t.Fatalf("insecure=true + cert_sha256 应通过: %v", err)
+	}
+	// insecure=false 时无需指纹（走系统 CA），不应被该约束拦截。
+	base.Client.Insecure = false
+	base.Client.CertSHA256 = ""
+	if err := base.Validate(); err != nil {
+		t.Fatalf("insecure=false 无需指纹应通过: %v", err)
+	}
+}
+
+// TestValidatePSKMinLength 验证 PSK 最小长度安全约束：<16 字节的弱密钥被拒，
+// ≥16 字节通过。短 PSK 是隧道唯一认证/加密输入，可被离线暴力破解。
+func TestValidatePSKMinLength(t *testing.T) {
+	cfg := &Config{Mode: "client", Addr: "1.2.3.4:4000"}
+	cfg.applyDefaults()
+
+	for _, short := range []string{"", "short", "123456789012345"} { // 0/5/15 字节
+		cfg.PSK = short
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("PSK %q (len=%d) 应校验失败", short, len(short))
+		}
+	}
+
+	// 恰好 16 字节通过；首尾空格不贡献有效熵，trim 后 <16 仍拒绝。
+	cfg.PSK = "0123456789abcdef"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("16 字节 PSK 应通过: %v", err)
+	}
+	cfg.PSK = "  0123456789ab  " // trim 后 12 字节
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("trim 后不足 16 字节应校验失败（空格不贡献熵）")
 	}
 }
 
@@ -261,7 +308,7 @@ func TestValidateNetifdInterfaceManager(t *testing.T) {
 }
 
 func TestValidateBrutalBounds(t *testing.T) {
-	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
+	cfg := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
 	cfg.applyDefaults()
 	cfg.BrutalUp = maxBrutalRateMbps + 1
 	if err := cfg.Validate(); err == nil {

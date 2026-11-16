@@ -266,8 +266,6 @@ func init() { padModeCode.Store(padCodeBucket) }
 // 策略真正变化时清零填充累计：两种策略的线路长度分布完全不同，混在一个
 // 累计里会让"填充开销"既不代表旧策略也不代表新策略。
 func setPadMode(mode string) string {
-	padStatsMu.Lock()
-	defer padStatsMu.Unlock()
 	actual := padModeBucket
 	if mode == padModeOff {
 		actual = padModeOff
@@ -281,7 +279,7 @@ func setPadMode(mode string) string {
 	}
 	padWireC.v.Store(0)
 	padPadC.v.Store(0)
-	padStatsEpoch++
+	padStatsEpoch.Add(1)
 	return actual
 }
 
@@ -311,10 +309,14 @@ type padCounter struct {
 	_pad [56]byte
 }
 
-var padStatsMu sync.Mutex
-var padStatsEpoch uint64
+// padStatsEpoch 是填充策略代际号。setPadMode 在策略变化时递增并清零累计；
+// 写入方先捕获当前代际，写入前用原子的 Load 复核，跨策略周期的写入被丢弃。
+// 原实现用 padStatsMu 全局锁保护该代际号，但 padWireC/padPadC 本身已是原子
+// 计数器，锁只串行化代际号读改写——改成原子后热路径每批省去 2 次全局锁
+// （recordPadBytes 捕获代际 + recordPadBytesAt 复核各一次）。
+var padStatsEpoch atomic.Uint64
 
-func padAccountingEpoch() uint64 { padStatsMu.Lock(); defer padStatsMu.Unlock(); return padStatsEpoch }
+func padAccountingEpoch() uint64 { return padStatsEpoch.Load() }
 
 var (
 	padWireC padCounter // 已发出记录的线路字节：10B 帧头 + 负载 + 填充
@@ -325,17 +327,13 @@ var (
 // Epoch guards keep writes assembled before a policy change out of the new period.
 func recordPadBytes(wire, pad uint64) { recordPadBytesAt(wire, pad, padAccountingEpoch()) }
 func recordPadBytesAt(wire, pad, epoch uint64) {
-	padStatsMu.Lock()
-	defer padStatsMu.Unlock()
-	if epoch != padStatsEpoch {
+	if epoch != padStatsEpoch.Load() {
 		return
 	}
 	padWireC.v.Add(wire)
 	padPadC.v.Add(pad)
 }
 func padStatsSnapshot() (wire, pad uint64) {
-	padStatsMu.Lock()
-	defer padStatsMu.Unlock()
 	return padWireC.v.Load(), padPadC.v.Load()
 }
 
@@ -456,6 +454,9 @@ func generatePadding(min, max int) string {
 const (
 	// maxWireDataLen 数据帧线路负载上限（帧头 4B 长度字段的合法性边界）
 	maxWireDataLen = 65535 * 2
+	// maxWirePadLen 帧头 2B padLen 字段的合法上限（uint16）。填充混淆用于
+	// 隐藏真实负载长度；线路帧的完整长度 = rawDataLen + padLen。
+	maxWirePadLen = 0xffff
 	// maxHandshakeDataLen 认证前首帧上限。合法握手 JSON < 2KB；不设限的话
 	// 攻击者用 10 字节帧头声明 131070 长度即可把扫描缓冲扩到 131KB/连接，
 	// 预认证并发连接无上限，构成内存放大。
@@ -468,18 +469,29 @@ type FrameScanner struct {
 	offset int
 	// maxDataLen 当前允许的帧负载上限：认证前的握手帧用小上限，认证通过后
 	// 恢复线路全量上限（见 SetMaxDataLen）。
-	maxDataLen   int
+	maxDataLen int
+	// maxTotalLen 当前允许的完整线路帧上限（rawDataLen+padLen）。认证前与
+	// maxDataLen 同为小值，防攻击者用 padLen 字段绕过 dataLen 上限撑大缓冲；
+	// 认证后放开到 maxWireDataLen+maxWirePadLen，容纳合法 jumbo 帧+填充。
+	maxTotalLen   int
 	lastWireSize uint64 // complete record consumed by the last successful ReadFrame
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
 	// 初始缓冲 16KB 覆盖典型 MTU 帧的聚合；大帧按需翻倍增长。旧值 70KB 对
 	// 1.5KB 帧是 45 倍冗余，多连接下白占内存并放大 GC 扫描。
-	return &FrameScanner{r: r, buf: make([]byte, 0, maxHandshakeDataLen), maxDataLen: maxWireDataLen}
+	return &FrameScanner{r: r, buf: make([]byte, 0, maxHandshakeDataLen),
+		maxDataLen: maxWireDataLen, maxTotalLen: maxWireDataLen + maxWirePadLen}
 }
 
 // SetMaxDataLen 调整帧负载上限（认证前收紧、认证后放开的配对使用）
 func (fs *FrameScanner) SetMaxDataLen(n int) { fs.maxDataLen = n }
+
+// SetMaxTotalLen 调整完整线路帧上限（rawDataLen+padLen）。认证前收紧到
+// maxHandshakeDataLen（握手帧不含填充），认证后放开到 maxWireDataLen+
+// maxWirePadLen。必须与 SetMaxDataLen 配对调用，否则 padLen 可绕过
+// dataLen 上限导致预认证缓冲放大。
+func (fs *FrameScanner) SetMaxTotalLen(n int) { fs.maxTotalLen = n }
 
 // BufferedFrameReady reports whether ReadFrame can consume one more complete
 // frame without another socket/TLS read. RX producers use this to flush a partial
@@ -491,13 +503,23 @@ func (fs *FrameScanner) BufferedFrameReady() bool {
 		return false
 	}
 	rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
-	if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+	padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
+	if fs.frameLenExceedsLimit(rawDataLen, padLen) {
 		// Let ReadFrame report the protocol error immediately rather than delaying
 		// the current batch in an attempt to coalesce with malformed input.
 		return false
 	}
-	padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
 	return available >= headerSize+int(rawDataLen)+padLen
+}
+
+// frameLenExceedsLimit 校验帧头声明的 rawDataLen 与 padLen 是否超出当前
+// 上限：rawDataLen 受 maxDataLen 约束，rawDataLen+padLen 受 maxTotalLen 约束。
+// 认证前两者同为小值，攻击者无法用 padLen 字段绕过 dataLen 上限撑大缓冲。
+func (fs *FrameScanner) frameLenExceedsLimit(rawDataLen uint32, padLen int) bool {
+	if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+		return true
+	}
+	return uint64(rawDataLen)+uint64(padLen) > uint64(fs.maxTotalLen)
 }
 
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
@@ -512,10 +534,10 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
 			seq := binary.BigEndian.Uint32(fs.buf[fs.offset+6 : fs.offset+10])
 
-			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+			if fs.frameLenExceedsLimit(rawDataLen, padLen) {
 				fs.buf = fs.buf[:0]
 				fs.offset = 0
-				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
+				return nil, 0, fmt.Errorf("invalid frame data length: %d (pad %d)", rawDataLen, padLen)
 			}
 			dataLen := int(rawDataLen)
 			totalLen := dataLen + padLen
@@ -555,10 +577,10 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 		if available >= HeaderSize {
 			rawDataLen := binary.BigEndian.Uint32(fs.buf[fs.offset : fs.offset+4])
 			padLen := int(binary.BigEndian.Uint16(fs.buf[fs.offset+4 : fs.offset+6]))
-			if uint64(rawDataLen) > uint64(fs.maxDataLen) {
+			if fs.frameLenExceedsLimit(rawDataLen, padLen) {
 				fs.buf = fs.buf[:0]
 				fs.offset = 0
-				return nil, 0, fmt.Errorf("invalid frame data length: %d", rawDataLen)
+				return nil, 0, fmt.Errorf("invalid frame data length: %d (pad %d)", rawDataLen, padLen)
 			}
 			frameCap := uint64(fs.offset) + HeaderSize + uint64(rawDataLen) + uint64(padLen)
 			if frameCap > uint64(requiredCap) {

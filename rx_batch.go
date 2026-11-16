@@ -74,7 +74,7 @@ func newRXSessionWorker(reorder *ReorderBuffer) *rxSessionWorker {
 	}
 	w := &rxSessionWorker{reorder: reorder, queue: make(chan rxSessionWork, rxSessionQueueDepth), closed: make(chan struct{}), done: make(chan struct{})}
 	w.generation.Store(1)
-	go w.run()
+	goSafe(w.run)
 	return w
 }
 func (w *rxSessionWorker) enqueue(work rxSessionWork) bool {

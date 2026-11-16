@@ -120,7 +120,7 @@ func TestValidateSourceRules(t *testing.T) {
 // TestClientPolicyRoutingConfigValidation fwmark_priority 是 uint32；负值与
 // 超出回绕值都要被拦下，且错误信息里带上字段名便于用户定位。
 func TestClientPolicyRoutingConfigValidation(t *testing.T) {
-	cfg := &Config{Mode: "client", PSK: "k", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
+	cfg := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "1.2.3.4:4000", Client: ClientConfig{Conns: 1}}
 	cfg.applyDefaults()
 	cfg.Client.Fwmark = 256
 	cfg.Client.FwmarkPriority = 1000

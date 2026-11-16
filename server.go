@@ -93,7 +93,7 @@ func NewVSwitch() *VSwitch {
 		vs.shards[i] = &VSwitchShard{macTable: make(map[macKey]*macEntry)}
 	}
 	vs.coarseSec.Store(1)
-	go vs.runCoarseClockAndPurge()
+	goSafe(vs.runCoarseClockAndPurge)
 	return vs
 }
 
@@ -1226,7 +1226,12 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	srv.tap = tap
 
 	tapBackend := make(chan *VPNFrameBatch, 32)
+	// startServer 退出（ctx 取消）时关闭 tapBackend，让上面 for range 的消费
+	// goroutine 正常退出，避免 goroutine 泄漏。defer 逆序执行：tapPort.Close
+	// 在 close(tapBackend) 之前，确保不再有发送者才关 channel（防 send-on-closed）。
+	defer close(tapBackend)
 	tapPort := NewAsyncPort(ctx, tapPortID)
+	defer tapPort.Close()
 	tapPort.RegisterOwnedBackend(tapBackend, new(uint32))
 	// tapPort 是本机 TAP 侧端口：调度/FEC 策略字段同样作用于它（与 per-session
 	// port 一致），保证服务端所有发送方向策略统一。cfg 已过 applyDefaults，值合法。
@@ -1236,7 +1241,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	srv.vswitch.AddPort(tapPort)
 
-	go func() {
+	goSafe(func() {
 		for batch := range tapBackend {
 			for _, vf := range batch.Frames {
 				if len(vf.Data) > 0 {
@@ -1251,9 +1256,9 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 			}
 			putOwnedVPNFrameBatch(batch)
 		}
-	}()
+	})
 
-	go func() {
+	goSafe(func() {
 		readSize, pooledRead := tapReadBufferSize(cfg.Tap)
 		if pooledRead {
 			log.Debugf("[Server] TAP zero-copy read enabled (read buffer=%d bytes)", readSize)
@@ -1282,7 +1287,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 				srv.vswitch.ProcessFrame(tapPortID, buf[:rn])
 			}
 		}
-	}()
+	})
 
 	tlsConfig := getServerTLSConfig(cfg.Server.Cert, cfg.Server.Key)
 	tcpAddr, err := net.ResolveTCPAddr("tcp", cfg.Addr)
@@ -1322,7 +1327,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 
 	srv.installTrafficAccounting(dailyTraffic)
 	if cfg.Web.Addr != "" {
-		go startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg)
+		goSafe(func() { startWebServer(cfg.Web.Addr, srv, nil, cfg.Web.Auth, cfg.Web.Cert, cfg.Web.Key, cfg) })
 	}
 	log.Infof("VPN Server listening on %s (TCP TLS, ALPN: h2)", cfg.Addr)
 
@@ -1373,7 +1378,7 @@ func (s *Server) publicMCPDispatcher() *publicMCPDispatcher {
 
 // serveListener 阻塞接受连接直到 ctx 取消。独立成函数以便测试进程内启动。
 func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, tlsConfig *tls.Config) {
-	go func() { <-ctx.Done(); listener.Close() }()
+	goSafe(func() { <-ctx.Done(); listener.Close() })
 	limiter := &connectionLimiter{byIP: make(map[string]int)}
 
 	for {
@@ -1396,7 +1401,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 			continue
 		}
 
-		go func(c *net.TCPConn) {
+		goSafe1(func(c *net.TCPConn) {
 			defer limiter.release(c.RemoteAddr())
 			mcpDispatch := srv.publicMCPDispatcher()
 			peekBuf := make([]byte, 1)
@@ -1464,7 +1469,7 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 
 			tlsInfo := tlsHandshakeInfoFromState(tlsConn.ConnectionState(), helloObservation)
 			srv.handleConnection(ctx, prefixConn2, c, tlsInfo)
-		}(conn)
+		}, conn)
 	}
 }
 
@@ -1478,6 +1483,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 首帧是握手 JSON（<2KB）：认证前用小上限，防 10 字节帧头声明 131070
 	// 长度把扫描缓冲扩到 131KB/连接的内存放大
 	scanner.SetMaxDataLen(maxHandshakeDataLen)
+	// 握手帧不含填充：rawDataLen+padLen 同样收紧，防 padLen 绕过 dataLen 上限
+	scanner.SetMaxTotalLen(maxHandshakeDataLen)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	reqData, _, err := scanner.ReadFrame()
 	conn.SetReadDeadline(time.Time{})
@@ -1719,10 +1726,23 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		var icTx, icRx, fecTx, fecRx *innerCipher
 		if encrypt {
 			encAlgo = expectedEncAlgo
-			icTx, _ = newInnerCipherForAlgo(psk, saltB[:], encAlgo) // s2c
-			icRx, _ = newInnerCipherForAlgo(psk, saltA[:], encAlgo) // c2s
-			fecTx, _ = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo)
-			fecRx, _ = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo)
+			// expectedEncAlgo/salt 已在锁外校验为合法，派生理论上不会失败；仍不
+			// 静默忽略——若万一失败则记录并禁用内层加密/FEC（宁可不加密也不发
+			// 送密钥错乱的坏数据），绝不静默回退到未声明的算法。
+			var derr error
+			if icTx, derr = newInnerCipherForAlgo(psk, saltB[:], encAlgo); derr != nil { // s2c
+				log.Errorf("[%s] s2c inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
+				encAlgo = encAlgoNone
+			} else if icRx, derr = newInnerCipherForAlgo(psk, saltA[:], encAlgo); derr != nil { // c2s
+				log.Errorf("[%s] c2s inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
+				encAlgo = encAlgoNone
+			} else if fecTx, derr = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo); derr != nil {
+				log.Errorf("[%s] s2c FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
+				encAlgo = encAlgoNone
+			} else if fecRx, derr = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo); derr != nil {
+				log.Errorf("[%s] c2s FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
+				encAlgo = encAlgoNone
+			}
 		}
 		fecMode := "off"
 		if fecEncK > 0 {
@@ -1917,6 +1937,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	// 响应带协商结果：FEC XOR 分组大小 + 内层加密算法与两个方向的会话盐。
 	// GCM 未启用时不下发盐值（客户端也不启用加密器）。
 	encSalt, encSalt2 := handshakeEncSalts(encAlgo, saltA, saltB)
+	// 服务端视角的客户端来源地址（含 NAT 后出口），随握手返回供客户端展示：
+	// 客户端连接明细的"目标/对端"在直连时是同一个服务器地址，这条才是它
+	// 经网络实际出现在服务端面前的样子，用于确认出口/NAT。
+	if tlsInfo != nil && tcpConn != nil {
+		tlsInfo.ClientAddr = tcpConn.RemoteAddr().String()
+	}
 	// 先完成 TLSVPN 应用层握手，再切 TCP congestion control。Brutal 是数据面
 	// 优化，不应阻塞/拖死客户端等待握手响应。给响应写入本身也加明确超时。
 	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -1984,7 +2010,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	batchCork.BindCarryState(&backend.carryPending)
 	defer batchCork.Close()
 
-	go func() {
+	goSafe(func() {
 		sendBuffer := make([]byte, 0, 64*1024+4096)
 		var txAEADScratch nonceAADScratch
 		keepAliveTicker := time.NewTicker(keepaliveInterval)
@@ -2209,10 +2235,12 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				}
 			}
 		}
-	}()
+	})
 
 	// 认证已通过：恢复数据帧的线路全量上限（jumbo 帧合法）
 	scanner.SetMaxDataLen(maxWireDataLen)
+	// 认证后放开到线路全量上限+最大填充，容纳合法 jumbo 帧与混淆填充
+	scanner.SetMaxTotalLen(maxWireDataLen + maxWirePadLen)
 	var rxBytesBatch, rxPacketsBatch uint64
 	var rxAEADScratch nonceAADScratch
 	session.sessionMu.RLock()

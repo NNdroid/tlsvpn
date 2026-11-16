@@ -37,7 +37,7 @@ func TestQueuePriorityPref(t *testing.T) {
 // 负值与 >maxFramePriority 越界被拒并带字段名。
 func TestConfigPriorityDefaultsAndValidate(t *testing.T) {
 	// nil=未配置：applyDefaults 填充默认 7/5（控制优先）
-	cfg := &Config{Mode: "client", PSK: "test-secret", Addr: "127.0.0.1:4000"}
+	cfg := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000"}
 	cfg.applyDefaults()
 	if cfg.PriorityControl == nil || *cfg.PriorityControl != defaultPriorityControl {
 		t.Fatalf("control default not applied: got %v", cfg.PriorityControl)
@@ -62,7 +62,7 @@ func TestConfigPriorityDefaultsAndValidate(t *testing.T) {
 		{"priority_data", -1},
 		{"priority_data", maxFramePriority + 1},
 	} {
-		c := &Config{Mode: "client", PSK: "test-secret", Addr: "127.0.0.1:4000"}
+		c := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000"}
 		c.applyDefaults()
 		v := bad.val
 		if bad.field == "priority_control" {
@@ -91,7 +91,7 @@ func TestConfigPriorityDefaultsAndValidate(t *testing.T) {
 		{maxFramePriority, 1},
 		{1, maxFramePriority},
 	} {
-		c := &Config{Mode: "client", PSK: "test-secret", Addr: "127.0.0.1:4000"}
+		c := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000"}
 		c.applyDefaults()
 		ctl, dat := ok.control, ok.data
 		c.PriorityControl, c.PriorityData = &ctl, &dat
@@ -102,7 +102,7 @@ func TestConfigPriorityDefaultsAndValidate(t *testing.T) {
 
 	// 显式 0 必须被 applyDefaults 保留：指针非 nil 指向 0，不被覆盖成默认。
 	zero := 0
-	cfg2 := &Config{Mode: "client", PSK: "test-secret", Addr: "127.0.0.1:4000", PriorityControl: &zero, PriorityData: &zero}
+	cfg2 := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000", PriorityControl: &zero, PriorityData: &zero}
 	cfg2.applyDefaults()
 	if cfg2.PriorityControl == nil || *cfg2.PriorityControl != 0 {
 		t.Fatalf("explicit 0 overwritten by defaults: %v", cfg2.PriorityControl)
@@ -116,7 +116,7 @@ func TestConfigPriorityDefaultsAndValidate(t *testing.T) {
 // "priority_control:0" 不能被当成"未配置"覆盖成默认）。omitempty 对指向 0
 // 的非 nil 指针不省略，这是 *int 区别于 int 的关键行为。
 func TestPriorityZeroJSONRoundTrip(t *testing.T) {
-	raw := []byte(`{"mode":"client","psk":"s","addr":"127.0.0.1:4000","priority_control":0,"priority_data":0}`)
+	raw := []byte(`{"mode":"client","psk":"test-only-high-entropy-secret","addr":"127.0.0.1:4000","priority_control":0,"priority_data":0}`)
 	var c Config
 	if err := json.Unmarshal(raw, &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)

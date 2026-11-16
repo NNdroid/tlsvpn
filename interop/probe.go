@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/md5" // UUID v3 is required to reproduce the established client-id namespace.
 	"crypto/rand"
 	"crypto/sha1" // UUID v5 is required by the established client-id derivation.
@@ -135,20 +136,25 @@ func newProbeCipher(psk string, salt []byte, algo int) (*probeCipher, error) {
 	default:
 		return nil, fmt.Errorf("unsupported inner cipher %d", algo)
 	}
-	key := sha256.Sum256([]byte(psk + label))
+	// 与主程序 crypto.go newInnerCipherDomainForAlgo 保持一致的 KDF：
+	// HKDF-SHA256(ikm=psk, salt=encSalt, info=label)。探针不 import 主包，
+	// 必须复制此处，否则无法检测 wire 不兼容。
+	key, err := hkdf.Key(sha256.New, []byte(psk), salt, label, keyLen)
+	if err != nil {
+		return nil, fmt.Errorf("derive probe key: %w", err)
+	}
 	var aead cipher.AEAD
-	var err error
 	switch algo {
 	case 2, 4:
 		var block cipher.Block
-		block, err = aes.NewCipher(key[:keyLen])
+		block, err = aes.NewCipher(key)
 		if err == nil {
 			aead, err = cipher.NewGCM(block)
 		}
 	case 5:
-		aead, err = chacha20poly1305.New(key[:])
+		aead, err = chacha20poly1305.New(key)
 	case 6:
-		aead, err = chacha20poly1305.NewX(key[:])
+		aead, err = chacha20poly1305.NewX(key)
 	}
 	if err != nil {
 		return nil, err

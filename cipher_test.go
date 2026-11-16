@@ -732,7 +732,9 @@ func TestGCM128CrossLanguageGoldenVector(t *testing.T) {
 	const psk = "interop-gcm128-psk"
 	salt, _ := hex.DecodeString("0102030405060708")
 	plain, _ := hex.DecodeString("746c7376706e2d67636d3132382d63726f73732d6c616e67756167652d766563746f72")
-	want, _ := hex.DecodeString("fad2a4db0a2a0d73db601949351e36d354bb4698df7c2f27040f8229960d93d67066fe116d875cb38daa0877f281a3d5fbab9e")
+	// KDF 自 v2 起为 HKDF-SHA256(ikm=psk, salt=encSalt, info=label)，以下为加盐
+	// 派生后的跨语言已知答案向量（Rust 端必须同步复现）。
+	want, _ := hex.DecodeString("85d1c16cb4ff7f1429c7cc4470472e85808d26479439330c1443bcc80d80d927fb612c0d7050ddc8aa5aa08a21e0be7bcc0134")
 	const seq uint32 = 0x01020304
 	wireLen := uint32(len(plain) + aeadTagSize)
 

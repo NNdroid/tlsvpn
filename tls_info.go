@@ -25,6 +25,10 @@ type TLSHandshakeInfo struct {
 	// CertSHA256 是客户端观测到的对端（服务端）证书叶子证书 DER 的 SHA-256
 	// 指纹（hex）。服务端侧无对端证书（未启用 ClientAuth），此字段为空。
 	CertSHA256              string   `json:"cert_sha256,omitempty"`
+	// ClientAddr 是服务端视角看到的客户端来源地址（含 NAT 后的公网出口），
+	// 随握手返回给客户端，供连接明细展示。仅诊断用途，不参与认证/授权。
+	// 服务端自身快照不使用此字段（它已有 remote）。
+	ClientAddr              string   `json:"client_addr,omitempty"`
 	VersionID               uint16   `json:"version_id,omitempty"`
 	Version                 string   `json:"version,omitempty"`
 	CipherSuiteID           uint16   `json:"cipher_suite_id,omitempty"`

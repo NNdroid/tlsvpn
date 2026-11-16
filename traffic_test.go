@@ -131,7 +131,7 @@ func TestTrafficDefaultFileNextToConfig(t *testing.T) {
 }
 
 func TestTrafficConfigValidate(t *testing.T) {
-	cfg := &Config{Mode: "client", Addr: "127.0.0.1:4000", PSK: "k", TrafficDays: 5000}
+	cfg := &Config{Mode: "client", Addr: "127.0.0.1:4000", PSK: "test-only-high-entropy-secret", TrafficDays: 5000}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("traffic_days beyond max must be rejected")

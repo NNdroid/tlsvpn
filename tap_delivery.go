@@ -38,7 +38,7 @@ func newOwnedTapDelivery(ctx context.Context, writer io.Writer, queue int, onWri
 		ch:         make(chan []byte, queue),
 		onWriteErr: onWriteErr,
 	}
-	go d.run()
+	goSafe(d.run)
 	return d
 }
 

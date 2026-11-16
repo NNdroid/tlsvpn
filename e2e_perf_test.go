@@ -125,7 +125,7 @@ func startPerfHarnessWithAlgo(t *testing.T, conns int, fec bool, encrypt bool, e
 	srvAddr := fmt.Sprintf("127.0.0.1:%d", nextPerfPort())
 	h.srvAddr = srvAddr
 	srvCfg := &Config{
-		Mode: "server", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
+		Mode: "server", PSK: "test-only-high-entropy-secret", Tap: "mem", Addr: srvAddr,
 		Mac: "02:00:00:00:00:01", Encrypt: encrypt, EncAlgo: encAlgo,
 		Server: ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"},
 	}
@@ -154,9 +154,9 @@ func startPerfHarnessWithAlgo(t *testing.T, conns int, fec bool, encrypt bool, e
 
 	// ---- client ----
 	cliCfg := &Config{
-		Mode: "client", PSK: "perf-psk", Tap: "mem", Addr: srvAddr,
+		Mode: "client", PSK: "test-only-high-entropy-secret", Tap: "mem", Addr: srvAddr,
 		Mac: "02:00:00:00:00:02", Encrypt: encrypt, EncAlgo: encAlgo,
-		Client: ClientConfig{Conns: conns, FEC: fec, FecGroup: 4, Insecure: true},
+		Client: ClientConfig{Conns: conns, FEC: fec, FecGroup: 4, Insecure: true, CertSHA256: e2eServerCertFingerprint()},
 	}
 	cliCfg.applyDefaults()
 	if err := cliCfg.Validate(); err != nil {

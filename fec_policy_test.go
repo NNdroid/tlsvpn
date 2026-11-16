@@ -17,7 +17,7 @@ import (
 
 // TestServerFecGroupPolicyDefaults 未配置时策略区间即协议边界，行为不变。
 func TestServerFecGroupPolicyDefaults(t *testing.T) {
-	cfg := &Config{Mode: "server", PSK: "fec-policy-psk", Tap: "mem", Addr: "127.0.0.1:0"}
+	cfg := &Config{Mode: "server", PSK: "test-only-high-entropy-secret", Tap: "mem", Addr: "127.0.0.1:0"}
 	cfg.applyDefaults()
 	if cfg.Server.FecGroupMin != fecMinGroup || cfg.Server.FecGroupMax != fecMaxGroup {
 		t.Fatalf("默认策略区间应为 [%d,%d]，实际 [%d,%d]",
@@ -45,7 +45,7 @@ func TestValidateServerFecGroupPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// 先跑默认填充（区间被填成协议边界），再把区间强制改成用例值，
 			// 这样也能覆盖"配置里显式写了越界值"的情形
-			cfg := &Config{Mode: "server", PSK: "fec-policy-psk", Addr: "0.0.0.0:4000",
+			cfg := &Config{Mode: "server", PSK: "test-only-high-entropy-secret", Addr: "0.0.0.0:4000",
 				Server: ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64"}}
 			cfg.applyDefaults()
 			cfg.Server.FecGroupMin, cfg.Server.FecGroupMax = tc.min, tc.max
@@ -63,7 +63,7 @@ func TestValidateServerFecGroupPolicy(t *testing.T) {
 // newFecPolicyServer 起一个只做握手验证的进程内 Server（mem tap）。
 func newFecPolicyServer(t *testing.T, ctx context.Context, min, max int) *Server {
 	t.Helper()
-	cfg := &Config{Mode: "server", PSK: "fec-policy-psk", Tap: "mem", Addr: "127.0.0.1:0",
+	cfg := &Config{Mode: "server", PSK: "test-only-high-entropy-secret", Tap: "mem", Addr: "127.0.0.1:0",
 		Encrypt: false,
 		Server: ServerConfig{V4CIDR: "10.0.0.0/24", V6CIDR: "fd00::/64",
 			FecGroupMin: min, FecGroupMax: max}}
@@ -122,8 +122,8 @@ func rawHandshake(t *testing.T, srv *Server, fec bool, k int) (*HandshakeResp, e
 	req := HandshakeReq{
 		ProtocolVersion: protocolVersion,
 		ClientInstance:  "abcdefghijklmnop",
-		ClientID:        derivedClientID("02:aa:bb:cc:dd:ee", "fec-policy-psk"),
-		PSK:             hashPSK("fec-policy-psk"),
+		ClientID:        derivedClientID("02:aa:bb:cc:dd:ee", "test-only-high-entropy-secret"),
+		PSK:             hashPSK("test-only-high-entropy-secret"),
 		MAC:             "02:aa:bb:cc:dd:ee",
 		Padding:         strings.Repeat("a", 100),
 		FEC:             fec,
@@ -244,7 +244,7 @@ func TestServerFecGroupPolicyHotReload(t *testing.T) {
 	}
 	// 走面板同一条路径（合并 → 校验 → 热更）
 	newCfg, needsRestart, err := mergeAndValidateConfig(srv.cfg.Load(),
-		[]byte(`{"mode":"server","psk":"fec-policy-psk","tap":"mem","addr":"127.0.0.1:0",
+		[]byte(`{"mode":"server","psk":"test-only-high-entropy-secret","tap":"mem","addr":"127.0.0.1:0",
 			"server":{"v4_cidr":"10.0.0.0/24","v6_cidr":"fd00::/64",
 				"fec_group_min":2,"fec_group_max":64}}`), true, srv, nil)
 	if err != nil {

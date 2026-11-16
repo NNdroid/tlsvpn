@@ -169,7 +169,7 @@ func (w *WebManager) rebindIfNeeded() {
 			l = tls.NewListener(l, tlsCfg)
 		}
 		w.listeners = append(w.listeners, &webListener{spec: sp, l: l})
-		go w.serve(l)
+		goSafe1(w.serve, l)
 		log.Infof("[Web] listening on %s (bind=%s, auth=%v, mcp_auth=%s, tls=%v)", addr, cfg.Web.Bind, cfg.Web.Auth != "", normalizeMCPAuthMode(cfg.Web.MCP.AuthMode), tlsCfg != nil)
 	}
 	if len(failed) > 0 && w.onceWarn("listen|"+strings.Join(failed, "|")) {

@@ -194,8 +194,8 @@ func (t *TrafficAccounting) OnConfig(cfg *Config) {
 		t.file = file
 		t.clientFile = clientFile
 		t.loadLocked()
-		go t.loop()
-		go t.recentLoop()
+		goSafe(t.loop)
+		goSafe(t.recentLoop)
 	} else {
 		t.file = file // 热更：下一轮采样落到新路径
 		t.clientFile = clientFile

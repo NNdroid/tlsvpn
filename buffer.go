@@ -148,8 +148,8 @@ func newReorderBuffer(outFunc func([]byte), outOwned bool) *ReorderBuffer {
 		gapWake:    make(chan struct{}, 1),
 		closed:     make(chan struct{}),
 	}
-	go rb.timeoutWorker()
-	go rb.outWorker()
+	goSafe(rb.timeoutWorker)
+	goSafe(rb.outWorker)
 	return rb
 }
 

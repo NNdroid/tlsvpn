@@ -69,11 +69,11 @@ func runApplyConfigPingSubtest(t *testing.T, name string, mutate func(cfg *Confi
 		time.Sleep(500 * time.Millisecond)
 
 		newCfg := &Config{
-			Mode: "client", PSK: "perf-psk", Tap: "mem", Addr: h.srvAddr,
+			Mode: "client", PSK: "test-only-high-entropy-secret", Tap: "mem", Addr: h.srvAddr,
 			Mac: "02:00:00:00:00:02", Encrypt: true,
 			RoutingAlgo: "auto", FecStrategy: "auto", FecNearWindowMs: 10,
 			Client: ClientConfig{
-				Conns: 2, FEC: true, FecGroup: 4, Insecure: true,
+				Conns: 2, FEC: true, FecGroup: 4, Insecure: true, CertSHA256: e2eServerCertFingerprint(),
 			},
 		}
 		newCfg.applyDefaults()

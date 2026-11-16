@@ -33,7 +33,7 @@ func newActorReorderBuffer(outFunc func([]byte), outOwned bool) *ReorderBuffer {
 		gapWake:    make(chan struct{}, 1),
 		closed:     make(chan struct{}),
 	}
-	go rb.outWorker()
+	goSafe(rb.outWorker)
 	return rb
 }
 

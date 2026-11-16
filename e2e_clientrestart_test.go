@@ -124,7 +124,7 @@ func newClientRestartHarness(t *testing.T, tc clientRestartCase) *clientRestartH
 	t.Helper()
 	port := nextPerfPort()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	const psk = "cli-restart-psk"
+	const psk = "test-only-high-entropy-secret"
 
 	srvCtx, srvCancel := context.WithCancel(context.Background())
 	srvCfg := &Config{
@@ -200,7 +200,7 @@ func (h *clientRestartHarness) startClient(mac string) (*Client, *memTap, contex
 	c := &Config{
 		Mode: "client", PSK: h.psk, Tap: "mem", Addr: h.addr, Mac: mac,
 		Encrypt:    h.tc.encrypt,
-		Client:     ClientConfig{Conns: conns, Insecure: true},
+		Client:     ClientConfig{Conns: conns, Insecure: true, CertSHA256: e2eServerCertFingerprint()},
 		SourcePath: h.cfgPath,
 	}
 	c.applyDefaults()

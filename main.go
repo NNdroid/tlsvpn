@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -83,6 +84,38 @@ func (r *logRingBuf) snapshot(after uint64) []logLine {
 		}
 	}
 	return out
+}
+
+// goSafe 启动一个后台 goroutine 并包裹 panic 恢复：VPN 是长期运行、要求高可用
+// 的隧道，任一自启动 goroutine 内的意外 panic（nil 解引用、切片越界、并发 map
+// 写等）都会直接拖垮整个进程。这里记日志并附堆栈，不让单个 goroutine 的缺陷
+// 演变成整条隧道断线。用法：goSafe(func() { ... })。
+func goSafe(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if log != nil {
+					log.Errorf("recovered from panic in background goroutine: %v\n%s", r, debug.Stack())
+				}
+			}
+		}()
+		fn()
+	}()
+}
+
+// goSafe1 是带单参数的 goSafe：把 `go f(x)` 改成 `goSafe1(f, x)`。参数在调用
+// 时立即求值传入，不闭包捕获外层循环变量（避免 Go 循环变量捕获陷阱）。
+func goSafe1[A any](fn func(A), arg A) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if log != nil {
+					log.Errorf("recovered from panic in background goroutine: %v\n%s", r, debug.Stack())
+				}
+			}
+		}()
+		fn(arg)
+	}()
 }
 
 func initLogger(level string) {
