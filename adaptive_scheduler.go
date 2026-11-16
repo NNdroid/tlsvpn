@@ -216,20 +216,20 @@ func (p *AsyncPort) noteInputDequeued(n int) {
 // on AsyncPort.run, so the hot TAP producer only increments inputTotalBytes.
 // After a long idle interval the first new sample replaces (rather than blends
 // with) the old bulk rate, allowing the active set to collapse immediately.
-func (p *AsyncPort) observeInputDemand() uint64 {
+func (p *AsyncPort) observeInputDemand() (uint64, bool) {
 	if p == nil {
-		return 0
+		return 0, false
 	}
 	now := time.Now()
 	total := p.inputTotalBytes.Load()
 	if p.demandSampleAt.IsZero() {
 		p.demandSampleAt = now
 		p.demandSampleTotal = total
-		return p.inputRateBytesPerSec.Load()
+		return p.inputRateBytesPerSec.Load(), false
 	}
 	elapsed := now.Sub(p.demandSampleAt)
 	if elapsed < adaptiveDemandSampleMinInterval {
-		return p.inputRateBytesPerSec.Load()
+		return p.inputRateBytesPerSec.Load(), false
 	}
 	delta := total - p.demandSampleTotal
 	inst := uint64(0)
@@ -245,7 +245,7 @@ func (p *AsyncPort) observeInputDemand() uint64 {
 	}
 	p.demandSampleAt = now
 	p.demandSampleTotal = total
-	return p.inputRateBytesPerSec.Load()
+	return p.inputRateBytesPerSec.Load(), true
 }
 
 func adaptiveActivePathTarget(pressure, demandRate uint64, eligible int) int {
@@ -269,21 +269,28 @@ func adaptiveActivePathTarget(pressure, demandRate uint64, eligible int) int {
 
 func (p *AsyncPort) schedulerPressureFor(backends []*Backend, currentBatchBytes uint64) uint64 {
 	if p != nil {
-		p.observeInputDemand()
-	}
-	pressure := currentBatchBytes
-	if p != nil {
-		pressure += p.inputQueuedBytes.Load()
-	}
-	for _, b := range backends {
-		if b != nil {
-			pressure += b.queuedBytes.Load()
+		if _, resampled := p.observeInputDemand(); resampled {
+			// ETA 遥测与需求采样同频（≥500µs 一次，随负载自适应）：全后端
+			// etaUsec 刷新从"每批 × 每后端 ~5 次原子 RMW"降到采样节奏（高
+			// 负载 ~2000 次/s，低负载本来就不贵）。热数据不受影响——当批
+			// 资格后端仍由 buildEligibleCandidates 每批 Store 最新 ETA。
+			p.publishBaselineETA(backends, currentBatchBytes)
 		}
+		pressure := currentBatchBytes
+		if p != nil {
+			pressure += p.inputQueuedBytes.Load()
+		}
+		for _, b := range backends {
+			if b != nil {
+				pressure += b.queuedBytes.Load()
+			}
+		}
+		if p != nil {
+			p.schedulerPressure.Store(pressure)
+		}
+		return pressure
 	}
-	if p != nil {
-		p.schedulerPressure.Store(pressure)
-	}
-	return pressure
+	return currentBatchBytes
 }
 
 func adaptiveStickySlackUS(rtt uint32) uint64 {
@@ -314,14 +321,26 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		p.activePaths.Store(0)
 		return nil
 	}
+	// 单后端快路径：跳过三遍全量扫描/ETA/排名（每批 ~30 次原子 RMW）。成员
+	// 维护语义与全量管线一致——stalled/队满走 fallbackSinglePath（与管线
+	// healthy==0 分支相同），健康路径 replicate commitSinglePath 的提交动作。
+	if len(backends) == 1 {
+		b := backends[0]
+		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
+			return p.fallbackSinglePath(backends)
+		}
+		b.active.Store(true)
+		b.virtualFinishNS.Store(0)
+		p.activePaths.Store(1)
+		p.preferred.Store(b)
+		return b
+	}
 	current := p.preferred.Load()
-	p.publishBaselineETA(backends, incomingBytes)
 
-	minMeasuredRTT, healthy := scanWarmedMinRTT(backends)
+	minRTT, maxRTT, referenceRate, healthy := scanEnvelope(backends)
 	if healthy == 0 {
 		return p.fallbackSinglePath(backends)
 	}
-	minRTT, maxRTT, referenceRate := buildEnvelope(backends, minMeasuredRTT)
 	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate)
 	p.schedulerScratch = cands
 	if len(cands) == 0 {
@@ -346,6 +365,8 @@ func (p *AsyncPort) feedEncoderPathCount(n int) {
 }
 
 // publishBaselineETA 为所有后端发布保守 ETA 遥测（含当前拥塞的 SRTT 估计）。
+// 调用方负责节流：此函数每跑一遍要对所有后端各做 ~5 次原子 RMW，每批调用
+// 是多路径高 PPS 下的主要每批固定开销之一（见 schedulerPressureFor）。
 func (p *AsyncPort) publishBaselineETA(backends []*Backend, incomingBytes uint64) {
 	for _, b := range backends {
 		if b != nil {
@@ -354,10 +375,14 @@ func (p *AsyncPort) publishBaselineETA(backends []*Backend, incomingBytes uint64
 	}
 }
 
-// scanWarmedMinRTT 只从完全"热身"路径构建 RTT 参考：有 RTT 采样且已承载足够
-// egress 载荷（rateBytesPerSec!=0）才计入，否则测量顺序可能永久压缩候选集。
-func scanWarmedMinRTT(backends []*Backend) (minMeasuredRTT uint32, healthy int) {
-	minMeasuredRTT = ^uint32(0)
+// scanEnvelope 单遍合并原 scanWarmedMinRTT + buildEnvelope：健康计数、热身
+// 最小 RTT、资格包络与参考速率。原先两遍各自重复加载同一批原子（每后端
+// minRTT/rate/cold 各算两次），高 PPS 下是每批的主要固定开销之一。语义逐
+// 字段保留：healthy 只计未阻塞路径；minWarmed 只计有 RTT 且完成热身的健康
+// 路径（否则测量顺序可能永久压缩候选集）；referenceRate 只计包络内（或
+// fairStart）路径；包络排除明显偏离的路径以限界接收端乱序。
+func scanEnvelope(backends []*Backend) (minRTT uint32, maxRTT uint64, referenceRate uint64, healthy int) {
+	minWarmed := ^uint32(0)
 	for _, b := range backends {
 		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
 			continue
@@ -365,36 +390,11 @@ func scanWarmedMinRTT(backends []*Backend) (minMeasuredRTT uint32, healthy int) 
 		healthy++
 		rtt, unknownRTT := adaptiveBackendMinRTT(b)
 		cold := b.rateBytesPerSec.Load() == 0
-		if unknownRTT || cold {
-			continue
-		}
-		if rtt < minMeasuredRTT {
-			minMeasuredRTT = rtt
+		if !unknownRTT && !cold && rtt < minWarmed {
+			minWarmed = rtt
 		}
 	}
-	return minMeasuredRTT, healthy
-}
-
-// fallbackSinglePath 无健康路径时退化为首条后端，重置活跃/债务状态。
-func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
-	b := backends[0]
-	if b != nil {
-		for _, x := range backends {
-			if x != nil {
-				x.active.Store(x == b)
-				x.virtualFinishNS.Store(0)
-			}
-		}
-		p.activePaths.Store(1)
-		p.preferred.Store(b)
-	}
-	return b
-}
-
-// buildEnvelope 计算近 MinRTT 资格包络（maxRTT）与参考速率。min_rtt 是无拥塞
-// 地板，包络用它排除明显偏离的路径以限界接收端乱序。
-func buildEnvelope(backends []*Backend, minMeasuredRTT uint32) (minRTT uint32, maxRTT uint64, referenceRate uint64) {
-	minRTT = minMeasuredRTT
+	minRTT = minWarmed
 	if minRTT == ^uint32(0) {
 		minRTT = adaptiveUnknownRTTUS
 	}
@@ -419,7 +419,23 @@ func buildEnvelope(backends []*Backend, minMeasuredRTT uint32) (minRTT uint32, m
 			referenceRate = rate
 		}
 	}
-	return minRTT, maxRTT, referenceRate
+	return minRTT, maxRTT, referenceRate, healthy
+}
+
+// fallbackSinglePath 无健康路径时退化为首条后端，重置活跃/债务状态。
+func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
+	b := backends[0]
+	if b != nil {
+		for _, x := range backends {
+			if x != nil {
+				x.active.Store(x == b)
+				x.virtualFinishNS.Store(0)
+			}
+		}
+		p.activePaths.Store(1)
+		p.preferred.Store(b)
+	}
+	return b
 }
 
 // buildEligibleCandidates 构建候选集：资格包络 + stall/队满排除，按策略算主排名键。

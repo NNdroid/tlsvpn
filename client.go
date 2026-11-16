@@ -547,9 +547,14 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 	if batch == nil {
 		return
 	}
+	// 只在快照读取时持读锁；派发、FEC parity 与拥塞退避全部使用快照。
+	// ownedCh 从不关闭（UnregisterOwnedBackend 只摘表项，Backend 对象由快照
+	// 持有引用），锁外发送安全。此前整个派发——含最长 5ms 的拥塞自旋——都压
+	// 在 backendsMu 之下：UnregisterOwnedBackend 的写锁被阻塞，且 Go RWMutex
+	// 写者等待期间新读者也排队，重连风暴会反压入口队列（结构性放大器）。
 	p.backendsMu.RLock()
-	defer p.backendsMu.RUnlock()
 	backends := p.backends
+	p.backendsMu.RUnlock()
 	if len(backends) == 0 {
 		p.dropN(len(batch.Frames))
 		freeOwnedVPNFrameBatch(batch)
@@ -568,14 +573,32 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 		p.fecTXArmed.Store(p.encoder.multipath && p.encoder.armed)
 		best := dataBest
 		p.dropN(sendOwnedBatchToAnyFenced(p, backends, best, batch))
-		for _, par := range parities {
-			if len(backends) < 2 {
+		if len(backends) < 2 {
+			// 单路径：encoder 已旁路，parities 恒空；防御性释放。
+			for _, par := range parities {
 				putFrame(par)
-				continue
 			}
-			p.paritySent.Add(1)
+		} else if len(parities) > 0 {
+			// 同一次 flush 的 parity 合并为单个 owned batch：此前每份 parity
+			// 各自走"取批次对象→入队→记账"，K=4 时每 4 个数据帧多一整套批次
+			// 开销。目标仍由 pickParityBackend 轮转选择（每次 dispatch 旋转
+			// 一步，跨批均匀分布）。
 			target := p.pickParityBackend(backends, best)
-			p.dropN(sendOwnedFrameTo(target, VPNFrame{Seq: 0, Data: par}))
+			p.paritySent.Add(uint64(len(parities)))
+			pbatch := getOwnedVPNFrameBatch()
+			for _, par := range parities {
+				appendOwnedVPNFrame(pbatch, VPNFrame{Seq: 0, Data: par})
+			}
+			n := pbatch.Bytes
+			target.addQueuedBytes(n)
+			if tryQueueOwnedBatch(target, pbatch) {
+				target.fecAssignedBytes.Add(n)
+				target.fecAssignedBatches.Add(1)
+			} else {
+				target.completeQueuedBytes(n)
+				p.dropN(len(pbatch.Frames))
+				freeOwnedVPNFrameBatch(pbatch)
+			}
 		}
 		clear(parities)
 		p.parityScratch = parities[:0]
