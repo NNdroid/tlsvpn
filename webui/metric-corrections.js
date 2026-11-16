@@ -86,6 +86,12 @@
       const d = q.txDropPct;
       out.push(chip(t('ov.drop_pct'), d.toFixed(3) + '%', d > 1 ? 'bad' : (d > 0 ? 'warn' : 'good')));
     }
+    // reorder gap 超时冲刷：乱序严重度的直接信号（后端 reorder.timeout_flushes），
+    // >0 才占位，说明有帧等到了 50ms 窗口上限才放行。
+    const ro = data && data.reorder ? data.reorder : {};
+    if (num(ro.timeout_flushes) > 0) {
+      out.push(chip(t('ov.tflush'), fmtNum(ro.timeout_flushes), 'warn'));
+    }
     const fec = data && data.fec ? data.fec : {};
     if (fec.enabled && q.fecRecoveryPct !== null) {
       const p = q.fecRecoveryPct;
@@ -211,8 +217,11 @@
     return out;
   };
 
-  schedulerCell = function (s) {
+  schedulerCell = function (s, stalled) {
     if (!s) return '<span class="dim">-</span>';
+    // stalled 必须保留：连接被调度器判定不健康时独立于 active/standby 展示。
+    // 此前本覆盖丢掉了第二参数，失效连接显示成普通待命（回归）。
+    if (stalled) return '<div class="sched-cell"><span class="badge b-off" title="' + esc(t('sched.stalled_tip')) + '">' + esc(t('sched.stalled')) + '</span><small class="dim">' + esc(t('sched.stalled_note')) + '</small></div>';
     const cls = s.active ? 'b-on' : 'b-off';
     const state = s.active ? t('sched.active') : t('sched.standby');
     const capacity = num(s.rate_mbps);
@@ -221,16 +230,24 @@
     const share = sampled ? num(s._share_pct).toFixed(1) + '%' : '-';
     const batchRate = sampled ? num(s._batch_ps).toFixed(num(s._batch_ps) < 10 ? 1 : 0) + '/s' : '-';
     const eta = fmtSchedulerEta(num(s._queue_eta_us));
+    // 双向时钟偏移 θ/U（schedulerConnJSON，ns/µs）：只在收敛时显示。θ 的可信度
+    // 直接决定 fwd/ret 单向拆分的置信度，是判断探针读数能不能当真用的关键。
+    // θ ns→µs 后走 fmtMsUs；U 本身已是 µs。符号显式带出（偏移可负）。
+    let clock = '';
+    if (s.clock_offset_converged && s.clock_offset_ns !== undefined) {
+      const thUS = Number(s.clock_offset_ns) / 1000; // ns→µs（可为小数/负数）
+      clock = ' · θ ' + fmtMsUs(thUS) + 'ms ± U ' + fmtMsUs(num(s.clock_offset_unc_us)) + 'ms';
+    }
     const meta = t('sched.queue') + ' ' + fmtBytes(num(s.queued_bytes)) + ' · ' +
       t('sched.assign') + ' ' + alloc + ' (' + share + ') · ' +
       t('sched.capacity') + ' ' + (capacity ? capacity.toFixed(capacity < 10 ? 1 : 0) + ' Mbps' : '-') + ' · ' +
       t('sched.qeta') + ' ' + eta + ' · ' + t('sched.batches') + ' ' + batchRate +
-      (s.carry_pending ? ' · ' + t('sched.carry') : '');
+      (s.carry_pending ? ' · ' + t('sched.carry') : '') + clock;
     const totalBytes = num(s.assigned_bytes) + num(s.fec_assigned_bytes);
     const totalBatches = num(s.assigned_batches) + num(s.fec_assigned_batches);
     const tip = t('sched.cumulative') + ': ' + fmtBytes(totalBytes) + ' / ' + totalBatches + ' ' + t('sched.batch_unit') +
       ' | DATA ' + fmtBytes(num(s.assigned_bytes)) + ' / ' + num(s.assigned_batches) +
-      ' | FEC ' + fmtBytes(num(s.fec_assigned_bytes)) + ' / ' + num(s.fec_assigned_batches);
+      ' | FEC ' + fmtBytes(num(s.fec_assigned_bytes)) + ' / ' + num(s.fec_assigned_batches) + clock;
     return '<div class="sched-cell" title="' + esc(tip) + '"><span class="badge ' + cls + '">' + esc(state) + '</span><small class="dim">' + esc(meta) + '</small></div>';
   };
 })();

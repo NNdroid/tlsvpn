@@ -168,8 +168,18 @@
     credential.value=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
     credential.type='text';toEditor();
     q('mcp-credential-status').textContent=lang().generated;
+    // 生成后短暂可见方便复制/核对，随后自动回到密文；用户手动点过👁则尊重
+    // 手动状态，失焦也立即收起。绝不把 32 字节凭据永久明文留在屏幕上。
+    clearTimeout(revealTimer);
+    revealTimer=setTimeout(hideCredential,20000);
   };
-  q('mcp-secret-show').onclick=()=>{credential.type=credential.type==='password'?'text':'password';};
+  let revealTimer=null;
+  function hideCredential(){
+    clearTimeout(revealTimer);revealTimer=null;
+    if(credential.type==='text'&&!credential.matches(':focus'))credential.type='password';
+  }
+  credential.addEventListener('blur',hideCredential);
+  q('mcp-secret-show').onclick=()=>{clearTimeout(revealTimer);credential.type=credential.type==='password'?'text':'password';};
   q('mcp-path-regen').onclick=()=>{
     const bytes=new Uint8Array(10);crypto.getRandomValues(bytes);
     path.value='/'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');

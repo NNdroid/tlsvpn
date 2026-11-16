@@ -397,8 +397,10 @@ type runtimeNegJSON struct {
 	TLS             *TLSHandshakeInfo `json:"tls,omitempty"`
 	Brutal          brutalInfoJSON    `json:"brutal"`
 	// 策略路由生效状态。fwmark>0 但这里为 false 就意味着规则没装进内核，
-	// 隧道在线而本机不通，只能靠面板看到。
-	PolicyRouting    bool   `json:"policy_routing,omitempty"`
+	// 隧道在线而本机不通，只能靠面板看到。用 *bool 而非 bool+omitempty：
+	// bool 的 omitempty 会把 false 整个字段省掉，前端"未生效"三分支
+	// （true/false/缺省=未配置）永远收不到 false，失败被当成未配置静默跳过。
+	PolicyRouting    *bool  `json:"policy_routing,omitempty"`
 	PolicyRoutingErr string `json:"policy_routing_error,omitempty"`
 }
 
@@ -1289,7 +1291,9 @@ func (c *Client) negSnapshot() runtimeNegJSON {
 	// 只在配了 fwmark 或 source_rules 时报状态：没配的时候这一栏不显示，
 	// 免得"未生效"被误读成配置错误。
 	if lv != nil && (lv.fwmark > 0 || len(lv.sourceRules) > 0) {
-		n.PolicyRouting, n.PolicyRoutingErr = c.policyRoutingResult()
+		pr, prErr := c.policyRoutingResult()
+		n.PolicyRouting = &pr
+		n.PolicyRoutingErr = prErr
 	}
 	return n
 }

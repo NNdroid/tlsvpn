@@ -93,10 +93,13 @@
       while(myGen===generation){
         const part=await reader.read();
         if(part.done)break;
-        buf+=dec.decode(part.value,{stream:true}).replace(/\r\n/g,'\n');
-        let cut;
-        while((cut=buf.indexOf('\n\n'))>=0){
-          const block=buf.slice(0,cut);buf=buf.slice(cut+2);
+        // 不按 chunk 做行尾归一：\r 若恰落在块边界、\n 在下一块开头，按块替换
+        // 会留下 \r\n\r\n，而帧分隔只认 \n\n —— 流会永久卡死。先拼接，再用
+        // /\r?\n\r?\n/ 找完整帧边界，块边界上的任何行尾组合都安全。
+        buf+=dec.decode(part.value,{stream:true});
+        let m;
+        while((m=/\r?\n\r?\n/.exec(buf))!==null){
+          const block=buf.slice(0,m.index);buf=buf.slice(m.index+m[0].length);
           if(!block||block[0]===':')continue;
           const frame=parseBlock(block);
           if(TYPES.indexOf(frame.event)>=0)applyFrame(frame.event,frame.data);

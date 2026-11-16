@@ -107,14 +107,21 @@
     Array.from(fec.options).forEach(o=>{o.textContent=c.fecs[o.value]||o.value;});
   }
   function parseEditor(){try{return JSON.parse(editor.value||'{}');}catch(_){return null;}}
+  // optionValue 在 options 里线性找值：不能用 querySelector('option[value="…"]')，
+  // JSON 里用户可控的值拼进属性选择器（含引号）会抛 SyntaxError 把整个加载炸掉。
+  function optionValue(sel,v){
+    if(v===undefined||v===null)return false;
+    v=String(v);
+    return Array.from(sel.options).some(function(o){return o.value===v;});
+  }
   function updateNearVisibility(){root.querySelectorAll('[data-fec-near]').forEach(el=>{el.style.display=fec.value==='near'?'':'none';});}
   function fromEditor(){
     const cfg=parseEditor();if(!cfg)return false;
     // 三字段在 Config 顶层（全局，client 上行 / server 下行共用）。
     const av=cfg.routing_algo;
-    algo.value=(av&&algo.querySelector('option[value="'+av+'"]'))?av:'';
+    if(av&&optionValue(algo,av))algo.value=String(av);
     const fv=cfg.fec_strategy;
-    fec.value=(fv&&fec.querySelector('option[value="'+fv+'"]'))?fv:'';
+    if(fv&&optionValue(fec,fv))fec.value=String(fv);
     windowEl.value=(cfg.fec_near_window_ms>=1&&cfg.fec_near_window_ms<=100)?String(cfg.fec_near_window_ms):'';
     updateNearVisibility();return true;
   }

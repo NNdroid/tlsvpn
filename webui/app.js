@@ -69,6 +69,15 @@ function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'<
   if(s==='connecting')return '<span class="badge b-dup">'+t('st.connecting')+'</span>';
   return '<span class="badge b-off">'+(s||'-')+'</span>';}
 function shortId(id,n){return id.length>n?id.slice(0,n)+'…':id;}
+// fmtMsUs 把 µs 精度的时延转成可读 ms 文本，自适应小数位：µs 数据被整数 ms
+// （round(us/1000)）压掉小数后，亚毫秒路径（LAN/回环，真实 0.2-0.9ms）会全部
+// 显示成"1 ms"——旧 max(1,·) 地板把伪值从 1µs 换成了 1ms。这里 ≥100ms 取整数、
+// ≥10ms 一位、≥1ms 两位、<1ms 三位小数（保留 µs 分辨率），Number() 去尾零。
+// 调用方负责 0=未收敛哨兵（显示 '-'），本函数只管 >0 的数值。
+function fmtMsUs(us){
+  const ms=us/1000,d=ms>=100?0:ms>=10?1:ms>=1?2:3;
+  return String(Number(ms.toFixed(d)));
+}
 function esc(x){return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\x22/g,'&quot;').replace(/\x27/g,'&#39;');}
 // hi 在已转义的文本上高亮首个命中（查询词为小写）；无命中原样返回
 function hi(s,q){
@@ -81,10 +90,13 @@ function showPane(id){
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('on'));
   document.getElementById('pane-'+id).classList.add('on');
   moveTabInd();
-  // 事件在后台一直攒着，面板不在前台时不渲染；切过来补一次全量绘制
+  // 事件在后台一直攒着，面板不在前台时不渲染；切过来补一次全量绘制。
+  // 诊断/安全/拓扑同理：stats 帧只渲染可见面板，这里补切页后的那次。
   if(id==='events')evRender(false);
-  if(id==='events')evRender(false);
-  if(id==='sec'||id==='topo'){if(lastStats){renderSec(lastStats);renderTopo(lastStats);}}
+  if(id==='diag'||id==='sec'||id==='topo'){if(lastStats){
+    if(id==='diag')renderDiag(lastStats);
+    if(id==='sec'||id==='topo'){renderSec(lastStats);renderTopo(lastStats);}
+  }}
   if(id==='settings')loadConfig();
   // 刚显示的面板之前在 display:none 里量不到宽度，按钮的 min-width 还是 0
   syncSelects();
@@ -818,7 +830,7 @@ const SORTCOLS={
   conns:{
     owner:function(r){return r.owner;},target:function(r){return r.target||'';},serverSeen:function(r){return r.serverSeen||'';},remote:function(r){return r.remote||'';},
     rtt:function(r){return r.rtt;},tx:function(r){return r.tx;},rx:function(r){return r.rx;},
-    txs:function(r){return r.sx;},rxs:function(r){return r.sr;},age:function(r){return r.age;}
+    txs:function(r){return r.sx;},rxs:function(r){return r.sr;},age:function(r){return r.age;},retries:function(r){return r.retries||0;}
   },
   traffic:{
     date:function(r){return r.date;},up:function(r){return r.up;},down:function(r){return r.down;},
@@ -1001,14 +1013,14 @@ function applyStats(data){
     document.getElementById('pps-up').innerText=Math.round(isServer?ppsRx:ppsTx).toLocaleString();
     document.getElementById('pps-down').innerText=Math.round(isServer?ppsTx:ppsRx).toLocaleString();
     const m=data.mem||{};
-    document.getElementById('mem').innerHTML=(m.heap_alloc_mb||0).toFixed(1)+'<small> MB</small>';
+    document.getElementById('mem').innerHTML=(m.heap_alloc_mb||0).toFixed(1)+'<small> MB</small>'+(m.sys_mb?'<small class="dim"> / sys '+m.sys_mb.toFixed(0)+'</small>':'');
     document.getElementById('goroutines').innerText=m.num_goroutine||0;
 
     if(data.ip_pool){document.getElementById('ippool-card').style.display='';
       document.getElementById('ippool-kpi').innerHTML=data.ip_pool.v4_used+'<small> / '+data.ip_pool.v4_total+'</small>';
       document.getElementById('v6used').innerText=data.ip_pool.v6_used;}
 
-    const meta=[];if(data.enc_algo===2)meta.push('AES-256-GCM');else if(data.enc_algo===4)meta.push('AES-128-GCM');
+    const meta=[];if(data.enc_algo!==undefined&&data.enc_algo!==0)meta.push(encName(data.enc_algo));
     if(data.fec_mode&&data.fec_mode!=='off')meta.push('FEC '+data.fec_mode);
     document.getElementById('meta').innerText=meta.join(' · ');
 
@@ -1048,8 +1060,8 @@ function renderClientsTable(data){
       '<td class="num">'+fmtBytes(r.c.tx_bytes)+'</td><td class="num">'+fmtBytes(r.c.rx_bytes)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
       '<td class="hide-sm">'+badge(r.c.fec)+'</td><td class="hide-sm">'+encBadge(r.c.enc_algo)+'</td>'+
-      '<td>'+(data.mode==='server'?'<button class="btn danger sm" onclick="kickClient(\''+r.id+'\')">'+t('th.kick')+'</button>'+
-        '<button class="btn ghost sm" onclick="banClient(\''+r.id+'\',0)">'+t('th.ban')+'</button>':'-')+'</td></tr>';
+      '<td>'+(data.mode==='server'?'<button class="btn danger sm" data-act="kick" data-id="'+esc(r.id)+'">'+t('th.kick')+'</button>'+
+        '<button class="btn ghost sm" data-act="ban" data-id="'+esc(r.id)+'">'+t('th.ban')+'</button>':'-')+'</td></tr>';
   }).join('')||emptyTableRow('clients',12,all);
   setCount('client-count',f,total,all);
   renderPager('clients',total);
@@ -1068,6 +1080,9 @@ function peerSummary(p){
   const a=[];
   if(p.hostname)a.push(p.hostname);
   const impl=[p.implementation,p.version].filter(Boolean).join(' ');if(impl)a.push(impl);
+  // 构建 commit/时间：版本排障时对齐两端二进制（同一 version 不同 commit 是常见坑）
+  if(p.git_commit)a.push(String(p.git_commit).slice(0,7));
+  if(p.build_time)a.push(p.build_time);
   const plat=[p.os,p.os_version,p.arch].filter(Boolean).join(' ');if(plat)a.push(plat);
   if(p.kernel)a.push('kernel '+p.kernel);
   return a.join(' · ');
@@ -1084,7 +1099,10 @@ function certCell(c){
     +(c.not_after?' <span class="mono" style="color:var(--sub)">'+esc(c.not_after)+'</span>':'')
     +(c.self_signed?' <span class="badge b-dup">self-signed</span>':'');
 }
-function encName(a){return a===2?'AES-256-GCM':(a===4?'AES-128-GCM':(a===0?'none (TLS only)':String(a)));}
+// encName/encLabel 与 encBadge 的算法名保持同一映射（encBadge 是唯一权威）：
+// 此前这里缺 5/6 分支，ChaCha20 会话显示成裸数字/"off"（明文），是错误读数。
+function encLabel(a){return a===2?'AES-256-GCM':a===4?'AES-128-GCM':a===5?'ChaCha20-Poly1305':a===6?'XChaCha20-Poly1305':'off';}
+function encName(a){return a===0?'none (TLS only)':(a===null||a===undefined)?String(a):encLabel(a);}
 function rateRange(lo,hi2){if(!lo&&!hi2)return '-';return (lo===hi2?String(lo):lo+'~'+hi2)+' Mbps';}
 function renderStatus(data){
   const sys=data.system||{},neg=data.negotiate||{},b=neg.brutal||{},tls=neg.tls||{},cfg=data.cfg||{},peer=data.peer||{};
@@ -1100,13 +1118,15 @@ function renderStatus(data){
     [t('stt.sys.cfgpath'),mtxt(sys.cfg_path||'-')],
     [t('stt.sys.ver'),mtxt(data.version||'-')+' · '+fmtDur(data.uptime_sec||0)],
   ];
-  // 系统指标尽力而为：Linux 才有负载/内存/文件描述符，缺位不占行
-  if(sys.load)sysRows.push([t('stt.sys.load'),'<span class="mono">'+sys.load.one.toFixed(2)+' / '+sys.load.five.toFixed(2)+' / '+sys.load.fifteen.toFixed(2)+'</span>']);
-  if(sys.mem)sysRows.push([t('stt.sys.mem'),'<span class="mono">'+fmtBytes(sys.mem.used_mb*1048576)+' / '+fmtBytes(sys.mem.total_mb*1048576)+'</span> ('+Math.round(sys.mem.used_mb/sys.mem.total_mb*100)+'%)']);
+  // 系统指标尽力而为：Linux 才有负载/内存/文件描述符，缺位不占行。
+  // 数值逐字段兜底：一帧里单个缺失字段不能把整帧渲染炸掉（catch 只能兜住
+  // 整个 applyStats，会让后续的 conns/status/diag 全部不渲染）。
+  if(sys.load)sysRows.push([t('stt.sys.load'),'<span class="mono">'+Number(sys.load.one||0).toFixed(2)+' / '+Number(sys.load.five||0).toFixed(2)+' / '+Number(sys.load.fifteen||0).toFixed(2)+'</span>']);
+  if(sys.mem)sysRows.push([t('stt.sys.mem'),'<span class="mono">'+fmtBytes((sys.mem.used_mb||0)*1048576)+' / '+fmtBytes((sys.mem.total_mb||0)*1048576)+'</span> ('+(sys.mem.total_mb?Math.round((sys.mem.used_mb||0)/sys.mem.total_mb*100)+'%':'-')+')']);
   if(sys.fd_open)sysRows.push([t('stt.sys.fd'),'<span class="mono">'+sys.fd_open+'</span>']);
-  if(sys.num_gc)sysRows.push([t('stt.sys.gc'),'<span class="mono">'+sys.num_gc+'</span> / <span class="mono">'+sys.gc_pause_ms.toFixed(1)+' ms</span>']);
+  if(sys.num_gc)sysRows.push([t('stt.sys.gc'),'<span class="mono">'+sys.num_gc+'</span> / <span class="mono">'+Number(sys.gc_pause_ms||0).toFixed(1)+' ms</span>']);
   // 证书有效期与进程 CPU 是"到期前就该看到"的指标，放在宿主块而不是靠翻告警
-  if(data.cpu)sysRows.push([t('stt.sys.cpu_use'),'<span class="mono">'+data.cpu.percent.toFixed(1)+'%</span>']);
+  if(data.cpu)sysRows.push([t('stt.sys.cpu_use'),'<span class="mono">'+Number(data.cpu.percent||0).toFixed(1)+'%</span>']);
   if(data.cert)sysRows.push([t('stt.sys.cert'),certCell(data.cert)]);
   kv(document.getElementById('st-sys'),sysRows);
   // 密钥代际与端到端 shaping 速率是"一条会话"的概念，服务端不消费单一会话，
@@ -1173,9 +1193,17 @@ function renderStatus(data){
   renderRouteStatus(data.routes);
   renderTapStatus(data.tap_link);
   renderOverview(data);
-  renderDiag(data);
-  renderSec(data);
-  renderTopo(data);
+  // 诊断/安全/拓扑是三块大 innerHTML（几百节点），每 2 秒全量重建成本高；
+  // 面板不可见时跳过，切页时由 showPane 补一次渲染（与事件面板同策略）。
+  if(paneOn('diag'))renderDiag(data);
+  if(paneOn('sec'))renderSec(data);
+  if(paneOn('topo'))renderTopo(data);
+}
+
+// paneOn 报告某页签当前是否可见；不存在/隐藏都算不可见。
+function paneOn(id){
+  const p=document.getElementById('pane-'+id);
+  return !!p&&p.classList.contains('on');
 }
 
 // ---------- 诊断中心：健康度环 + 分类自检清单 ----------
@@ -1468,6 +1496,9 @@ function renderPadStatus(p){
   // 多付带宽比：每 1 字节填充，线路上实际传了多少字节
   rows.push([t('ov.pad_ratio'),wire&&pad?mtxt('1 : '+(wire/pad).toFixed(2)):ntxt()]);
   rows.push([t('ov.pad_pct'),'<span class="mono">'+(p.overhead_pct||0).toFixed(1)+'%</span>']);
+  // 填充策略代际：诊断图 pad 曲线的断点正是 epoch 变化触发（web_diagnostics），
+  // 显示当前 epoch 才能对上"为什么这里断线了"。
+  if(p.epoch!==undefined&&p.epoch!==null)rows.push([t('ov.pad_epoch'),'<span class="mono">#'+Number(p.epoch)+'</span>']);
   kv(document.getElementById('st-pad'),rows);
 }
 
@@ -1490,7 +1521,8 @@ function renderProtectStatus(pr){
   if(!psk.length){
     out.push([t('ov.prot.psk'),'<span style="color:var(--sub)">'+t('ov.prot.psk_empty')+'</span>']);
   }else{
-    out.push([t('ov.prot.psk'),'<span class="mono">'+psk.length+' / '+t('ov.prot.window')+'</span>']);
+    // 统计窗口（window_sec）随计数一并显示，否则不知道 count 是多长时间的口径
+    out.push([t('ov.prot.psk'),'<span class="mono">'+psk.length+' / '+t('ov.prot.window')+' '+((psk[0]&&psk[0].window_sec)||0)+'s</span>']);
     psk.slice(0,8).forEach(function(p){
       out.push(['<span class="mono">'+esc(p.remote)+'</span>','<span class="mono">'+(p.count||0)+'</span>']);
     });
@@ -1774,13 +1806,15 @@ function renderConnsTable(data,fresh){
       '<span class="badge b-off">'+esc(r.state||'-')+'</span>';
     // 跨路径 RTT 探针收敛后显示去/回单向时延（fwd/ret，µs→ms），一眼看出方向
     // 不对称：较大的一侧加 .rtt-asym 轻着色。两侧都未收敛（0）退回显示 roundtrip RTT。
-    let rtt=r.rtt>=100000?'-':r.rtt+' ms',rttTip='',rttCls='';
+    // rtt=0 是"尚未采样"（后端无 omitempty，新建连接为 0），与 fwd/ret 同口径
+    // 显示 '-'；>=100000 是未知哨兵。
+    let rtt=r.rtt>0&&r.rtt<100000?r.rtt+' ms':'-',rttTip='',rttCls='';
     if(r.fwd>0||r.ret>0){
-      // 0 仅表示未收敛（无探针样本）：decomposeOneWay 用公共偏移保证所有已
-      // 测量方向都 >0（100% 可探测），不再因"该方向比参考连接快"而压 0。
-      // 未收敛方向显示 '-'，不能显示 0——0 在口径里不是零时延。fwd/ret 为 µs；
-      // 真实亚毫秒值（>0）用 max(1,·) 兜底显示 1，避免与"不可测"混淆。
-      const fw=r.fwd>0?Math.max(1,Math.round(r.fwd/1000)):'-',rt=r.ret>0?Math.max(1,Math.round(r.ret/1000)):'-';
+      // 0 仅表示未收敛（无探针样本）：分解保证所有已测量方向都有非负相对值，
+      // 不再因"该方向比参考连接快"而压 0。未收敛方向显示 '-'，不能显示 0——
+      // 0 在口径里不是零时延。fwd/ret 为 µs，按 fmtMsUs 自适应精度转 ms 显示
+      // （不做 max(1,·) 地板：那会把亚毫秒真实值全部显示成"1 ms"伪读数）。
+      const fw=r.fwd>0?fmtMsUs(r.fwd):'-',rt=r.ret>0?fmtMsUs(r.ret):'-';
       rtt=fw+'/'+rt;
       // tooltip 里 '-' 写成可读词"不可测"，避免用户把 '-' 当零时延或缺失数据。
       // 可测值自带 ms 后缀（模板 {f}/{r} 不再带 ms），不可测值用纯词。
@@ -1791,7 +1825,7 @@ function renderConnsTable(data,fresh){
     }
     // 内核 min_rtt 地板（µs→ms）一并显示在"去/回"旁，收敛与否都给出参考值。
     if(r.minrtt>0){
-      const mn=Math.max(1,Math.round(r.minrtt/1000));
+      const mn=fmtMsUs(r.minrtt);
       rtt+=' <span class="dim">· '+t('ov.mn')+' '+mn+'</span>';
       rttTip+=(rttTip?' · ':'')+t('ov.mn')+' '+mn+' ms';
     }
@@ -1810,7 +1844,7 @@ function renderConnsTable(data,fresh){
     if(r.brutErr){brutTxt=t('st.skip');brutCls='b-dup';brutTip='brutal skipped: '+r.brutErr;}
     else if(r.brut===true){brutTxt=r.up+'↑/'+r.down+'↓';brutCls='b-on';brutTip='brutal shaping '+r.up+' Mbps upstream / '+r.down+' Mbps downstream';}
     const brut='<span class="badge '+brutCls+'">'+brutTxt+'</span>';
-    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn danger sm" onclick="kickClient(\''+r.fullId+'\')">'+t('th.kick')+'</button>':'';
+    const ops=(data.mode==='server'&&r.fullId)?'<button class="btn danger sm" data-act="kick" data-id="'+esc(r.fullId)+'">'+t('th.kick')+'</button>':'';
     const sniMeta=[r.tlsVer,r.tlsCipher,r.tlsAlpn].filter(Boolean).join(' · ');
     // 没错误时不能留空格：esc(undefined) 转成空串，同行其它占位列都是 '-'，
     // 唯独这里是个看得见的洞。
@@ -1821,12 +1855,15 @@ function renderConnsTable(data,fresh){
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(r.cert||'')+'">'+(r.cert?hi(esc(shortId(r.cert,16)),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
-	      '<td class="num dim">'+(r.age?fmtDur(r.age):'-')+'</td>'+
+	      '<td class="num dim">'+(r.age!==undefined?fmtDur(r.age||0):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
 	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecCellTip(r.fec,r.fecStrategy,r.fecNearWindowMs,fecParityPct(r.fecAsg,r.asg),data&&data.fec))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
-      '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td></tr>';
-  }).join('')||emptyTableRow('conns',21,all);
+      '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td>'+
+      // 重连次数（后端 conns[].retries）：>0 才显示，0 涂淡——它是"这条路径
+      // 抖过几次"的直接信号，配合错误列定位不稳定链路。服务端视图无此字段。
+      '<td class="num hide-sm dim">'+(r.retries>0?fmtNum(r.retries):'<span style="color:var(--sub)">0</span>')+'</td></tr>';
+  }).join('')||emptyTableRow('conns',22,all);
   setCount('conn-count',f,total,all);
   renderPager('conns',total);
 }
@@ -2029,13 +2066,30 @@ function renderDrawer(){
     '<div class="dc-sec">'+dcSec(t('dc.connections'),t('dc.conns_n').replace('{n}',String(conns.length)))+connHtml+'</div>'+
     '<div class="dc-sec">'+dcSec(t('dc.security'),t('dc.sec_hint'))+dcKV(sr)+'</div>';
 }
-// 交互：客户端表整行可点开；抽屉内动作按钮用 data-act 委托——
+// 交互：客户端表整行可点开；动作按钮统一 data-act 委托——
 // ClientID 里可能出现引号，拼进 onclick 属性有注入风险，集中委托更稳
 document.getElementById('clients-body').addEventListener('click',function(ev){
+  const b=ev.target.closest('button[data-act]');
+  if(b){
+    const id=b.getAttribute('data-id');
+    const act=b.getAttribute('data-act');
+    if(act==='kick')kickClient(id);
+    else if(act==='ban')banClient(id,0);
+    return;
+  }
   if(ev.target.closest('button'))return;
   const tr=ev.target.closest('tr[data-open]');
   if(!tr)return;
   openClient(tr.getAttribute('data-open'));
+});
+// 连接表操作列（服务端模式的踢出）与封禁表的解封按钮：同一委托纪律
+document.getElementById('conns-body').addEventListener('click',function(ev){
+  const b=ev.target.closest('button[data-act]');
+  if(b&&b.getAttribute('data-act')==='kick')kickClient(b.getAttribute('data-id'));
+});
+document.getElementById('bans-body').addEventListener('click',function(ev){
+  const b=ev.target.closest('button[data-act]');
+  if(b&&b.getAttribute('data-act')==='unban')unban(b.getAttribute('data-id'));
 });
 // 拓扑图里服务端模式的客户端节点同样可点开抽屉（共用 data-open 约定）
 document.getElementById('tpo').addEventListener('click',function(ev){
@@ -2128,7 +2182,7 @@ function renderBansTable(data){
     const id=p[0],left=p[1];
     return '<tr><td class="num dim" title="'+esc(id)+'">'+esc(shortId(id,18))+'</td>'+
       '<td>'+(left===0?'<span class="badge b-dup">'+t('perm')+'</span>':'<span class="badge b-on">'+fmtDur(left)+'</span>')+'</td>'+
-      '<td><button class="btn ghost sm" onclick="unban(\''+id+'\')">'+t('th.unban')+'</button></td></tr>';
+      '<td><button class="btn ghost sm" data-act="unban" data-id="'+esc(id)+'">'+t('th.unban')+'</button></td></tr>';
   }).join('')||emptyRow('bans',3,data.banned?t('no_bans'):t('ov.no_data'));
   renderPager('bans',bans.length);
 }
@@ -2395,7 +2449,7 @@ function scRun(data){
   const nEp=Object.keys(eps).length;
   if(data.mode==='server'){
     if(!cr.length)add('auth','a_epoch','skip',miss);
-    else if(nEp<=1)add('auth','a_epoch','ok','v'+cr[0].session_epoch);
+    else if(nEp<=1)add('auth','a_epoch','ok','v'+(cr[0].session_epoch||0));
     else add('auth','a_epoch','warn',t('sc.kinds').replace('{n}',String(nEp)));
   }else if(np.session_epoch>0)add('auth','a_epoch','ok','v'+np.session_epoch);
   else add('auth','a_epoch','skip',miss);
@@ -2412,7 +2466,7 @@ function scRun(data){
   else add('enc','e_algo','skip',miss);
   if(np.enc_algo===0&&cfg.encrypt===true)add('enc','e_algo_off','warn',t('sc.plaintext'));
   else if(np.enc_algo>0&&cfg.encrypt===true&&np.enc_algo!==cfg.enc_algo)
-    add('enc','e_algo_off','warn',cfg.enc_algo+' → '+np.enc_algo);
+    add('enc','e_algo_off','warn',esc(String(cfg.enc_algo))+' → '+esc(String(np.enc_algo)));
   else if(np.enc_algo>0)add('enc','e_algo_off','ok','v'+np.enc_algo);
   else add('enc','e_algo_off','skip',miss);
   if(cfg.session_encrypt===true)add('enc','e_session','ok',t('stt.yes'));
@@ -2497,7 +2551,7 @@ function scRun(data){
     add('mgmt','m_bind',allIf?'warn':'ok',esc(b));
   }else add('mgmt','m_bind','skip',miss);
   const nr=sm.needs_restart||[];
-  add('mgmt','m_restart',nr.length?'warn':'ok',nr.length?N(nr.length)+' 项':t('stt.no'));
+  add('mgmt','m_restart',nr.length?'warn':'ok',nr.length?t('sc.kinds').replace('{n}',N(nr.length)):t('stt.no'));
   if(ho&&ho.up_error)add('mgmt','ov.hook.fail','warn',esc(ho.up_error.slice(0,40)));
   else add('mgmt','ov.hook.fail','skip',miss);
   add('mgmt','dg.loglvl',(data.log_level||'')==='debug'?'warn':'ok',esc(data.log_level||''));
@@ -2761,7 +2815,7 @@ function tpEndpoints(data){
       const rs=[];
       rs.push([t('tp.target'),'<span class="mono">'+esc(c.target||'-')+'</span>']);
       rs.push([t('tp.state'),'<span class="mono">'+esc(c.state||'-')+'</span>']);
-      rs.push([t('tp.rtt'),'<span class="mono">'+(c.rtt_ms||0)+' ms</span>']);
+      rs.push([t('tp.rtt'),'<span class="mono">'+(c.rtt_ms>0&&c.rtt_ms<100000?c.rtt_ms+' ms':'-')+'</span>']);
       rs.push([t('tp.age'),'<span class="mono">'+fmtDur(c.age_sec||0)+'</span>']);
       rs.push([t('tp.byt'),'<span class="mono">'+fmtBytes(c.tx_bytes||0)+' / '+fmtBytes(c.rx_bytes||0)+'</span>']);
       if(c.last_error)rs.push([t('tp.err'),'<span class="neg">'+esc(c.last_error)+'</span>']);
@@ -2788,7 +2842,7 @@ function tpChain(data){
     if(s.length===2)return s.join('/');
     return t('sc.kinds').replace('{n}',String(s.length));
   };
-  const encS=function(a){return a===2?'AES-256-GCM':(a===4?'AES-128-GCM':'off');};
+  const encS=encLabel;
   const cliArr=function(){const o=data.clients;return o&&Object.prototype.toString.call(o)==='[object Object]'?Object.keys(o):[];};
   const vals=function(k){return uniq(cliArr().map(function(x){return data.clients[x][k];}));};
   const tlsV=uniq(cr.map(function(c){return c.tls_version;}));
@@ -2851,6 +2905,8 @@ function renderTopo(data){
 }
 
 let logSeq=0,logFilter='';
+// 日志 DOM 封顶：事件流有 EV_MAX，日志此前没有——debug 级长跑 DOM 无限增长。
+const LOG_DOM_MAX=500;
 function applyLogs(lines){
   if(!Array.isArray(lines)||!lines.length)return;
   lines=lines.filter(function(l){return l&&l.seq>logSeq;});
@@ -2859,7 +2915,17 @@ function applyLogs(lines){
     if(!lines.length)return;
     const box=document.getElementById('logbox');
     if(box.querySelector('.empty-box'))box.innerHTML='';
-    box.innerHTML+=lines.map(l=>'<div class="ln lv-'+l.level+'"><span class="ts">['+l.time+']</span><span class="lv">'+l.level+'</span><span class="msg">'+esc(l.msg)+'</span></div>').join('');
+    // time/level 一并转义：level 还会被拼进 class，注入会破坏样式隔离。
+    // insertAdjacentHTML 不重解析既有节点（innerHTML+= 会），滚动位置与事件都不丢。
+    box.insertAdjacentHTML('beforeend',lines.map(l=>{
+      const lv=String(l.level||'info');
+      return '<div class="ln lv-'+esc(lv)+'"><span class="ts">['+esc(l.time||'')+']</span><span class="lv">'+esc(lv)+'</span><span class="msg">'+esc(l.msg)+'</span></div>';
+    }).join(''));
+    const extra=box.querySelectorAll(':scope > .ln').length-LOG_DOM_MAX;
+    if(extra>0){
+      const all=box.querySelectorAll(':scope > .ln');
+      for(let i=0;i<extra&&i<all.length;i++)all[i].remove();
+    }
     logSeq=lines[lines.length-1].seq;
     applyLogFilter();
     if(document.getElementById('autoscroll').checked)box.scrollTop=box.scrollHeight;
@@ -2936,7 +3002,12 @@ function applyMcpLogs(lines){
   const box=document.getElementById('mcpbox');
   if(!box)return;
   if(box.querySelector('.empty-box'))box.innerHTML='';
-  box.innerHTML+=lines.map(mcpRow).join('');
+  box.insertAdjacentHTML('beforeend',lines.map(mcpRow).join(''));
+  const extra=box.querySelectorAll(':scope > .ln').length-LOG_DOM_MAX;
+  if(extra>0){
+    const all=box.querySelectorAll(':scope > .ln');
+    for(let i=0;i<extra&&i<all.length;i++)all[i].remove();
+  }
   mcpSeq=lines[lines.length-1].seq;
   applyMcpFilter();
 }
@@ -3112,8 +3183,11 @@ function resetDashboardPeriod(data){
   if(changed){
     prev={};lastT=0;globalPrev=null;prevPps={ok:false};lastSpeeds={};prevConns={};lastConnsT=0;lastConnSpeeds={};
     txHist.length=0;rxHist.length=0;txTimes.length=0;trendData=null;
-    logSeq=0;evSeq=0;evItems=[];
+    logSeq=0;evSeq=0;evItems=[];mcpSeq=0;
     const box=document.getElementById('logbox');if(box)box.innerHTML='';
+    const mbox=document.getElementById('mcpbox');if(mbox)mbox.innerHTML='';
+    // mcpSeq 必须一并归零：服务端在新实例上从 seq 0 重发全量，旧进程的高位
+    // 游标会把新进程所有记录滤掉且永不恢复（与 logSeq/evSeq 同一故障形态）。
   }
   if(data.instance_id)dashboardInstance=data.instance_id;
   if(data.uptime_sec!==undefined)dashboardUptime=data.uptime_sec;
