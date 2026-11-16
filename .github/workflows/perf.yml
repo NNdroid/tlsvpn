@@ -236,7 +236,7 @@ jobs:
           go version -m perf-bin/tlsvpn-candidate > perf-artifacts/selected-buildinfo.txt
           cat perf-artifacts/selected-buildinfo.txt
 
-      - name: Run paired main-off/release-candidate throughput matrix
+      - name: Run paired main-off/release-candidate throughput matrix (2 interleaved rounds)
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -244,28 +244,37 @@ jobs:
           CANDIDATE_RESULTS: ${{ github.workspace }}/perf-artifacts/candidate.tsv
         run: |
           set -euo pipefail
-          for conns in 1 2 4; do
-            for enc in gcm256 gcm128; do
-              for pad in bucket off; do
-                echo "=== main -pgo=off: conns=$conns enc=$enc pad=$pad ==="
-                sudo -E env \
-                  BIN="$MAIN_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
-                  PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
-                  PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
-                  bash scripts/real_tap_perf.sh
-
-                echo "=== selected release candidate: conns=$conns enc=$enc pad=$pad ==="
-                sudo -E env \
-                  BIN="$CANDIDATE_BIN" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
-                  PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
-                  PERF_MIN_MBPS=500 PERF_RESULT_FILE="$CANDIDATE_RESULTS" \
-                  bash scripts/real_tap_perf.sh
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$MAIN_RESULTS"
+          printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$CANDIDATE_RESULTS"
+          for round in 1 2; do
+            # 轮内顺序翻转：固定"main 先、candidate 后"会让后跑的一方系统性
+            # 吞下 CPU 热降频/共享 runner 噪声——同一提交两次运行曾把 FEC 门禁
+            # 摆出 -7.28% 与 -0.83%（纯 webui 提交也触发过 -5.57%）。轮间翻转
+            # + 门禁取每格中位数把这种漂移对消。
+            if [ "$round" -eq 1 ]; then order="main candidate"; else order="candidate main"; fi
+            for conns in 1 2 4; do
+              for enc in gcm256 gcm128; do
+                for pad in bucket off; do
+                  for who in $order; do
+                    if [ "$who" = main ]; then
+                      bin="$MAIN_BIN"; out="$MAIN_RESULTS"; label="main -pgo=off"
+                    else
+                      bin="$CANDIDATE_BIN"; out="$CANDIDATE_RESULTS"; label="selected release candidate"
+                    fi
+                    echo "=== $label (round $round): conns=$conns enc=$enc pad=$pad ==="
+                    sudo -E env \
+                      BIN="$bin" PERF_CONNS="$conns" PERF_ENC_ALGO="$enc" \
+                      PERF_PAD_MODE="$pad" PERF_DIRECTION=both PERF_SECONDS=3 \
+                      PERF_MIN_MBPS=500 PERF_RESULT_FILE="$out" \
+                      bash scripts/real_tap_perf.sh
+                  done
+                done
               done
             done
           done
           sudo chown -R "$USER:$USER" perf-artifacts
 
-      - name: Run paired single-path FEC main-off/release-candidate throughput
+      - name: Run paired single-path FEC main-off/release-candidate throughput (3 interleaved rounds)
         env:
           MAIN_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-main
           CANDIDATE_BIN: ${{ github.workspace }}/perf-bin/tlsvpn-candidate
@@ -276,19 +285,26 @@ jobs:
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$MAIN_RESULTS"
           printf 'conns\tenc_algo\tpad_mode\tdirection\tmbps\n' > "$CANDIDATE_RESULTS"
 
-          echo "=== main -pgo=off: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
-          sudo -E env \
-            BIN="$MAIN_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
-            PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
-            PERF_MIN_MBPS=500 PERF_RESULT_FILE="$MAIN_RESULTS" \
-            bash scripts/real_tap_perf.sh
-
-          echo "=== selected release candidate: conns=1 fec=K4 enc=gcm256 pad=bucket ==="
-          sudo -E env \
-            BIN="$CANDIDATE_BIN" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
-            PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
-            PERF_MIN_MBPS=500 PERF_RESULT_FILE="$CANDIDATE_RESULTS" \
-            bash scripts/real_tap_perf.sh
+          for round in 1 2 3; do
+            case "$round" in
+              1) order="main candidate" ;;
+              2) order="candidate main" ;;
+              *) order="main candidate" ;;
+            esac
+            for who in $order; do
+              if [ "$who" = main ]; then
+                bin="$MAIN_BIN"; out="$MAIN_RESULTS"; label="main -pgo=off"
+              else
+                bin="$CANDIDATE_BIN"; out="$CANDIDATE_RESULTS"; label="selected release candidate"
+              fi
+              echo "=== $label (round $round): conns=1 fec=K4 enc=gcm256 pad=bucket ==="
+              sudo -E env \
+                BIN="$bin" PERF_CONNS=1 PERF_ENC_ALGO=gcm256 PERF_PAD_MODE=bucket \
+                PERF_FEC=true PERF_FEC_GROUP=4 PERF_DIRECTION=both PERF_SECONDS=5 \
+                PERF_MIN_MBPS=500 PERF_RESULT_FILE="$out" \
+                bash scripts/real_tap_perf.sh
+            done
+          done
           sudo chown -R "$USER:$USER" perf-artifacts
 
       - name: Validate release candidate and promotion decision
@@ -296,21 +312,25 @@ jobs:
           python3 - <<'PY'
           import csv
           import math
+          import statistics
           from pathlib import Path
 
           root = Path('perf-artifacts')
           key_fields = ('conns', 'enc_algo', 'pad_mode', 'direction')
 
           def load(path):
+              # TSV 现在含多轮交错样本（主矩阵 2 轮 / FEC 3 轮）：每格收全部
+              # 样本，由 compare 取中位数——单次 3-5s 测量的格级方差 ±5-10%，
+              # 单样本门禁测的是噪声而不是代码。
               out = {}
               with path.open(newline='') as f:
                   for row in csv.DictReader(f, delimiter='\t'):
-                      out[tuple(row[k] for k in key_fields)] = float(row['mbps'])
+                      out.setdefault(tuple(row[k] for k in key_fields), []).append(float(row['mbps']))
               return out
 
           def compare(base_path, cand_path, out_path):
-              base = load(base_path)
-              cand = load(cand_path)
+              base = {k: statistics.median(v) for k, v in load(base_path).items()}
+              cand = {k: statistics.median(v) for k, v in load(cand_path).items()}
               if set(base) != set(cand):
                   raise SystemExit(f'matrix mismatch: {sorted(set(base) ^ set(cand))}')
               rows = []
