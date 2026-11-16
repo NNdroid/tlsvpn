@@ -51,9 +51,12 @@
     const body=document.getElementById('diag-body-'+card);let wrap=document.getElementById('diag-wrap-'+key);
     if(!wrap){wrap=document.createElement('div');wrap.id='diag-wrap-'+key;wrap.innerHTML='<canvas id="diag-'+key+'" height="150"></canvas><div class="legend diagnostic-legend"></div>';body.append(wrap);const canvas=wrap.querySelector('canvas');canvas.addEventListener('pointermove',ev=>{const rect=canvas.getBoundingClientRect(),plot=canvas.diagPlot;if(!plot||!history?.points.length)return;const x=Math.max(0,Math.min(1,(ev.clientX-rect.left-plot.l)/(plot.r-plot.l)));const target=plot.first+x*(plot.last-plot.first);hoverTime=history.points.reduce((best,p)=>Math.abs(p.t-target)<Math.abs(best.t-target)?p:best).t;scheduleDraw();});canvas.addEventListener('pointerleave',()=>{hoverTime=null;scheduleDraw();});}
     const canvas=wrap.querySelector('canvas'),ctx=canvas.getContext('2d'),W=canvas.clientWidth||320,H=150,dpr=window.devicePixelRatio||1;
-    // 位图尺寸只在变化时重设：重设即整块清空位图 + 强制布局失效，每帧 ×12 面板
+    // 位图尺寸只在变化时重设（重设会强制布局失效，每帧 ×12 面板）。但注意：
+    // width/height 赋值同时是 canvas 的清屏手段——尺寸不变而跳过重设时必须
+    // 显式清屏，否则每帧都画在上一帧残影上（轴标签/悬停提示框逐帧堆积成鬼影）。
     const bw=Math.round(W*dpr),bh=Math.round(H*dpr);
     if(canvas.width!==bw||canvas.height!==bh){canvas.width=bw;canvas.height=bh;}
+    ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,canvas.width,canvas.height);
     ctx.setTransform(dpr,0,0,dpr,0,0);ctx.font='10px sans-serif';
     const pts=history?.points||[];let max=1;series.forEach(s=>pts.forEach(p=>{const v=s.value(p);if(v!=null&&Number.isFinite(v))max=Math.max(max,v);}));
     const ticks=[max,max/2,0].map(v=>format(v,unit));const L=Math.ceil(Math.max(...ticks.map(s=>ctx.measureText(s).width)))+14,R=12,T=12,B=24,pw=W-L-R,ph=H-T-B;
