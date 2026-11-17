@@ -169,6 +169,12 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 			t.Errorf("webui/app.js 缺少调度可观测片段 %q", want)
 		}
 	}
+	// 展开态保持：renderSchedLog 每轮轮询整段 innerHTML 重建 details，若不把 open
+	// 属性带回，用户点开 2 秒后就被折回收起（表现为"自动隐藏"）。
+	renderLog := app[strings.Index(app, "function renderSchedLog(data)"):]
+	if !strings.Contains(renderLog, "wasOpen") || !strings.Contains(renderLog, "prev.open") {
+		t.Error("renderSchedLog 未保留 details 展开态（轮询重建会吞掉 open）")
+	}
 	css := readWebUIAsset(t, "webui/style.css")
 	if !strings.Contains(css, ".slog-row") {
 		t.Error("style.css 缺少决策流水行样式")

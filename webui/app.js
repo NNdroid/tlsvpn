@@ -1823,6 +1823,11 @@ function renderSchedLog(data){
   if(!box)return;
   const es=schedLogEntries(data);
   if(!es.length){box.innerHTML='';return;}
+  // 轮询每 2 秒重建本容器。重建前必须留住展开态：details 的 open 属性不在
+  // innerHTML 里就等于每轮都被折回收起——用户刚点开，2 秒后它就自己缩回去，
+  // 看起来像"自动隐藏"。
+  const prev=box.querySelector('details.sched-log');
+  const wasOpen=prev?prev.open:false;
   let rows='';
   for(let i=es.length-1;i>=0;i--){
     const e=es[i];
@@ -1834,7 +1839,7 @@ function renderSchedLog(data){
   }
   const last=es[es.length-1];
   const llab=t('sched.reason_'+last.reason);
-  box.innerHTML='<details class="sched-log"><summary>'+esc(t('sched.log_title')+' · '+
+  box.innerHTML='<details class="sched-log"'+(wasOpen?' open':'')+'><summary>'+esc(t('sched.log_title')+' · '+
     t('sched.latest')+' '+(llab!=='sched.reason_'+last.reason?llab:String(last.reason)))+'</summary>'+rows+'</details>';
 }
 
