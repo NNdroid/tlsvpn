@@ -33,6 +33,17 @@ const elements = {
   'routing-algo': makeSelect(),
   'fec-strategy': makeSelect(),
   'fec-near-window': makeInput(),
+  'sched-envelope': {
+    value: '',
+    options: ['rtt', 'fwd'].map(makeOption),
+    style: {},
+    querySelector(sel) {
+      const m = /^option\[value="(.+)"\]$/.exec(sel);
+      return m ? makeOption(m[1]) : null;
+    },
+    addEventListener() {},
+  },
+  'sched-envelope-window': makeInput(),
 };
 const editor = { value: '', parentNode: { insertBefore() {} } };
 elements['cfg-editor'] = editor;
@@ -70,6 +81,8 @@ editor.value = JSON.stringify({
   routing_algo: 'latency_strict',
   fec_strategy: 'near',
   fec_near_window_ms: 25,
+  sched_envelope: 'fwd',
+  sched_envelope_ms: 35,
 });
 
 // 脚本在 testdata/，目标脚本在 ../webui/（相对本文件）。
@@ -86,19 +99,27 @@ function assert(cond, msg) {
 const algo = elements['routing-algo'];
 const fec = elements['fec-strategy'];
 const windowEl = elements['fec-near-window'];
+const gateEl = elements['sched-envelope'];
+const gateWindowEl = elements['sched-envelope-window'];
 assert(algo.value === 'latency_strict', 'fromEditor reads top-level routing_algo, got "' + algo.value + '"');
 assert(fec.value === 'near', 'fromEditor reads top-level fec_strategy, got "' + fec.value + '"');
 assert(windowEl.value === '25', 'fromEditor reads top-level fec_near_window_ms, got "' + windowEl.value + '"');
+assert(gateEl.value === 'fwd', 'fromEditor reads top-level sched_envelope, got "' + gateEl.value + '"');
+assert(gateWindowEl.value === '35', 'fromEditor reads top-level sched_envelope_ms, got "' + gateWindowEl.value + '"');
 
 // ---- 用例 2：toEditor(true) 写顶层字段（而非 cfg.client） ----
 algo.value = 'min_rtt_adaptive';
 fec.value = 'near';
 windowEl.value = '40';
+gateEl.value = 'fwd';
+gateWindowEl.value = '45';
 changeHandler && changeHandler({ target: algo });
 let out = JSON.parse(editor.value);
 assert(out.routing_algo === 'min_rtt_adaptive', 'toEditor writes top-level routing_algo, got "' + out.routing_algo + '"');
 assert(out.fec_strategy === 'near', 'toEditor writes top-level fec_strategy, got "' + out.fec_strategy + '"');
 assert(out.fec_near_window_ms === 40, 'toEditor writes top-level fec_near_window_ms, got "' + out.fec_near_window_ms + '"');
+assert(out.sched_envelope === 'fwd', 'toEditor writes top-level sched_envelope, got "' + out.sched_envelope + '"');
+assert(out.sched_envelope_ms === 45, 'toEditor writes top-level sched_envelope_ms, got "' + out.sched_envelope_ms + '"');
 assert(out.client === undefined, 'toEditor must NOT create a client block, got ' + JSON.stringify(out.client));
 
 // ---- 用例 3：toEditor 边界值（窗口越界回退 10） ----
@@ -108,6 +129,25 @@ windowEl.value = '500'; // 越界
 changeHandler && changeHandler({ target: windowEl });
 out = JSON.parse(editor.value);
 assert(out.fec_near_window_ms === 10, 'toEditor clamps out-of-range window to 10, got "' + out.fec_near_window_ms + '"');
+
+// ---- 用例 3b：sched_envelope_ms 越界回退 20（fwd 门窗口范围 1-500） ----
+gateWindowEl.value = '9000'; // 越界
+changeHandler && changeHandler({ target: gateWindowEl });
+out = JSON.parse(editor.value);
+assert(out.sched_envelope_ms === 20, 'toEditor clamps out-of-range sched_envelope_ms to 20, got "' + out.sched_envelope_ms + '"');
+gateWindowEl.value = '0'; // 下界外
+changeHandler && changeHandler({ target: gateWindowEl });
+out = JSON.parse(editor.value);
+assert(out.sched_envelope_ms === 20, 'toEditor clamps below-range sched_envelope_ms to 20, got "' + out.sched_envelope_ms + '"');
+
+// ---- 用例 3c：空值不写入非法枚举 ----
+// 真实契约：toEditor 对 select 取值，空值必须落回合法默认 rtt，
+// 而不是把空串写进配置（后端 ValidSchedEnvelope 会拒空串以外的未知值，
+// 但空串会被 applyDefaults 归一——面板侧就该自己兜住）。
+gateEl.value = '';
+changeHandler && changeHandler({ target: gateEl });
+out = JSON.parse(editor.value);
+assert(out.sched_envelope === 'rtt', 'empty sched_envelope must fall back to rtt, got "' + out.sched_envelope + '"');
 
 // ---- 用例 4：zh-TW（繁中）翻译生效 ----
 // documentElement.lang='zh-TW'，translate() 必须用 zh-TW 字典而非回退 en。

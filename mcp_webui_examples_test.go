@@ -65,7 +65,7 @@ func TestWebUIMCPDeployAndAccessPanelEmbedded(t *testing.T) {
 		{"/sse.js", []string{"mcp_logs", "mcp_after", "applyMcpLogs"}},
 		{"/app.js", []string{"applyMcpLogs", "clearMcpLog", "downloadMcpLog", "mcpSeq", "applyModeTabs"}},
 		{"/mcp-settings.js", []string{"mcp-deploy", "mcp-deploy-lock", "applyDeployLock", "deployLocked", "mcp-path", "mcp-path-regen", "deploys"}},
-		{"/scheduler-settings.js", []string{"routing-algo", "fec-strategy", "fec-near-window", "latency_strict", "min_rtt_strict", "roundtrip_strict", "fromEditor", "toEditor"}},
+		{"/scheduler-settings.js", []string{"routing-algo", "fec-strategy", "fec-near-window", "sched-envelope", "sched-envelope-window", "latency_strict", "min_rtt_strict", "roundtrip_strict", "fromEditor", "toEditor"}},
 		{"/i18n.js", []string{"routing_algo", "fec_strategy", "fec_near_window_ms"}},
 	} {
 		rr := httptest.NewRecorder()
