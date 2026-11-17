@@ -143,7 +143,7 @@ func parseClockOffsetFrame(payload []byte) (kind byte, nonce uint32, conn uint32
 	return kind, nonce, conn, sendTS, recvTS, txTS, nil
 }
 
-// isClockOffsetFrame 读循环前置拦截用：payload 是合法时钟偏移帧即返回 true。
+// isClockOffsetFrame 读循环前置分流用：payload 是合法时钟偏移帧即返回 true。
 func isClockOffsetFrame(payload []byte) bool {
 	if len(payload) != clockOffsetWireLen {
 		return false

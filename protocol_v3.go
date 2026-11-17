@@ -46,7 +46,7 @@ func parseActivePathsFrame(payload []byte) (uint16, bool) {
 	return binary.BigEndian.Uint16(payload[1:3]), true
 }
 
-// isActivePathsFrame 快速前置识别（读循环在 FEC 门控之前拦截）。
+// isActivePathsFrame 快速前置识别（读循环在 FEC 门控之前分流认领）。
 func isActivePathsFrame(payload []byte) bool {
 	return len(payload) == activePathsWireLen && payload[0] == controlKindActivePaths
 }

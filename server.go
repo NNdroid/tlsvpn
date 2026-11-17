@@ -431,6 +431,39 @@ type ClientSession struct {
 	conns   map[*connInfo]struct{}
 }
 
+// dispatchRxControlFrame 会话级控制平面分流器（语义与 Client.dispatchRxControlFrame
+// 相同）：按 payload kind 把 seq=0 帧分发给各自的处理器。返回 true 表示帧已被
+// 认领并消费完毕；false 表示无匹配处理器——typed control 未被认领时由调用方
+// 交 FEC 门控按协议违规处理（fail-closed，未知 kind 断链）。
+func (session *ClientSession) dispatchRxControlFrame(frame []byte, connIndex int) bool {
+	// 0x07 active-paths：客户端上行调度当前选中槽位位图。按 connIndex 刷新
+	// 各自的对端活跃时刻，快照按窗口判过期。
+	if isActivePathsFrame(frame) {
+		if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
+			now := time.Now().UnixNano()
+			session.sessionMu.RLock()
+			for conn := range session.conns {
+				if conn.connIndex >= 0 && conn.connIndex < 16 && bm&(1<<uint(conn.connIndex)) != 0 {
+					conn.peerActiveAt.Store(now)
+				}
+			}
+			session.sessionMu.RUnlock()
+		}
+		return true
+	}
+	// 跨路径 RTT 探针/回包：仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
+	if session.rttProbe != nil && isRttProbeFrame(frame) {
+		session.rttProbe.onFrame(frame, connIndex)
+		return true
+	}
+	// 双向时钟偏移探针/回包：同纪律。
+	if session.clockOffset != nil && isClockOffsetFrame(frame) {
+		session.clockOffset.onFrame(frame, connIndex)
+		return true
+	}
+	return false
+}
+
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
 type connInfo struct {
 	tcpObservation atomic.Pointer[tcpSocketSnapshot]
@@ -2398,36 +2431,16 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				frame = plain
 			}
 			if seq == 0 {
-				// 客户端 0x07 active-paths：客户端上行调度当前选中槽位位图。在
-				// FEC 门控之前拦截（无 FEC 会话也可用）；按 connIndex 刷新各自
-				// 的对端活跃时刻，快照按窗口判过期。
-				if isActivePathsFrame(frame) {
-					if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
-						now := time.Now().UnixNano()
-						session.sessionMu.RLock()
-						for conn := range session.conns {
-							if conn.connIndex >= 0 && conn.connIndex < 16 && bm&(1<<uint(conn.connIndex)) != 0 {
-								conn.peerActiveAt.Store(now)
-							}
-						}
-						session.sessionMu.RUnlock()
-					}
+				// 会话级控制平面分流（语义与 Client.dispatchRxControlFrame 相同）：
+				// 0x07 active-paths / RTT 探针 / 时钟偏移是与数据流无关的旁路信号，
+				// 不需要保序/重排/FEC 恢复且无 FEC 会话也存在，必须在 FEC 门控
+				// 之前认领——否则无 FEC 会话会把合法控制帧判成协议违规断链。
+				if session.dispatchRxControlFrame(frame, ci.connIndex) {
 					putFrame(frame)
 					continue
 				}
-				// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
-				// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
-				if session.rttProbe != nil && isRttProbeFrame(frame) {
-					session.rttProbe.onFrame(frame, ci.connIndex)
-					putFrame(frame)
-					continue
-				}
-				// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
-				if session.clockOffset != nil && isClockOffsetFrame(frame) {
-					session.clockOffset.onFrame(frame, ci.connIndex)
-					putFrame(frame)
-					continue
-				}
+				// 未被控制平面认领的 typed control → FEC 门控（其载荷属于 FEC
+				// 会话管线）。
 				if fecDec == nil {
 					putFrame(frame)
 					log.Debugf("[%s] protocol v%d violation: typed control without negotiated FEC", clientID, protocolVersion)

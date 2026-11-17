@@ -265,11 +265,11 @@ func (d *fecDecoder) OnControlWithScratch(payload []byte, scratch *nonceAADScrat
 		d.handleModeControl(ctrl)
 		return nil
 	case controlKindRttProbe, controlKindRttReply:
-		// 探针/回包由读循环在 FEC 门控之前拦截，正常不会到达这里。
+		// 探针/回包由读循环在 FEC 门控之前分流认领，正常不会到达这里。
 		// 防御性 no-op：泄露至此不致命。
 		return nil
 	case controlKindClockProbe, controlKindClockReply:
-		// 时钟偏移探针/回包同样由读循环在 FEC 门控之前拦截，防御性 no-op。
+		// 时钟偏移探针/回包同样由读循环在 FEC 门控之前分流认领，防御性 no-op。
 		return nil
 	default:
 		return fmt.Errorf("unsupported control kind 0x%02x", kind)

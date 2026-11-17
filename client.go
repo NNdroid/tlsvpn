@@ -1062,7 +1062,7 @@ func (p *AsyncPort) publishNearState(b, dataBest *Backend) uint32 {
 // parityNearState near 窗口的三态：schedFlagNearIn=窗口内、schedFlagNearLenient=
 // 探针未收敛的宽松放行、0=窗口外。ok 判定拿到的原始 oneWay 直接复用比较：
 // adaptiveBackendOneWayUS 在已收敛时返回同一原始值（回退链只服务未测路径，
-// 而未测已被 Lenient 提前拦截），不必经 adaptive 再读一轮原子。
+// 而未测已被 Lenient 分支提前认领），不必经 adaptive 再读一轮原子。
 func (p *AsyncPort) parityNearState(b, dataBest *Backend) uint32 {
 	if b == nil || dataBest == nil {
 		return 0
@@ -2250,6 +2250,43 @@ type connSnapshot struct {
 	Stalled bool `json:"stalled"`
 }
 
+// dispatchRxControlFrame 会话级控制平面分流器：按 payload kind 把 seq=0 帧
+// 分发给各自的处理器。返回 true 表示帧已被认领并消费完毕（调用方归还缓冲即
+// 可）；false 表示本端没有匹配的处理器——typed control 未被认领时由调用方
+// 交 FEC 门控按协议违规处理（fail-closed，未知 kind 断链）。
+//
+// 为什么控制平面要前置分流而不是进数据管线：active-paths/RTT 探针/时钟偏移
+// 是旁路信号，不参与保序、重排与 FEC 恢复，且在没有协商 FEC 的会话上同样
+// 存在；放进 FEC 门控之后的统一分发会让无 FEC 会话无法使用它们。
+func (c *Client) dispatchRxControlFrame(frame []byte, connIndex int) bool {
+	// 0x07 active-paths：对端调度器当前选中槽位位图。按本端 conns 表的槽位
+	// 编号刷新各自的对端活跃时刻，快照按窗口判过期。
+	if isActivePathsFrame(frame) {
+		if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
+			now := time.Now().UnixNano()
+			c.connsMu.Lock()
+			for idx, cinfo := range c.conns {
+				if idx >= 0 && idx < 16 && bm&(1<<uint(idx)) != 0 {
+					cinfo.peerActiveAt.Store(now)
+				}
+			}
+			c.connsMu.Unlock()
+		}
+		return true
+	}
+	// 跨路径 RTT 探针/回包：仅在两端握手协商 RTTProbe 后 c.rttProbe 才非空。
+	if c.rttProbe != nil && isRttProbeFrame(frame) {
+		c.rttProbe.onFrame(frame, connIndex)
+		return true
+	}
+	// 双向时钟偏移探针/回包：同纪律。
+	if c.clockOffset != nil && isClockOffsetFrame(frame) {
+		c.clockOffset.onFrame(frame, connIndex)
+		return true
+	}
+	return false
+}
+
 // snapshotConns 汇总所有物理连接明细
 // avgRTT 当前所有物理连接 RTT 的均值（毫秒）；无连接时 0。供趋势采样使用。
 func (c *Client) avgRTT() float64 {
@@ -3186,36 +3223,16 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					frame = plain
 				}
 				if seq == 0 {
-					// 对端 0x07 active-paths：对端调度器当前选中槽位位图。在 FEC
-					// 门控之前拦截（无 FEC 会话也可用）；按本端 conns 表的槽位
-					// 编号刷新各自的对端活跃时刻，快照按窗口判过期。
-					if isActivePathsFrame(frame) {
-						if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
-							now := time.Now().UnixNano()
-							c.connsMu.Lock()
-							for idx, cinfo := range c.conns {
-								if idx >= 0 && idx < 16 && bm&(1<<uint(idx)) != 0 {
-									cinfo.peerActiveAt.Store(now)
-								}
-							}
-							c.connsMu.Unlock()
-						}
+					// 会话级控制平面分流：0x07 active-paths / RTT 探针 / 时钟偏移
+					// 都是与数据流无关的旁路信号（不需要保序/重排/FEC 恢复，且
+					// 无 FEC 会话也存在），因此必须在 FEC 门控之前认领——否则
+					// 无 FEC 会话会把合法控制帧判成协议违规断链。
+					if c.dispatchRxControlFrame(frame, connIndex) {
 						putFrame(frame)
 						continue
 					}
-					// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
-					// 仅在两端握手协商 RTTProbe 后 c.rttProbe 才非空。
-					if c.rttProbe != nil && isRttProbeFrame(frame) {
-						c.rttProbe.onFrame(frame, connIndex)
-						putFrame(frame)
-						continue
-					}
-					// 双向时钟偏移探针/回包：同纪律，在 FEC 门控之前拦截。
-					if c.clockOffset != nil && isClockOffsetFrame(frame) {
-						c.clockOffset.onFrame(frame, connIndex)
-						putFrame(frame)
-						continue
-					}
+					// 未被控制平面认领的 typed control → FEC 门控（其载荷属于
+					// FEC 会话管线）。
 					if !useXorFec || connDecoder == nil {
 						putFrame(frame)
 						errChan <- fmt.Errorf("protocol v%d: unexpected typed control without negotiated FEC", protocolVersion)

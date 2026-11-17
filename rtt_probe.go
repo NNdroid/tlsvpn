@@ -110,7 +110,7 @@ func parseRttProbeFrame(payload []byte) (kind byte, nonce uint32, replyOn uint32
 	return kind, nonce, replyOn, sendTS, nil
 }
 
-// isRttProbeFrame 读循环前置拦截用：payload 是合法探针/回包帧即返回 true。
+// isRttProbeFrame 读循环前置分流用：payload 是合法探针/回包帧即返回 true。
 // 不校验 flags/长度之外的字段，失败一律当作非探针帧（走原有 FEC 控制路径）。
 func isRttProbeFrame(payload []byte) bool {
 	if len(payload) != rttProbeWireLen {

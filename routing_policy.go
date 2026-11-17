@@ -49,7 +49,7 @@ type routingPolicy struct {
 }
 
 // routingAlgoCode 把算法标识映射为 AsyncPort 上存储的 int32 码（热路径零分配读取）。
-// 0 = auto；未知值一律归一化为 0，与校验期拦截相配合。
+// 0 = auto；未知值一律归一化为 0，与校验期拒绝相配合。
 func routingAlgoCode(algo string) int32 {
 	switch RoutingAlgo(algo) {
 	case RoutingAlgoLatencyStrict:
