@@ -55,7 +55,7 @@ function fecParityPct(fecAssigned,assigned){
 }
 // FEC 列 tooltip：分组徽章 + 策略 + parity 占比 + 会话级 recover/lost。
 // fecText 为 "xor K=4" 徽章文本；fecStats 为会话级 {recovered,lost}（或空）。
-function fecCellTip(fecText,strategy,windowMs,parityPct,fecStats){
+function fecCellTip(fecText,strategy,windowMs,parityPct,fecStats,nearState){
   const parts=[];
   if(fecText&&fecText!=='off')parts.push(fecText);
   const s=fecStratTip(strategy,windowMs);
@@ -63,6 +63,12 @@ function fecCellTip(fecText,strategy,windowMs,parityPct,fecStats){
   if(parityPct!==null&&parityPct!==undefined)parts.push(t('fecstrat.parity').replace('{n}',parityPct.toFixed(1)));
   if(fecStats&&(fecStats.recovered||fecStats.lost))
     parts.push(t('fecstrat.rec').replace('{r}',String(fecStats.recovered||0)).replace('{l}',String(fecStats.lost||0)));
+  // near 成员资格三态：窗口内拿到 parity / 探针未收敛的 bootstrap 宽限 / 窗口外。
+  // 后端只在 near 策略下发布该值，auto 策略为空串即不显示。
+  if(nearState){
+    const nl=t('sched.near_'+nearState);
+    parts.push(t('sched.near')+' '+(nl!=='sched.near_'+nearState?nl:nearState));
+  }
   return parts.join(' · ');
 }
 function stBadge(s){if(s==='up')return '<span class="badge b-on">'+t('st.up')+'</span>';
@@ -1025,6 +1031,7 @@ function applyStats(data){
     document.getElementById('meta').innerText=meta.join(' · ');
 
 	renderConnsTable(data,true);renderMacsTable(data);renderBansTable(data);renderTraffic(data);renderStatus(data);
+	renderSchedLog(data);
   }catch(e){console.error('stats render failed',e);}
 }
 
@@ -1739,17 +1746,96 @@ function fmtSchedulerEta(us){
   if(us<1000)return Math.round(us)+' us';
   return (us/1000).toFixed(us<10000?2:1)+' ms';
 }
+function fmtMsUsUS(v){return fmtMsUs(v||0)+' ms';}
+// 被资格门排除的路径其排除原因 token（stalled/queue_full/cap_zero/envelope_out）。
+// 无排除（候选内）返回空串。
+function schedExclReason(s){return (s&&s.exclude_reason)||'';}
 function schedulerCell(s,stalled){
   if(!s)return '<span class="dim">-</span>';
   // 连接被判定为不健康（stalled）：调度器已停止向其分配数据，独立于 active/standby。
   if(stalled)return '<div class="sched-cell"><span class="badge b-off" title="'+esc(t('sched.stalled_tip'))+'">'+esc(t('sched.stalled'))+'</span><small class="dim">'+esc(t('sched.stalled_note'))+'</small></div>';
-  const cls=s.active?'b-on':'b-off';
-  const state=s.active?t('sched.active'):t('sched.standby');
+  const excl=schedExclReason(s);
+  let cls, state;
+  if(excl){
+    cls='b-dup';
+    state=t('sched.excl_'+excl);
+    if(state==='sched.excl_'+excl)state=excl;
+  }else{
+    cls=s.active?'b-on':'b-off';
+    state=s.active?t('sched.active'):t('sched.standby');
+  }
   const rate=Number(s.rate_mbps||0);
-  const meta=t('sched.queue')+' '+fmtBytes(s.queued_bytes||0)+' · '+
+  let meta=t('sched.queue')+' '+fmtBytes(s.queued_bytes||0)+' · '+
     (rate?rate.toFixed(rate<10?1:0)+' Mbps':'-')+' · ETA '+fmtSchedulerEta(s.eta_us||0)+
     (s.carry_pending?' · '+t('sched.carry'):'')+' · '+t('th.tx')+' '+fmtBytes(s.assigned_bytes||0)+' / '+Number(s.assigned_batches||0);
+  // 资格包络：把"去程最快却待命"解释成包络外，而不是选路 bug。上限未建立时不显示
+  // 伪值（后端哨兵折半也会误导）。门维度按端口级 sched_envelope 选择展示哪一组：
+  // rtt 门是往返 min_rtt 区间，fwd 门是去程地板（单值，窗口由配置给）。
+  if(Number(s.group_fwd_floor_us)>0){
+    meta+=' · '+t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us);
+  }else if(Number(s.group_min_rtt_us)>0){
+    const umax=Number(s.group_max_rtt_us);
+    meta+=' · '+t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+(umax>0?'~'+fmtMsUsUS(umax):'');
+  }
+  if(s.near_state)meta+=' · '+t('sched.near')+' '+(t('sched.near_'+s.near_state)!==('sched.near_'+s.near_state)?t('sched.near_'+s.near_state):s.near_state);
   return '<div class="sched-cell"><span class="badge '+cls+'">'+esc(state)+'</span><small class="dim">'+esc(meta)+'</small></div>';
+}
+// schedulerTip 调度单元格悬停说明：排除原因/排名键/包络上下限/粘滞/near 资格。
+// 与 schedulerCell 同口径，放在 <td> 的 title 上（表头不占列宽）。
+function schedulerTip(r){
+  const s=r.sched;
+  if(!s)return '';
+  const parts=[];
+  const excl=schedExclReason(s);
+  if(excl){
+    const lab=t('sched.excl_'+excl);
+    // 比较式按门维度分列：rtt 门比 min_rtt 与上限，fwd 门比去程与地板+窗口。
+    // 两种门量纲不同，不能共用一条文案（fwd 门的下限是相对量、可为负）。
+    const cmpFwd=(s.fwd_rank_known&&Number(s.group_fwd_floor_us)>0)?(t('sched.excl_cmp_fwd').replace('{a}',fmtMsUsUS(s.fwd_rank_us||0)).replace('{b}',fmtMsUsUS(s.group_fwd_floor_us))):'';
+    const cmp=Number(s.min_rtt_us)>0&&Number(s.group_max_rtt_us)>0?(t('sched.excl_cmp').replace('{a}',fmtMsUsUS(s.min_rtt_us)).replace('{b}',fmtMsUsUS(s.group_max_rtt_us))):'';
+    parts.push((lab!=='sched.excl_'+excl?lab:excl)+((cmpFwd||cmp)?' ('+(cmpFwd||cmp)+')':''));
+  }
+  if(s.rank_known)parts.push(t('sched.rank_key')+' '+(Number(s.rank_key_us)>=0?'+':'-')+fmtMsUsUS(Math.abs(Number(s.rank_key_us))));
+  if(Number(s.group_fwd_floor_us)>0){
+    parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us));
+  }else if(Number(s.group_min_rtt_us)>0&&Number(s.group_max_rtt_us)>0)parts.push(t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+'~'+fmtMsUsUS(s.group_max_rtt_us));
+  if(s.sticky_held)parts.push(t('sched.sticky_held'));
+  if(s.near_state){
+    const nl=t('sched.near_'+s.near_state);
+    parts.push(t('sched.near')+' '+(nl!=='sched.near_'+s.near_state?nl:s.near_state));
+  }
+  return parts.join(' · ');
+}
+// 选路理由流水数据源：客户端模式取顶层 sched_log；服务端模式逐会话，取首个非空。
+function schedLogEntries(data){
+  const top=data&&data.sched_log;
+  if(top&&top.length)return top;
+  const sc=(data&&data.server_conns)||[];
+  for(let i=0;i<sc.length;i++){
+    if(sc[i].sched_log&&sc[i].sched_log.length)return sc[i].sched_log;
+  }
+  return [];
+}
+// 渲染"最近选路决策"折叠块：新近在上，只显示原因/路径/活跃数/相对时间。
+// 后端只记"相对末条发生变化"的决策，故条目天然低频、可读。
+function renderSchedLog(data){
+  const box=document.getElementById('sched-log');
+  if(!box)return;
+  const es=schedLogEntries(data);
+  if(!es.length){box.innerHTML='';return;}
+  let rows='';
+  for(let i=es.length-1;i>=0;i--){
+    const e=es[i];
+    const key='sched.reason_'+e.reason;
+    const lab=t(key);
+    const ago=t('dg.updated').replace('{t}',fmtDur(Math.max(0,Math.round((Date.now()-Number(e.at_ms||0))/1000))));
+    rows+='<div class="slog-row"><span class="badge b-dup">'+esc(lab!==key?lab:String(e.reason))+'</span><small class="dim">'+
+      esc(t('sched.log_line').replace('{a}',e.path<0?'-':String(e.path)).replace('{b}',String(Number(e.active||0))).replace('{c}',ago))+'</small></div>';
+  }
+  const last=es[es.length-1];
+  const llab=t('sched.reason_'+last.reason);
+  box.innerHTML='<details class="sched-log"><summary>'+esc(t('sched.log_title')+' · '+
+    t('sched.latest')+' '+(llab!=='sched.reason_'+last.reason?llab:String(last.reason)))+'</summary>'+rows+'</details>';
 }
 
 function renderConnsTable(data,fresh){
@@ -1846,6 +1932,14 @@ function renderConnsTable(data,fresh){
       rtt+=' <span class="dim">· '+t('ov.mn')+' '+mn+'</span>';
       rttTip+=(rttTip?' · ':'')+t('ov.mn')+' '+mn+' ms';
     }
+    // 调度器实际用于排名的键（去程稳定地板，µs 有符号）：与上面带 δ 抬升的显示
+    // 读数是两条互不污染的数，并置才能看出"调度依据"与"面板读数"的差别。
+    if(r.sched&&r.sched.rank_known){
+      const rk=Number(r.sched.rank_key_us);
+      const rkv=(rk<0?'-':'')+fmtMsUs(Math.abs(rk));
+      rtt+=' <span class="dim">· '+t('sched.rank')+' '+rkv+'</span>';
+      rttTip+=(rttTip?' · ':'')+t('sched.rank')+' '+rkv+' ms';
+    }
     // 上次探针重算时刻（unix ms）：fwd/ret 同一次重算一并发布，面板把它作为
     // 新鲜度提示显示在"去/回"旁，一眼看出这个时延是多早之前算的；0=尚未收敛
     // （首次发布前不显示），避免把"从未算过"误读成"刚算过"。
@@ -1868,13 +1962,13 @@ function renderConnsTable(data,fresh){
     const cerr=r.err||r.brutErr;
     const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
     return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
-      '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td>'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
+      '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td title="'+esc(schedulerTip(r))+'">'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(r.cert||'')+'">'+(r.cert?hi(esc(shortId(r.cert,16)),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
 	      '<td class="num dim">'+(r.age!==undefined?fmtDur(r.age||0):'-')+'</td>'+
       '<td class="hide-sm num dim" title="'+esc(r.epoch?'session key epoch '+r.epoch:'no epoch yet')+'">'+(r.epoch?r.epoch:'-')+'</td>'+
-	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecCellTip(r.fec,r.fecStrategy,r.fecNearWindowMs,fecParityPct(r.fecAsg,r.asg),data&&data.fec))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
+	      '<td class="hide-sm">'+encBadge(r.enc)+'</td><td class="hide-sm" title="'+esc(fecCellTip(r.fec,r.fecStrategy,r.fecNearWindowMs,fecParityPct(r.fecAsg,r.asg),data&&data.fec,(r.sched&&r.sched.near_state)||''))+'">'+badge(r.fec)+fecStratBadge(r.fecStrategy)+'</td>'+
       '<td class="hide-sm" title="'+esc(brutTip)+'">'+brut+'</td>'+
       '<td class="hide-sm">'+errCell+'</td><td>'+ops+'</td>'+
       // 重连次数（后端 conns[].retries）：>0 才显示，0 涂淡——它是"这条路径

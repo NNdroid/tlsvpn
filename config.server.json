@@ -12,6 +12,8 @@
   "brutal_up": 100,
   "brutal_down": 500,
   "routing_algo": "auto",
+  "sched_envelope": "rtt",
+  "sched_envelope_ms": 20,
   "fec_strategy": "auto",
   "fec_near_window_ms": 10,
   "tap": "tap0",

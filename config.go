@@ -99,6 +99,16 @@ type Config struct {
 	// latency_sticky / min_rtt_strict / min_rtt_adaptive / roundtrip_strict。默认 auto，
 	// 可热更、无需重启。作用于本端 egress（client 上行 / server 下行）。
 	RoutingAlgo string `json:"routing_algo,omitempty"`
+	// SchedEnvelope 候选资格门（near-minRTT envelope）的度量维度：rtt（内核
+	// min_rtt 往返地板，默认，历史行为）/ fwd（本端去程排名键）。
+	// fwd 让"去程最快但往返很慢"的极不对称路径也能准入本端 egress 候选集——它慢的
+	// 那一侧是对端发送方向，会被对端自己的门挡掉，两端各自按发送方向设门。
+	// 可热更、无需重启。作用于本端 egress（client 上行 / server 下行）。
+	SchedEnvelope string `json:"sched_envelope,omitempty"`
+	// SchedEnvelopeMs fwd 模式的去程准入窗口（毫秒）：去程相对本组最小值的差
+	// ≤ 该值即准入。默认 20，范围 [1,500]，可热更。与 fec_near_window_ms 同量纲
+	// 但语义独立（这里管准入，那里管 parity 资格）。
+	SchedEnvelopeMs int `json:"sched_envelope_ms,omitempty"`
 	// FecStrategy parity 分发策略（见 FecStrategy 常量）：auto（所有健康后端轮转，
 	// 默认）/ near（只投到去程单程时延与数据路径相差 ≤ fec_near_window_ms 的连接）。
 	// 可热更、无需重启。作用于本端 egress。
@@ -228,6 +238,8 @@ const exampleConfigJSON = `{
   "brutal_down": 500,
   "socks5": "",
   "routing_algo": "auto",
+  "sched_envelope": "rtt",
+  "sched_envelope_ms": 20,
   "fec_strategy": "auto",
   "fec_near_window_ms": 10,
   "tap": "tap0",
@@ -404,6 +416,12 @@ func (c *Config) applyDefaults() {
 	// 放在顶层对所有 mode 无条件填充默认。
 	if c.RoutingAlgo == "" {
 		c.RoutingAlgo = string(RoutingAlgoAuto)
+	}
+	if c.SchedEnvelope == "" {
+		c.SchedEnvelope = string(SchedEnvelopeRTT)
+	}
+	if c.SchedEnvelopeMs == 0 {
+		c.SchedEnvelopeMs = schedEnvelopeDefaultMs
 	}
 	if c.FecStrategy == "" {
 		c.FecStrategy = string(FecStrategyAuto)
@@ -601,6 +619,12 @@ func (c *Config) Validate() error {
 			"invalid routing_algo %q (want auto, latency_strict, latency_sticky, min_rtt_strict, min_rtt_adaptive or roundtrip_strict)",
 			c.RoutingAlgo,
 		)
+	}
+	if !ValidSchedEnvelope(c.SchedEnvelope) {
+		return fmt.Errorf("invalid sched_envelope %q (want rtt or fwd)", c.SchedEnvelope)
+	}
+	if c.SchedEnvelopeMs < schedEnvelopeMinMs || c.SchedEnvelopeMs > schedEnvelopeMaxMs {
+		return fmt.Errorf("sched_envelope_ms must be in [%d, %d]", schedEnvelopeMinMs, schedEnvelopeMaxMs)
 	}
 	if !ValidFecStrategy(c.FecStrategy) {
 		return fmt.Errorf("invalid fec_strategy %q (want auto or near)", c.FecStrategy)

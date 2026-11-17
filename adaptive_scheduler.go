@@ -44,6 +44,134 @@ const (
 	adaptiveStickyMaxUS = 5_000
 )
 
+// schedFlag* 是 Backend.schedFlags 的位布局。bit-pack 而非逐字段 atomic：
+// buildEligibleCandidates 每批每后端只做 1 次 Store（该循环已有 etaUsec/active/
+// virtualFinishNS 三次 Store），面板要的却是四项不同信息。
+const (
+	schedFlagNearIn      uint32 = 1 << 0 // parity near 窗口内（真实判定）
+	schedFlagNearLenient uint32 = 1 << 1 // 探针未收敛的 bootstrap 宽限（宽松放行）
+	schedFlagStickyHeld  uint32 = 1 << 2 // 本批因粘滞滞回保留了当前路径
+	schedFlagRankKnown   uint32 = 1 << 3 // rankKeyUS 已发布（0 是合法排名值，需门控）
+	schedFlagExcludeMask uint32 = 7 << 4 // 排除原因，见 schedExclude*
+)
+
+// schedExclude* 排除原因（schedFlagExcludeMask 内编码）。0 = 无排除（候选内）。
+// 分列而不是笼统的 eligible=false：面板要回答的是"为什么没选它"。
+const (
+	schedExcludeNone        uint32 = 0 << 4
+	schedExcludeStalled     uint32 = 1 << 4
+	schedExcludeQueueFull   uint32 = 2 << 4
+	schedExcludeCapZero     uint32 = 3 << 4
+	schedExcludeEnvelopeOut uint32 = 4 << 4
+)
+
+// schedReason* 是选路管线各返回分支的决策原因。用稳定字符串而非数字码：
+// 前端直接映射到 i18n 键 sched.reason.<token>，避免两套编号漂移。
+const (
+	schedReasonRank0         = "rank0"          // 单路径模式取 rank[0]
+	schedReasonStickyHeld    = "sticky_held"    // 粘滞带内保留当前路径
+	schedReasonWFQDispatch   = "wfq_dispatch"   // 活跃集内按 WFQ 服务债务分发
+	schedReasonEnvelopeEmpty = "envelope_empty" // 候选集被资格门清空，退化到 pickBackend
+	schedReasonNoHealthy     = "no_healthy"     // 无健康后端，退化到首条后端
+	schedReasonSinglePath    = "single_path"    // 单后端快路径
+)
+
+// schedDecisionEntry 是选路决策环的一条记录。
+type schedDecisionEntry struct {
+	Reason string `json:"reason"`
+	Path   int    `json:"path"` // 所选后端的 backends 下标；-1 = 未选出
+	AtMs   uint64 `json:"at_ms"`
+	Active int32  `json:"active"` // 本批活跃路径数
+}
+
+// schedDecisionRingCap 决策环容量。只记"相对末条发生变化"的决策，故 16 条足够
+// 覆盖人类可读的切换历史；固定容量保证内存不随运行时长线性增长。
+const schedDecisionRingCap = 16
+
+// recordSchedDecision 追加一条选路决策。run goroutine 独占调用。
+// 与末条同原因同路径时不追加——否则高 PPS 下 16 条会被瞬间轮空。
+func (p *AsyncPort) recordSchedDecision(reason string, path int, active int32) {
+	if p == nil {
+		return
+	}
+	e := schedDecisionEntry{
+		Reason: reason,
+		Path:   path,
+		AtMs:   uint64(time.Now().UnixMilli()),
+		Active: active,
+	}
+	if e.Reason == p.decisionLast.Reason && e.Path == p.decisionLast.Path {
+		return
+	}
+	p.decisionMu.Lock()
+	p.decisionRing = append(p.decisionRing, e)
+	if len(p.decisionRing) > schedDecisionRingCap {
+		p.decisionRing = append(p.decisionRing[:0], p.decisionRing[len(p.decisionRing)-schedDecisionRingCap:]...)
+	}
+	p.decisionMu.Unlock()
+	p.decisionLast = e
+}
+
+// recordChoice recordSchedDecision 的便捷包装：把所选后端解析为 backends 下标，
+// 使面板能把决策映射回连接表里的某一行。
+func (p *AsyncPort) recordChoice(backends []*Backend, chosen *Backend, reason string, active int32) {
+	idx := -1
+	for i, b := range backends {
+		if b == chosen {
+			idx = i
+			break
+		}
+	}
+	p.recordSchedDecision(reason, idx, active)
+}
+
+// schedDecisionSnapshot 返回决策环的只读副本（API goroutine 读）。
+func (p *AsyncPort) schedDecisionSnapshot() []schedDecisionEntry {
+	if p == nil {
+		return nil
+	}
+	p.decisionMu.Lock()
+	defer p.decisionMu.Unlock()
+	if len(p.decisionRing) == 0 {
+		return nil
+	}
+	out := make([]schedDecisionEntry, len(p.decisionRing))
+	copy(out, p.decisionRing)
+	return out
+}
+
+// schedFlagsSet 置位/清位 schedFlags 的 mask 内各 bit（其余 bit 保留）。
+//
+// 两个写者（buildEligibleCandidates 写排除/排名 bit、pickParityBackend 写 near
+// bit）都在 run goroutine 内串行执行，故 Load-Store 的 RMW 无竞态；用原子而非
+// 普通字段是因为 schedulerSnapshot 在 API goroutine 读它。
+func (b *Backend) schedFlagsSet(mask, v uint32) {
+	if b == nil {
+		return
+	}
+	b.schedFlags.Store((b.schedFlags.Load() &^ mask) | (v & mask))
+}
+
+// publishExcluded 把一条被资格门排除的路径的观测状态写回该 Backend。
+// 与 buildEligibleCandidates 内"进入候选集"的发布点构成同一套不变量：每批每后端
+// 恰好写一次排除原因或一次候选内标志。
+func (p *AsyncPort) publishExcluded(b *Backend, reason uint32, minRTT uint32, maxRTT uint64, fwdFloor int64, fwdFloorOK bool) {
+	if b == nil {
+		return
+	}
+	b.active.Store(false)
+	b.virtualFinishNS.Store(0)
+	if minRTT != adaptiveUnknownRTTUS {
+		b.schedEnvMinRttUS.Store(uint64(minRTT))
+		b.schedEnvMaxRttUS.Store(maxRTT)
+	}
+	p.publishEnvelopeFloor(b, fwdFloor, fwdFloorOK)
+	// 未进入候选集即无排名键：清 RankKnown 并把键归零，面板显示"-"而非伪 0。
+	b.rankKeyUS.Store(0)
+	// 被排除的路径同样清粘滞位，否则上一批的 sticky_held 会跨批残留。
+	b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, reason)
+}
+
 type backendCandidate struct {
 	backend   *Backend
 	baseUS    int64 // unloaded path quality: oneWay probe + this batch service time; signed (probe raw may be negative)
@@ -86,6 +214,38 @@ type schedulerConnJSON struct {
 	// ClockOffsetConverged θ 是否可信（样本充分且不确定度在阈内）。面板据此
 	// 显示"虚拟时钟已同步"状态。仅观测，不在 TLSVPN 线上。
 	ClockOffsetConverged bool `json:"clock_offset_converged,omitempty"`
+	// Eligible 该路径是否落在本批资格包络内（true=进入候选集参与排名）。
+	// false 表示被 buildEligibleCandidates 排除，ExcludeReason 给出原因。
+	// 面板据此把"去程最快却待命"解释成包络外，而不是选路 bug。
+	Eligible bool `json:"eligible"`
+	// ExcludeReason 排除原因（stalled/queue_full/cap_zero/envelope_out）。
+	// 候选内或尚未评估时为空串。
+	ExcludeReason string `json:"exclude_reason,omitempty"`
+	// RankKnown / RankKeyUS 本批实际用于排名的排名键（µs，有符号）。与显示层
+	// 的 fwd_oneway_us 是两条互不污染的数（后者带 δ 抬升），并置展示才能看出
+	// "调度依据"和"面板读数"的差别。
+	RankKnown bool  `json:"rank_known,omitempty"`
+	RankKeyUS int64 `json:"rank_key_us,omitempty"`
+	// GroupMinRttUS / GroupMaxRttUS 本批资格包络的组内 min_rtt 地板与上限（µs）。
+	// 组约简结果，前端无法自行推算（cold/unknownRTT 豁免状态不在 JSON 里）。
+	// 0=包络尚未建立。
+	GroupMinRttUS uint64 `json:"group_min_rtt_us,omitempty"`
+	GroupMaxRttUS uint64 `json:"group_max_rtt_us,omitempty"`
+	// GroupFwdFloorUS 本批 fwd 门的组内去程地板（µs，有符号相对量）。仅
+	// sched_envelope=fwd 时有值；面板据此显示"去程地板"，并把落在地板+窗口之外
+	// 的路径解释成包络外。0=尚未建立。与 GroupMinRttUS 是两条独立的门，不同时
+	// 都生效——前端应按端口级 envelope_mode 选择展示哪一组。
+	GroupFwdFloorUS int64 `json:"group_fwd_floor_us,omitempty"`
+	// FwdRankKnown / FwdRankUS 本路径已收敛的去程读数（µs，有符号相对量），与
+	// GroupFwdFloorUS 同一尺度，供 fwd 门的排除比较式使用。刻意区别于显示层的
+	// fwd_oneway_us（后者带 δ 抬升非负）。未收敛时两者都缺省，前端不显示比较式。
+	FwdRankKnown bool  `json:"fwd_rank_known,omitempty"`
+	FwdRankUS    int64 `json:"fwd_rank_us,omitempty"`
+	// NearState parity near 窗口成员资格："in"=窗口内、"lenient"=探针未收敛的
+	// bootstrap 宽限放行、"out"=窗口外（不会拿 parity）。仅 near 策略有意义。
+	NearState string `json:"near_state,omitempty"`
+	// StickyHeld 本批是否因粘滞滞回保留了当前路径（而非取 rank[0]）。
+	StickyHeld bool `json:"sticky_held,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {
@@ -186,6 +346,39 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		RetOneWayUS:        b.retOneWayUS.Load(),
 		MinRttUS:           minRTT,
 		ProbeAtMs:          b.probeUpdatedAt.Load(),
+		GroupMinRttUS:      b.schedEnvMinRttUS.Load(),
+		GroupMaxRttUS:      b.schedEnvMaxRttUS.Load(),
+		GroupFwdFloorUS:    b.schedEnvFwdFloorUS.Load(),
+		RankKnown:          b.schedFlags.Load()&schedFlagRankKnown != 0,
+		RankKeyUS:          b.rankKeyUS.Load(),
+		StickyHeld:         b.schedFlags.Load()&schedFlagStickyHeld != 0,
+	}
+	flags := b.schedFlags.Load()
+	// 排除原因优先于"候选内"呈现：被排除时 Eligible 必为 false，面板据此换徽章。
+	reason := flags & schedFlagExcludeMask
+	switch {
+	case reason == schedExcludeStalled:
+		snap.ExcludeReason = "stalled"
+	case reason == schedExcludeQueueFull:
+		snap.ExcludeReason = "queue_full"
+	case reason == schedExcludeCapZero:
+		snap.ExcludeReason = "cap_zero"
+	case reason == schedExcludeEnvelopeOut:
+		snap.ExcludeReason = "envelope_out"
+	}
+	snap.Eligible = reason == schedExcludeNone
+	switch {
+	case flags&schedFlagNearIn != 0:
+		snap.NearState = "in"
+	case flags&schedFlagNearLenient != 0:
+		snap.NearState = "lenient"
+	}
+	// fwd 门的比较式需要"这条路径的去程读数 vs 组内地板"。用 backendOneWayUS 的
+	// 原始有符号相对量（与门判定同源），刻意不用显示层的 fwdOneWayUS——后者带 δ
+	// 抬升，与地板+窗口的判定不是同一个数，并置展示会让面板读到"其实没超窗"。
+	if v, ok := b.backendOneWayUS(); ok {
+		snap.FwdRankKnown = true
+		snap.FwdRankUS = v
 	}
 	// 时钟偏移 θ/U：仅当注入且已收敛时暴露，面板据此显示"虚拟时钟已同步"。
 	if b.clockOffsetTheta != nil {
@@ -326,21 +519,32 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	if len(backends) == 1 {
 		b := backends[0]
 		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
-			return p.fallbackSinglePath(backends)
+			fb := p.fallbackSinglePath(backends)
+			p.recordChoice(backends, fb, schedReasonNoHealthy, 1)
+			return fb
 		}
 		b.active.Store(true)
 		b.virtualFinishNS.Store(0)
 		p.activePaths.Store(1)
 		p.storePreferredIfCurrent(b)
+		p.recordChoice(backends, b, schedReasonSinglePath, 1)
 		return b
 	}
 	current := p.preferred.Load()
 
 	minRTT, maxRTT, referenceRate, healthy := scanEnvelope(backends)
 	if healthy == 0 {
-		return p.fallbackSinglePath(backends)
+		fb := p.fallbackSinglePath(backends)
+		p.recordChoice(backends, fb, schedReasonNoHealthy, 1)
+		return fb
 	}
-	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate)
+	// fwd 门的组内去程地板。取不到（组内无已收敛去程读数）时整体回退 rtt 门：
+	// 回退值混排会让地板变成绝对尺度伪值，把全部路径误判成包络外。
+	fwdFloor, fwdFloorOK := int64(0), false
+	if p.schedEnvelopeFwd.Load() {
+		fwdFloor, fwdFloorOK = schedEnvelopeFloor(backends)
+	}
+	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate, fwdFloor, fwdFloorOK)
 	p.schedulerScratch = cands
 	if len(cands) == 0 {
 		// 全部后端被并发排除（唯一健康者在扫描间隙被 markStalled）：pickBackend
@@ -354,6 +558,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 			}
 		}
 		p.activePaths.Store(1)
+		p.recordChoice(backends, chosen, schedReasonEnvelopeEmpty, 1)
 		return chosen
 	}
 	rankCandidates(cands)
@@ -383,6 +588,71 @@ func (p *AsyncPort) publishBaselineETA(backends []*Backend, incomingBytes uint64
 			b.etaUsec.Store(b.estimatedETAUS(incomingBytes))
 		}
 	}
+}
+
+// schedEnvelopeFloor 健康后端的去程读数最小值：fwd 门的地板。
+//
+// 只计 backendOneWayUS 已收敛的路径（真实探针值），且要求与 min_rtt 同源
+// 的公平启动条件（有 RTT 且完成热身）——冷/未测路径的 min_rtt/2 回退是绝对
+// 内核尺度，与已收敛探针的有符号相对量混排会让参考地板被一条冷路径钉到负
+// 侧，把其余路径全部判成"包络外"。因此地板取不到时返回 ok=false，调用方整体
+// 回退 rtt 门（见 schedEnvelope 的文档）。
+func schedEnvelopeFloor(backends []*Backend) (floor int64, ok bool) {
+	var minFwd int64
+	for _, b := range backends {
+		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
+			continue
+		}
+		if b.rateBytesPerSec.Load() == 0 {
+			continue
+		}
+		if _, unknownRTT := adaptiveBackendMinRTT(b); unknownRTT {
+			continue
+		}
+		fwd, okFwd := b.backendOneWayUS()
+		if !okFwd {
+			continue
+		}
+		if !ok || fwd < minFwd {
+			minFwd, ok = fwd, true
+		}
+	}
+	return minFwd, ok
+}
+
+// publishEnvelopeFloor 发布本批 fwd 门的组内去程地板（µs，有符号相对量）。
+// 与 rtt 门的 schedEnvMinRttUS/MaxRttUS 平行的观测字段：面板据此显示"去程地板"，
+// 并把落在其 +sched_envelope_ms 之外的路径解释成包络外。未收敛时归零（=尚未建立）。
+func (p *AsyncPort) publishEnvelopeFloor(b *Backend, fwdFloor int64, ok bool) {
+	if b == nil || !ok {
+		return
+	}
+	b.schedEnvFwdFloorUS.Store(fwdFloor)
+}
+
+// envelopeIn 判定一条已完成公平启动的路径是否落在当前资格门内（false=排除）。
+//
+// rtt 门（默认，历史行为）：内核 min_rtt 往返地板 + 滞回上限。方向盲——会顺手
+// 毙掉"去程最快但往返很慢"的极不对称路径。maxRTT 由 scanEnvelope 算好传入，
+// 与历史实现的比较式逐字一致。
+// fwd 门：本端去程排名键，与排名键同源，使上述路径准入；它慢的那一侧是对端的
+// 发送方向，由对端自己那端的门负责挡掉，两端各自按发送方向设门、无需跨端协调。
+//
+// 探针未收敛的路径在 fwd 门下宽松放行（与 near 窗口的 parityNearState 同契约）：
+// 未收敛时 adaptiveBackendOneWayUS 回退到绝对内核尺度（min_rtt/2 或 50ms 哨兵
+// 折半），与已收敛探针的有符号相对量跨尺度比较会把 bootstrap 期全部误判包络外。
+func (p *AsyncPort) envelopeIn(b *Backend, fwdFloor int64, fwdFloorOK bool, maxRTT uint64) bool {
+	if !p.schedEnvelopeFwd.Load() || !fwdFloorOK {
+		// rtt 门，或 fwd 门因组内无已收敛读数整体回退。
+		if rtt, _ := adaptiveBackendMinRTT(b); uint64(rtt) > maxRTT {
+			return false
+		}
+		return true
+	}
+	if _, ok := b.backendOneWayUS(); !ok {
+		return true
+	}
+	return adaptiveBackendOneWayUS(b) <= fwdFloor+int64(p.schedEnvelopeUS.Load())
 }
 
 // scanEnvelope 单遍合并原 scanWarmedMinRTT + buildEnvelope：健康计数、热身
@@ -460,14 +730,23 @@ func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
 }
 
 // buildEligibleCandidates 构建候选集：资格包络 + stall/队满排除，按策略算主排名键。
-func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64) []backendCandidate {
+func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64, fwdFloor int64, fwdFloorOK bool) []backendCandidate {
 	cands := p.schedulerScratch[:0]
 	for _, b := range backends {
-		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
-			if b != nil {
-				b.active.Store(false)
-				b.virtualFinishNS.Store(0)
-			}
+		if b == nil {
+			continue
+		}
+		// 四类排除子原因分列发布：面板要回答的是"为什么没选它"，笼统的
+		// eligible=false 无法区分 stalled、队满、cap 未就绪与真正落在包络外。
+		switch {
+		case b.queueCap() == 0:
+			p.publishExcluded(b, schedExcludeCapZero, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			continue
+		case b.queueLen() >= b.queueCap()-2:
+			p.publishExcluded(b, schedExcludeQueueFull, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			continue
+		case b.isStalled():
+			p.publishExcluded(b, schedExcludeStalled, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
 		}
 		// SRTT 用于 ETA 遥测（含当前拥塞，预测更准）；min_rtt 用于资格包络与
@@ -479,10 +758,10 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Ba
 		if fairStart {
 			rtt = minRTT
 		}
-		if !fairStart && uint64(rtt) > maxRTT {
-			// 冷路径完成热身却真正落在包络外：清掉过期成员。
-			b.active.Store(false)
-			b.virtualFinishNS.Store(0)
+		if !fairStart && !p.envelopeIn(b, fwdFloor, fwdFloorOK, maxRTT) {
+			// 冷路径完成热身却真正落在资格门外（按当前 sched_envelope 维度判定）：
+			// 清掉过期成员。
+			p.publishExcluded(b, schedExcludeEnvelopeOut, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
 		}
 		// Writer-drain EWMA 只作观测 ETA，不代表端到端 TCP 投递能力。
@@ -508,9 +787,21 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Ba
 				}
 			}
 		}
+		baseUS := candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate)
+		// 观测发布：排名键 + 资格包络 + 候选内标志，面板据此把"去程最快却待命"
+		// 解释清楚。与上方排除分支写同一批原子，避免两条路径语义分叉。
+		if minRTT != adaptiveUnknownRTTUS {
+			b.schedEnvMinRttUS.Store(uint64(minRTT))
+			b.schedEnvMaxRttUS.Store(maxRTT)
+		}
+		p.publishEnvelopeFloor(b, fwdFloor, fwdFloorOK)
+		b.rankKeyUS.Store(baseUS)
+		// StickyHeld 在此处清空：粘滞判定发生在其后的 commitSinglePath，同一批内
+		// "先清后设"，故粘滞未生效的路径不会残留上一批的旧标志。
+		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, schedExcludeNone|schedFlagRankKnown)
 		cands = append(cands, backendCandidate{
 			backend:   b,
-			baseUS:    candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate),
+			baseUS:    baseUS,
 			rttUS:     rtt,
 			schedRate: schedRate,
 			wasActive: b.active.Load(),
@@ -542,6 +833,7 @@ func rankCandidates(cands []backendCandidate) {
 // 保留当前路径；其余路径清为待命并重置公平债务。
 func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandidate, current *Backend, bestBase int64, policy routingPolicy) *Backend {
 	chosen := cands[0].backend
+	reason := schedReasonRank0
 	if policy.sticky && current != nil && current != chosen {
 		for i := range cands {
 			if cands[i].backend != current {
@@ -549,6 +841,10 @@ func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandida
 			}
 			if cands[i].baseUS <= bestBase+int64(adaptiveStickySlackUS(cands[i].rttUS)) {
 				chosen = current
+				reason = schedReasonStickyHeld
+				// 标记"因粘滞保留"而非"排名第一当选"：面板据此解释为什么明明有
+				// 更快的候选却留在当前路径。上方 buildEligibleCandidates 已清空该位。
+				current.schedFlagsSet(schedFlagStickyHeld, schedFlagStickyHeld)
 			}
 			break
 		}
@@ -562,6 +858,7 @@ func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandida
 	}
 	p.activePaths.Store(1)
 	p.storePreferredIfCurrent(chosen)
+	p.recordChoice(backends, chosen, reason, 1)
 	return chosen
 }
 
@@ -622,5 +919,6 @@ func (p *AsyncPort) dispatchWFQ(backends []*Backend, cands []backendCandidate, a
 	chosen.backend.addVirtualServiceAtRate(incomingBytes, chosen.schedRate)
 	p.activePaths.Store(int32(active))
 	p.storePreferredIfCurrent(chosen.backend)
+	p.recordChoice(backends, chosen.backend, schedReasonWFQDispatch, int32(active))
 	return chosen.backend
 }

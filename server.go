@@ -1031,16 +1031,19 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 		encOn           bool
 		fecStrategy     string
 		fecNearWindowMs int
+		schedLog        []schedDecisionEntry
 	}
 	s.mu.RLock()
 	snaps := make(map[string]*sessSnap, len(s.activeClients))
 	for id, session := range s.activeClients {
 		session.sessionMu.Lock()
 		snap := &sessSnap{fec: session.FecMode, enc: session.EncAlgo, encOn: session.Encrypt}
-		// FEC 策略是该会话下行端口的运行时状态，供连接明细展示（nil 防未接线端口）。
+		// FEC 策略与该会话下行端口的选路决策流水都是端口运行时状态，供连接明细
+		// 展示（nil 防未接线端口）。
 		if session.Port != nil {
 			snap.fecStrategy = string(session.Port.FecStrategy())
 			snap.fecNearWindowMs = session.Port.FecNearWindowMs()
+			snap.schedLog = session.Port.schedDecisionSnapshot()
 		}
 		snaps[id] = snap
 		session.sessionMu.Unlock()
@@ -1050,6 +1053,7 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 		if sn := snaps[out[i].ClientID]; sn != nil {
 			out[i].FEC, out[i].EncAlgo, out[i].SessionEnc = sn.fec, sn.enc, sn.encOn
 			out[i].FecStrategy, out[i].FecNearWindowMs = sn.fecStrategy, sn.fecNearWindowMs
+			out[i].SchedLog = sn.schedLog
 		}
 	}
 	return out
@@ -1088,6 +1092,8 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 			continue
 		}
 		session.Port.SetRoutingAlgo(cfg.RoutingAlgo)
+		session.Port.SetSchedEnvelope(cfg.SchedEnvelope)
+		session.Port.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
 		session.Port.SetFecStrategy(cfg.FecStrategy)
 		session.Port.SetFecNearWindowMs(cfg.FecNearWindowMs)
 		session.Port.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1107,6 +1113,8 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 	// tapPort 与本进程全部发送方向同策：热更时一并应用。
 	if s.tapPort != nil {
 		s.tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
+		s.tapPort.SetSchedEnvelope(cfg.SchedEnvelope)
+		s.tapPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
 		s.tapPort.SetFecStrategy(cfg.FecStrategy)
 		s.tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 		s.tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1240,6 +1248,8 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	// port 一致），保证服务端所有发送方向策略统一。cfg 已过 applyDefaults，值合法。
 	srv.tapPort = tapPort
 	tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
+	tapPort.SetSchedEnvelope(cfg.SchedEnvelope)
+	tapPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
 	tapPort.SetFecStrategy(cfg.FecStrategy)
 	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1789,6 +1799,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// auto，不设置则下行恒为 auto。s.cfg 是 atomic 读，持 s.mu 下安全。
 		if srvCfg := s.cfg.Load(); srvCfg != nil {
 			port.SetRoutingAlgo(srvCfg.RoutingAlgo)
+			port.SetSchedEnvelope(srvCfg.SchedEnvelope)
+			port.SetSchedEnvelopeMs(srvCfg.SchedEnvelopeMs)
 			port.SetFecStrategy(srvCfg.FecStrategy)
 			port.SetFecNearWindowMs(srvCfg.FecNearWindowMs)
 			port.SetProbeMinHalfRTTUs(intValue(srvCfg.ProbeMinHalfRTTUs))

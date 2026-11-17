@@ -131,3 +131,46 @@ func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32,
 		return oneWay + int64(serviceTimeUS(incomingBytes, schedRate))
 	}
 }
+
+// SchedEnvelope 是候选资格门（near-minRTT envelope）的度量维度。
+//
+// 资格门回答"这条路径有没有资格进候选集"，与排名键回答"谁最快"是两个独立问题。
+// 历史实现只用内核 min_rtt（往返地板）做门，它是**方向盲**的：会顺手毙掉一条
+// "去程最快但往返很慢"的极不对称路径——而那条路径对本端 egress 的接收端乱序
+// 窗口其实最有利——它慢的那一侧是对端的发送方向，会被对端自己那端的资格门挡掉。
+// 两端各自按自己的发送方向设门，不需要跨端协调。
+type SchedEnvelope string
+
+const (
+	// SchedEnvelopeRTT 内核 min_rtt 往返地板（历史行为，默认）。
+	SchedEnvelopeRTT SchedEnvelope = "rtt"
+	// SchedEnvelopeFwd 本端去程排名键（µs，有符号相对量）。探针未收敛的单条
+	// 路径自动回退 rtt 门；组内无任何已收敛去程读数时整体回退 rtt 门。
+	SchedEnvelopeFwd SchedEnvelope = "fwd"
+)
+
+// schedEnvelope*Ms fwd 模式的去程准入窗口（毫秒）。与 fec_near_window_ms 同量纲
+// 但语义独立：这里决定"准入"，那里决定"parity 资格"。
+const (
+	schedEnvelopeDefaultMs = 20
+	schedEnvelopeMinMs     = 1
+	schedEnvelopeMaxMs     = 500
+)
+
+// ValidSchedEnvelope 校验 sched_envelope 取值。未知值按非法处理，由配置层报错。
+func ValidSchedEnvelope(v string) bool {
+	switch SchedEnvelope(v) {
+	case SchedEnvelopeRTT, SchedEnvelopeFwd:
+		return true
+	}
+	return false
+}
+
+// schedEnvelopeFor 把配置值归一为枚举：空串/未知值一律回退 rtt（默认，与引入本
+// 选项前的历史行为一致）。
+func schedEnvelopeFor(v string) SchedEnvelope {
+	if v == string(SchedEnvelopeFwd) {
+		return SchedEnvelopeFwd
+	}
+	return SchedEnvelopeRTT
+}

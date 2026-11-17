@@ -89,8 +89,11 @@ type WebStats struct {
 	MACs              []MACEntry           `json:"mac_table,omitempty"`
 	Conns             []connSnapshot       `json:"conns,omitempty"`        // client 模式连接明细
 	ServerConns       []serverConnSnapshot `json:"server_conns,omitempty"` // server 模式物理连接明细
-	FecMode           string               `json:"fec_mode,omitempty"`     // client 模式 FEC 状态
-	EncAlgo           int                  `json:"enc_algo,omitempty"`
+	// SchedLog client 模式本端 egress 端口（txPort）的选路决策流水。服务端模式
+	// 逐会话，见 server_conns[].sched_log。
+	SchedLog []schedDecisionEntry `json:"sched_log,omitempty"`
+	FecMode  string               `json:"fec_mode,omitempty"` // client 模式 FEC 状态
+	EncAlgo  int                  `json:"enc_algo,omitempty"`
 	// client 模式会话级密钥代际。服务端逐连接有 session_epoch，客户端只有一条
 	// 逻辑会话，故放在顶层；连接表按列展示它，代际漂移一眼可见。
 	SessionEpoch uint64 `json:"session_epoch,omitempty"`
@@ -127,7 +130,10 @@ type serverConnSnapshot struct {
 	// 与 FEC 分组（"xor K=N"）正交，来源是该会话 Port 的运行时状态。
 	FecStrategy     string `json:"fec_strategy,omitempty"`
 	FecNearWindowMs int    `json:"fec_near_window_ms,omitempty"`
-	Epoch      uint64 `json:"session_epoch"`
+	// SchedLog 该会话下行端口的选路决策流水（最近至多 schedDecisionRingCap 条，
+	// 仅记录原因或所选路径发生变化的决策）。面板"选路理由"数据源。
+	SchedLog []schedDecisionEntry `json:"sched_log,omitempty"`
+	Epoch    uint64               `json:"session_epoch"`
 	// TCP Brutal：本连接实际生效的整形速率与生效结果
 	BrutalApplied bool   `json:"brutal_applied"`
 	BrutalErr     string `json:"brutal_error,omitempty"`
@@ -339,7 +345,7 @@ type runtimeCfgJSON struct {
 	BrutalUp         uint64       `json:"brutal_up"`
 	BrutalDown       uint64       `json:"brutal_down"`
 	PriorityControl  *int         `json:"priority_control,omitempty"` // 数据面控制帧写优先级（nil=未配置）
-	PriorityData     *int         `json:"priority_data,omitempty"`     // 数据面数据帧写优先级（nil=未配置）
+	PriorityData     *int         `json:"priority_data,omitempty"`    // 数据面数据帧写优先级（nil=未配置）
 	Socks5           bool         `json:"socks5"`
 	FEC              bool         `json:"fec"`
 	FecGroup         int          `json:"fec_group"`
@@ -373,6 +379,8 @@ type runtimeCfgJSON struct {
 	ReqV6            string       `json:"req_v6,omitempty"`
 	InterfaceManager string       `json:"interface_manager,omitempty"`
 	RoutingAlgo      string       `json:"routing_algo,omitempty"`       // 本端 egress 多路径选路算法（auto/...）
+	SchedEnvelope    string       `json:"sched_envelope,omitempty"`     // 候选资格门维度（rtt/fwd）
+	SchedEnvelopeMs  int          `json:"sched_envelope_ms,omitempty"`  // fwd 门去程准入窗口（ms）
 	FecStrategy      string       `json:"fec_strategy,omitempty"`       // 本端 egress parity 分发策略（auto/near）
 	FecNearWindowMs  int          `json:"fec_near_window_ms,omitempty"` // near 窗口（ms）
 	TrafficDays      int          `json:"traffic_days,omitempty"`
@@ -976,6 +984,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.Conns = cli.snapshotConns()
 		if cli.txPort != nil {
 			stats.Dropped = cli.txPort.Dropped()
+			stats.SchedLog = cli.txPort.schedDecisionSnapshot()
 			rec, lost := cli.FECStats()
 			fecEnabled := negotiatedFEC && decoder != nil
 			stats.Fec = fecStatsJSON{Enabled: fecEnabled, ParityAttempts: cli.txPort.ParitySent(), Recovered: rec, Lost: lost}
@@ -1111,6 +1120,8 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.ReqV6 = cfg.Client.ReqV6
 	out.InterfaceManager = cfg.Client.InterfaceManager
 	out.RoutingAlgo = cfg.RoutingAlgo
+	out.SchedEnvelope = cfg.SchedEnvelope
+	out.SchedEnvelopeMs = cfg.SchedEnvelopeMs
 	out.FecStrategy = cfg.FecStrategy
 	out.FecNearWindowMs = cfg.FecNearWindowMs
 	// 流量历史保留策略与 up/down 钩子路径（最近一次执行结果见 WebStats.Hooks）

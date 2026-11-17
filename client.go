@@ -80,7 +80,29 @@ type Backend struct {
 	// probeUpdatedAt 最近一次发布 fwd/ret 的 unix 毫秒（0=尚未收敛）。面板用它
 	// 显示"上次计算时间"，判断跨路径 RTT 探针是否仍在刷新。
 	probeUpdatedAt atomic.Uint64
-	oneWayModePtr  *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
+	// schedFlags 调度决策观测标志（见 adaptive_scheduler.go 的 schedFlag* 常量）。
+	// bit-pack 成单个 atomic：buildEligibleCandidates 每批每后端只做 1 次 Store，
+	// 与该循环既有的 etaUsec/active/virtualFinishNS 三次 Store 同量级。
+	// run goroutine 写、API goroutine 快照读。
+	schedFlags atomic.Uint32
+	// rankKeyUS 本批选路实际使用的排名键（µs，有符号，candidateRankUS 的产出）。
+	// 与显示层的 fwdOneWayUS 刻意分开：后者带 δ 抬升非负，前者是有符号原始相对量。
+	// 是否有效由 schedFlagRankKnown 门控（0 是合法排名值，不能当哨兵）。
+	rankKeyUS atomic.Int64
+	// schedEnvMinRttUS / schedEnvMaxRttUS 本批资格包络的组内 min_rtt 地板与上限
+	// （µs，见 scanEnvelope）。0=包络尚未建立。
+	//
+	// 组级量刻意冗余存到每条 Backend（而非只存 AsyncPort）：schedulerSnapshot
+	// 只接收 *Backend，两条快照调用点（客户端/服务端）都不在选路锁内，走
+	// per-Backend 通道可保持该函数签名不变、两条链路零分改。
+	schedEnvMinRttUS atomic.Uint64
+	schedEnvMaxRttUS atomic.Uint64
+	// schedEnvFwdFloorUS 本批 fwd 门的组内去程地板（µs，有符号相对量，见
+	// schedEnvelopeFloor）。与 schedEnvMinRttUS 同一套冗余到 per-Backend 的理由。
+	// 用 Int64：该值是 raw+oneWayRankZeroUS 解码后的有符号量，可为负（快于 ref
+	// 基准）。0 = 尚未收敛/未建立。
+	schedEnvFwdFloorUS atomic.Int64
+	oneWayModePtr      *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
 	// clockOffsetTheta 提供所属会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
 	// 是否收敛。由 Client/ServerSession 在初始化 Backend 时注入，使快照可暴露
 	// θ/U 收敛状态。nil=未注入（快照省略这些字段）。
@@ -145,11 +167,25 @@ type AsyncPort struct {
 	// fecNearWindowUS near 策略的去程时延窗口（µs）。热更生效。
 	fecNearWindowUS atomic.Uint64
 
+	// schedEnvelopeFwd 候选资格门是否改用本端去程排名键（true=fwd，false=内核
+	// min_rtt 往返地板，默认）。见 SchedEnvelope。调度器每批读取，热更后新一批即
+	// 生效。
+	schedEnvelopeFwd atomic.Bool
+	// schedEnvelopeUS fwd 模式的去程准入窗口（µs）。热更生效。
+	schedEnvelopeUS atomic.Uint64
+
 	// probeMinHalfRTTUS 单向时延分解的物理锚定下界（µs）。跨路径探针的参考
 	// 连接 ref 自回包 decayed-min 可能采到亚毫秒极值，使锚点 halfRef 地板成伪值
 	// （ref 自身去/回程被钉成"去程 1ms"这类物理上不可能的读数）。调度器每次重算
 	// 读取该下界抬升 halfRef。热更生效。
 	probeMinHalfRTTUS atomic.Uint64
+
+	// decisionMu 保护 decisionRing：run goroutine 在选路管线各返回分支追加，
+	// API goroutine 快照读。decisionLast 是 run goroutine 独占的变化检测快路径
+	// （原因或所选路径相对末条无变化就不追加，天然把每批数千次的写入压到低频）。
+	decisionMu   sync.Mutex
+	decisionRing []schedDecisionEntry
+	decisionLast schedDecisionEntry
 
 	// clockOffsetTheta 提供本端会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
 	// 是否收敛。由 Client/ServerSession 注入所属 clockOffsetScheduler 的读取器；
@@ -197,6 +233,8 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	}
 	// near 窗口默认 10ms，防止未配置时策略读到 0 而把 parity 限制到恰好同速。
 	p.fecNearWindowUS.Store(uint64(fecNearWindowDefaultMs) * 1000)
+	// fwd 模式准入窗口默认 20ms。未配置时不能让 0 窗口把所有路径挡在门外。
+	p.schedEnvelopeUS.Store(uint64(schedEnvelopeDefaultMs) * 1000)
 	goSafe(p.run)
 	return p
 }
@@ -232,6 +270,36 @@ func (p *AsyncPort) SetFecNearWindowMs(ms int) {
 		ms = fecNearWindowMaxMs
 	}
 	p.fecNearWindowUS.Store(uint64(ms) * 1000)
+}
+
+// SetSchedEnvelope 设定候选资格门的度量维度（见 SchedEnvelope 常量）。可热更，
+// 调度器每批读取，新一批即生效。未知值按 rtt（默认）处理。
+func (p *AsyncPort) SetSchedEnvelope(v string) {
+	p.schedEnvelopeFwd.Store(schedEnvelopeFor(v) == SchedEnvelopeFwd)
+}
+
+// SetSchedEnvelopeMs 设定 fwd 模式的去程准入窗口（毫秒）。可热更。
+func (p *AsyncPort) SetSchedEnvelopeMs(ms int) {
+	if ms < schedEnvelopeMinMs {
+		ms = schedEnvelopeMinMs
+	}
+	if ms > schedEnvelopeMaxMs {
+		ms = schedEnvelopeMaxMs
+	}
+	p.schedEnvelopeUS.Store(uint64(ms) * 1000)
+}
+
+// SchedEnvelope 返回当前资格门维度（供快照/面板展示）。热路径零分配读取。
+func (p *AsyncPort) SchedEnvelope() SchedEnvelope {
+	if p.schedEnvelopeFwd.Load() {
+		return SchedEnvelopeFwd
+	}
+	return SchedEnvelopeRTT
+}
+
+// SchedEnvelopeMs 返回 fwd 模式的去程准入窗口（毫秒）。供快照/面板展示。
+func (p *AsyncPort) SchedEnvelopeMs() int {
+	return int(p.schedEnvelopeUS.Load() / 1000)
 }
 
 // SetProbeMinHalfRTTUs 设定单向时延分解的物理锚定下界（µs）。可随时热更。
@@ -797,8 +865,10 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 			if b == dataBest {
 				continue
 			}
-			if nearOnly && !p.parityNearEligible(b, dataBest) {
-				continue
+			if nearOnly {
+				if st := p.publishNearState(b, dataBest); st == 0 {
+					continue
+				}
 			}
 			if _, ok := backendScore(b); ok {
 				return b
@@ -807,13 +877,20 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 	}
 	if dataBest != nil {
 		if _, ok := backendScore(dataBest); ok {
+			if nearOnly {
+				// 数据路径自身天然在窗口内（差值 0）；仍走同一发布通道，面板
+				// 才能看出它拿到 parity 是"窗口内"而非"bootstrap 宽限"。
+				p.publishNearState(dataBest, dataBest)
+			}
 			return dataBest
 		}
 	}
 	for i := 0; i < len(backends); i++ {
 		b := backends[(start+i)%len(backends)]
-		if nearOnly && !p.parityNearEligible(b, dataBest) {
-			continue
+		if nearOnly {
+			if st := p.publishNearState(b, dataBest); st == 0 {
+				continue
+			}
 		}
 		if _, ok := backendScore(b); ok {
 			return b
@@ -832,16 +909,36 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 // 常为负，跨尺度比较会把未收敛候选系统性排除在窗口外（bootstrap 期 parity 全部
 // 退化到数据路径），与"此时两者近等，本就无慢链之分"的文档承诺直接矛盾。
 func (p *AsyncPort) parityNearEligible(b, dataBest *Backend) bool {
+	return p.parityNearState(b, dataBest) != 0
+}
+
+// publishNearState 计算 near 三态并发布到候选后端，返回该三态（0=窗口外）。
+// pickParityBackend 的过滤条件即"三态 != 0"，与 parityNearEligible 语义一致；
+// 发布让面板能区分"窗口内拿到 parity"与"探针未收敛的 bootstrap 宽限"。
+func (p *AsyncPort) publishNearState(b, dataBest *Backend) uint32 {
+	st := p.parityNearState(b, dataBest)
+	if b != nil {
+		b.schedFlagsSet(schedFlagNearIn|schedFlagNearLenient, st)
+	}
+	return st
+}
+
+// parityNearState near 窗口的三态：schedFlagNearIn=窗口内、schedFlagNearLenient=
+// 探针未收敛的宽松放行、0=窗口外。
+func (p *AsyncPort) parityNearState(b, dataBest *Backend) uint32 {
 	if b == nil || dataBest == nil {
-		return false
+		return 0
 	}
 	if _, okRef := dataBest.backendOneWayUS(); !okRef {
-		return true
+		return schedFlagNearLenient
 	}
 	if _, okFwd := b.backendOneWayUS(); !okFwd {
-		return true
+		return schedFlagNearLenient
 	}
-	return adaptiveBackendOneWayUS(b) <= adaptiveBackendOneWayUS(dataBest)+int64(p.fecNearWindowUS.Load())
+	if adaptiveBackendOneWayUS(b) <= adaptiveBackendOneWayUS(dataBest)+int64(p.fecNearWindowUS.Load()) {
+		return schedFlagNearIn
+	}
+	return 0
 }
 
 // tryQueueOwnedBatch transfers batch ownership on success and leaves ownership
@@ -1425,6 +1522,9 @@ func (c *Client) ApplyConfig(cfg *Config) {
 	}
 	// 选路算法热更：调度器每批读取，新一批即生效。
 	c.txPort.SetRoutingAlgo(cfg.RoutingAlgo)
+	// 候选资格门维度与 fwd 窗口热更：buildEligibleCandidates 每批读取。
+	c.txPort.SetSchedEnvelope(cfg.SchedEnvelope)
+	c.txPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
@@ -1637,6 +1737,9 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	c.txPort.SetOneWayMode(oneWayModeFwd)
 	// 启动即应用配置里的选路算法；空值归一化为 auto。
 	c.txPort.SetRoutingAlgo(cfg.RoutingAlgo)
+	// 候选资格门维度与 fwd 窗口：buildEligibleCandidates 每批读取。
+	c.txPort.SetSchedEnvelope(cfg.SchedEnvelope)
+	c.txPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
