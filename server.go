@@ -452,7 +452,10 @@ type connInfo struct {
 	brutalTx       atomic.Uint64
 	brutalRx       atomic.Uint64
 	epoch          atomic.Uint64
-	tls            *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
+	// peerActiveAt 最近一次收到客户端 0x07 active-paths 帧且本槽位在其活跃
+	// 位图中的时刻（unix ns；0=从未）。快照按 2s 窗口判过期。
+	peerActiveAt atomic.Int64
+	tls          *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
 }
 
 type Server struct {
@@ -990,13 +993,15 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 			if ci.rttCache != nil && ci.rttMeasured.Load() {
 				rtt = atomic.LoadUint32(ci.rttCache) / 1000
 			}
+			sched := schedulerSnapshot(ci.backend.Load())
+			sched.PeerActive = peerActiveRecently(ci.peerActiveAt.Load())
 			out = append(out, serverConnSnapshot{
 				TCP:       ci.tcpObservation.Load(),
 				ClientID:  id,
 				ConnID:    ci.connID,
 				Remote:    ci.remote,
 				RttMs:     rtt,
-				Scheduler: schedulerSnapshot(ci.backend.Load()),
+				Scheduler: sched,
 				TxBytes:   ci.txBytes.Load(),
 				RxBytes:   ci.rxBytes.Load(),
 				TxPackets: ci.txPackets.Load(),
@@ -1243,7 +1248,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	defer close(tapBackend)
 	tapPort := NewAsyncPort(ctx, tapPortID)
 	defer tapPort.Close()
-	tapPort.RegisterOwnedBackend(tapBackend, new(uint32))
+	tapPort.RegisterOwnedBackend(tapBackend, new(uint32), -1)
 	// tapPort 是本机 TAP 侧端口：调度/FEC 策略字段同样作用于它（与 per-session
 	// port 一致），保证服务端所有发送方向策略统一。cfg 已过 applyDefaults，值合法。
 	srv.tapPort = tapPort
@@ -1805,6 +1810,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 
 		port := NewAsyncPort(parentCtx, clientID)
+		// 本端（服务端下行）调度器活跃槽位周期广播（0x07 active-paths）：让
+		// 客户端面板标注"服务端下行调度正活跃在本连接"。随 port ctx（会话销毁）
+		// 自动停止。
+		port.startPeerActiveBroadcaster()
 		if fecEncK > 0 {
 			port.AttachFEC(fecEncK, fecTx)
 		}
@@ -2062,7 +2071,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	s.mu.Unlock()
 
 	connTxChan := make(chan *VPNFrameBatch, 32)
-	backend := port.RegisterOwnedBackend(connTxChan, rttCache)
+	backend := port.RegisterOwnedBackend(connTxChan, rttCache, req.BrutalConnIndex)
 	backend.minRttCache = minRttCache
 	backend.probeCh = make(chan []byte, 8)
 	ci.backend.Store(backend)
@@ -2389,6 +2398,23 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				frame = plain
 			}
 			if seq == 0 {
+				// 客户端 0x07 active-paths：客户端上行调度当前选中槽位位图。在
+				// FEC 门控之前拦截（无 FEC 会话也可用）；按 connIndex 刷新各自
+				// 的对端活跃时刻，快照按窗口判过期。
+				if isActivePathsFrame(frame) {
+					if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
+						now := time.Now().UnixNano()
+						session.sessionMu.RLock()
+						for conn := range session.conns {
+							if conn.connIndex >= 0 && conn.connIndex < 16 && bm&(1<<uint(conn.connIndex)) != 0 {
+								conn.peerActiveAt.Store(now)
+							}
+						}
+						session.sessionMu.RUnlock()
+					}
+					putFrame(frame)
+					continue
+				}
 				// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
 				// 仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
 				if session.rttProbe != nil && isRttProbeFrame(frame) {

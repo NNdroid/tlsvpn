@@ -247,6 +247,10 @@ type schedulerConnJSON struct {
 	NearState string `json:"near_state,omitempty"`
 	// StickyHeld 本批是否因粘滞滞回保留了当前路径（而非取 rank[0]）。
 	StickyHeld bool `json:"sticky_held,omitempty"`
+	// PeerActive 对端调度器当前选中本槽位（0x07 active-paths 位图，2s 窗口内
+	// 收到过声明）。与 Active（本端选中）并列：面板据此把"两端各自选了谁"
+	// 同时呈现。由连接快照组装层填充（数据在 connInfo 而非 Backend）。
+	PeerActive bool `json:"peer_active,omitempty"`
 }
 
 func vpnFrameBatchBytes(batch []VPNFrame) uint64 {

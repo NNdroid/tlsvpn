@@ -6,8 +6,32 @@ import (
 )
 
 func TestProtocolV3VersionAndControlKinds(t *testing.T) {
-	if protocolVersion != 4 {
-		t.Fatalf("protocolVersion=%d want=4 (v4: AAD binds frame padLen / parity descriptor)", protocolVersion)
+	if protocolVersion != 5 {
+		t.Fatalf("protocolVersion=%d want=5 (v5: 0x07 active-paths 控制帧，v4: AAD 绑定 padLen/parity 描述符)", protocolVersion)
+	}
+	for _, kind := range []byte{controlKindActivePaths} {
+		got, err := parseControlKind([]byte{kind})
+		if err != nil || got != kind {
+			t.Fatalf("kind=0x%02x got=0x%02x err=%v", kind, got, err)
+		}
+	}
+	// 0x07 帧编解码往返 + 长度/类型拒绝
+	bm := uint16(0b0000000000100101)
+	buf := appendActivePathsFrame(nil, bm)
+	if len(buf) != activePathsWireLen {
+		t.Fatalf("active-paths wire len=%d want %d", len(buf), activePathsWireLen)
+	}
+	if got, ok := parseActivePathsFrame(buf); !ok || got != bm {
+		t.Fatalf("roundtrip got=%d ok=%v want %d", got, ok, bm)
+	}
+	if _, ok := parseActivePathsFrame(buf[:activePathsWireLen-1]); ok {
+		t.Fatal("accepted short active-paths frame")
+	}
+	if _, ok := parseActivePathsFrame(append(buf, 0)); ok {
+		t.Fatal("accepted long active-paths frame")
+	}
+	if isActivePathsFrame(appendRttProbeFrame(nil, 1, 2)) {
+		t.Fatal("misidentified rtt probe as active-paths frame")
 	}
 	for _, kind := range []byte{controlKindFECParity, controlKindFECMode, controlKindRttProbe, controlKindRttReply, controlKindClockProbe, controlKindClockReply} {
 		got, err := parseControlKind([]byte{kind})

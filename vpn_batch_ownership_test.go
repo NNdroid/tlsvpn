@@ -41,7 +41,7 @@ func TestAsyncPortOwnedBackendCarriesAuthoritativeBytes(t *testing.T) {
 	p := NewAsyncPort(ctx, "owned-batch-bytes")
 	rtt := uint32(1)
 	ch := make(chan *VPNFrameBatch, 4)
-	p.RegisterOwnedBackend(ch, &rtt)
+	p.RegisterOwnedBackend(ch, &rtt, -1)
 	defer p.UnregisterOwnedBackend(ch)
 
 	payload := getFrameAtLeast(1379)[:1379]

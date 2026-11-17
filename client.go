@@ -51,8 +51,12 @@ type Backend struct {
 	// 与含处理延迟的探针 RTT 尺度错配，会破坏 fwd/ret 自洽性。
 	minRttCache *uint32
 	// probeCh 跨路径 RTT 探针/回包的专用投递通道（发送 goroutine 独立 select
-	// case 处理，用 appendPaddedFrame 桶填充写出以消除流量特征）。
+	// case 处理，用 appendPaddedFrame 桶填充写出以消除流量特征）。0x07
+	// active-paths 帧同路投递。
 	probeCh chan []byte
+	// connIndex 双端同步的握手槽位编号（RegisterOwnedBackend 传入）；-1=无槽位
+	// 语义（本机 TAP），不参与对端活跃位图。
+	connIndex int
 
 	// Adaptive scheduler observability. queuedBytes includes channel-resident
 	// batches plus the batch currently owned by the TLS writer until Write
@@ -397,10 +401,12 @@ func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 
 // RegisterOwnedBackend is the production data path. The channel carries the
 // batch object itself, so descriptor storage and its byte count have one owner.
-func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint32) *Backend {
+// connIndex 是握手 BrutalConnIndex 同步的双端槽位编号（0..conns-1）；本机 TAP
+// 等无槽位语义的端口传 -1（不参与 0x07 活跃位图）。
+func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint32, connIndex int) *Backend {
 	p.backendsMu.Lock()
 	defer p.backendsMu.Unlock()
-	b := &Backend{ownedCh: ch, rttCache: rttCache}
+	b := &Backend{ownedCh: ch, rttCache: rttCache, connIndex: connIndex}
 	b.oneWayModePtr = &p.oneWayMode
 	b.clockOffsetTheta = p.clockOffsetTheta
 	p.backends = append(p.backends, b)
@@ -430,6 +436,84 @@ func (p *AsyncPort) UnregisterOwnedBackend(ch chan *VPNFrameBatch) {
 			return
 		}
 	}
+}
+
+// peerActiveInterval 0x07 活跃位图广播周期；peerActiveWindow 快照过期窗口
+// （容忍连续 4 轮丢失）。
+const (
+	peerActiveInterval = 500 * time.Millisecond
+	peerActiveWindow   = 2 * time.Second
+)
+
+// startPeerActiveBroadcaster 每 500ms 把本端调度器的活跃槽位位图以 0x07
+// active-paths 控制帧投给轮转后端的 probeCh（writer 的控制帧优先通道，与
+// RTT 探针同路）。位图 bit i = 本端调度器当前选中 connIndex i；对端 RX 按自己
+// 的握手槽位编号判定"我这条在对端是否活跃"。probeCh 满则跳过本轮（writer 忙，
+// 下轮再试）；轮转游标仅本 goroutine 独占。ctx 派生自 port ctx，Close 即停。
+func (p *AsyncPort) startPeerActiveBroadcaster() {
+	goSafe(func() {
+		t := time.NewTicker(peerActiveInterval)
+		defer t.Stop()
+		rotate := 0
+		for {
+			select {
+			case <-p.ctx.Done():
+				return
+			case <-t.C:
+			}
+			var cands []*Backend
+			p.backendsMu.RLock()
+			bitmap := buildActivePathsBitmap(p.backends)
+			for _, b := range p.backends {
+				if b != nil && b.connIndex >= 0 && b.connIndex < 16 && b.probeCh != nil {
+					cands = append(cands, b)
+				}
+			}
+			p.backendsMu.RUnlock()
+			if len(cands) == 0 {
+				continue
+			}
+			// 空闲隧道没有数据批，b.active 不会被本轮刷新——两级回落让对端
+			// 徽章在无流量时保持稳定而不是闪断：先 preferred（调度器的"上次
+			// 选择"），仍无则单后端拓扑直接取唯一路径（单路径没有选择问题，
+			// 它就是事实数据路径）。多路径空闲且从未 dispatch 时位图为空，对端
+			// 按窗口过期自然熄灭；有流量时下一批立即覆盖。
+			if bitmap == 0 {
+				if pb := p.preferred.Load(); pb != nil && pb.connIndex >= 0 && pb.connIndex < 16 {
+					bitmap = 1 << uint(pb.connIndex)
+				} else if len(p.backends) == 1 && p.backends[0] != nil &&
+					p.backends[0].connIndex >= 0 && p.backends[0].connIndex < 16 {
+					bitmap = 1 << uint(p.backends[0].connIndex)
+				}
+			}
+			b := cands[rotate%len(cands)]
+			rotate = (rotate + 1) % len(cands)
+			select {
+			case b.probeCh <- appendActivePathsFrame(nil, bitmap):
+			default:
+			}
+		}
+	})
+}
+
+// buildActivePathsBitmap 汇总本端调度器活跃槽位：bit i = connIndex i 的
+// Backend 本批 active。负槽位（本机 TAP）与 ≥16 越界不参与。
+func buildActivePathsBitmap(backends []*Backend) uint16 {
+	var bitmap uint16
+	for _, b := range backends {
+		if b == nil || b.connIndex < 0 || b.connIndex >= 16 {
+			continue
+		}
+		if b.active.Load() {
+			bitmap |= 1 << uint(b.connIndex)
+		}
+	}
+	return bitmap
+}
+
+// peerActiveRecently 报告对端活跃标志是否仍在过期窗口内。
+func peerActiveRecently(at int64) bool {
+	return at > 0 && time.Since(time.Unix(0, at)) < peerActiveWindow
 }
 
 // storePreferredIfCurrent 把 b 写回 preferred，但仅当它仍在当前后端表中。
@@ -1652,10 +1736,13 @@ type clientConnInfo struct {
 	txBytes        atomic.Uint64
 	rxBytes        atomic.Uint64
 	retries        atomic.Uint64
-	brutal         atomic.Pointer[brutalApplyResult]  // 本连接的内核实际状态；nil=尚未尝试
-	brutalCfg      atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
-	negotiated     atomic.Pointer[sessionNeg]
-	linkedAt       int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
+	// peerActiveAt 最近一次收到对端 0x07 active-paths 帧且本槽位在对端活跃
+	// 位图中的时刻（unix ns；0=从未）。快照按 2s 窗口判过期。
+	peerActiveAt atomic.Int64
+	brutal       atomic.Pointer[brutalApplyResult]  // 本连接的内核实际状态；nil=尚未尝试
+	brutalCfg    atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
+	negotiated   atomic.Pointer[sessionNeg]
+	linkedAt     int64 // 最近一次握手成功时间（unix 秒，0=未连接过）
 }
 
 // startClient 以 JSON 配置启动客户端（cfg 已经过 applyDefaults + Validate）
@@ -1804,6 +1891,9 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	}
 	// 去程调度使用 fwd（client→server）单向估计。
 	c.txPort.SetOneWayMode(oneWayModeFwd)
+	// 本端调度器活跃槽位周期广播（0x07 active-paths）：让对端面板标注
+	// "客户端上行调度正活跃在哪条连接"。随 port ctx 停止，无泄漏。
+	c.txPort.startPeerActiveBroadcaster()
 	// 启动即应用配置里的选路算法；空值归一化为 auto。
 	c.txPort.SetRoutingAlgo(cfg.RoutingAlgo)
 	// 候选资格门维度与 fwd 窗口：buildEligibleCandidates 每批读取。
@@ -2219,7 +2309,6 @@ func (c *Client) snapshotConns() []connSnapshot {
 			Target:         ci.target,
 			ServerSeenAddr: serverSeen,
 			RttMs:          rtt,
-			Scheduler:      schedulerSnapshot(ci.backend.Load()),
 			TxBytes:        ci.txBytes.Load(),
 			RxBytes:        ci.rxBytes.Load(),
 			Retries:        ci.retries.Load(),
@@ -2231,6 +2320,9 @@ func (c *Client) snapshotConns() []connSnapshot {
 			TLSALPN:        tlsAlpn,
 			CertSHA256:     certSHA,
 		}
+		// 对端活跃标志填进选路快照（与 serverConnSnapshot 同一呈现位置）：
+		// peer_active=true 表示"服务端下行调度正活跃在本连接"。
+		snap.Scheduler.PeerActive = peerActiveRecently(ci.peerActiveAt.Load())
 		// FEC 策略是端口级状态（所有物理连接共享 txPort），nil 防测试直构 Client。
 		if c.txPort != nil {
 			snap.FecStrategy = string(c.txPort.FecStrategy())
@@ -2741,7 +2833,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 
 	errChan := make(chan error, 2)
 	connTxChan := make(chan *VPNFrameBatch, 32)
-	backend := c.txPort.RegisterOwnedBackend(connTxChan, rttCache)
+	backend := c.txPort.RegisterOwnedBackend(connTxChan, rttCache, connIndex)
 	backend.minRttCache = minRttCache
 	backend.probeCh = make(chan []byte, 8)
 	ci.backend.Store(backend)
@@ -3094,6 +3186,23 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					frame = plain
 				}
 				if seq == 0 {
+					// 对端 0x07 active-paths：对端调度器当前选中槽位位图。在 FEC
+					// 门控之前拦截（无 FEC 会话也可用）；按本端 conns 表的槽位
+					// 编号刷新各自的对端活跃时刻，快照按窗口判过期。
+					if isActivePathsFrame(frame) {
+						if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
+							now := time.Now().UnixNano()
+							c.connsMu.Lock()
+							for idx, cinfo := range c.conns {
+								if idx >= 0 && idx < 16 && bm&(1<<uint(idx)) != 0 {
+									cinfo.peerActiveAt.Store(now)
+								}
+							}
+							c.connsMu.Unlock()
+						}
+						putFrame(frame)
+						continue
+					}
 					// 跨路径 RTT 探针/回包：在 FEC 门控之前拦截，非 FEC 会话也可用。
 					// 仅在两端握手协商 RTTProbe 后 c.rttProbe 才非空。
 					if c.rttProbe != nil && isRttProbeFrame(frame) {
@@ -3346,6 +3455,7 @@ func (c *Client) beginConnAttempt(index int, target string) *clientConnInfo {
 	defer c.connsMu.Unlock()
 	if old := c.conns[index]; old != nil {
 		ci.retries.Store(old.retries.Load())
+		ci.peerActiveAt.Store(0) // 重拨是对端重新评估的槽位，旧活跃时刻不延续
 		if err, ok := old.lastError.Load().(string); ok {
 			ci.lastError.Store(err)
 		}

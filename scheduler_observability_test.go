@@ -200,7 +200,7 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 	}
 	for _, want := range []string{
 		"excl_envelope_out:'", "excl_cmp:'", "reason_sticky_held:'",
-		"near_lenient:'", "log_line:'", "rank:'",
+		"near_lenient:'", "log_line:'", "rank:'", "peer_active:'",
 	} {
 		if got := strings.Count(i18n, want); got != 5 {
 			t.Errorf("i18n.js %s 出现 %d 次 want=5（五个 locale 各一份）", want, got)

@@ -820,3 +820,6 @@ td.rtt-asym{background:var(--warn-soft);color:var(--warn)}
    hover 底色（选择器同特异性、文件序在后），保证 hover 下高亮不丢。 */
 tbody tr.row-active td{background:var(--up-soft)}
 tbody tr.row-active td:first-child{box-shadow:inset 3px 0 0 var(--up)}
+
+/* 对端调度器选中标识（0x07 active-paths 位图，青色与本端绿色区分） */
+.b-peer{background:var(--cyan-soft);color:var(--cyan)}

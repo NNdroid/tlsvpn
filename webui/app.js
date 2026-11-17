@@ -1782,6 +1782,14 @@ function activePathMark(s,stalled){
   if(!s||!s.active||stalled)return '';
   return ' <span class="badge b-on" title="'+esc(t('sched.active'))+'">▶ '+esc(t('sched.active'))+'</span>';
 }
+// peerActiveMark 对端调度器当前选中本连接的标识徽章（青色，与本端绿色区分）：
+// 数据源是 0x07 active-paths 位图（对端 500ms 广播、2s 窗口）。连接表 remote
+// 列、选路单元格与抽屉连接块共用。
+function peerActiveMark(s){
+  if(!s||!s.peer_active)return '';
+  const tip=t('sched.peer_active_tip')||t('sched.peer_active');
+  return ' <span class="badge b-peer" title="'+esc(tip)+'">⇄ '+esc(t('sched.peer_active'))+'</span>';
+}
 function schedulerCell(s,stalled){
   if(!s)return '<span class="dim">-</span>';
   // 连接被判定为不健康（stalled）：调度器已停止向其分配数据，独立于 active/standby。
@@ -1810,7 +1818,7 @@ function schedulerCell(s,stalled){
     meta+=' · '+t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+(umax>0?'~'+fmtMsUsUS(umax):'');
   }
   if(s.near_state)meta+=' · '+t('sched.near')+' '+(t('sched.near_'+s.near_state)!==('sched.near_'+s.near_state)?t('sched.near_'+s.near_state):s.near_state);
-  return '<div class="sched-cell"><span class="badge '+cls+'">'+esc(state)+'</span><small class="dim">'+esc(meta)+'</small></div>';
+  return '<div class="sched-cell"><span class="badge '+cls+'">'+esc(state)+'</span>'+peerActiveMark(s)+'<small class="dim">'+esc(meta)+'</small></div>';
 }
 // schedulerTip 调度单元格悬停说明：排除原因/排名键/包络上下限/粘滞/near 资格。
 // 与 schedulerCell 同口径，放在 <td> 的 title 上（表头不占列宽）。
@@ -1831,6 +1839,7 @@ function schedulerTip(r){
   if(Number(s.group_fwd_floor_us)>0){
     parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us));
   }else if(Number(s.group_min_rtt_us)>0&&Number(s.group_max_rtt_us)>0)parts.push(t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+'~'+fmtMsUsUS(s.group_max_rtt_us));
+  if(s.peer_active)parts.push(t('sched.peer_active_tip')||t('sched.peer_active'));
   if(s.sticky_held)parts.push(t('sched.sticky_held'));
   if(s.near_state){
     const nl=t('sched.near_'+s.near_state);
@@ -2052,7 +2061,7 @@ function renderConnsTable(data,fresh){
     const cerr=r.err||r.brutErr;
     const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
     const rowActive=r.sched&&r.sched.active&&!r.stalled;
-    return '<tr'+(rowActive?' class="row-active"':'')+' data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+activePathMark(r.sched,r.stalled)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+    return '<tr'+(rowActive?' class="row-active"':'')+' data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+activePathMark(r.sched,r.stalled)+peerActiveMark(r.sched)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td title="'+esc(schedulerTip(r))+'">'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
@@ -2214,7 +2223,7 @@ function renderDrawer(){
         :'';
       return '<div class="dc-conn">'+
         '<div class="dc-conn-top">'+
-          '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+activePathMark(x.scheduler,!!x.stalled)+
+          '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+activePathMark(x.scheduler,!!x.stalled)+peerActiveMark(x.scheduler)+
           '<span class="dc-conn-rtt">'+(rtt>0&&rtt<100000?(rtt+' ms'):'-')+'</span>'+
           '<span class="dc-conn-rate"><span class="arr-up">↑</span> '+fmtBytes((srvDirection?x.rx_bytes:x.tx_bytes)||0)+
             '<span class="arr-down">↓</span> '+fmtBytes((srvDirection?x.tx_bytes:x.rx_bytes)||0)+'</span>'+
