@@ -52,6 +52,10 @@ func putVPNFrameBatch(b []VPNFrame) {
 type VPNFrameBatch struct {
 	Frames []VPNFrame
 	Bytes  uint64
+	// RateBytes 参与投递速率记账（observeDelivered EWMA）的 payload 字节。
+	// 数据批 = Bytes；parity 批与 fence 控制帧 = 0（不计入速率，否则
+	// K=4 时投递速率系统性高估 ~25%）。调度/队列记账仍用 Bytes。
+	RateBytes uint64
 }
 
 func newOwnedVPNFrameBatch() any {
@@ -64,6 +68,7 @@ func getOwnedVPNFrameBatch() *VPNFrameBatch {
 	b := ownedVPNFrameBatchPool.Get().(*VPNFrameBatch)
 	b.Frames = b.Frames[:0]
 	b.Bytes = 0
+	b.RateBytes = 0
 	return b
 }
 
@@ -74,6 +79,7 @@ func putOwnedVPNFrameBatch(b *VPNFrameBatch) {
 	clear(b.Frames) // release payload references before the descriptor storage is pooled
 	b.Frames = b.Frames[:0]
 	b.Bytes = 0
+	b.RateBytes = 0
 	ownedVPNFrameBatchPool.Put(b)
 }
 
@@ -206,26 +212,6 @@ func freeFrames(batch []VPNFrame) {
 // 会把多个较小 backend batch 顺手合并到一次 Write。
 const maxTLSWriteBatchBytes = streamTLSBatchSoftLimit
 
-// appendOwnedFrameBatch 把一个 backend batch 成帧进 sendBuffer，并终结该
-// batch 的 payload/描述符所有权。返回帧数与其中填充字节数，供调用方在 Write
-// 成功之后批量累加统计。
-func appendOwnedFrameBatch(sendBuffer []byte, frames []VPNFrame, ic *innerCipher, recordLimit ...int) ([]byte, int, uint64) {
-	n := len(frames)
-	limit := 0
-	if len(recordLimit) > 0 {
-		limit = recordLimit[0]
-	}
-	var pad uint64
-	for _, vf := range frames {
-		var p int
-		sendBuffer, p = appendPaddedFrame(sendBuffer, vf, ic, limit)
-		pad += uint64(p)
-	}
-	freeFrames(frames)
-	putVPNFrameBatch(frames)
-	return sendBuffer, n, pad
-}
-
 // ======================= 混淆填充策略 =======================
 //
 // 填充长度按配置选择，支持热更。入参统一为线路负载长度（明文长 + 加密标签长），
@@ -265,9 +251,18 @@ func init() { padModeCode.Store(padCodeBucket) }
 // setPadMode 切换填充策略（非法值回落 bucket），返回实际生效的策略名。
 // 策略真正变化时清零填充累计：两种策略的线路长度分布完全不同，混在一个
 // 累计里会让"填充开销"既不代表旧策略也不代表新策略。
+//
+// 入参先按 crypto.go encAlgoFromConfig 的同型纪律规范化（ToLower+TrimSpace）：
+// "OFF"/" off " 此前被精确匹配静默回落为 bucket 填充。规范化改变了入参时
+// 告警一次，风格与 ApplyConfig 的 Invalid pad_mode 警告一致；调用方仍按
+// 返回值 != 原始配置自行告警，调用约定不变。
 func setPadMode(mode string) string {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized != mode {
+		log.Warnf("pad_mode %q normalized to %q", mode, normalized)
+	}
 	actual := padModeBucket
-	if mode == padModeOff {
+	if normalized == padModeOff {
 		actual = padModeOff
 	}
 	if actual == padModeName() {
@@ -407,13 +402,14 @@ func appendPaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher, recordLimit ...
 	binary.BigEndian.PutUint16(buf[startIdx+4:startIdx+6], uint16(padLen))
 	binary.BigEndian.PutUint32(buf[startIdx+6:startIdx+10], vf.Seq)
 
-	// 4. 拷贝数据负载并加密
+	// 4. 拷贝数据负载并加密（AAD 绑定本帧帧头的最终 padLen，接收端按帧头校验）
 	if dataLen > 0 {
 		payloadStart := startIdx + 10
 		copy(buf[payloadStart:payloadStart+dataLen], vf.Data)
 
 		if ic != nil && vf.Seq != 0 {
-			ic.sealInPlace(buf[payloadStart:payloadStart+wireLen], dataLen, vf.Seq, uint32(wireLen))
+			var scratch nonceAADScratch
+			ic.sealInPlaceWithScratch(buf[payloadStart:payloadStart+wireLen], dataLen, vf.Seq, uint32(wireLen), uint16(padLen), &scratch)
 		}
 	}
 
@@ -473,8 +469,11 @@ type FrameScanner struct {
 	// maxTotalLen 当前允许的完整线路帧上限（rawDataLen+padLen）。认证前与
 	// maxDataLen 同为小值，防攻击者用 padLen 字段绕过 dataLen 上限撑大缓冲；
 	// 认证后放开到 maxWireDataLen+maxWirePadLen，容纳合法 jumbo 帧+填充。
-	maxTotalLen   int
+	maxTotalLen  int
 	lastWireSize uint64 // complete record consumed by the last successful ReadFrame
+	// lastPadLen 最近一次成功 ReadFrame 的帧头 padLen。数据帧内层 AEAD 的 AAD
+	// 绑定该值（与发送端封印时一致），调用方解密时传入，篡改 padLen 即解密失败。
+	lastPadLen int
 }
 
 func NewFrameScanner(r io.Reader) *FrameScanner {
@@ -525,6 +524,7 @@ func (fs *FrameScanner) frameLenExceedsLimit(rawDataLen uint32, padLen int) bool
 func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 	const HeaderSize = 10
 	fs.lastWireSize = 0
+	fs.lastPadLen = 0
 
 	for {
 		available := len(fs.buf) - fs.offset
@@ -544,6 +544,7 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 
 			if available >= HeaderSize+totalLen {
 				fs.lastWireSize = uint64(HeaderSize + totalLen)
+				fs.lastPadLen = padLen
 				if dataLen == 0 {
 					// 心跳/控制帧：返回给调用方（frame=nil），用于刷新读超时。
 					// 旧实现在此静默跳过，导致空闲隧道的 30 秒读超时永不刷新、
@@ -563,10 +564,20 @@ func (fs *FrameScanner) ReadFrame() ([]byte, uint32, error) {
 
 		if fs.offset > 0 && (fs.offset == len(fs.buf) || fs.offset > 16384) {
 			remaining := len(fs.buf) - fs.offset
-			if remaining > 0 {
-				copy(fs.buf, fs.buf[fs.offset:])
+			// 只在整理点缩容（本分支每帧至多进入一次）：认证后收过一个 jumbo
+			// 帧会把 cap 推到 ~215KB，只增不减就常驻到会话结束。cap 超过 64KB
+			// 且剩余不足 16KB 时重分配回 16KB 并 copy 剩余；cap 回落后本条件
+			// 自然不再成立，不会每帧分配。
+			if cap(fs.buf) > 64*1024 && remaining < 16*1024 {
+				shrunk := make([]byte, remaining, 16*1024)
+				copy(shrunk, fs.buf[fs.offset:])
+				fs.buf = shrunk
+			} else {
+				if remaining > 0 {
+					copy(fs.buf, fs.buf[fs.offset:])
+				}
+				fs.buf = fs.buf[:remaining]
 			}
-			fs.buf = fs.buf[:remaining]
 			fs.offset = 0
 		}
 
@@ -638,7 +649,7 @@ type HandshakeReq struct {
 	// 去/回程不对称度，去掉单向时延分解里的公共偏移 δ、恢复 fwd+ret=RTT 自洽。
 	// 仅当两端都声明支持时启用；与 RTTProbe 独立协商（偏移估计可选叠加）。
 	ClockOffset bool `json:"clock_offset,omitempty"`
-	Encrypt  bool `json:"encrypt,omitempty"`
+	Encrypt     bool `json:"encrypt,omitempty"`
 	// EncAlgo：本端声明的内层加密算法（none / AES-256-GCM / AES-128-GCM / ChaCha20-Poly1305 / XChaCha20-Poly1305）。
 	// 服务端要求与配置完全相等，不做隐式降级。
 	EncAlgo int `json:"enc_algo,omitempty"`
@@ -677,7 +688,7 @@ type HandshakeResp struct {
 	// ClockOffset：服务端是否同意启用双向时钟偏移探针（与客户端声明取交集）。
 	// 未协商成功时 rttProbe 仍按现有锚定法 + δ 工作，行为不变。
 	ClockOffset bool `json:"clock_offset,omitempty"`
-	Encrypt  bool `json:"encrypt,omitempty"`
+	Encrypt     bool `json:"encrypt,omitempty"`
 	// EncAlgo：协商选定的算法（0=无内层加密，2=AES-256-GCM，4=AES-128-GCM）。
 	// 为 GCM 时 EncSalt 为 c2s 方向盐（客户端加密/服务端解密），
 	// EncSalt2 为 s2c 方向盐（服务端加密/客户端解密）。

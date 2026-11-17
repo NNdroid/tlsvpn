@@ -118,10 +118,12 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 	if !multipath {
 		// The constructor defaults to multipath=true so direct encoder tests keep
 		// their historical immediate-encoding semantics. If the very first real
-		// dispatch has only one backend, however, no multipath traffic has existed
-		// yet and RX has no dynamic state to suspend. Enter suppressed mode without
-		// emitting a synthetic startup SUSPEND.
-		hadTraffic := e.lastSeq != 0 || len(e.seqs) != 0
+		// dispatch has only one backend, enter suppressed mode and publish a
+		// startup SUSPEND at the first arithmetic group boundary: conns≥2 的会话
+		// RX 侧 staticSingle=false，若第二条连接迟迟拨不上，没有 bypass 窗口的话
+		// RX 会对整个被抑制区间空转建组（每帧 XOR + d.mu + pending 组表占用，
+		// 512 组满舱靠淘汰链空转）。fence 随数据批到达后 RX 从 seq=1 起全 bypass；
+		// 之后的 1→2 恢复由 controlGeneration!=0 分支发 RESUME 闭合窗口。
 		boundary := fecGroupStart(firstSeq, e.k)
 		if len(e.seqs) != 0 {
 			boundary = e.seqs[0]
@@ -131,16 +133,15 @@ func (e *fecEncoder) setPhysicalPathCount(paths int) {
 			e.reset()
 		}
 		e.armed = false
-		if hadTraffic {
-			e.publishModeControl(fecControlSuspend, boundary)
-		}
+		e.publishModeControl(fecControlSuspend, boundary)
 		return
 	}
 
-	// A startup 1 -> 2 transition does not require RESUME if no SUSPEND was ever
-	// published: RX stayed conservatively active the whole time. Once a genuine
-	// multipath -> single-path SUSPEND exists, later 1 -> 2 transitions must close
-	// that bypass window at the next complete arithmetic group boundary.
+	// A startup 1 -> 2 transition does not require RESUME only when no SUSPEND
+	// was ever published (RX stayed conservatively active the whole time)——since
+	// the startup single-path path now always publishes SUSPEND, every later
+	// 1 -> 2 transition closes that bypass window at the next complete arithmetic
+	// group boundary.
 	e.multipath = true
 	e.armed = false
 	if e.controlGeneration == 0 {
@@ -228,7 +229,9 @@ func (e *fecEncoder) buildParity() []byte {
 	if e.ic != nil {
 		// 校验帧线路负载 = 描述符 + 加密后的异或载荷（AEAD 附标签），
 		// 以 groupStart 为 AEAD 的 seq。接收端解码时用同方向盐。
-		e.ic.sealInPlaceWithScratch(buf[off:off+maxLen+tagLen], maxLen, e.seqs[0], uint32(maxLen+tagLen), &e.aeadScratch)
+		// AAD 整体绑定描述符（kind+groupStart+K+成员长度表）：描述符此前是
+		// parity 路径唯一的未认证字段，成员长度被篡改只能靠下游自洽性检查兜底。
+		e.ic.sealInPlaceWithAAD(buf[off:off+maxLen+tagLen], maxLen, e.seqs[0], buf[:off], &e.aeadScratch)
 	}
 	return buf
 }

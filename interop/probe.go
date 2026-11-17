@@ -9,6 +9,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/md5" // UUID v3 is required to reproduce the established client-id namespace.
 	"crypto/rand"
 	"crypto/sha1" // UUID v5 is required by the established client-id derivation.
@@ -197,9 +198,11 @@ func record(seq uint32, plain []byte, c *probeCipher) []byte {
 	if c == nil || seq == 0 || len(plain) == 0 {
 		copy(out[10:], plain)
 	} else {
-		var aad [8]byte
+		// AAD = wireLen(4) || padLen(2) || seq(4)，绑定帧头完整字段（与主实现一致）
+		var aad [10]byte
 		binary.BigEndian.PutUint32(aad[:4], uint32(wireLen))
-		binary.BigEndian.PutUint32(aad[4:], seq)
+		binary.BigEndian.PutUint16(aad[4:6], padLen)
+		binary.BigEndian.PutUint32(aad[6:], seq)
 		sealed := c.aead.Seal(out[10:10], c.nonce(seq), plain, aad[:])
 		if len(sealed) != wireLen {
 			panic("unexpected AEAD length")
@@ -284,12 +287,20 @@ func main() {
 	if _, err := io.ReadFull(rand.Reader, instance[:]); err != nil {
 		fatalf("random client instance: %v", err)
 	}
+	// 协议 v4：握手 PSK 证明绑定本条 TLS 连接的 exporter 密钥材料，
+	// 静态 hashPSK 不再是可重放凭据（与主实现 crypto.go pskProofHex 一致）。
+	cs := conn.ConnectionState()
+	exporter, err := cs.ExportKeyingMaterial(pskProofLabel, nil, pskProofLen)
+	if err != nil {
+		fatalf("export TLS keying material: %v", err)
+	}
 	pskHash := sha256.Sum256([]byte(*psk))
+	_ = pskHash
 	req := handshakeReq{
-		ProtocolVersion: 3,
+		ProtocolVersion: 4,
 		ClientInstance:  hex.EncodeToString(instance[:]),
 		ClientID:        clientID(*mac, *psk),
-		PSK:             hex.EncodeToString(pskHash[:]),
+		PSK:             pskProofHex(*psk, exporter),
 		MAC:             strings.ToLower(*mac),
 		IPv4:            "10.7.0.77",
 		Encrypt:         true,
@@ -320,8 +331,8 @@ func main() {
 	if !resp.Success {
 		fatalf("handshake rejected: %s", resp.Message)
 	}
-	if resp.ProtocolVersion != 3 || resp.SessionEpoch == 0 {
-		fatalf("server lacks protocol-v3 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
+	if resp.ProtocolVersion != 4 || resp.SessionEpoch == 0 {
+		fatalf("server lacks protocol-v4 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
 	}
 	if resp.TLS == nil {
 		fatalf("server did not return server-observed TLS summary")
@@ -376,4 +387,17 @@ func main() {
 		}
 	}
 	fatalf("no server heartbeat before timeout")
+}
+
+// ======================= 协议 v4 握手 PSK 证明 =======================
+// 与主实现 crypto.go 保持一致：证明 = HMAC-SHA256(key=sha256(psk), msg=exporter)。
+
+const pskProofLabel = "tlsvpn psk proof v1"
+const pskProofLen = 32
+
+func pskProofHex(psk string, exporter []byte) string {
+	key := sha256.Sum256([]byte(psk))
+	mac := hmac.New(sha256.New, key[:])
+	mac.Write(exporter)
+	return hex.EncodeToString(mac.Sum(nil))
 }

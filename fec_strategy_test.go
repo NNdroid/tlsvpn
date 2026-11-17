@@ -79,11 +79,11 @@ func TestParityNearEligible(t *testing.T) {
 	dataBest := oneWayBackend(160_000, 80_000, 80_000, 30_000_000)
 	near := oneWayBackend(160_000, 85_000, 80_000, 30_000_000)
 	far := oneWayBackend(160_000, 120_000, 80_000, 30_000_000)
-	if !p.parityNearEligible(near, dataBest) {
-		t.Fatal("85ms should be within 10ms window of 80ms")
+	if st := p.parityNearState(near, dataBest); st != schedFlagNearIn {
+		t.Fatalf("85ms should be within 10ms window of 80ms: state=%d", st)
 	}
-	if p.parityNearEligible(far, dataBest) {
-		t.Fatal("120ms should be outside 10ms window of 80ms")
+	if st := p.parityNearState(far, dataBest); st != 0 {
+		t.Fatalf("120ms should be outside 10ms window of 80ms: state=%d", st)
 	}
 }
 

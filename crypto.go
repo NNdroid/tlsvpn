@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -222,22 +223,28 @@ func (ic *innerCipher) tagLen() int {
 	return ic.aead.Overhead()
 }
 
-// nonceAADScratch 同时容纳最大 24B nonce 与 8B AAD，避免热路径每帧分配。
-type nonceAADScratch [xNonceSize + 8]byte
+// nonceAADScratch 同时容纳最大 24B nonce 与 10B AAD，避免热路径每帧分配。
+type nonceAADScratch [xNonceSize + 10]byte
 
-func (ic *innerCipher) nonceAAD(seq uint32, wireLen uint32, buf *nonceAADScratch) (nonce, aad []byte) {
+// AAD = wireLen(4B) ‖ padLen(2B) ‖ seq(4B)：绑定帧头中除明文长度外全部
+// 完整性相关字段。padLen 此前不被认证，能改内层流量的攻击者可翻转它使
+// padding 字节被重新解析为下一帧头（连接级去同步 DoS）；纳入 AAD 后两端
+// 按帧头实际 padLen 校验，篡改即解密失败。
+func (ic *innerCipher) nonceAAD(seq uint32, wireLen uint32, padLen uint16, buf *nonceAADScratch) (nonce, aad []byte) {
 	if ic.algo == encAlgoXChaCha20 {
 		copy(buf[0:20], ic.xnoncePrefix[:])
 		binary.BigEndian.PutUint32(buf[20:24], seq)
 		binary.BigEndian.PutUint32(buf[24:28], wireLen)
-		binary.BigEndian.PutUint32(buf[28:32], seq)
-		return buf[:xNonceSize], buf[xNonceSize : xNonceSize+8]
+		binary.BigEndian.PutUint16(buf[28:30], padLen)
+		binary.BigEndian.PutUint32(buf[30:34], seq)
+		return buf[:xNonceSize], buf[xNonceSize : xNonceSize+10]
 	}
 	binary.BigEndian.PutUint32(buf[0:4], seq)
 	copy(buf[4:12], ic.salt[:])
 	binary.BigEndian.PutUint32(buf[12:16], wireLen)
-	binary.BigEndian.PutUint32(buf[16:20], seq)
-	return buf[:standardNonceSize], buf[standardNonceSize : standardNonceSize+8]
+	binary.BigEndian.PutUint16(buf[16:18], padLen)
+	binary.BigEndian.PutUint32(buf[18:22], seq)
+	return buf[:standardNonceSize], buf[standardNonceSize : standardNonceSize+10]
 }
 
 // 历史测试辅助函数保留 AES-GCM 的 nonce/AAD 观察语义。
@@ -247,64 +254,158 @@ func (ic *innerCipher) gcmNonce(seq uint32) []byte {
 	copy(nonce[4:], ic.salt[:])
 	return nonce[:]
 }
-func gcmAAD(wireLen, seq uint32) []byte {
-	var aad [8]byte
+func gcmAAD(wireLen uint32, padLen uint16, seq uint32) []byte {
+	var aad [10]byte
 	binary.BigEndian.PutUint32(aad[0:4], wireLen)
-	binary.BigEndian.PutUint32(aad[4:8], seq)
+	binary.BigEndian.PutUint16(aad[4:6], padLen)
+	binary.BigEndian.PutUint32(aad[6:10], seq)
 	return aad[:]
 }
 
-func (ic *innerCipher) sealInPlaceWithScratch(region []byte, ptLen int, seq uint32, wireLen uint32, scratch *nonceAADScratch) int {
+func (ic *innerCipher) sealInPlaceWithScratch(region []byte, ptLen int, seq uint32, wireLen uint32, padLen uint16, scratch *nonceAADScratch) int {
 	if ptLen == 0 || ic == nil {
 		return ptLen
 	}
-	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, padLen, scratch)
 	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
 	return len(out)
 }
 
-// sealInPlace is retained for tests/cold callers. The hot writer path passes a
-// goroutine-local scratch explicitly via sealInPlaceWithScratch.
+// sealInPlace is retained for tests/cold callers (padLen=0: raw payload without
+// frame padding). The hot writer path passes a goroutine-local scratch and the
+// frame's final padLen explicitly via sealInPlaceWithScratch.
 func (ic *innerCipher) sealInPlace(region []byte, ptLen int, seq uint32, wireLen uint32) int {
 	var scratch nonceAADScratch
-	return ic.sealInPlaceWithScratch(region, ptLen, seq, wireLen, &scratch)
+	return ic.sealInPlaceWithScratch(region, ptLen, seq, wireLen, 0, &scratch)
 }
 
-func (ic *innerCipher) openInPlaceWithScratch(data []byte, seq uint32, wireLen uint32, scratch *nonceAADScratch) ([]byte, error) {
+// sealInPlaceWithAAD nonce 仍由 (seq, salt) 派生，AAD 由调用方整体提供。
+// FEC parity 用它把描述符（kind+groupStart+K+成员长度表）纳入认证——描述符
+// 此前是 parity 路径唯一的未认证字段，成员长度表被篡改只能靠下游自洽性
+// 检查兜底。
+func (ic *innerCipher) sealInPlaceWithAAD(region []byte, ptLen int, seq uint32, aad []byte, scratch *nonceAADScratch) int {
+	if ptLen == 0 || ic == nil {
+		return ptLen
+	}
+	nonce, _ := ic.nonceAAD(seq, 0, 0, scratch)
+	out := ic.aead.Seal(region[:0], nonce, region[:ptLen], aad)
+	return len(out)
+}
+
+func (ic *innerCipher) openInPlaceWithScratch(data []byte, seq uint32, wireLen uint32, padLen uint16, scratch *nonceAADScratch) ([]byte, error) {
 	if len(data) == 0 || ic == nil {
 		return data, nil
 	}
 	if len(data) < ic.tagLen() {
 		return nil, fmt.Errorf("AEAD payload too short: %d", len(data))
 	}
-	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, padLen, scratch)
 	return ic.aead.Open(data[:0], nonce, data, aad)
 }
 
-// openInPlace is retained for tests/cold callers. The hot reader path passes a
-// goroutine-local scratch explicitly via openInPlaceWithScratch.
+// openInPlace is retained for tests/cold callers (padLen=0). The hot reader
+// path passes the frame header's padLen explicitly.
 func (ic *innerCipher) openInPlace(data []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	var scratch nonceAADScratch
-	return ic.openInPlaceWithScratch(data, seq, wireLen, &scratch)
+	return ic.openInPlaceWithScratch(data, seq, wireLen, 0, &scratch)
 }
 
-func (ic *innerCipher) openToWithScratch(dst, src []byte, seq uint32, wireLen uint32, scratch *nonceAADScratch) ([]byte, error) {
+func (ic *innerCipher) openToWithScratch(dst, src []byte, seq uint32, wireLen uint32, padLen uint16, scratch *nonceAADScratch) ([]byte, error) {
 	if ic == nil {
+		if len(dst) < len(src) {
+			return nil, fmt.Errorf("plaintext destination too small: %d < %d", len(dst), len(src))
+		}
 		copy(dst, src)
-		return dst, nil
+		return dst[:len(src)], nil
 	}
 	if len(src) < ic.tagLen() {
 		return nil, fmt.Errorf("AEAD payload too short: %d", len(src))
 	}
-	nonce, aad := ic.nonceAAD(seq, wireLen, scratch)
+	nonce, aad := ic.nonceAAD(seq, wireLen, padLen, scratch)
 	return ic.aead.Open(dst[:0], nonce, src, aad)
 }
 
-// openTo is retained for tests/cold callers. FEC RX passes its connection-local
-// scratch explicitly via openToWithScratch.
+// openToWithAAD nonce 仍由 (seq, salt) 派生，AAD 由调用方整体提供（FEC parity
+// 的描述符，见 sealInPlaceWithAAD）。
+func (ic *innerCipher) openToWithAAD(dst, src []byte, seq uint32, aad []byte, scratch *nonceAADScratch) ([]byte, error) {
+	if ic == nil {
+		if len(dst) < len(src) {
+			return nil, fmt.Errorf("plaintext destination too small: %d < %d", len(dst), len(src))
+		}
+		copy(dst, src)
+		return dst[:len(src)], nil
+	}
+	if len(src) < ic.tagLen() {
+		return nil, fmt.Errorf("AEAD payload too short: %d", len(src))
+	}
+	nonce, _ := ic.nonceAAD(seq, 0, 0, scratch)
+	return ic.aead.Open(dst[:0], nonce, src, aad)
+}
+
+// openTo is retained for tests/cold callers (padLen=0). FEC RX passes its
+// connection-local scratch explicitly via openToWithScratch.
 func (ic *innerCipher) openTo(dst, src []byte, seq uint32, wireLen uint32) ([]byte, error) {
 	var scratch nonceAADScratch
-	return ic.openToWithScratch(dst, src, seq, wireLen, &scratch)
+	return ic.openToWithScratch(dst, src, seq, wireLen, 0, &scratch)
+}
+
+// ======================= 握手 PSK 证明 =======================
+//
+// 协议 v3 及以前，握手"证明"就是静态的 sha256(PSK) 本身：拿到一次握手明文
+// （harvest-now-decrypt-later / CA 失陷）即可在其他连接上永久重放该 hash。
+// v4 把证明绑定到当前 TLS 连接的 exporter 密钥材料（RFC 5705）：同一连接
+// 两端导出相同值，不同连接（包括录制的旧握手）导出值必然不同，静态凭据
+// 重放被消除。hashPSK 仍保留用于会话复活时校验"同一 PSK 创建的会话"。
+
+// pskProofLabel 是握手 PSK 证明的 TLS exporter label，两端硬编码一致。
+const pskProofLabel = "tlsvpn psk proof v1"
+
+// pskProofLen 是 exporter 导出长度（字节）。
+const pskProofLen = 32
+
+// pskProofHex 计算握手 PSK 证明：HMAC-SHA256(key=sha256(psk), msg=exporter)。
+// exporter 由调用方从各自 TLS 连接上导出（两端同连接同值）。
+func pskProofHex(psk string, exporter []byte) string {
+	key := sha256.Sum256([]byte(psk))
+	mac := hmac.New(sha256.New, key[:])
+	mac.Write(exporter)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// verifyPSKProof 常量时间比较客户端提交的证明（限流与焦油坑挡不住时序预言机）。
+func verifyPSKProof(proofHex, psk string, exporter []byte) bool {
+	want := pskProofHex(psk, exporter)
+	return hmac.Equal([]byte(proofHex), []byte(want))
+}
+
+// handshakePSKVerify 握手 PSK 证明校验入口。生产实现从连接包装里解出
+// *tls.Conn 导出 exporter；无 TLS 密钥材料（裸 TCP 直连，仅测试可能出现）
+// 一律 fail-closed。测试可注入替代实现以绕开真实 TLS 握手。
+var handshakePSKVerify = func(conn net.Conn, proof, psk string) bool {
+	exporter := tlsExporterFromConn(conn)
+	if exporter == nil {
+		return false
+	}
+	return verifyPSKProof(proof, psk, exporter)
+}
+
+// tlsExporterFromConn 解出握手连接的 TLS exporter 密钥材料。生产路径 conn
+// 恒为包着 *tls.Conn 的 PrefixConn；解包失败或导出失败返回 nil。
+func tlsExporterFromConn(conn net.Conn) []byte {
+	pc, ok := conn.(*PrefixConn)
+	if !ok {
+		return nil
+	}
+	tc, ok := pc.Conn.(*tls.Conn)
+	if !ok {
+		return nil
+	}
+	cs := tc.ConnectionState()
+	exp, err := cs.ExportKeyingMaterial(pskProofLabel, nil, pskProofLen)
+	if err != nil {
+		return nil
+	}
+	return exp
 }
 
 // verifyCertHash 用服务器证书叶子证书的 SHA-256 指纹校验 -cert-sha256。

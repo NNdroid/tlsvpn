@@ -200,6 +200,7 @@ func (e *clockOffsetEstimator) add(s offsetSample) {
 	if len(e.samples) < clockOffsetSampleCap {
 		e.samples = append(e.samples, s)
 		e.head = 0
+		e.dirty = true
 		return
 	}
 	// 已满：覆盖最旧槽位并前移游标。
@@ -247,8 +248,10 @@ func (e *clockOffsetEstimator) solve() {
 	// 用 uint64 差值转 int64（ns 量级远小于 int64 上限，无溢出）。
 	est := make([]int64, 0, n)
 	for _, s := range e.samples {
-		if s.t1 == 0 || s.t2 < s.t1 || s.t3 == 0 || s.t4 < s.t3 {
-			continue // 时钟异常样本丢弃
+		// 只过滤缺时间戳的哨兵样本；t2<t1 / t4<t3 是跨钟（A↔B）比较，B 慢于
+		// A 属合法状态（θ<0），据此丢弃会让估计器对负偏移系统性失明。
+		if s.t1 == 0 || s.t2 == 0 || s.t3 == 0 || s.t4 == 0 {
+			continue
 		}
 		f := int64(s.t2 - s.t1) // 去程分量 F + θ
 		b := int64(s.t4 - s.t3) // 回程分量 B - θ
@@ -450,6 +453,12 @@ func (s *clockOffsetScheduler) resetTimer() {
 	if d < 50*time.Millisecond {
 		d = 50 * time.Millisecond
 	}
+	// 排空可能已到期的旧值：不排空的话 Reset 后下一轮 select 会立刻收到
+	// 旧到期值，多打一轮探针（有 pending 上限兜底，但属无谓抖动）。
+	select {
+	case <-s.timer.C:
+	default:
+	}
 	s.timer.Reset(d)
 	s.timerCh = s.timer.C
 }
@@ -514,8 +523,9 @@ func (s *clockOffsetScheduler) respond(fr clockOffsetFrame) {
 	}
 	now := time.Now()
 	recvTS := uint64(now.UnixNano())
-	// off_ts 存 UnixMilli 低 32 位：毫秒粒度足够（θ 精度受 U 上限约束），
-	// 且避免纳秒在 uint32 下回绕。
+	// off_ts 存 UnixMilli 低 32 位。当前毫秒时间戳约 1.76e12，已超出 uint32
+	//（32 位承载纳秒才够 ~136 年）；接收端以 recv_ts 的毫秒为基准、按 uint32
+	// 环回差值重建完整 t3，见 absorb。
 	txTS := uint32(now.UnixMilli())
 	payload := appendClockOffsetReplyFrame(nil, fr.nonce, fr.sendTS, recvTS, txTS)
 	select {
@@ -534,16 +544,27 @@ func (s *clockOffsetScheduler) absorb(fr clockOffsetFrame) {
 	if fr.sendTS == 0 || fr.recvTS == 0 || fr.txTS == 0 {
 		return // 缺时间戳（含对端未填 off_ts）：丢弃该样本
 	}
-	recvNS := uint64(fr.recvAt.UnixNano())
-	t3NS := uint64(fr.txTS) * 1_000_000 // off_ts（UnixMilli）→ ns
-	if fr.sendTS > recvNS || fr.recvTS > recvNS || t3NS > recvNS {
-		return // 时钟异常，丢弃
+	recvNS := uint64(fr.recvAt.UnixNano()) // t4（A 钟）
+	// t3 重建：off_ts 是 UnixMilli 的低 32 位（不能当绝对毫秒用——直接乘 1e6
+	// 会得到比 t4 小三个数量级的垃圾 t3，θ 恒为荒谬负值却"收敛"）。以 t2
+	// （B 钟完整纳秒）的毫秒为基准，按 uint32 环回差值还原：
+	// t3 = t2 + (off_ms − floor(t2/1e6)) × 1e6，误差 ≤1ms（off_ts 毫秒截断）。
+	// int32 环回差值要求 |t3−t2| < 2^31 ms，恒成立。
+	deltaMS := int32(fr.txTS - uint32(fr.recvTS/1_000_000))
+	if deltaMS < 0 || deltaMS > 1000 {
+		return // off_ts 垃圾或 B 侧异常延迟：丢弃该样本
 	}
+	t3NS := fr.recvTS + uint64(deltaMS)*1_000_000
+	if fr.sendTS > recvNS {
+		return // t1 > t4（A 钟内回包早于请求发出）：时钟异常
+	}
+	// 注意 t2/t3 是 B 钟值，不与 t1/t4（A 钟）跨钟比较大小——B 慢于 A 是合法
+	// 状态，正是本估计器要测量的 θ。
 	s.est.add(offsetSample{
-		t1: fr.sendTS, // A 发送
-		t2: fr.recvTS, // B 接收
-		t3: t3NS,     // B 发送（回包注入时刻，对端显式回填，非 issued 近似）
-		t4: recvNS,   // A 接收
+		t1:   fr.sendTS, // A 发送
+		t2:   fr.recvTS, // B 接收
+		t3:   t3NS,      // B 发送（由 off_ts 环回重建）
+		t4:   recvNS,    // A 接收
 		conn: p.targetConn,
 	})
 	s.est.refresh()

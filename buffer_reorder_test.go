@@ -72,3 +72,45 @@ func BenchmarkReorderChunkDrain1024(b *testing.B) {
 		rb.freeBatch(batch)
 	}
 }
+
+// TestReorderResetShrinksGrownWindow 一次大偏斜把窗口扩到 8192 后，Reset 必须
+// 把 ring/seqSlots 缩回初始 2048——扩容后的描述符（满档 65536 约 0.8MB）不应
+// 常驻到会话结束。缩回只在 Reset（会话重置，单写者）时发生，热路径不缩容。
+func TestReorderResetShrinksGrownWindow(t *testing.T) {
+	rb := NewReorderBuffer(nil)
+	defer rb.Close()
+	rb.Insert(1, getFrameAtLeast(32)[:32])
+	rb.Insert(1+5000, getFrameAtLeast(32)[:32])
+	if len(rb.ring) <= ReorderWindowSize {
+		t.Fatalf("前置条件失败：偏斜未触发扩容 ring=%d", len(rb.ring))
+	}
+	rb.Reset()
+	if len(rb.ring) != ReorderWindowSize || len(rb.seqSlots) != ReorderWindowSize ||
+		rb.windowMask != ReorderWindowSize-1 {
+		t.Fatalf("Reset 后窗口未缩回: ring=%d seqSlots=%d mask=%d",
+			len(rb.ring), len(rb.seqSlots), rb.windowMask)
+	}
+	// 缩回后缓冲区仍可正常工作。
+	rb.Insert(1, getFrameAtLeast(32)[:32])
+	if rb.ExpectedSeqSnapshot() != 2 {
+		t.Fatalf("Reset 后 Insert 不可用: expectedSeq=%d", rb.ExpectedSeqSnapshot())
+	}
+}
+
+// TestReorderResetActorShrinksGrownWindow 同上走 actor 路径：ResetActor 在
+// epoch barrier 内由唯一写者调用，扩容窗口同样必须缩回初始 2048。
+func TestReorderResetActorShrinksGrownWindow(t *testing.T) {
+	rb := NewActorReorderBuffer(nil)
+	defer rb.Close()
+	rb.InsertActor(1, getFrameAtLeast(32)[:32])
+	rb.InsertActor(1+5000, getFrameAtLeast(32)[:32])
+	if len(rb.ring) <= ReorderWindowSize {
+		t.Fatalf("前置条件失败：偏斜未触发扩容 ring=%d", len(rb.ring))
+	}
+	rb.ResetActor()
+	if len(rb.ring) != ReorderWindowSize || len(rb.seqSlots) != ReorderWindowSize ||
+		rb.windowMask != ReorderWindowSize-1 {
+		t.Fatalf("ResetActor 后窗口未缩回: ring=%d seqSlots=%d mask=%d",
+			len(rb.ring), len(rb.seqSlots), rb.windowMask)
+	}
+}

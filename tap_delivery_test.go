@@ -121,6 +121,29 @@ func TestOwnedTapDeliveryReleasesFrameAfterCancellation(t *testing.T) {
 	d.EnqueueOwned(f)
 }
 
+// TestOwnedTapDeliveryCancelledEnqueueNeverStrandsFrames 取消后入队不得滞留
+// channel：select 在"队列有位"与"ctx.Done"同时就绪时随机选择，run 已
+// releaseQueued 退出后入队的帧会无人消费（上限 128 池缓冲流失）。修复后
+// 入队前先查 ctx.Err，命中取消直接归还池缓冲，确定性断言 channel 恒空。
+func TestOwnedTapDeliveryCancelledEnqueueNeverStrandsFrames(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := newOwnedTapDelivery(ctx, &recordingTapWriter{}, asyncTapDeliveryQueue, nil)
+	cancel()
+	// 等 run 观察到取消并执行 releaseQueued（channel 排空后再断言）。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(d.ch) != 0 {
+		time.Sleep(time.Millisecond)
+	}
+	for i := 0; i < 128; i++ {
+		f := getFrameAtLeast(16)[:1]
+		f[0] = byte(i)
+		d.EnqueueOwned(f)
+	}
+	if n := len(d.ch); n != 0 {
+		t.Fatalf("取消后入队滞留 channel: %d 帧（应直接归还池缓冲）", n)
+	}
+}
+
 func TestAsyncTapDeliveryQueueIsBounded(t *testing.T) {
 	if asyncTapDeliveryQueue < 32 || asyncTapDeliveryQueue > 256 {
 		t.Fatalf("asyncTapDeliveryQueue=%d, want bounded low-latency range [32,256]", asyncTapDeliveryQueue)

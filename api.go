@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -486,6 +487,9 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		redacted.PSK = ""
 		redacted.Web.Auth = ""
 		redacted.Socks5 = ""
+		// MCP credential 是 sha256 验证器（防重放），但拿到验证器即可对弱口令
+		// 离线字典爆破；与其他秘密同等待遇，GET 一律脱敏。
+		redacted.Web.MCP.Credential = ""
 		data, _ := json.MarshalIndent(&redacted, "", "  ")
 		w.Write(data)
 	}))
@@ -566,6 +570,10 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 			writeOK(w)
 
 		case srv != nil && req.Action == "ban":
+			if err := validateBanTTLMinutes(req.TTLMinutes); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
 			ttl := time.Duration(req.TTLMinutes) * time.Minute
 			if srv.Ban(req.ClientID, ttl) {
 				log.Infof("[WebUI] Banned client %s (ttl=%s)", req.ClientID, ttl)
@@ -662,8 +670,14 @@ func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return nil, nil, fmt.Errorf("invalid config: expected exactly one JSON value")
 	}
-	// 面板提交的内容不允许自行改写来源路径与 mode 切换（mode 切换等于换进程形态）
+	// 面板提交的内容不允许自行改写来源路径与 mode 切换（mode 切换等于换进程形态）。
+	// mode 只固定 SourcePath 不固定会把错误角色持久化进配置文件——下次重启
+	// 服务端/客户端身份静默互换。运行中配置恒有 mode；old.Mode 为空（单元测试
+	// 构造的裸配置）时不固定，交由 Validate 按提交值校验。
 	newCfg.SourcePath = old.SourcePath
+	if old.Mode != "" {
+		newCfg.Mode = old.Mode
+	}
 	// GET /api/config 对凭据做了脱敏；面板回传空值表示“保留现有 secret”，
 	// 而不是把运行中的认证信息清空。
 	if newCfg.PSK == "" {
@@ -674,6 +688,13 @@ func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv
 	}
 	if newCfg.Socks5 == "" {
 		newCfg.Socks5 = old.Socks5
+	}
+	// web.mcp.credential 与 PSK 同理：GET 已脱敏，面板回传空值表示保留现有
+	// 验证器——但仅当认证模式未变。切换模式（如 basic→api_key）必须显式提供
+	// 新凭据，避免把旧验证器静默套到新用户名/头上。
+	if newCfg.Web.MCP.Credential == "" &&
+		normalizeMCPAuthMode(newCfg.Web.MCP.AuthMode) == normalizeMCPAuthMode(old.Web.MCP.AuthMode) {
+		newCfg.Web.MCP.Credential = old.Web.MCP.Credential
 	}
 	newCfg.applyDefaults()
 	if err := newCfg.Validate(); err != nil {
@@ -701,6 +722,19 @@ func tlsScheme(cert, key string) string {
 func writeOK(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status": "ok"}`))
+}
+
+// maxBanTTLMinutes 封禁 TTL 上限（7 天），MCP 路径与 /api/control 共用。
+const maxBanTTLMinutes = 7 * 24 * 60
+
+// validateBanTTLMinutes 统一校验 ban 的 TTL：0 表示永久，1..10080 分钟为有限期。
+// 负值/超大值经 time.Duration 乘法会整型回绕成 <=0，Server.Ban 把 ttl<=0 当
+// 永久封禁——等于把"输入错误"放大成"永久封禁"，必须在两个入口都拦下。
+func validateBanTTLMinutes(ttl int) error {
+	if ttl < 0 || ttl > maxBanTTLMinutes {
+		return fmt.Errorf("ttl_minutes must be 0 (permanent) or between 1 and %d", maxBanTTLMinutes)
+	}
+	return nil
 }
 
 // handleMetrics 输出 Prometheus 文本格式指标
@@ -781,8 +815,8 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 			emit("tlsvpn_psk_fail_buckets", "Remote addresses with recent PSK failures", "gauge", fmt.Sprint(pskBuckets))
 		}
 		if cli != nil {
-			emit("tlsvpn_tx_bytes_total", "Total bytes sent", "counter", fmt.Sprint(atomic.LoadUint64(&cli.TxBytes)))
-			emit("tlsvpn_rx_bytes_total", "Total bytes received", "counter", fmt.Sprint(atomic.LoadUint64(&cli.RxBytes)))
+			emit("tlsvpn_tx_bytes_total", "Total bytes sent", "counter", fmt.Sprint(cli.TxBytes.Load()))
+			emit("tlsvpn_rx_bytes_total", "Total bytes received", "counter", fmt.Sprint(cli.RxBytes.Load()))
 			emit("tlsvpn_live_connections", "Live physical connections", "gauge", fmt.Sprint(atomic.LoadInt32(&cli.liveConns)))
 			emit("tlsvpn_reconnect_attempts_total", "Reconnect attempts", "counter", fmt.Sprint(cli.ReconnectAttempts()))
 			emit("tlsvpn_port_dropped_frames_total", "Frames dropped due to backpressure", "counter", fmt.Sprint(cli.txPort.Dropped()))
@@ -801,9 +835,76 @@ func handleMetrics(srv *Server, cli *Client) http.HandlerFunc {
 	}
 }
 
-// startWebStatsHandler 输出运行状态 JSON（server/client 两种模式）
+// startWebStatsHandler 输出运行状态 JSON（server/client 两种模式）。
 func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, cli *Client) {
 	w.Header().Set("Content-Type", "application/json")
+	// SSE 经 dashboardStatsBytes 的 dashboardCapture 复用本 handler：多个 viewer
+	// 同一秒内各 emit 一次，各自全量构建（遍历会话拿多把锁 + 系统 metrics）
+	// 纯属重复。capture 路径命中 1s 进程级缓存直接回放；/api/stats 与测试直调
+	// 不经 capture，保持实时构建——读到的永远是当下状态（既有 webstats_* 断言
+	// 依赖同一实例上连续两次调用能看到状态变化）。缓存失败回落实时构建。
+	if _, isCapture := w.(*dashboardCapture); isCapture {
+		if _, encoded, err := cachedWebStats(srv, cli); err == nil {
+			// 末尾补换行，与 json.NewEncoder(w).Encode 的输出逐字节一致
+			_, _ = w.Write(encoded)
+			_, _ = w.Write([]byte("\n"))
+			return
+		}
+	}
+	stats, err := buildWebStatsStruct(srv, cli)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(stats)
+}
+
+const webStatsCacheTTL = time.Second
+
+// webStatsCache 进程级 stats 快照缓存（结构体 + JSON 字节）。字段全部在持有
+// mu 时读写。
+var webStatsCache struct {
+	mu      sync.Mutex
+	srv     *Server
+	cli     *Client
+	stats   *WebStats
+	encoded []byte
+	at      time.Time
+}
+
+// cachedWebStats 返回 TTL 内复用的 stats 快照。命中条件除 TTL 外还要求
+// srv/cli 指针一致：测试与嵌入场景可能临时构造不同实例，避免跨实例串值。
+// 未命中时构建一次：结构体给 MCP（SDK 直接编码），字节给 SSE 回放。
+func cachedWebStats(srv *Server, cli *Client) (*WebStats, []byte, error) {
+	now := time.Now()
+	webStatsCache.mu.Lock()
+	defer webStatsCache.mu.Unlock()
+	if webStatsCache.stats != nil && webStatsCache.srv == srv && webStatsCache.cli == cli &&
+		now.Sub(webStatsCache.at) < webStatsCacheTTL {
+		return webStatsCache.stats, webStatsCache.encoded, nil
+	}
+	stats, err := buildWebStatsStruct(srv, cli)
+	if err != nil {
+		return nil, nil, err
+	}
+	encoded, err := json.Marshal(stats)
+	if err != nil {
+		return nil, nil, err
+	}
+	webStatsCache.srv = srv
+	webStatsCache.cli = cli
+	webStatsCache.stats = stats
+	webStatsCache.encoded = encoded
+	webStatsCache.at = now
+	return stats, encoded, nil
+}
+
+// buildWebStatsStruct 构建运行状态快照结构体（server/client 两种模式）。
+// 此前构建逻辑内嵌在 HTTP handler 里，MCP 复用时走 capture→Marshal→Unmarshal
+// 的绕路、SDK 再 Marshal 一次；抽出后 MCP 直接复用结构体，消除三重序列化，
+// /api/stats 与 SSE 各自直接编码一次。error 保留给未来可能失败的构建步骤，
+// 当前恒为 nil。
+func buildWebStatsStruct(srv *Server, cli *Client) (*WebStats, error) {
 	stats := WebStats{InstanceID: dashboardInstanceID, SampleTimeMs: time.Now().UnixMilli(), AccountingScope: "application_wire_excluding_heartbeat", Version: appVersion, Clients: make(map[string]interface{}), LogLevel: currentLogLevelName()}
 
 	// 系统指标走共享 1 秒缓存：多个 dashboard 连接同 tick 各读一遍 /proc 并
@@ -845,10 +946,10 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 				}
 			}
 			session.sessionMu.Unlock()
-			txB := atomic.LoadUint64(&session.TxBytes)
-			rxB := atomic.LoadUint64(&session.RxBytes)
-			txP := atomic.LoadUint64(&session.TxPackets)
-			rxP := atomic.LoadUint64(&session.RxPackets)
+			txB := session.TxBytes.Load()
+			rxB := session.RxBytes.Load()
+			txP := session.TxPackets.Load()
+			rxP := session.RxPackets.Load()
 			snapClients[id] = tmpSession{
 				v4: session.IPv4, v6: session.IPv6, mac: session.MAC, fec: session.FecMode, enc: session.EncAlgo, conns: conns,
 				txB: txB, rxB: rxB, txP: txP, rxP: rxP,
@@ -977,8 +1078,8 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.RetainedSessions = 1
 		stats.Clients["local"] = map[string]interface{}{
 			"client_id": cli.clientID, "ipv4": v4, "ipv6": v6, "mac": mac, "active_conns": conns,
-			"tx_bytes": atomic.LoadUint64(&cli.TxBytes), "rx_bytes": atomic.LoadUint64(&cli.RxBytes),
-			"tx_packets": atomic.LoadUint64(&cli.TxPackets), "rx_packets": atomic.LoadUint64(&cli.RxPackets),
+			"tx_bytes": cli.TxBytes.Load(), "rx_bytes": cli.RxBytes.Load(),
+			"tx_packets": cli.TxPackets.Load(), "rx_packets": cli.RxPackets.Load(),
 			"fec": fec, "enc_algo": enc,
 		}
 		stats.Conns = cli.snapshotConns()
@@ -1007,10 +1108,10 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 		stats.FecMode = fec
 		stats.EncAlgo = enc
 		// 客户端只有一条逻辑会话，全局计数等于会话计数
-		stats.GlobalTxBytes = atomic.LoadUint64(&cli.TxBytes)
-		stats.GlobalRxBytes = atomic.LoadUint64(&cli.RxBytes)
-		stats.GlobalTxPackets = atomic.LoadUint64(&cli.TxPackets)
-		stats.GlobalRxPackets = atomic.LoadUint64(&cli.RxPackets)
+		stats.GlobalTxBytes = cli.TxBytes.Load()
+		stats.GlobalRxBytes = cli.RxBytes.Load()
+		stats.GlobalTxPackets = cli.TxPackets.Load()
+		stats.GlobalRxPackets = cli.RxPackets.Load()
 		stats.ReconnectAttempts = cli.ReconnectAttempts()
 		stats.LiveConns = conns
 		// 客户端不做转发，没有交换机丢帧；只有限速口与乱序缓冲两个来源
@@ -1051,7 +1152,7 @@ func startWebStatsHandler(w http.ResponseWriter, r *http.Request, srv *Server, c
 	ts := dailyTraffic.Snapshot()
 	stats.Traffic = &ts
 
-	json.NewEncoder(w).Encode(stats)
+	return &stats, nil
 }
 
 // ======================= 运行时状态快照（面板"状态"页） =======================
@@ -1414,8 +1515,8 @@ func (s *Server) serverConnsBrutal() brutalInfoJSON {
 		var sessionUp, sessionDown uint64
 		for ci := range sess.conns {
 			total++
-			sessionUp = atomic.LoadUint64(&ci.brutalRx)
-			sessionDown = atomic.LoadUint64(&ci.brutalTx)
+			sessionUp = ci.brutalRx.Load()
+			sessionDown = ci.brutalTx.Load()
 			if br := ci.brutal.Load(); br != nil && br.Applied {
 				applied++
 			}

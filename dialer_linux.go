@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -28,4 +29,22 @@ func socketMarkControl(mark int) func(network, address string, c syscall.RawConn
 		}
 		return sockErr
 	}
+}
+
+// probeSocketMark 一次性探测当前进程能否设置 SO_MARK（需要 CAP_NET_ADMIN 或 root）。
+// 用一个即建即关的 UDP socket 试打 mark，不产生任何网络流量；否则缺权限时只能
+// 在每次 dial 报 EPERM，故障暴露太晚。mark<=0 视为未启用，恒成功。
+func probeSocketMark(mark int) error {
+	if mark <= 0 {
+		return nil
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("create probe socket: %w", err)
+	}
+	defer unix.Close(fd)
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, mark); err != nil {
+		return fmt.Errorf("set SO_MARK %d: %w", mark, err)
+	}
+	return nil
 }

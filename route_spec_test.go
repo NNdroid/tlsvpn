@@ -136,16 +136,19 @@ func TestClientPolicyRoutingConfigValidation(t *testing.T) {
 		t.Errorf("错误信息应带字段名: %v", err)
 	}
 
-	// 上界用例需要 int 能装下 2^32；32 位平台上常量本身编不过，
-	// 那里的 int 天然装不下越界值，越界无从发生。
+	// 上界用例需要 int 能装下 2^32。数值必须以 uint64 变量承载再转 int：
+	// 未定型常量（及常量转换）在 32 位平台编译期就会溢出报错。32 位平台上
+	// int 天然装不下越界值、越界无从发生，直接跳过运行。
 	if strconv.IntSize == 32 {
 		return
 	}
-	cfg.Client.FwmarkPriority = 4294967296
+	tooBigFwmark := uint64(4294967296)
+	cfg.Client.FwmarkPriority = int(tooBigFwmark)
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("超出 uint32 的 fwmark_priority 应校验失败")
 	}
-	cfg.Client.FwmarkPriority = 4294967295
+	maxUint32Fwmark := uint64(4294967295)
+	cfg.Client.FwmarkPriority = int(maxUint32Fwmark)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("uint32 上限值应通过: %v", err)
 	}

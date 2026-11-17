@@ -6,8 +6,8 @@ import (
 )
 
 func TestProtocolV3VersionAndControlKinds(t *testing.T) {
-	if protocolVersion != 3 {
-		t.Fatalf("protocolVersion=%d want=3", protocolVersion)
+	if protocolVersion != 4 {
+		t.Fatalf("protocolVersion=%d want=4 (v4: AAD binds frame padLen / parity descriptor)", protocolVersion)
 	}
 	for _, kind := range []byte{controlKindFECParity, controlKindFECMode, controlKindRttProbe, controlKindRttReply, controlKindClockProbe, controlKindClockReply} {
 		got, err := parseControlKind([]byte{kind})

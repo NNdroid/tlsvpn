@@ -178,12 +178,26 @@ func (rb *ReorderBuffer) Reset() {
 	hadGap := !rb.gapSince.IsZero()
 	rb.expectedSeq = 0
 	rb.releaseRingLocked()
+	rb.shrinkWindowLocked()
 	rb.gapSince = time.Time{}
 	rb.mu.Unlock()
 	if hadGap {
 		rb.signalGapWorker()
 	}
 	rb.freeBatch(drain)
+}
+
+// shrinkWindowLocked 把一次大偏斜扩大的窗口缩回初始尺寸：一次 65536 级偏斜的
+// ring/seqSlots（约 0.8MB 描述符）不应常驻到会话结束。只在 Reset/ResetActor
+// （会话重置/epoch barrier，单写者、缓冲区已清空）时调用，热路径不缩容，
+// 避免与读取性能互相干扰。
+func (rb *ReorderBuffer) shrinkWindowLocked() {
+	if len(rb.ring) <= ReorderWindowSize {
+		return
+	}
+	rb.ring = make([][]byte, ReorderWindowSize)
+	rb.seqSlots = make([]uint32, ReorderWindowSize)
+	rb.windowMask = ReorderWindowSize - 1
 }
 
 func (rb *ReorderBuffer) Stats() ReorderBufferStats {
@@ -222,48 +236,6 @@ func (rb *ReorderBuffer) Insert(seq uint32, frame []byte) {
 		return
 	}
 	wake := rb.insertLocked(seq, frame)
-	batch := rb.takePendingLocked()
-	if batch != nil {
-		rb.deliverMu.Lock()
-	}
-	rb.mu.Unlock()
-	if wake {
-		rb.signalGapWorker()
-	}
-	rb.deliver(batch)
-	if batch != nil {
-		rb.deliverMu.Unlock()
-	}
-}
-
-// InsertBatch consumes a reader-owned batch with one reorder critical section.
-// It is the multi-connection RX worker hot path; Insert remains for recovered frames
-// and compatibility callers. Every Data buffer is consumed regardless of outcome.
-func (rb *ReorderBuffer) InsertBatch(frames []VPNFrame) {
-	if len(frames) == 0 {
-		return
-	}
-	rb.mu.Lock()
-	if rb.shutting {
-		rb.mu.Unlock()
-		freeFrames(frames)
-		return
-	}
-	wake := false
-	for i := range frames {
-		frame := frames[i].Data
-		if frames[i].Seq == 0 {
-			if frame != nil {
-				putFrame(frame)
-			}
-			frames[i].Data = nil
-			continue
-		}
-		if rb.insertLocked(frames[i].Seq, frame) {
-			wake = true
-		}
-		frames[i].Data = nil
-	}
 	batch := rb.takePendingLocked()
 	if batch != nil {
 		rb.deliverMu.Lock()

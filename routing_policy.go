@@ -112,8 +112,9 @@ func routingAlgoList() []RoutingAlgo {
 //
 // oneWay 为探针分解的原始相对量（可为负：快于 ref 对称基准的方向），完全未测
 // 路径已折到参考 minRTT/2；rttUS 为已归一化的 min_rtt（fairStart 路径取参考
-// minRTT），srttUS 为原始 SRTT（未知时可能为 adaptiveUnknownRTTUS 哨兵，仅观测
-// 用），schedRate 为调度速率。有符号保证快路径（负值）与慢路径的完整序参与
+// minRTT），srttUS 为原始 SRTT（未知时为 adaptiveUnknownRTTUS 哨兵——
+// roundtrip_strict 会拿它做排名键：50ms/2 的固定名次是有意的保守回退，让
+// 冷路径压过 SRTT>50ms 的拥塞热路径并享受 fair-start），schedRate 为调度速率。有符号保证快路径（负值）与慢路径的完整序参与
 // argmin——压非负会让快路径并列，选路退化（旧 subClamp 教训）。
 func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32, incomingBytes, schedRate uint64) int64 {
 	switch p.rank {

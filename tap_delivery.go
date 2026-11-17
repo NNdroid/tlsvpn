@@ -48,6 +48,15 @@ func (d *ownedTapDelivery) EnqueueOwned(frame []byte) {
 	if frame == nil {
 		return
 	}
+	// 入队前先查 ctx：select 在"队列有位"与"ctx.Done"同时就绪时随机选择，
+	// 取消后仍可能入队，而 run 已 releaseQueued 退出 → 帧滞留 channel 交 GC
+	// （上限 128，池缓冲流失）。命中取消直接归还池缓冲；select 仅作回退，
+	// 覆盖检查之后才取消的窗口（此时 run 尚未退出，正常消费或由
+	// releaseQueued 兜底）。
+	if d.ctx.Err() != nil {
+		putFrame(frame)
+		return
+	}
 	select {
 	case d.ch <- frame:
 	case <-d.ctx.Done():

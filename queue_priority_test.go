@@ -10,9 +10,9 @@ import (
 // （写循环保持原 select 随机竞争，零行为变化）。
 func TestQueuePriorityPref(t *testing.T) {
 	cases := []struct {
-		name         string
+		name          string
 		control, data int
-		wantC, wantD bool
+		wantC, wantD  bool
 	}{
 		{"control higher", 10, 5, true, false},
 		{"data higher", 5, 10, false, true},

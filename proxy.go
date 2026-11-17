@@ -72,6 +72,11 @@ func parseSocks5(raw string) (string, *xproxy.Auth, error) {
 		if u.Host == "" {
 			return "", nil, fmt.Errorf("socks5 url missing host")
 		}
+		// 与裸格式分支语义一致：缺端口在解析期就报错（net.Dialer 要到拨号
+		// 阶段才会因 "missing port" 失败，故障暴露太晚）
+		if _, _, err := net.SplitHostPort(u.Host); err != nil {
+			return "", nil, fmt.Errorf("invalid socks5 address %q: %v", u.Host, err)
+		}
 		return u.Host, auth, nil
 	}
 

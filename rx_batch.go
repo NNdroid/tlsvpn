@@ -86,6 +86,16 @@ func (w *rxSessionWorker) enqueue(work rxSessionWork) bool {
 	if w.closing.Load() {
 		return false
 	}
+	// 关闭后的确定性快路径（与 tap_delivery EnqueueOwned 同型）：close(closed)
+	// 与 closing=true 同在写锁临界区内，正常情况下上方的 closing 检查已覆盖；
+	// 这里再查一次已关闭状态，保证"队列有位"与"已关闭"同时就绪时绝不走
+	// select 随机分支把 work 滞留在无人消费的 queue 里（run 排空循环结束后
+	// 到达的 work 只能等 GC，batch/帧缓冲随之流失）。select 仅作回退。
+	select {
+	case <-w.closed:
+		return false
+	default:
+	}
 	select {
 	case w.queue <- work:
 		return true
@@ -109,6 +119,23 @@ func (w *rxSessionWorker) advanceEpoch(reset bool, fec *fecDecoder) {
 }
 func (w *rxSessionWorker) AdvanceEpoch()                        { w.advanceEpoch(false, nil) }
 func (w *rxSessionWorker) AdvanceEpochAndReset(fec *fecDecoder) { w.advanceEpoch(true, fec) }
+
+// DoneIsClosed 报告 run goroutine 是否已完全退出。ReorderBuffer.Close 的
+// actor 排空安全依赖"先关 worker 再关 reorder"的顺序契约（见 rx_actor.go
+// InsertActorBuffered 注释）；Close 本身已等待 done，此断言供调用点显式
+// 验证契约，违反时打日志而非 panic（清理路径不做崩溃点）。
+func (w *rxSessionWorker) DoneIsClosed() bool {
+	if w == nil {
+		return true
+	}
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
+	}
+}
+
 func (w *rxSessionWorker) Close() {
 	if w == nil {
 		return

@@ -75,15 +75,29 @@ func mcpRemoteHost(r *http.Request) string {
 	return r.RemoteAddr
 }
 
+// mcpRequestMethodLimit 本函数为审计日志 peek 请求体的上限，与 MCP handler
+// 的 mcpMaxRequestBodyBytes（1MB）保持一致：peek 不改变 handler 看到的请求
+// 大小，超限请求仍由 handler 按自己的上限拒绝（413）。
+const mcpRequestMethodLimit = 1 << 20
+
 // mcpRequestMethod best-effort 解析 JSON-RPC 请求体，提取 method 与
 // tools/call 的工具名。读取后恢复 Body，让 MCP handler 能再次读取。
 // 解析失败返回空（不阻断请求）。
+//
+// 此前用 64KB LimitReader 截断读取：超过 64KB 的合法 JSON-RPC 被截成非法
+// JSON，日志里 method 全空且 handler 拿到的是残缺 body。现在按 handler 同款
+// 上限读取；超过上限时不消费剩余流，把已读前缀与原始 body 拼接回填，
+// handler 看到的仍是完整请求，由它的 MaxRequestBodyBytes 正常拒绝（413）。
 func mcpRequestMethod(r *http.Request) (method, tool string) {
 	if r.Body == nil {
 		return "", ""
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	body, err := io.ReadAll(io.LimitReader(r.Body, mcpRequestMethodLimit+1))
 	if err != nil {
+		return "", ""
+	}
+	if len(body) > mcpRequestMethodLimit {
+		r.Body = restorePeekedBody(bytes.NewReader(body), r.Body)
 		return "", ""
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -101,6 +115,15 @@ func mcpRequestMethod(r *http.Request) (method, tool string) {
 		tool = msg.Params.Name
 	}
 	return method, tool
+}
+
+// restorePeekedBody 把 peek 已读的前缀与剩余原始 body 拼接成完整请求体回填，
+// Close 仍指向原始 body（连接回收依赖它）。
+func restorePeekedBody(peeked io.Reader, orig io.ReadCloser) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(peeked, orig), orig}
 }
 
 // mcpStatusWriter 捕获 MCP handler 实际写出的 HTTP 状态码，供访问日志记录。

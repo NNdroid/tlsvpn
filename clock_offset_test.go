@@ -172,7 +172,8 @@ func TestClockOffsetEstimatorExcludesBadSamples(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		e.add(offsetSample{t1: base, t2: base + fwd, t3: base + 1, t4: base + 1 + ret})
 	}
-	// 注入 t2<t1 的时钟异常样本，应被丢弃而不影响估计。
+	// 注入 t2<t1 的样本（跨钟负偏移或离群，估计器不再按 t2<t1 丢弃——B 慢于
+	// A 是合法状态）：中位数解应保持不受单个离群样本拉偏。
 	e.add(offsetSample{t1: base, t2: base - 1, t3: base + 1, t4: base + 1 + ret})
 	e.refresh()
 	got, ok := e.thetaNS()
@@ -184,8 +185,9 @@ func TestClockOffsetEstimatorExcludesBadSamples(t *testing.T) {
 	}
 }
 
-// TestClockOffsetAbsorbUsesTxTS 验证 absorb 用对端显式回填的 off_ts 作 t3，
-// 而非 issued 时刻近似，且 off_ts==0 的样本被丢弃。
+// TestClockOffsetAbsorbUsesTxTS 验证 absorb 用对端显式回填的 off_ts 重建 t3
+// （off_ts 是 UnixMilli 低 32 位，须以 recv_ts 的毫秒为基准做环回差值还原，
+// 而非 issued 时刻近似），且 off_ts==0 的样本被丢弃。
 func TestClockOffsetAbsorbUsesTxTS(t *testing.T) {
 	backend := &Backend{probeCh: make(chan []byte, 8)}
 	resolve := func(i int) *Backend { return backend }
@@ -198,23 +200,25 @@ func TestClockOffsetAbsorbUsesTxTS(t *testing.T) {
 	t1 := uint64(now.UnixNano())
 	s.pending[42] = pendingClockProbe{srcConn: 0, targetConn: 0, issued: now}
 
-	// off_ts 显式回填：注入时刻 = now + 2ms。
-	txMS := uint32((now.UnixMilli() + 2))
+	// B 在 now+3ms 收到请求、now+5ms 发出回包：recv_ts 全量纳秒，off_ts 为
+	// now+5ms 的 UnixMilli 低 32 位。重建结果应恰为 recvTS+2ms。
+	t2 := uint64(now.UnixNano()) + 3_000_000
+	txMS := uint32(now.UnixMilli() + 5)
 	fr := clockOffsetFrame{
 		kind: controlKindClockReply, nonce: 42, conn: 0,
-		sendTS: t1, recvTS: uint64(now.UnixNano()) + 3_000_000,
+		sendTS: t1, recvTS: t2,
 		txTS: txMS, srcConn: 0, recvAt: now.Add(5 * time.Millisecond),
 	}
 	s.absorb(fr)
 
-	// 估计器应收到一个样本且 t3 精确 = txMS*1ms，非 issued 近似。
+	// 估计器应收到一个样本且 t3 精确 = t2 + (txMS − ms(t2)) × 1ms。
 	if n := s.est.count(); n != 1 {
 		t.Fatalf("estimator sample count = %d, want 1", n)
 	}
 	samp := s.est.samples[0]
-	wantT3 := uint64(txMS) * 1_000_000
+	wantT3 := t2 + uint64(int32(txMS-uint32(t2/1_000_000)))*1_000_000
 	if samp.t3 != wantT3 {
-		t.Fatalf("t3 = %d, want %d (from off_ts)", samp.t3, wantT3)
+		t.Fatalf("t3 = %d, want %d (reconstructed from off_ts)", samp.t3, wantT3)
 	}
 	if samp.t1 != t1 || samp.t2 != fr.recvTS {
 		t.Fatalf("t1/t2 = (%d,%d), want (%d,%d)", samp.t1, samp.t2, t1, fr.recvTS)

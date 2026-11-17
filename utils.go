@@ -90,7 +90,6 @@ func isHexDigit(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
-// hashPSK 将明文 PSK 转换为 SHA256 防止明文传输
 type PrefixConn struct {
 	net.Conn
 	prefix []byte

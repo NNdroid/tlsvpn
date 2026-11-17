@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -88,6 +89,14 @@ func derivedClientID(mac, psk string) string {
 // 不走自己的 Client：客户端发送前会把 fec_group 夹到协议范围，绕不过服务端策略闸。
 func rawHandshake(t *testing.T, srv *Server, fec bool, k int) (*HandshakeResp, error) {
 	t.Helper()
+	// 本测试的握手走裸 TCP（无 TLS exporter），注入 v3 语义的 PSK 校验：
+	// 证明 = hashPSK(psk)。协议 v4 的 fail-closed 导出检查会拒绝无 exporter
+	// 的连接，而这些用例的目标是 FEC 策略闸（认证之后），必须先认证成功。
+	oldVerify := handshakePSKVerify
+	handshakePSKVerify = func(_ net.Conn, proof, psk string) bool {
+		return hmac.Equal([]byte(proof), []byte(hashPSK(psk)))
+	}
+	defer func() { handshakePSKVerify = oldVerify }()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

@@ -46,8 +46,8 @@ func TestXChaChaNonceDerivedFromExistingSalt(t *testing.T) {
 	b, _ := newInnerCipherForAlgo("xnonce-psk", salt, encAlgoXChaCha20)
 	sa := new(nonceAADScratch)
 	sb := new(nonceAADScratch)
-	n1, aad1 := a.nonceAAD(1, 100, sa)
-	n2, _ := b.nonceAAD(1, 100, sb)
+	n1, aad1 := a.nonceAAD(1, 100, 0, sa)
+	n2, _ := b.nonceAAD(1, 100, 0, sb)
 	if len(n1) != 24 {
 		t.Fatalf("xchacha nonce len=%d", len(n1))
 	}
@@ -57,11 +57,11 @@ func TestXChaChaNonceDerivedFromExistingSalt(t *testing.T) {
 	if binary.BigEndian.Uint32(n1[20:24]) != 1 {
 		t.Fatalf("seq suffix=%x", n1[20:24])
 	}
-	if binary.BigEndian.Uint32(aad1[:4]) != 100 || binary.BigEndian.Uint32(aad1[4:]) != 1 {
+	if binary.BigEndian.Uint32(aad1[:4]) != 100 || binary.BigEndian.Uint16(aad1[4:6]) != 0 || binary.BigEndian.Uint32(aad1[6:]) != 1 {
 		t.Fatalf("aad=%x", aad1)
 	}
 	sc := new(nonceAADScratch)
-	n3, _ := a.nonceAAD(2, 100, sc)
+	n3, _ := a.nonceAAD(2, 100, 0, sc)
 	if bytes.Equal(n1, n3) {
 		t.Fatal("different seq reused XChaCha nonce")
 	}

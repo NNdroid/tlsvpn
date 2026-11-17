@@ -670,3 +670,81 @@ func TestFECDropsTruncatedParityThroughOnParity(t *testing.T) {
 		t.Fatalf("忽略不自洽帧后分组应仍可恢复 seq=3, got %v", c.seqs)
 	}
 }
+
+// TestFECDecoderSuspendParityBypassNoGhostGroup SUSPEND 后在途 parity 与
+// BypassData 对称：组 start 落在 bypass 窗口内的 parity 不得为该组建状态——
+// 成员已被 bypass 丢弃，parity 永远等不到它们，只会以"全部成员缺失"形态占住
+// pending 组表直到淘汰。窗口之前的迟到 parity 不受影响，仍按正常路径恢复。
+func TestFECDecoderSuspendParityBypassNoGhostGroup(t *testing.T) {
+	const k = 4
+	c, out := newFecCollector()
+	d := NewFECDecoder(k, nil, out)
+
+	oldPayloads := [][]byte{
+		bytes.Repeat([]byte{0x01}, 40),
+		bytes.Repeat([]byte{0x02}, 40),
+		bytes.Repeat([]byte{0x03}, 40),
+		bytes.Repeat([]byte{0x04}, 40),
+	}
+	parityOld := encodeGroup(k, nil, 1, oldPayloads)
+	inWindowPayloads := [][]byte{
+		bytes.Repeat([]byte{0xA1}, 40),
+		bytes.Repeat([]byte{0xA2}, 40),
+		bytes.Repeat([]byte{0xA3}, 40),
+		bytes.Repeat([]byte{0xA4}, 40),
+	}
+	parityInWindow := encodeGroup(k, nil, 9, inWindowPayloads) // 组 start=9，落在 [5,∞) 内
+
+	// 组 1 先到三个成员（缺 seq=2），再挂 SUSPEND boundary=5 → 窗口 [5,∞)。
+	c.expect(1)
+	d.OnData(1, oldPayloads[0])
+	d.OnData(3, oldPayloads[2])
+	d.OnData(4, oldPayloads[3])
+	suspend := appendFECModeControl(nil, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
+	if err := d.OnControl(suspend); err != nil {
+		t.Fatalf("SUSPEND control rejected: %v", err)
+	}
+	if from, until := d.fence.Window(); from != 5 || until != 0 {
+		t.Fatalf("fence window=%d..%d want=5..open", from, until)
+	}
+
+	// 在途 parity（组 9，窗口内）：不得建组，也不得产出恢复帧。
+	d.OnParity(parityInWindow)
+	groups := decoderGroupStarts(d)
+	if len(groups) != 1 || !groups[1] {
+		t.Fatalf("bypassed in-window parity must not create group state: %v", groups)
+	}
+
+	// 窗口之前的迟到 parity（组 1）不受影响：仍恢复 seq=2。
+	d.OnParity(parityOld)
+	c.waitDone(t)
+	if len(c.seqs) != 1 || c.seqs[0] != 2 {
+		t.Fatalf("应恰好恢复 seq=2, got %v", c.seqs)
+	}
+}
+
+// TestFECDecoderSuspendParityActorBypassNoGhostGroup 同上，走 actor 入口
+// （rxSessionWorker 的无锁路径）：bypass 窗口内的在途 parity 不建幽灵组，
+// 窗口外的迟到 parity 仍可经 tryRecoverActor 恢复。
+func TestFECDecoderSuspendParityActorBypassNoGhostGroup(t *testing.T) {
+	const k = 4
+	payloads := [][]byte{
+		bytes.Repeat([]byte{0xB1}, 40),
+		bytes.Repeat([]byte{0xB2}, 40),
+		bytes.Repeat([]byte{0xB3}, 40),
+		bytes.Repeat([]byte{0xB4}, 40),
+	}
+	parityInWindow := encodeGroup(k, nil, 5, payloads) // 组 start=5，落在 [5,∞) 内
+
+	d := NewFECDecoder(k, nil, nil)
+	suspend := appendFECModeControl(nil, fecModeControl{Generation: 1, Op: fecControlSuspend, Boundary: 5})
+	if err := d.OnControl(suspend); err != nil {
+		t.Fatalf("SUSPEND control rejected: %v", err)
+	}
+
+	// actor 入口：窗口内 parity 直接丢弃，不建组。
+	d.OnParityActorWithScratch(parityInWindow, &nonceAADScratch{})
+	if groups := decoderGroupStarts(d); len(groups) != 0 {
+		t.Fatalf("actor bypassed in-window parity must not create group state: %v", groups)
+	}
+}

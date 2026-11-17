@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,23 @@ type WebManager struct {
 	cfgStamp    string
 	lastWarn    string
 	lastWarnAt  time.Time
+	// TLS 证书热加载缓存：rebindIfNeeded 每 2s 跑一次，无条件 LoadX509KeyPair
+	// 等于反复读盘+解析。记录上次加载的路径与文件指纹（mtime+size），仅在
+	// 路径或指纹变化（含热替换证书）时重载。字段仅在持有 mu 的 rebindIfNeeded
+	// 内读写，无额外锁需求。
+	tlsFp     webTLSFingerprint
+	tlsCached *tls.Config
+}
+
+// webTLSFingerprint 证书/密钥文件的变化指纹。全部字段可比较，== 判等即可
+// 判断是否需要重新 LoadX509KeyPair。
+type webTLSFingerprint struct {
+	certPath string
+	keyPath  string
+	certMod  time.Time
+	keyMod   time.Time
+	certSize int64
+	keySize  int64
 }
 
 func NewWebManager(srv *Server, cli *Client, cfg *Config, mux *http.ServeMux) *WebManager {
@@ -107,10 +125,18 @@ func (w *WebManager) rebindIfNeeded() {
 	specs := w.currentSpecs()
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// auth_mode=none + 公网部署面：MCP 写工具（配置保存/踢人/封禁）完全无认证，
+	// 仅靠 80-bit 随机路径遮挡，路径一旦泄漏（日志、referer、代理）即全面失守。
+	// 每次 rebind 检查一次，onceWarn 30s 去重避免 2s 轮询刷屏。
+	if normalizeMCPAuthMode(cfg.Web.MCP.AuthMode) == mcpAuthNone && cfg.Web.MCP.deployAllowsPublic() {
+		if w.onceWarn("mcp_none_public") {
+			log.Warnf("[Web] MCP auth_mode=none with deploy=%s: MCP write tools are fully unauthenticated on the public face and gated only by the random endpoint path; configure web.mcp authentication", cfg.Web.MCP.Deploy)
+		}
+	}
 	var tlsCfg *tls.Config
 	if len(specs) > 0 {
 		var err error
-		tlsCfg, err = loadWebTLS(cfg)
+		tlsCfg, err = w.loadWebTLS(cfg)
 		if err != nil {
 			if w.onceWarn("tls|" + cfg.Web.Cert + "|" + cfg.Web.Key) {
 				log.Errorf("[Web] load TLS pair: %v (keeping current listeners)", err)
@@ -177,19 +203,52 @@ func (w *WebManager) rebindIfNeeded() {
 	}
 }
 
-func loadWebTLS(cfg *Config) (*tls.Config, error) {
-	if cfg.Web.Cert == "" || cfg.Web.Key == "" {
+// loadWebTLS 加载面板 TLS 证书对，带文件指纹缓存：rebindIfNeeded 每 2s 调用
+// 一次，无条件 LoadX509KeyPair 会对每对 listener 反复读盘解析。路径或
+// mtime/size 指纹不变时直接复用上次结果；文件被热替换（内容变化）仍会重载。
+// 仅在持有 w.mu 的 rebindIfNeeded 中调用。
+func (w *WebManager) loadWebTLS(cfg *Config) (*tls.Config, error) {
+	certPath, keyPath := cfg.Web.Cert, cfg.Web.Key
+	if certPath == "" || keyPath == "" {
+		w.tlsFp = webTLSFingerprint{}
+		w.tlsCached = nil
 		return nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.Web.Cert, cfg.Web.Key)
+	ci, err := os.Stat(certPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat cert: %w", err)
+	}
+	ki, err := os.Stat(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat key: %w", err)
+	}
+	fp := webTLSFingerprint{
+		certPath: certPath, keyPath: keyPath,
+		certMod: ci.ModTime(), keyMod: ki.ModTime(),
+		certSize: ci.Size(), keySize: ki.Size(),
+	}
+	if w.tlsCached != nil && fp == w.tlsFp {
+		return w.tlsCached, nil
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}, nil
+	w.tlsFp = fp
+	w.tlsCached = &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
+	return w.tlsCached, nil
 }
 
 func (w *WebManager) serve(l net.Listener) {
-	httpSrv := &http.Server{Handler: securityHeaders(w.mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	// TLS listener（配置了 web.cert/key）追加 HSTS：告诉浏览器此后仅以 https
+	// 访问面板，阻断 SSL 剥离/降级重放。明文 listener 下发 HSTS 会被浏览器
+	// 忽略且语义错误，仅在 TLS 模式注入。listener 的 TLS 属性由 cfgStamp 决定，
+	// cert/key 热更会整体重建 listener，serve 内读到的配置与该 listener 一致。
+	var handler http.Handler = securityHeaders(w.mux)
+	if cfg := w.Config(); cfg.Web.Cert != "" && cfg.Web.Key != "" {
+		handler = hstsHeader(handler)
+	}
+	httpSrv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	if err := httpSrv.Serve(l); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, http.ErrServerClosed) {
 		log.Warnf("[Web] serve stopped: %v", err)
 	}
@@ -226,6 +285,15 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// hstsHeader TLS listener 专用的 HSTS 头（见 serve 内注释）。一年 max-age 覆盖
+// 典型证书周期，includeSubDomains 防止面板域下的子域被用于降级攻击。
+func hstsHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // auth uses an HttpOnly cookie session instead of browser Basic Auth prompts.
 // The dashboard keeps web.auth as its credential source. MCP shares the same
 // listener/TLS/port but its authentication policy is independently configured
@@ -252,10 +320,10 @@ func (w *WebManager) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		switch r.URL.Path {
 		case "/api/login":
-			handleDashboardLogin(rw, r, expected)
+			handleDashboardLogin(rw, r, expected, w.Config().Web.BehindProxy)
 			return
 		case "/api/logout":
-			handleDashboardLogout(rw, r)
+			handleDashboardLogout(rw, r, w.Config().Web.BehindProxy)
 			return
 		case "/api/auth/status":
 			rw.Header().Set("Content-Type", "application/json")

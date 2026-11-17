@@ -133,25 +133,28 @@ const (
 )
 
 type AsyncPort struct {
-	id            string
-	ch            chan []byte
-	ctx           context.Context
-	cancel        context.CancelFunc
-	backendsMu    sync.RWMutex
-	backends      []*Backend
-	preferred     atomic.Pointer[Backend]
-	encoder       *fecEncoder
-	txSeq         uint32
-	resetEpoch    chan portEpochReset
-	exhausted     atomic.Bool
-	onExhaust     func()
-	dropped       uint64 // 各环节丢弃帧计数（面板/metrics）
-	fecTXArmed    atomic.Bool
-	written       txFrameCounters
-	paritySent    atomic.Uint64
-	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
-	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
-	dataNext      uint32   // legacy/compatibility picker cursor
+	id              string
+	ch              chan []byte
+	ctx             context.Context
+	cancel          context.CancelFunc
+	backendsMu      sync.RWMutex
+	backends        []*Backend
+	preferred       atomic.Pointer[Backend]
+	encoder         *fecEncoder
+	txSeq           uint32
+	resetEpoch      chan portEpochReset
+	exhausted       atomic.Bool
+	onExhaust       func()
+	dropped         atomic.Uint64 // 各环节丢弃帧计数（面板/metrics）；atomic 类型保证 32 位平台 8 字节对齐
+	fecTXArmed      atomic.Bool
+	written         txFrameCounters
+	paritySent      atomic.Uint64
+	parityScratch   [][]byte      // run goroutine 独占，复用 FEC parity 描述符切片
+	parityNext      uint32        // run goroutine 独占：单份 parity 在健康后端间轮转
+	dataNext        uint32        // legacy/compatibility picker cursor
+	spinCount       int           // run goroutine 独占：waitForBackendSlot 对 preferred 的连续自旋计数（超限触发全后端扫描）
+	envelopeScratch []envelopeObs // run goroutine 独占：资格扫描观测切片，按批复用避免每批堆分配
+	lastFecStrategy int32         // run goroutine 独占：上一批的 fecStrategy 码，用于检测热更切换并清理 near 位
 
 	// oneWayMode 本端 egress 的单向时延选择（见 oneWayMode* 常量）。
 	// 设置后由所有 Backend 经 oneWayModePtr 读取；run() 每批读取。
@@ -211,7 +214,7 @@ type portEpochReset struct {
 }
 
 // Dropped 累计丢弃帧数（队列满、后端投递失败、无后端）
-func (p *AsyncPort) Dropped() uint64 { return atomic.LoadUint64(&p.dropped) }
+func (p *AsyncPort) Dropped() uint64 { return p.dropped.Load() }
 
 // ParitySent is the legacy parity-attempt counter. Web stats use written counters.
 func (p *AsyncPort) ParitySent() uint64 {
@@ -220,7 +223,7 @@ func (p *AsyncPort) ParitySent() uint64 {
 
 func (p *AsyncPort) dropN(n int) {
 	if n > 0 {
-		atomic.AddUint64(&p.dropped, uint64(n))
+		p.dropped.Add(uint64(n))
 	}
 }
 
@@ -406,13 +409,25 @@ func (p *AsyncPort) RegisterOwnedBackend(ch chan *VPNFrameBatch, rttCache *uint3
 
 func (p *AsyncPort) UnregisterOwnedBackend(ch chan *VPNFrameBatch) {
 	p.backendsMu.Lock()
-	defer p.backendsMu.Unlock()
 	for i, b := range p.backends {
 		if b.ownedCh == ch {
 			b.orphaned.Store(true)
 			p.preferred.CompareAndSwap(b, nil)
 			p.backends = append(p.backends[:i], p.backends[i+1:]...)
 			break
+		}
+	}
+	p.backendsMu.Unlock()
+	// 排空注销通道里未被 writer 消费的批次并归还内存池：writer 退出后通道
+	// （容量 32）里残留的 batch 无人 free，频繁重连时池命中率下降、GC 压力
+	// 上升。非阻塞 best-effort：与已退出 writer 的残留发送者并发时漏掉的
+	// 批次仍由 GC 兜底（与旧行为一致）。
+	for {
+		select {
+		case batch := <-ch:
+			freeOwnedVPNFrameBatch(batch)
+		default:
+			return
 		}
 	}
 }
@@ -529,11 +544,30 @@ func (p *AsyncPort) waitForBackendSlot() bool {
 			if b.queueHasRoom() {
 				return true
 			}
-			// 拥塞：preferred（最近一次 dispatch 选中的最佳后端）已满。此时
-			// 只退避重试，不扫描全部 backends 也不持 backendsMu——其余后端
-			// 在拥塞下大概率同样已满，扫描徒增锁竞争（Register/Unregister
-			// 写锁会等待读锁），还拖慢本数据生产 goroutine。若确有后端空出，
-			// 下一次 dispatch 的 pickAdaptiveBackend 会更新 preferred。
+			// 拥塞：preferred（最近一次 dispatch 选中的最佳后端）已满。先退避重试，
+			// 不扫描全部 backends 也不持 backendsMu——其余后端在拥塞下大概率同样
+			// 已满，扫描徒增锁竞争。但下一次 dispatch 正被本函数阻塞，preferred
+			// 不会因 pickAdaptiveBackend 而更新：自旋若干轮仍满时必须主动回退一次
+			// 全后端扫描，否则 preferred 的 writer 卡在长写（最坏 3s）时，即使另一
+			// 条连接空闲，入口也持续自旋并在 p.ch 满后丢帧，人为制造线路序号洞。
+			p.spinCount++
+			if p.spinCount < 20 {
+				time.Sleep(50 * time.Microsecond)
+				continue
+			}
+			p.spinCount = 0
+			p.backendsMu.RLock()
+			ready := false
+			for _, alt := range p.backends {
+				if alt.queueHasRoom() {
+					ready = true
+					break
+				}
+			}
+			p.backendsMu.RUnlock()
+			if ready {
+				return true
+			}
 			time.Sleep(50 * time.Microsecond)
 			continue
 		}
@@ -639,6 +673,7 @@ func (p *AsyncPort) run() {
 
 			// Ownership moves as one object: scheduler/TLS writer consume both the
 			// descriptors and the authoritative payload-byte count.
+			batch.RateBytes = batch.Bytes // 本批全是数据帧：投递速率按全部 payload 记账
 			p.dispatchOwnedBatch(batch)
 			batch = getOwnedVPNFrameBatch()
 		}
@@ -668,6 +703,22 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 	dataBest := p.pickAdaptiveBackend(backends, pressure, batch.Bytes)
 
 	if p.encoder != nil {
+		// near 三态观测维护：数据路径契约上恒在窗口内（或未收敛宽松），但
+		// pickParityBackend 的首轮循环跳过 dataBest 不发布，热切 auto 后旧 near
+		// 位也会永久残留——这里每批补一次 dataBest 发布，并在策略码切换后的
+		// 第一批清掉全部后端的 near 位（run goroutine 独占，无锁）。
+		curStrategy := p.fecStrategy.Load()
+		if curStrategy != p.lastFecStrategy {
+			p.lastFecStrategy = curStrategy
+			for _, b := range backends {
+				if b != nil {
+					b.schedFlagsSet(schedFlagNearIn|schedFlagNearLenient, 0)
+				}
+			}
+		}
+		if dataBest != nil {
+			p.publishNearState(dataBest, dataBest)
+		}
 		parities := p.parityScratch[:0]
 		for _, vf := range batch.Frames {
 			if par := p.encoder.add(vf); par != nil {
@@ -913,10 +964,6 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 // 回退值是绝对内核尺度（min_rtt/2，双未知时是 50ms 哨兵折半），而已收敛的 ref
 // 常为负，跨尺度比较会把未收敛候选系统性排除在窗口外（bootstrap 期 parity 全部
 // 退化到数据路径），与"此时两者近等，本就无慢链之分"的文档承诺直接矛盾。
-func (p *AsyncPort) parityNearEligible(b, dataBest *Backend) bool {
-	return p.parityNearState(b, dataBest) != 0
-}
-
 // publishNearState 计算 near 三态并发布到候选后端，返回该三态（0=窗口外）。
 // pickParityBackend 的过滤条件即"三态 != 0"，与 parityNearEligible 语义一致；
 // 发布让面板能区分"窗口内拿到 parity"与"探针未收敛的 bootstrap 宽限"。
@@ -929,18 +976,22 @@ func (p *AsyncPort) publishNearState(b, dataBest *Backend) uint32 {
 }
 
 // parityNearState near 窗口的三态：schedFlagNearIn=窗口内、schedFlagNearLenient=
-// 探针未收敛的宽松放行、0=窗口外。
+// 探针未收敛的宽松放行、0=窗口外。ok 判定拿到的原始 oneWay 直接复用比较：
+// adaptiveBackendOneWayUS 在已收敛时返回同一原始值（回退链只服务未测路径，
+// 而未测已被 Lenient 提前拦截），不必经 adaptive 再读一轮原子。
 func (p *AsyncPort) parityNearState(b, dataBest *Backend) uint32 {
 	if b == nil || dataBest == nil {
 		return 0
 	}
-	if _, okRef := dataBest.backendOneWayUS(); !okRef {
+	refUS, okRef := dataBest.backendOneWayUS()
+	if !okRef {
 		return schedFlagNearLenient
 	}
-	if _, okFwd := b.backendOneWayUS(); !okFwd {
+	fwdUS, okFwd := b.backendOneWayUS()
+	if !okFwd {
 		return schedFlagNearLenient
 	}
-	if adaptiveBackendOneWayUS(b) <= adaptiveBackendOneWayUS(dataBest)+int64(p.fecNearWindowUS.Load()) {
+	if fwdUS <= refUS+int64(p.fecNearWindowUS.Load()) {
 		return schedFlagNearIn
 	}
 	return 0
@@ -1013,6 +1064,7 @@ func sendOwnedBatchToAnyFenced(p *AsyncPort, backends []*Backend, preferred *Bac
 				appendOwnedVPNFrame(withFence, VPNFrame{Seq: 0, Data: payload})
 				withFence.Frames = append(withFence.Frames, out.Frames...)
 				withFence.Bytes += out.Bytes
+				withFence.RateBytes = out.RateBytes // fence 控制帧不计投递速率
 				sendBatch = withFence
 				fenced = true
 			}
@@ -1265,10 +1317,10 @@ type Client struct {
 	rxReorder        *ReorderBuffer
 	rxWorker         *rxSessionWorker
 	fecDec           *fecDecoder
-	TxBytes          uint64
-	RxBytes          uint64
-	TxPackets        uint64
-	RxPackets        uint64
+	TxBytes          atomic.Uint64
+	RxBytes          atomic.Uint64
+	TxPackets        atomic.Uint64
+	RxPackets        atomic.Uint64
 	icTx             *innerCipher           // 当前会话发送方向（GCM）
 	icRx             *innerCipher           // 当前会话接收方向（GCM）
 	encAlgo          int                    // 当前会话协商结果（encAlgoNone / encAlgoGCM）
@@ -1487,7 +1539,13 @@ func (c *Client) installPolicyRouting(spec policyRoutingSpec) error {
 		// 覆盖 snap 的网关，只保留它独有的旧优先级和旧额外路由。
 		snap.gwV4, snap.gwV6 = spec.gwV4, spec.gwV6
 		s := *snap
-		c.prInstalled = append(c.prInstalled, s)
+		// 覆盖末条而非追加：fwmark 客户端按 1-3s 退避持续重连，追加会让
+		// prInstalled 随运行时长线性增长，退出清理对同组规则重复执行。
+		if n := len(c.prInstalled); n > 0 {
+			c.prInstalled[n-1] = s
+		} else {
+			c.prInstalled = append(c.prInstalled, s)
+		}
 	}
 	c.prMark = spec.mark
 	c.prGwV4, c.prGwV6 = spec.gwV4, spec.gwV6
@@ -1513,6 +1571,12 @@ func (c *Client) installPolicyRouting(spec policyRoutingSpec) error {
 // conns 数量变化时重建连接注册表（新数量生效于下一次重拨）。
 func (c *Client) ApplyConfig(cfg *Config) {
 	lv := liveFromCfg(cfg)
+	// 空目标列表会让 dialAndServe 的 connIndex%len(...) 除零 panic（Validate
+	// 已拒绝，这里再挡一层纵深防御）：拒绝本次热更，保留旧 live 继续运行。
+	if len(lv.targetAddrs) == 0 {
+		log.Errorf("[Client] hot-apply rejected: client.addr parses to zero target addresses, keeping current config")
+		return
+	}
 	// 捕获旧 live 必须早于 Store：比较要拿「本次热更之前」的生效值，否则
 	// Store 之后 Load 读到的已是新值，DeepEqual 恒真而永远不触发重连。
 	oldLive := c.live.Load()
@@ -1585,9 +1649,9 @@ type clientConnInfo struct {
 	minRttCache    *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
 	backend        atomic.Pointer[Backend]
 	conn           atomic.Value // connHolder：强制重连时关闭（统一包装类型避免 Value 类型不一致 panic）
-	txBytes        uint64
-	rxBytes        uint64
-	retries        uint64
+	txBytes        atomic.Uint64
+	rxBytes        atomic.Uint64
+	retries        atomic.Uint64
 	brutal         atomic.Pointer[brutalApplyResult]  // 本连接的内核实际状态；nil=尚未尝试
 	brutalCfg      atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
 	negotiated     atomic.Pointer[sessionNeg]
@@ -1849,6 +1913,9 @@ func (c *Client) Run(ctx context.Context) {
 		}
 		if c.rxWorker != nil {
 			c.rxWorker.Close()
+			if !c.rxWorker.DoneIsClosed() {
+				log.Errorf("[Client] rx worker not fully drained before reorder close (contract violation)")
+			}
 		}
 		c.rxReorder.Close()
 		c.txPort.Close()
@@ -1927,7 +1994,7 @@ func (c *Client) Run(ctx context.Context) {
 				}
 				atomic.AddUint64(&c.reconnects, 1)
 				if ci := c.connInfoAt(connIndex); ci != nil {
-					atomic.AddUint64(&ci.retries, 1)
+					ci.retries.Add(1)
 				}
 				start := time.Now()
 				linked, err := c.dialAndServe(ctx, connIndex)
@@ -2153,9 +2220,9 @@ func (c *Client) snapshotConns() []connSnapshot {
 			ServerSeenAddr: serverSeen,
 			RttMs:          rtt,
 			Scheduler:      schedulerSnapshot(ci.backend.Load()),
-			TxBytes:        atomic.LoadUint64(&ci.txBytes),
-			RxBytes:        atomic.LoadUint64(&ci.rxBytes),
-			Retries:        atomic.LoadUint64(&ci.retries),
+			TxBytes:        ci.txBytes.Load(),
+			RxBytes:        ci.rxBytes.Load(),
+			Retries:        ci.retries.Load(),
 			BrutalTxMbps:   txRate,
 			BrutalRxMbps:   rxRate,
 			SNI:            sni,
@@ -2221,6 +2288,10 @@ func (c *Client) negotiateUTLS(ctx context.Context, rawConn net.Conn, lv *liveCo
 		// VPN 是持续大流量而不是交互式短响应；关闭动态 record sizing 后
 		// 从一开始就使用满尺寸 TLS record，减少 record/AEAD/write 调用。
 		DynamicRecordSizingDisabled: true,
+		// 显式关闭重协商：握手 PSK 证明用 TLS exporter 导出密钥材料，而
+		// ExportKeyingMaterial 在"连接允许重协商"时拒绝导出（防重协商后
+		// transcript 复用）。utls 默认 FreelyAsClient，必须压回 Never。
+		Renegotiation: utls.RenegotiateNever,
 	}
 
 	// 自定义证书哈希校验
@@ -2246,6 +2317,18 @@ func (c *Client) negotiateUTLS(ctx context.Context, rawConn net.Conn, lv *liveCo
 
 	// 构建 uTLS 连接并握手
 	utlsConn := utls.UClient(rawConn, utlsConf, clientHelloID)
+	// 指纹预设（Chrome 等）自带 RenegotiationInfoExtension，其 writeToUConn 会
+	// 无条件用它自己的 Renegotiation 值覆盖 config——显式 Never 被改写回
+	// Freely，导致握手 PSK 证明的 ExportKeyingMaterial 拒绝导出。Build 一次
+	// 让预设填充扩展列表，再把 reneg 扩展替换为 Never 版本钉住 config。
+	if err := utlsConn.BuildHandshakeState(); err != nil {
+		return nil, fmt.Errorf("uTLS build ClientHello failed: %v", err)
+	}
+	for i, ext := range utlsConn.Extensions {
+		if _, ok := ext.(*utls.RenegotiationInfoExtension); ok {
+			utlsConn.Extensions[i] = &utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateNever}
+		}
+	}
 	if err := utlsConn.HandshakeContext(ctx); err != nil {
 		return nil, fmt.Errorf("uTLS handshake failed: %v", err)
 	}
@@ -2342,12 +2425,20 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	connID := uuid.New().String()
 	ci.connID.Store(connID)
 
+	// 握手 PSK 证明绑定本条 TLS 连接的 exporter 密钥材料（协议 v4）：录制的
+	// 历史握手无法在其他连接上重放。exporter 在 TLS 握手完成后可用。
+	ucs := tlsConn.ConnectionState()
+	exporter, perr := ucs.ExportKeyingMaterial(pskProofLabel, nil, pskProofLen)
+	if perr != nil {
+		return 0, fmt.Errorf("export TLS keying material for psk proof: %w", perr)
+	}
+
 	req := HandshakeReq{
 		ProtocolVersion: protocolVersion,
 		ClientInstance:  instanceID,
 		ConnID:          connID,
 		ClientID:        c.clientID,
-		PSK:             hashPSK(lv.psk),
+		PSK:             pskProofHex(lv.psk, exporter),
 		MAC:             c.macAddr,
 		IPv4:            lv.reqV4,
 		IPv6:            lv.reqV6,
@@ -2800,7 +2891,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			lastFrameStart := -1
 		drainBatches:
 			for {
-				queuedPayload += batch.Bytes
+				queuedPayload += batch.RateBytes
 				var n, last int
 				sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
 				txPackets += n
@@ -2819,6 +2910,8 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			}
 			var tailPad int
 			sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
+			// 填充决策之后再统一加密封装：AAD 绑定每帧帧头的最终 padLen
+			sealStreamBatchInPlace(sendBuffer, icTx, &txAEADScratch)
 			padTotal := uint64(tailPad)
 			refreshWriteDeadline()
 			batchCork.BeforeWrite(len(sendBuffer))
@@ -2839,9 +2932,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
 			// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline
 			// 可少一次 runtime_pollSetDeadline syscall。
-			atomic.AddUint64(&c.TxBytes, uint64(len(sendBuffer)))
-			atomic.AddUint64(&c.TxPackets, uint64(txPackets))
-			atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
+			c.TxBytes.Add(uint64(len(sendBuffer)))
+			c.TxPackets.Add(uint64(txPackets))
+			ci.txBytes.Add(uint64(len(sendBuffer)))
 			dailyTraffic.Add(uint64(len(sendBuffer)), 0) // 上行 = client→server
 			return true
 		}
@@ -2951,9 +3044,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			if rxPacketsBatch == 0 {
 				return
 			}
-			atomic.AddUint64(&c.RxBytes, rxBytesBatch)
-			atomic.AddUint64(&c.RxPackets, rxPacketsBatch)
-			atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
+			c.RxBytes.Add(rxBytesBatch)
+			c.RxPackets.Add(rxPacketsBatch)
+			ci.rxBytes.Add(rxBytesBatch)
 			dailyTraffic.Add(0, rxBytesBatch) // 下行 = server→client
 			rxBytesBatch, rxPacketsBatch = 0, 0
 		}
@@ -2991,7 +3084,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					flushRxStats()
 				}
 				if seq != 0 && icRx != nil {
-					plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
+					plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), uint16(scanner.lastPadLen), &rxAEADScratch)
 					if derr != nil {
 						// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 						log.Debugf("[Conn %d] dropped tampered/foreign frame (seq=%d): %v", connIndex, seq, derr)
@@ -3252,7 +3345,7 @@ func (c *Client) beginConnAttempt(index int, target string) *clientConnInfo {
 	c.connsMu.Lock()
 	defer c.connsMu.Unlock()
 	if old := c.conns[index]; old != nil {
-		ci.retries = atomic.LoadUint64(&old.retries)
+		ci.retries.Store(old.retries.Load())
 		if err, ok := old.lastError.Load().(string); ok {
 			ci.lastError.Store(err)
 		}

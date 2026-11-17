@@ -22,6 +22,10 @@ func runNetifdHelper(path string, extraEnv ...string) error {
 
 	cmd := exec.CommandContext(ctx, path)
 	cmd.Env = append(os.Environ(), extraEnv...)
+	// 超时后 CommandContext 只杀直接子进程；helper 脚本派生的孙进程会继承
+	// CombinedOutput 的管道导致 Read 永久阻塞。WaitDelay 到点后放弃管道并
+	// 收尾，与 hooks.go 的 runHookCommand 保持一致。
+	cmd.WaitDelay = 2 * time.Second
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("%s timed out", path)

@@ -106,7 +106,7 @@ func registerMCPReadTools(s *mcp.Server, w *WebManager) {
 			return &mcp.CallToolResult{}, stats, err
 		})
 
-		mcp.AddTool(s, readOnlyTool("tlsvpn_connections", "Return active client/session/physical-connection information, including bans and MAC table state where available. Each connection detail carries its negotiated TLS fingerprint (fingerprint_sha256) and, on the client side, the server certificate SHA-256 (cert_sha256)."),
+	mcp.AddTool(s, readOnlyTool("tlsvpn_connections", "Return active client/session/physical-connection information, including bans and MAC table state where available. Each connection detail carries its negotiated TLS fingerprint (fingerprint_sha256) and, on the client side, the server certificate SHA-256 (cert_sha256)."),
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ mcpEmptyInput) (*mcp.CallToolResult, any, error) {
 			stats, err := mcpCurrentStats(ctx, w)
 			if err != nil {
@@ -255,8 +255,8 @@ func registerMCPWriteTools(s *mcp.Server, w *WebManager) {
 			if id == "" {
 				return nil, nil, fmt.Errorf("client_id is required")
 			}
-			if in.TTLMinutes < 0 || in.TTLMinutes > 7*24*60 {
-				return nil, nil, fmt.Errorf("ttl_minutes must be 0 (permanent) or between 1 and 10080")
+			if err := validateBanTTLMinutes(in.TTLMinutes); err != nil {
+				return nil, nil, err
 			}
 			ttl := time.Duration(in.TTLMinutes) * time.Minute
 			if !w.srv.Ban(id, ttl) {
@@ -426,19 +426,14 @@ func registerMCPPrompts(s *mcp.Server) {
 }
 
 func mcpCurrentStats(ctx context.Context, w *WebManager) (WebStats, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://tlsvpn.local/api/stats", nil)
+	// 直接复用进程级 stats 缓存的结构体：此前经 dashboardStatsBytes 的 JSON
+	// 字节再 Unmarshal 回结构体，SDK 编码时又 Marshal 一次，三重序列化纯属
+	// 浪费。缓存结构体构建后不再变更，共享只读安全。
+	stats, _, err := cachedWebStats(w.srv, w.cli)
 	if err != nil {
 		return WebStats{}, err
 	}
-	body, err := dashboardStatsBytes(req, w.srv, w.cli)
-	if err != nil {
-		return WebStats{}, err
-	}
-	var stats WebStats
-	if err := json.Unmarshal(body, &stats); err != nil {
-		return WebStats{}, fmt.Errorf("decode status snapshot: %w", err)
-	}
-	return stats, nil
+	return *stats, nil
 }
 
 func mcpRedactedConfig(cfg *Config) Config {
@@ -446,6 +441,7 @@ func mcpRedactedConfig(cfg *Config) Config {
 	redacted.PSK = ""
 	redacted.Web.Auth = ""
 	redacted.Socks5 = ""
+	redacted.Web.MCP.Credential = ""
 	return redacted
 }
 

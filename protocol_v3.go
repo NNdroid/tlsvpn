@@ -6,7 +6,11 @@ import "fmt"
 // implementation. v3 intentionally breaks compatibility with the older
 // seq=0 magic-dispatch semantics: post-handshake seq=0 is now an explicit
 // control plane with typed payloads.
-const protocolVersion = 3
+// v4 binds the inner AEAD AAD to the frame header's padLen (data frames) and
+// to the FEC parity descriptor (parity frames) — both were previously
+// unauthenticated. Mixed v3/v4 pairs fail the handshake version gate by
+// design; upgrade both ends together.
+const protocolVersion = 4
 
 const (
 	controlKindFECParity byte = 0x01

@@ -150,13 +150,23 @@ func TestAsyncPortSinglePathDoesNotBuildDiscardedParity(t *testing.T) {
 	for time.Now().Before(deadline) && dataFrames < 8 {
 		select {
 		case batch := <-ch0:
+			// seq=0 且 kind=FECParity 才是 parity；SUSPEND/RESUME fence 控制帧
+			// （kind=FECMode）随批携带，不算 parity。先遍历整批再判定，避免
+			// fence 帧排前时漏计同批数据帧。
+			isParity := false
 			for _, vf := range batch {
 				if vf.Seq == 0 {
-					freeFrames(batch)
-					putVPNFrameBatch(batch)
-					t.Fatal("single physical path transmitted parity")
+					if len(vf.Data) > 0 && vf.Data[0] == controlKindFECParity {
+						isParity = true
+					}
+					continue
 				}
 				dataFrames++
+			}
+			freeFrames(batch)
+			putVPNFrameBatch(batch)
+			if isParity {
+				t.Fatal("single physical path transmitted parity")
 			}
 			freeFrames(batch)
 			putVPNFrameBatch(batch)
@@ -191,7 +201,8 @@ func TestAsyncPortSinglePathDoesNotBuildDiscardedParity(t *testing.T) {
 				select {
 				case batch := <-ch:
 					for _, vf := range batch {
-						if vf.Seq == 0 {
+						// RESUME fence 控制帧不算 parity（kind 精确区分）。
+						if vf.Seq == 0 && len(vf.Data) > 0 && vf.Data[0] == controlKindFECParity {
 							parityFrames++
 						}
 					}

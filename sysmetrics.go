@@ -153,8 +153,9 @@ func readProcCPU() *cpuJSON {
 	if cpuBsn.armed {
 		elapsed := now.Sub(cpuBsn.wall).Seconds()
 		if elapsed > 0 && ticks >= cpuBsn.ticks {
-			const clkTck = 100.0 // Linux 默认 HZ，utime/stime 的计数单位
-			out.Percent = float64(ticks-cpuBsn.ticks) / clkTck / elapsed * 100.0
+			// CLK_TCK 用真实内核值（HZ≠100 时按固定 100 折算会成比例失真），
+			// Linux 实现见 sysmetrics_linux.go
+			out.Percent = float64(ticks-cpuBsn.ticks) / hostCLKTCK() / elapsed * 100.0
 		}
 	}
 	cpuBsn.ticks = ticks

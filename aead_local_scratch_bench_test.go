@@ -21,8 +21,8 @@ func benchmarkInnerAEADLocalScratch(b *testing.B, algo int) {
 	for i := 0; i < b.N; i++ {
 		copy(buf, plaintext)
 		seq := uint32(i + 1)
-		tx.sealInPlaceWithScratch(buf, len(plaintext), seq, uint32(len(buf)), &txScratch)
-		if _, err := rx.openInPlaceWithScratch(buf, seq, uint32(len(buf)), &rxScratch); err != nil {
+		tx.sealInPlaceWithScratch(buf, len(plaintext), seq, uint32(len(buf)), 0, &txScratch)
+		if _, err := rx.openInPlaceWithScratch(buf, seq, uint32(len(buf)), 0, &rxScratch); err != nil {
 			b.Fatal(err)
 		}
 	}

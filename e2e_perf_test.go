@@ -319,8 +319,8 @@ func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) 
 	t.Logf("dataplane stats: txPortDropped=%d parity=%d fecRecovered=%d fecLost=%d reorder=%+v txBytes=%d txPackets=%d rxBytes=%d rxPackets=%d",
 		h.cli.txPort.Dropped(), h.cli.txPort.ParitySent(), rec, lost,
 		h.cli.rxReorder.Stats(),
-		atomic.LoadUint64(&h.cli.TxBytes), atomic.LoadUint64(&h.cli.TxPackets),
-		atomic.LoadUint64(&h.cli.RxBytes), atomic.LoadUint64(&h.cli.RxPackets))
+		h.cli.TxBytes.Load(), h.cli.TxPackets.Load(),
+		h.cli.RxBytes.Load(), h.cli.RxPackets.Load())
 
 	// 分层诊断：区分 socket/scanner、session reorder、VSwitch/TAP 哪一层成为
 	// 实际吞吐瓶颈。测试同一时刻只有一个 client session。
@@ -335,7 +335,7 @@ func runPerfThroughput(t *testing.T, mode string, encrypt bool, encAlgo string) 
 		}
 		t.Logf("server dataplane: client=%s rxBytes=%d rxPackets=%d reorder=%+v portDropped=%d floodDrops=%d tapBytes=%d tapPkts=%d",
 			cid,
-			atomic.LoadUint64(&s.RxBytes), atomic.LoadUint64(&s.RxPackets),
+			s.RxBytes.Load(), s.RxPackets.Load(),
 			rs, s.Port.Dropped(), h.srv.vswitch.floodDrops.Load(),
 			h.srvTap.TxBytes.Load(), h.srvTap.TxPkts.Load())
 	}

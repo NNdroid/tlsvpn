@@ -419,10 +419,10 @@ type ClientSession struct {
 	PendingResumeToken string            // 两阶段 rollover：先下发、客户端回带后再正式替换 ResumeToken
 	CreatedAt          time.Time
 	ActiveConns        int
-	TxBytes            uint64
-	RxBytes            uint64
-	TxPackets          uint64
-	RxPackets          uint64
+	TxBytes            atomic.Uint64
+	RxBytes            atomic.Uint64
+	TxPackets          atomic.Uint64
+	RxPackets          atomic.Uint64
 	// 会话保活与生命周期控制
 	sessionMu    sync.RWMutex
 	destroyTimer *time.Timer
@@ -442,16 +442,16 @@ type connInfo struct {
 	minRttCache    *uint32 // tcpi_min_rtt（微秒，无拥塞地板）
 	connIndex      int     // 客户端声明的连接下标（握手 BrutalConnIndex），探针路由用
 	backend        atomic.Pointer[Backend]
-	txBytes        uint64
-	rxBytes        uint64
-	txPackets      uint64
-	rxPackets      uint64
+	txBytes        atomic.Uint64
+	rxBytes        atomic.Uint64
+	txPackets      atomic.Uint64
+	rxPackets      atomic.Uint64
 	brutal         atomic.Pointer[brutalApplyResult]  // 内核实际状态；nil=尚未尝试
 	brutalCfg      atomic.Pointer[brutalRebalanceCfg] // Brutal 重协商参数（连接数变化时用）
 	linkedAt       int64                              // 建立时间（unix 秒）
-	brutalTx       uint64
-	brutalRx       uint64
-	epoch          uint64
+	brutalTx       atomic.Uint64
+	brutalRx       atomic.Uint64
+	epoch          atomic.Uint64
 	tls            *TLSHandshakeInfo // 本连接握手观测摘要（SNI/版本/套件，面板展示用）
 }
 
@@ -947,7 +947,7 @@ func (s *Server) sampleClientTraffic() map[string][2]uint64 {
 	}
 	out := make(map[string][2]uint64)
 	add := func(id string, session *ClientSession) {
-		current := [2]uint64{atomic.LoadUint64(&session.RxBytes), atomic.LoadUint64(&session.TxBytes)}
+		current := [2]uint64{session.RxBytes.Load(), session.TxBytes.Load()}
 		previous := s.trafficLast[session]
 		delta := out[id]
 		for i := 0; i < 2; i++ {
@@ -997,10 +997,10 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 				Remote:    ci.remote,
 				RttMs:     rtt,
 				Scheduler: schedulerSnapshot(ci.backend.Load()),
-				TxBytes:   atomic.LoadUint64(&ci.txBytes),
-				RxBytes:   atomic.LoadUint64(&ci.rxBytes),
-				TxPackets: atomic.LoadUint64(&ci.txPackets),
-				RxPackets: atomic.LoadUint64(&ci.rxPackets),
+				TxBytes:   ci.txBytes.Load(),
+				RxBytes:   ci.rxBytes.Load(),
+				TxPackets: ci.txPackets.Load(),
+				RxPackets: ci.rxPackets.Load(),
 				AgeSec:    uint64(now - ci.linkedAt),
 				// brutalTx 是本端（服务端）下发方向整形速率，brutalRx 是客户端上行方向
 				BrutalApplied: ci.brutal.Load() != nil && ci.brutal.Load().Applied,
@@ -1010,9 +1010,9 @@ func (s *Server) snapshotServerConns() []serverConnSnapshot {
 					}
 					return ""
 				}(),
-				BrutalSrvTx: atomic.LoadUint64(&ci.brutalTx),
-				BrutalCliTx: atomic.LoadUint64(&ci.brutalRx),
-				Epoch:       ci.epoch,
+				BrutalSrvTx: ci.brutalTx.Load(),
+				BrutalCliTx: ci.brutalRx.Load(),
+				Epoch:       ci.epoch.Load(),
 				SNI:         sni,
 				TLSVersion:  tlsVer,
 				TLSCipher:   tlsCipher,
@@ -1281,6 +1281,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		if !pooledRead {
 			fallback = make([]byte, 65536)
 		}
+		consecutiveErr := 0
 		for {
 			var buf []byte
 			if pooledRead {
@@ -1293,8 +1294,29 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 				if pooledRead {
 					putFrame(buf)
 				}
-				return
+				if ctx.Err() != nil {
+					return
+				}
+				// 与客户端读循环一致：瞬态错误（设备被 ip link del 后重建、
+				// I/O 抖动）退避重试，而不是永久退出——读循环一旦退出，
+				// LAN→VPN 转发静默死亡而面板仍显示在线。
+				consecutiveErr++
+				if consecutiveErr == 1 || consecutiveErr%10 == 0 {
+					log.Warnf("TAP read error #%d: %v (retrying; the interface may have been reset)", consecutiveErr, err)
+					evBus.emit("tap_error", "warn", "", fmt.Sprintf("TAP read error: %v (retrying)", err))
+				}
+				delay := time.Second
+				if consecutiveErr >= 5 {
+					delay = 5 * time.Second
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(delay):
+				}
+				continue
 			}
+			consecutiveErr = 0
 			if pooledRead {
 				srv.vswitch.ProcessOwnedFrame(tapPortID, buf[:rn])
 			} else {
@@ -1395,14 +1417,26 @@ func serveListener(ctx context.Context, srv *Server, listener *net.TCPListener, 
 	goSafe(func() { <-ctx.Done(); listener.Close() })
 	limiter := &connectionLimiter{byIP: make(map[string]int)}
 
+	acceptErrStreak := 0
+acceptLoop:
 	for {
 		conn, err := listener.AcceptTCP()
 		if err != nil {
 			if ctx.Err() != nil {
 				break
 			}
+			// 持续性 Accept 错误（如 EMFILE/描述符耗尽）无退避会全核热旋，
+			// 进一步恶化资源枯竭。退避后重试；ctx 取消仍立即退出。
+			acceptErrStreak++
+			delay := time.Duration(min(acceptErrStreak, 10)) * 10 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				break acceptLoop
+			case <-time.After(delay):
+			}
 			continue
 		}
+		acceptErrStreak = 0
 
 		conn.SetKeepAlive(true)
 		conn.SetKeepAlivePeriod(15 * time.Second)
@@ -1542,11 +1576,13 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	priorityControl, priorityData := s.priorityControl, s.priorityData
 	s.mu.RUnlock()
 
+	// 握手 PSK 证明绑定本条 TLS 连接的 exporter 密钥材料（协议 v4）：证明 =
+	// HMAC-SHA256(sha256(psk), exporter)，录制的旧握手无法在其他连接上重放。
+	// 无 TLS 密钥材料（裸 TCP 直连）按 fail-closed 拒绝。
 	// 常量时间比较：Go 字符串 == 逐字节短路，响应时延会泄露匹配前缀长度。
-	// pskHash 本身就是握手凭据（线上传 hash 不传 PSK），非恒定时间比较等于
-	// 给攻击者一个逐字节重建 pskHash 的远程时序预言机，限流与焦油坑挡不住
-	// 换源 IP 的分布式采样。
-	if !hmac.Equal([]byte(req.PSK), []byte(pskHash)) {
+	// 证明即凭据（线上传证明不传 PSK），非恒定时间比较等于给攻击者一个
+	// 逐字节重建证明的远程时序预言机，限流与焦油坑挡不住换源 IP 的分布式采样。
+	if !handshakePSKVerify(conn, req.PSK, psk) {
 		// 限流：超限后直接断链而不是进焦油坑——焦油坑会让 goroutine
 		// 挂到读超时，无限触发等于给攻击者一个零成本内存放大器。
 		if s.pskFailExceeded(tcpConn.RemoteAddr().String()) {
@@ -1625,6 +1661,32 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		return
 	}
 	mac := req.MAC
+
+	// 内层加密算法已在锁外按服务端 enc_algo 做了完全一致校验；盐生成与
+	// HKDF/AES 密钥派生是握手临界区里最重的纯计算且不读任何共享状态——
+	// 预先在锁外完成（复活路径浪费一次派生，代价远小于并发握手被单锁串行）。
+	// AES-128/256 共享 wire format，但 KDF label 隔离；绝不静默回退。
+	var saltA, saltB [encSaltSize]byte
+	encAlgo := encAlgoNone
+	var icTx, icRx, fecTx, fecRx *innerCipher
+	if encrypt {
+		encAlgo = expectedEncAlgo
+		saltA, saltB = newRandomSalt(), newRandomSalt()
+		var derr error
+		if icTx, derr = newInnerCipherForAlgo(psk, saltB[:], encAlgo); derr != nil { // s2c
+			log.Errorf("[%s] s2c inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
+			encAlgo = encAlgoNone
+		} else if icRx, derr = newInnerCipherForAlgo(psk, saltA[:], encAlgo); derr != nil { // c2s
+			log.Errorf("[%s] c2s inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
+			encAlgo = encAlgoNone
+		} else if fecTx, derr = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo); derr != nil {
+			log.Errorf("[%s] s2c FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
+			encAlgo = encAlgoNone
+		} else if fecRx, derr = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo); derr != nil {
+			log.Errorf("[%s] c2s FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
+			encAlgo = encAlgoNone
+		}
+	}
 
 	s.mu.Lock()
 	if bind, exists := s.macToIP[mac]; exists && mac != "" {
@@ -1736,31 +1798,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		if req.FEC {
 			fecEncK = int(req.FecGroup)
 		}
-		// 内层加密算法已在锁外按服务端 enc_algo 做了完全一致校验。
-		// AES-128/256 共享 wire format，但 KDF label 隔离；绝不静默回退。
-		saltA, saltB := newRandomSalt(), newRandomSalt()
-		encAlgo := encAlgoNone
-		var icTx, icRx, fecTx, fecRx *innerCipher
-		if encrypt {
-			encAlgo = expectedEncAlgo
-			// expectedEncAlgo/salt 已在锁外校验为合法，派生理论上不会失败；仍不
-			// 静默忽略——若万一失败则记录并禁用内层加密/FEC（宁可不加密也不发
-			// 送密钥错乱的坏数据），绝不静默回退到未声明的算法。
-			var derr error
-			if icTx, derr = newInnerCipherForAlgo(psk, saltB[:], encAlgo); derr != nil { // s2c
-				log.Errorf("[%s] s2c inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
-				encAlgo = encAlgoNone
-			} else if icRx, derr = newInnerCipherForAlgo(psk, saltA[:], encAlgo); derr != nil { // c2s
-				log.Errorf("[%s] c2s inner AEAD init failed: %v; disabling inner encryption", clientID, derr)
-				encAlgo = encAlgoNone
-			} else if fecTx, derr = newInnerCipherDomainForAlgo(psk, saltB[:], "fec", encAlgo); derr != nil {
-				log.Errorf("[%s] s2c FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
-				encAlgo = encAlgoNone
-			} else if fecRx, derr = newInnerCipherDomainForAlgo(psk, saltA[:], "fec", encAlgo); derr != nil {
-				log.Errorf("[%s] c2s FEC AEAD init failed: %v; disabling inner encryption", clientID, derr)
-				encAlgo = encAlgoNone
-			}
-		}
+		// 盐与内层加密器已在锁外派生（见上方注释）。
 		fecMode := "off"
 		if fecEncK > 0 {
 			fecMode = fmt.Sprintf("xor K=%d", fecEncK)
@@ -1874,15 +1912,15 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 
 	v4ip, v6ip, port := session.IPv4, session.IPv6, session.Port
 	sessionID := session.SessionID // 提取出来准备发给客户端
-	encAlgo := session.EncAlgo
-	icTx, icRx := session.icTx, session.icRx
+	encAlgo = session.EncAlgo
+	icTx, icRx = session.icTx, session.icRx
 	// peer_info describes the peer on this authenticated handshake. During a
 	// peer_info is absent, overwrite with the empty
 	// normalized value instead of retaining identity from a previous connection.
 	session.sessionMu.Lock()
 	session.PeerInfo = normalizePeerInfo(req.PeerInfo)
 	session.sessionMu.Unlock()
-	saltA, saltB := session.SaltA, session.SaltB
+	saltA, saltB = session.SaltA, session.SaltB
 	resumeToken := responseResumeToken(session)
 	fecEncK := session.FecEncK
 	sessionEpoch := session.Epoch
@@ -1892,10 +1930,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		remote:    tcpConn.RemoteAddr().String(),
 		tcpConn:   tcpConn,
 		linkedAt:  time.Now().Unix(),
-		epoch:     sessionEpoch,
+		epoch:     atomic.Uint64{},
 		tls:       tlsInfo,
 		connIndex: req.BrutalConnIndex, // 客户端声明的连接下标（跨路径探针路由用）
 	}
+	ci.epoch.Store(sessionEpoch)
 	// 注册本物理连接到会话，供 Web 面板踢出/展示明细。清理 defer 必须在
 	// 发送握手响应之前安装：响应写失败会直接 return，不能把 ActiveConns 或
 	// session.conns 留成“幽灵连接”。
@@ -1910,7 +1949,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		s.mu.Lock()
 		session.sessionMu.Lock()
 		current, stillCurrent := s.activeClients[clientID]
-		if !stillCurrent || current != session || ci.epoch != session.Epoch {
+		if !stillCurrent || current != session || ci.epoch.Load() != session.Epoch {
 			session.sessionMu.Unlock()
 			s.mu.Unlock()
 			return
@@ -1959,8 +1998,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		serverTxRate, clientTxRate = negotiateBrutalRates(brutalUp, brutalDown, 0, 0)
 		serverLegacyRateBps, _ = brutalMbpsToBps(serverTxRate)
 	}
-	atomic.StoreUint64(&ci.brutalTx, serverTxRate)
-	atomic.StoreUint64(&ci.brutalRx, clientTxRate)
+	ci.brutalTx.Store(serverTxRate)
+	ci.brutalRx.Store(clientTxRate)
 
 	v4cidr := fmt.Sprintf("%s/%d", v4ip, maskSize(s.v4Net.Mask))
 	v6cidr := fmt.Sprintf("%s/%d", v6ip, maskSize(s.v6Net.Mask))
@@ -2135,7 +2174,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			lastFrameStart := -1
 		drainBatches:
 			for {
-				queuedPayload += batch.Bytes
+				queuedPayload += batch.RateBytes
 				var n, last int
 				sendBuffer, n, last = appendOwnedVPNFrameBatchStreamWithScratch(sendBuffer, batch, icTx, &txAEADScratch, &written)
 				txPackets += n
@@ -2154,6 +2193,8 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			}
 			var tailPad int
 			sendBuffer, tailPad = padStreamBatchTail(sendBuffer, lastFrameStart, padRecordLimit)
+			// 填充决策之后再统一加密封装：AAD 绑定每帧帧头的最终 padLen
+			sealStreamBatchInPlace(sendBuffer, icTx, &txAEADScratch)
 			padTotal := uint64(tailPad)
 			refreshWriteDeadline()
 			batchCork.BeforeWrite(len(sendBuffer))
@@ -2176,10 +2217,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			backend.observeDelivered(queuedPayload)
 			// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
 			recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
-			atomic.AddUint64(&session.TxBytes, uint64(len(sendBuffer)))
-			atomic.AddUint64(&session.TxPackets, uint64(txPackets))
-			atomic.AddUint64(&ci.txBytes, uint64(len(sendBuffer)))
-			atomic.AddUint64(&ci.txPackets, uint64(txPackets))
+			session.TxBytes.Add(uint64(len(sendBuffer)))
+			session.TxPackets.Add(uint64(txPackets))
+			ci.txBytes.Add(uint64(len(sendBuffer)))
+			ci.txPackets.Add(uint64(txPackets))
 			dailyTraffic.Add(0, uint64(len(sendBuffer))) // 下行 = server→client
 			return true
 		}
@@ -2292,10 +2333,10 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		}
 		s.rxBytesTotal.Add(rxBytesBatch)
 		s.rxPacketsTotal.Add(rxPacketsBatch)
-		atomic.AddUint64(&session.RxBytes, rxBytesBatch)
-		atomic.AddUint64(&session.RxPackets, rxPacketsBatch)
-		atomic.AddUint64(&ci.rxBytes, rxBytesBatch)
-		atomic.AddUint64(&ci.rxPackets, rxPacketsBatch)
+		session.RxBytes.Add(rxBytesBatch)
+		session.RxPackets.Add(rxPacketsBatch)
+		ci.rxBytes.Add(rxBytesBatch)
+		ci.rxPackets.Add(rxPacketsBatch)
 		dailyTraffic.Add(rxBytesBatch, 0) // 上行 = client→server
 		rxBytesBatch, rxPacketsBatch = 0, 0
 	}
@@ -2328,7 +2369,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			fecDec := session.FecDec
 			rxReorder := session.RxReorder
 			session.sessionMu.RUnlock()
-			if ci.epoch != currentEpoch {
+			if ci.epoch.Load() != currentEpoch {
 				putFrame(frame)
 				return
 			}
@@ -2338,7 +2379,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 				flushRxStats()
 			}
 			if seq != 0 && icRx != nil {
-				plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), &rxAEADScratch)
+				plain, derr := icRx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), uint16(scanner.lastPadLen), &rxAEADScratch)
 				if derr != nil {
 					// GCM 校验失败：篡改或异源注入的帧，直接丢弃
 					log.Debugf("[%s] dropped tampered/foreign frame (seq=%d): %v", clientID, seq, derr)
@@ -2416,6 +2457,9 @@ func (s *Server) destroySessionLocked(session *ClientSession, clientID string) {
 	s.vswitch.RemovePort(clientID)
 	if session.RxWorker != nil {
 		session.RxWorker.Close()
+		if !session.RxWorker.DoneIsClosed() {
+			log.Errorf("[%s] rx worker not fully drained before reorder close (contract violation)", clientID)
+		}
 	}
 	if session.RxReorder != nil {
 		session.RxReorder.Close()

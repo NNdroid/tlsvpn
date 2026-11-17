@@ -40,6 +40,14 @@ func newActorReorderBuffer(outFunc func([]byte), outOwned bool) *ReorderBuffer {
 // InsertActorBuffered records one actor-owned frame but defers handing the
 // resulting ordered batch to outWorker. This lets the actor interleave original
 // and FEC-recovered frames in sequence order before one delivery flush.
+//
+// Actor 无锁契约（本组 Actor* 方法绕过 rb.mu/fecDecoder.mu 直接改序号状态，
+// 结构上无法用锁保护，只能靠调用顺序保证）：唯一合法写者是已通过
+// rxSessionWorker.Close() 退出（Close 内部等待 w.done）的 RX worker goroutine，
+// 以及在"发布给读者之前"完成构建期 Reset 的构造序列。因此任何重排/FEC 状态
+// 的 Close 必须先于 worker 关闭之后调用——client.go/server.go 的会话清理序列
+// 固定先 rxWorker.Close() 再 rxReorder.Close()，AdvanceEpochAndReset 经 epoch
+// barrier 与 worker 串行。调整清理顺序前先核对这里。
 func (rb *ReorderBuffer) InsertActorBuffered(seq uint32, frame []byte) {
 	if seq == 0 {
 		if frame != nil {
@@ -62,37 +70,15 @@ func (rb *ReorderBuffer) InsertActor(seq uint32, frame []byte) {
 	rb.FlushActor()
 }
 
-// InsertBatchActor consumes a reader-owned batch without rb.mu/deliverMu. The
-// session worker is the only sequencing-state writer in actor mode.
-func (rb *ReorderBuffer) InsertBatchActor(frames []VPNFrame) {
-	if len(frames) == 0 {
-		return
-	}
-	if rb.shutting {
-		freeFrames(frames)
-		return
-	}
-	for i := range frames {
-		frame := frames[i].Data
-		if frames[i].Seq == 0 {
-			if frame != nil {
-				putFrame(frame)
-			}
-			frames[i].Data = nil
-			continue
-		}
-		rb.insertLocked(frames[i].Seq, frame)
-		frames[i].Data = nil
-	}
-	rb.FlushActor()
-}
-
 // ResetActor resets sequencing state at an epoch barrier. No producer from the
 // new generation is published until the barrier returns, so no mutex is needed.
 func (rb *ReorderBuffer) ResetActor() {
 	drain := rb.takePendingLocked()
 	rb.expectedSeq = 0
 	rb.releaseRingLocked()
+	// epoch barrier 内单写者、缓冲区已清空：把大偏斜扩出的窗口缩回初始尺寸，
+	// 与非 actor 的 Reset 行为对齐（否则 65536 级 ring 常驻到会话结束）。
+	rb.shrinkWindowLocked()
 	rb.gapSince = time.Time{}
 	rb.freeBatch(drain)
 }
@@ -284,6 +270,13 @@ func (d *fecDecoder) OnParityActorWithScratch(payload []byte, scratch *nonceAADS
 		return 0, nil, false
 	}
 	d.maybeRetireOldGroupsLocked()
+	// SUSPEND 后在途 parity 与 OnDataActor 的 BypassData 检查对称：bypass 窗口
+	// 覆盖的组不建状态——成员已被 bypass 丢弃，parity 永远等不到它们，只会以
+	// "全部成员缺失"形态占住 pending 组表直到淘汰。快路径一次 atomic load
+	// （actor 模式下 fence 写者与本校验同在 worker goroutine，无需二次检查）。
+	if d.fence.BypassParity(start) {
+		return 0, nil, false
+	}
 	if retired := d.retiredBefore.Load(); retired != 0 && start < retired {
 		return 0, nil, false
 	}
@@ -298,14 +291,15 @@ func (d *fecDecoder) OnParityActorWithScratch(payload []byte, scratch *nonceAADS
 	lens := getFECLens(k)
 	maxLen := 0
 	for i := 0; i < k; i++ {
-		l := int(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
-		if l+tagLen > len(payload)-descLen {
+		// int64 解析防 32 位平台 uint32→int 翻负绕过校验（同 OnParityWithScratch）。
+		l := int64(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
+		if l < 0 || l+int64(tagLen) > int64(len(payload)-descLen) {
 			putFECLens(lens)
 			return 0, nil, false
 		}
-		lens[i] = l
-		if l > maxLen {
-			maxLen = l
+		lens[i] = int(l)
+		if int(l) > maxLen {
+			maxLen = int(l)
 		}
 	}
 
@@ -325,8 +319,7 @@ func (d *fecDecoder) OnParityActorWithScratch(payload []byte, scratch *nonceAADS
 	g.k = k
 	g.lens = lens
 	pb := getFrameAtLeast(maxLen)[:maxLen]
-	wireLen := uint32(maxLen + tagLen)
-	if _, err := d.ic.openToWithScratch(pb, payload[descLen:descLen+maxLen+tagLen], start, wireLen, scratch); err != nil {
+	if _, err := d.ic.openToWithAAD(pb, payload[descLen:descLen+maxLen+tagLen], start, payload[:descLen], scratch); err != nil {
 		putFrame(pb)
 		putFECLens(g.lens)
 		g.lens = nil

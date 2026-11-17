@@ -250,7 +250,7 @@ func TestFrameGCMWireRoundtrip(t *testing.T) {
 		if len(frame) != len(want)+aeadTagSize {
 			t.Fatalf("第 %d 帧线路负载应含 16B 标签: got %d want %d", i, len(frame), len(want)+aeadTagSize)
 		}
-		plain, err := rx.openInPlace(frame, seq, uint32(len(frame)))
+		plain, err := rx.openInPlaceWithScratch(frame, seq, uint32(len(frame)), uint16(sc.lastPadLen), &nonceAADScratch{})
 		if err != nil {
 			t.Fatalf("第 %d 帧解密失败: %v", i, err)
 		}
@@ -733,8 +733,9 @@ func TestGCM128CrossLanguageGoldenVector(t *testing.T) {
 	salt, _ := hex.DecodeString("0102030405060708")
 	plain, _ := hex.DecodeString("746c7376706e2d67636d3132382d63726f73732d6c616e67756167652d766563746f72")
 	// KDF 自 v2 起为 HKDF-SHA256(ikm=psk, salt=encSalt, info=label)，以下为加盐
-	// 派生后的跨语言已知答案向量（Rust 端必须同步复现）。
-	want, _ := hex.DecodeString("85d1c16cb4ff7f1429c7cc4470472e85808d26479439330c1443bcc80d80d927fb612c0d7050ddc8aa5aa08a21e0be7bcc0134")
+	// 派生后的跨语言已知答案向量。v4 起 AAD=wireLen‖padLen(=0)‖seq（10B），
+	// 跨语言实现必须同步复现（含 AAD 布局）。
+	want, _ := hex.DecodeString("85d1c16cb4ff7f1429c7cc4470472e85808d26479439330c1443bcc80d80d927fb612c9ec8dfa764161f8a1d395957e7253fd0")
 	const seq uint32 = 0x01020304
 	wireLen := uint32(len(plain) + aeadTagSize)
 
@@ -764,5 +765,36 @@ func TestHandshakeEncSaltsForBothGCMKeySizes(t *testing.T) {
 	}
 	if gotA, gotB := handshakeEncSalts(encAlgoNone, saltA, saltB); gotA != "" || gotB != "" {
 		t.Fatalf("plaintext handshake must not carry GCM salts, got %q/%q", gotA, gotB)
+	}
+}
+
+// TestPSKProofBindsTLSExporter 验证协议 v4 的握手 PSK 证明语义：
+// 证明 = HMAC-SHA256(key=sha256(psk), msg=exporter)。
+// 同一 exporter 值验证通过；exporter 不同（即另一条 TLS 连接）则拒绝——
+// 静态 hashPSK 泄漏无法再在其他连接上重放认证。
+func TestPSKProofBindsTLSExporter(t *testing.T) {
+	psk := "psk-proof-binding-psk"
+	exporterA := bytes.Repeat([]byte{0xAB}, 32) // 连接 A 的 exporter
+	exporterB := bytes.Repeat([]byte{0xCD}, 32) // 连接 B 的 exporter
+
+	proof := pskProofHex(psk, exporterA)
+	if len(proof) != 64 {
+		t.Fatalf("proof hex length = %d, want 64", len(proof))
+	}
+	if !verifyPSKProof(proof, psk, exporterA) {
+		t.Fatal("valid proof rejected on same connection")
+	}
+	if verifyPSKProof(proof, psk, exporterB) {
+		t.Fatal("replayed proof from connection A accepted on connection B")
+	}
+	if verifyPSKProof(proof, "wrong-psk", exporterA) {
+		t.Fatal("proof accepted under wrong psk")
+	}
+	if verifyPSKProof("", psk, exporterA) || verifyPSKProof("short", psk, exporterA) {
+		t.Fatal("malformed proof accepted")
+	}
+	// hashPSK 语义保留：会话复活校验仍用静态 hash（不受本变更影响）
+	if got := hashPSK(psk); got == pskProofHex(psk, exporterA) {
+		t.Fatal("hashPSK and pskProofHex must not coincide")
 	}
 }

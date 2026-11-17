@@ -71,7 +71,20 @@ func dashboardStreamInterval(r *http.Request) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// sseWriteDeadline 每次 SSE 写前续期的写超时。HTTP server 的 WriteTimeout 在响应头
+// 读取时一次性设定并覆盖整个响应生命周期（不随 Flush 重置），SSE 长连接若不
+// 逐写续期，会在 30s 后被服务端强制断开。取值需大于最大推送间隔（interval_ms
+// 上限 10s、事件心跳 25s）加缓冲。不支持 DeadlineWriter 的 ResponseWriter
+// 保持原状（错误忽略）。
+const sseWriteDeadline = 60 * time.Second
+
+// sseRenewWriteDeadline 续写超时，见 sseWriteDeadline 注释。
+func sseRenewWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(sseWriteDeadline))
+}
+
 func writeDashboardSSE(w http.ResponseWriter, flusher http.Flusher, event string, payload []byte) error {
+	sseRenewWriteDeadline(w)
 	if len(payload) == 0 {
 		payload = []byte("null")
 	}

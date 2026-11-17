@@ -63,7 +63,7 @@ func TestDynamicFECSuspendDropsOnlyBypassGroups(t *testing.T) {
 	}
 }
 
-func TestDynamicFECResumeDropsParityOnlyBypassGroup(t *testing.T) {
+func TestDynamicFECResumeAcceptsPostBoundaryParityOnlyGroup(t *testing.T) {
 	var progress atomic.Uint32
 	progress.Store(1)
 	d := NewFECDecoder(4, nil, nil)
@@ -80,13 +80,14 @@ func TestDynamicFECResumeDropsParityOnlyBypassGroup(t *testing.T) {
 	defer putFrame(parity5)
 	defer putFrame(parity9)
 
-	// P2b deliberately keeps parity conservative. A parity-only group may be
-	// created while data 5..8 is bypassed; group 9 is the first resumed group.
+	// Parity is now symmetric with BypassData: in-flight parity whose group
+	// start falls inside the bypass window [5,∞) must NOT create a parity-only
+	// ghost group. Its members were dropped by the data bypass, so the group
+	// would wait forever and occupy the pending table until eviction.
 	d.OnParity(parity5)
 	d.OnParity(parity9)
-	before := decoderGroupStarts(d)
-	if !before[5] || !before[9] {
-		t.Fatalf("precondition groups=%v want parity-only starts 5 and 9", before)
+	if groups := decoderGroupStarts(d); len(groups) != 0 {
+		t.Fatalf("bypass-window parity must not create ghost groups: %v", groups)
 	}
 
 	applyTestFECModeControl(t, d, fecModeControl{
@@ -95,6 +96,10 @@ func TestDynamicFECResumeDropsParityOnlyBypassGroup(t *testing.T) {
 		Boundary:   9,
 	})
 
+	// RESUME narrows the window to [5,9): the first resumed group 9 is outside
+	// the closed interval, so its parity is accepted normally. Nothing inside
+	// the closed interval may (re)appear.
+	d.OnParity(parity9)
 	after := decoderGroupStarts(d)
 	if after[5] {
 		t.Fatalf("closed bypass interval group survived RESUME: groups=%v", after)

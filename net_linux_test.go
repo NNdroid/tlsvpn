@@ -27,11 +27,6 @@ func TestBrutalAndRTTNilSafe(t *testing.T) {
 	if _, err := getTCPRTT(nil); err == nil {
 		t.Error("nil 连接应返回错误而非成功")
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	var cache uint32
-	startRTTPoller(ctx, nil, &cache) // 应立即返回且不 panic
 }
 
 // TestSocketMarkControlNilWhenDisabled fwmark<=0 时不应产生 Control 回调，

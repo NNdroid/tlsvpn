@@ -4,14 +4,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -200,25 +198,6 @@ func getTCPMSS(conn *net.TCPConn) (int, error) {
 		return 0, err
 	}
 	return mss, sysErr
-}
-
-func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {
-	// 代理模式下无法读取内核 TCP_INFO，保持 rttCache 的默认估值即可
-	if conn == nil {
-		return
-	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if rtt, err := getTCPRTT(conn); err == nil && rtt > 0 {
-				atomic.StoreUint32(rttCache, rtt)
-			}
-		}
-	}
 }
 
 // ======================= 网络接口配置 =======================

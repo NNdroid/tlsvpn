@@ -21,6 +21,11 @@ const streamPadAbsoluteLimit = 512
 // appendUnpaddedFrame is the data-plane framing primitive for stream buckets.
 // Individual VPN frames are no longer bucket-padded; only the final frame in
 // an aggregated TLS plaintext batch receives cover padding.
+//
+// 注意：本函数只写帧头（padLen 暂置 0）与明文负载，不做内层加密封装——
+// 尾帧 padLen 要等整批聚合完成、padStreamBatchTail 决策后才能确定，而 AAD
+// 必须绑定最终 padLen。整批的加密封装由 sealStreamBatchInPlace 在填充决策
+// 之后统一执行。
 func appendUnpaddedFrameWithScratch(buf []byte, vf VPNFrame, ic *innerCipher, scratch *nonceAADScratch) ([]byte, int) {
 	dataLen := len(vf.Data)
 	encTag := 0
@@ -49,11 +54,35 @@ func appendUnpaddedFrameWithScratch(buf []byte, vf VPNFrame, ic *innerCipher, sc
 	if dataLen > 0 {
 		payloadStart := startIdx + 10
 		copy(buf[payloadStart:payloadStart+dataLen], vf.Data)
-		if ic != nil && vf.Seq != 0 {
-			ic.sealInPlaceWithScratch(buf[payloadStart:payloadStart+wireLen], dataLen, vf.Seq, uint32(wireLen), scratch)
-		}
+		// 标签预留区保持零值，sealStreamBatchInPlace 统一填充
 	}
 	return buf, startIdx
+}
+
+// sealStreamBatchInPlace 对聚合批次里的每个数据帧就地加密封装。必须在
+// padStreamBatchTail 决定尾帧 padLen 之后调用：AAD 绑定每帧帧头的最终
+// padLen（此前 padLen 不被认证，可被内层篡改导致帧边界去同步），接收端
+// 按帧头 padLen 校验，两端自然一致。ic==nil 或 pad 关闭时同样正确（seq=0
+// 控制帧跳过）。批次自描述（逐帧头推进），无需额外簿记。
+func sealStreamBatchInPlace(buf []byte, ic *innerCipher, scratch *nonceAADScratch) {
+	if ic == nil {
+		return
+	}
+	tagLen := ic.tagLen()
+	off := 0
+	for off+10 <= len(buf) {
+		wireLen := int(binary.BigEndian.Uint32(buf[off : off+4]))
+		padLen := binary.BigEndian.Uint16(buf[off+4 : off+6])
+		seq := binary.BigEndian.Uint32(buf[off+6 : off+10])
+		if seq == 0 || wireLen <= tagLen {
+			// 控制帧/心跳不加密；wireLen<=tagLen 是畸形容忍（接收端会拒）
+			off += 10 + wireLen + int(padLen)
+			continue
+		}
+		payload := buf[off+10 : off+10+wireLen]
+		ic.sealInPlaceWithScratch(payload, wireLen-tagLen, seq, uint32(wireLen), padLen, scratch)
+		off += 10 + wireLen + int(padLen)
+	}
 }
 
 func appendUnpaddedFrame(buf []byte, vf VPNFrame, ic *innerCipher) ([]byte, int) {

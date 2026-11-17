@@ -221,7 +221,7 @@ func TestAsyncPortBackpressureDoesNotConsumeSequenceBeforeBackendSlot(t *testing
 		t.Fatal(err)
 	}
 	time.Sleep(10 * time.Millisecond) // 明确超过旧 sendBatchToAny 的 5ms 丢弃窗口
-	<-ch                             // 释放 backend slot
+	<-ch                              // 释放 backend slot
 
 	select {
 	case batch := <-ch:
@@ -306,11 +306,16 @@ func TestFECParityIsSuppressedOnSingleTCPPath(t *testing.T) {
 		select {
 		case batch := <-ch0:
 			for _, vf := range batch {
-				if vf.Seq == 0 {
-					parityFrames++
-				} else {
-					dataFrames++
+				// seq=0 帧可能是 FECMode fence 控制帧（SUSPEND/RESUME 随批携带），
+				// 不是 parity：按 payload kind 精确区分，fence 帧不计入任何一侧。
+				if vf.Seq == 0 && len(vf.Data) > 0 {
+					switch vf.Data[0] {
+					case controlKindFECParity:
+						parityFrames++
+					}
+					continue
 				}
+				dataFrames++
 			}
 			freeFrames(batch)
 			putVPNFrameBatch(batch)
@@ -343,7 +348,8 @@ func TestFECParityIsSuppressedOnSingleTCPPath(t *testing.T) {
 				select {
 				case batch := <-ch:
 					for _, vf := range batch {
-						if vf.Seq == 0 {
+						// 同第一段：fence 控制帧（RESUME 随批携带）不算 parity。
+						if vf.Seq == 0 && len(vf.Data) > 0 && vf.Data[0] == controlKindFECParity {
 							parityFrames++
 						}
 					}

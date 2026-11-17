@@ -329,59 +329,6 @@ func (d *fecDecoder) OnData(seq uint32, frame []byte) {
 	d.tryRecoverLocked(g)
 }
 
-// OnDataBatch records a contiguous run of decrypted data frames while taking
-// the shared decoder mutex once. Multi-connection readers never call this directly;
-// the session RX worker is the sole hot-path caller.
-func (d *fecDecoder) OnDataBatch(frames []VPNFrame) {
-	if len(frames) == 0 || d.staticSingle.Load() {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for i := range frames {
-		seq, frame := frames[i].Seq, frames[i].Data
-		if len(frame) == 0 || seq == 0 {
-			continue
-		}
-		if d.staticSingle.Load() {
-			continue
-		}
-		if d.fence.BypassData(seq) {
-			if seq&0xff == 0 {
-				d.maybeRetireOldGroupsLocked()
-			}
-			continue
-		}
-		retired := d.retiredBefore.Load()
-		if retired != 0 && seq < retired {
-			continue
-		}
-		start := d.groupStartOf(seq)
-		if d.isDoneLocked(start) {
-			continue
-		}
-		g, ok := d.groups[start]
-		if !ok {
-			g = d.newGroupLocked(start)
-		}
-		bit := uint64(seq - start)
-		mask := uint64(1) << bit
-		if g.gotMask&mask != 0 {
-			continue
-		}
-		g.gotMask |= mask
-		if g.gotMask == d.fullMask {
-			d.finishGroupLocked(g)
-			continue
-		}
-		if len(frame) > len(g.acc) {
-			g.acc = d.growAccLocked(g.acc, len(frame))
-		}
-		subtle.XORBytes(g.acc[:len(frame)], g.acc[:len(frame)], frame)
-		d.tryRecoverLocked(g)
-	}
-}
-
 // OnParity 处理一个校验帧负载。payload 只读借用，不转移所有权。
 func (d *fecDecoder) OnParity(payload []byte) {
 	var scratch nonceAADScratch
@@ -402,6 +349,12 @@ func (d *fecDecoder) OnParityWithScratch(payload []byte, scratch *nonceAADScratc
 		return
 	}
 	d.cleanupByReorderProgress()
+	// SUSPEND 后在途 parity 与 BypassData 对称：bypass 窗口覆盖的组不建状态。
+	// 否则 [from,∞) 的组会以"全部成员缺失"的形态占住 pending 组表直到淘汰
+	// （成员已被 bypass 丢弃，parity 永远等不到它们）。快路径一次 atomic load。
+	if d.fence.BypassParity(start) {
+		return
+	}
 	if retired := d.retiredBefore.Load(); retired != 0 && start < retired {
 		return
 	}
@@ -416,21 +369,26 @@ func (d *fecDecoder) OnParityWithScratch(payload []byte, scratch *nonceAADScratc
 	lens := getFECLens(k)
 	maxLen := 0
 	for i := 0; i < k; i++ {
-		l := int(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
-		if l+tagLen > len(payload)-descLen {
+		// 用 int64 解析：32 位平台上 int(uint32) 会把 ≥2^31 的长度翻成负数，
+		// 绕过下面的自洽性检查后一路传到 tryRecoverLocked 的 [:n] 切片 panic
+		//（RX goroutine 被 goSafe 吞掉后该路径静默死亡）。
+		l := int64(binary.BigEndian.Uint32(payload[6+4*i : 10+4*i]))
+		if l < 0 || l+int64(tagLen) > int64(len(payload)-descLen) {
 			putFECLens(lens)
 			return // 描述符与负载长度自洽性校验失败
 		}
-		lens[i] = l
-		if l > maxLen {
-			maxLen = l
+		lens[i] = int(l)
+		if int(l) > maxLen {
+			maxLen = int(l)
 		}
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	retired := d.retiredBefore.Load()
-	if d.staticSingle.Load() || (retired != 0 && start < retired) || d.isDoneLocked(start) {
+	// 持锁后复检 bypass 窗口：快路径检查之后 SUSPEND 可能已并发落地（与 OnData
+	// 的二次 BypassData 检查同型）。此处返回须归还 lens。
+	if d.staticSingle.Load() || d.fence.BypassParity(start) || (retired != 0 && start < retired) || d.isDoneLocked(start) {
 		putFECLens(lens)
 		return
 	}
@@ -448,9 +406,9 @@ func (d *fecDecoder) OnParityWithScratch(payload []byte, scratch *nonceAADScratc
 	// 恰好返回了什么长度（openTo 按 dst[:0] 追加，以这里截断后的长度为界）。
 	pb := getFrameAtLeast(maxLen)[:maxLen]
 	// 解密校验载荷（GCM 模式解密同时校验完整性，失败即整组放弃）；
-	// AAD 与编码端一致：[加密区域长度(4BE) || groupStart(4BE)]。
-	wireLen := uint32(maxLen + tagLen)
-	if _, err := d.ic.openToWithScratch(pb, payload[descLen:descLen+maxLen+tagLen], start, wireLen, scratch); err != nil {
+	// AAD 与编码端一致：整个描述符（kind+groupStart+K+成员长度表），
+	// 成员长度表因此被 AEAD 认证，篡改无需依赖下游自洽性检查。
+	if _, err := d.ic.openToWithAAD(pb, payload[descLen:descLen+maxLen+tagLen], start, payload[:descLen], scratch); err != nil {
 		putFrame(pb)
 		putFECLens(g.lens)
 		g.lens = nil

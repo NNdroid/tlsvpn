@@ -4,7 +4,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net"
 
@@ -56,7 +55,8 @@ func getTCPMSS(conn *net.TCPConn) (int, error) {
 	return 0, fmt.Errorf("TCP MSS probing is only supported on Linux")
 }
 
-func startRTTPoller(ctx context.Context, conn *net.TCPConn, rttCache *uint32) {}
+// probeSocketMark 非 Linux 平台没有 SO_MARK（socketMarkControl 恒返 nil），探测恒成功。
+func probeSocketMark(mark int) error { return nil }
 
 // 非 Linux 没有 netlink，内核态观测项一律缺位；面板按"平台不支持"渲染。
 func routeStateSnapshot(fwmark int) *routeStateJSON { return nil }

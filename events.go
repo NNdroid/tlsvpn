@@ -132,12 +132,16 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher.Flush()
 
-	for _, e := range evBus.snapshot(after) {
-		writeSSE(w, flusher, e)
-	}
-
+	// 先订阅再回放：snapshot 与 subscribe 之间 emit 的事件既不在快照里也不会
+	// 推给订阅者（事件缺口）。回放 seq 之后的通道副本在下面的循环里按 seq 去重。
 	sub, cancel := evBus.subscribe()
 	defer cancel()
+
+	lastSeq := after
+	for _, e := range evBus.snapshot(after) {
+		writeSSE(w, flusher, e)
+		lastSeq = e.Seq
+	}
 
 	tick := time.NewTicker(25 * time.Second)
 	defer tick.Stop()
@@ -149,8 +153,13 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			if e.Seq <= lastSeq {
+				continue // 回放已覆盖（订阅先于快照导致的通道副本）
+			}
 			writeSSE(w, flusher, e)
+			lastSeq = e.Seq
 		case <-tick.C:
+			sseRenewWriteDeadline(w)
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 		}
@@ -158,6 +167,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, e evtJSON) {
+	sseRenewWriteDeadline(w)
 	data, _ := json.Marshal(e)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 	flusher.Flush()

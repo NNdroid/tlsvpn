@@ -228,18 +228,23 @@ func TestTrafficRetireAndRecreateBetweenSamples(t *testing.T) {
 	s.installTrafficAccounting(accounting)
 	p := NewAsyncPort(ctx, "old")
 	defer p.Close()
-	old := &ClientSession{Port: p, CreatedAt: time.Now(), RxBytes: 100, TxBytes: 200}
+	old := &ClientSession{Port: p, CreatedAt: time.Now()}
+	old.RxBytes.Add(100)
+	old.TxBytes.Add(200)
 	s.activeClients["same-client"] = old
 	first := accounting.ClientSnapshot()
 	if len(first) != 1 || first[0].Daily[0].Up != 100 || first[0].Daily[0].Down != 200 {
 		t.Fatalf("first live sample: %+v", first)
 	}
-	old.RxBytes += 50
-	old.TxBytes += 75
+	old.RxBytes.Add(50)
+	old.TxBytes.Add(75)
 	s.mu.Lock()
 	s.destroySessionLocked(old, "same-client")
 	s.mu.Unlock()
-	s.activeClients["same-client"] = &ClientSession{RxBytes: 10, TxBytes: 20}
+	newSess := &ClientSession{}
+	newSess.RxBytes.Add(10)
+	newSess.TxBytes.Add(20)
+	s.activeClients["same-client"] = newSess
 	next := accounting.ClientSnapshot()
 	if len(next) != 1 || next[0].Daily[0].Up != 160 || next[0].Daily[0].Down != 295 {
 		t.Fatalf("lost retired tail/new-session traffic: %+v", next)
@@ -337,11 +342,14 @@ func TestWebStatsSSEPriorProcessCursorResets(t *testing.T) {
 }
 
 func TestWebStatsReconnectOwnsCounters(t *testing.T) {
-	old := &clientConnInfo{target: "old.example:443", txBytes: 5000, rxBytes: 2000, retries: 3}
+	old := &clientConnInfo{target: "old.example:443"}
+	old.txBytes.Add(5000)
+	old.rxBytes.Add(2000)
+	old.retries.Store(3)
 	c := &Client{connsCount: 1, conns: map[int]*clientConnInfo{0: old}}
 	next := c.beginConnAttempt(0, "new.example:443")
-	old.txBytes += 1000
-	next.txBytes = 10
+	old.txBytes.Add(1000)
+	next.txBytes.Store(10)
 	got := c.snapshotConns()[0]
 	if got.Target != "new.example:443" || got.TxBytes != 10 || got.RxBytes != 0 || got.Retries != 3 || got.State != "connecting" {
 		t.Fatalf("reused connection attempt metadata: %+v", got)

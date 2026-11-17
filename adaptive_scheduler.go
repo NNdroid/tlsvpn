@@ -242,7 +242,8 @@ type schedulerConnJSON struct {
 	FwdRankKnown bool  `json:"fwd_rank_known,omitempty"`
 	FwdRankUS    int64 `json:"fwd_rank_us,omitempty"`
 	// NearState parity near 窗口成员资格："in"=窗口内、"lenient"=探针未收敛的
-	// bootstrap 宽限放行、"out"=窗口外（不会拿 parity）。仅 near 策略有意义。
+	// bootstrap 宽限放行；窗口外不发布（字段 omitempty 缺省），不会拿 parity。
+	// 仅 near 策略有意义。
 	NearState string `json:"near_state,omitempty"`
 	// StickyHeld 本批是否因粘滞滞回保留了当前路径（而非取 rank[0]）。
 	StickyHeld bool `json:"sticky_held,omitempty"`
@@ -332,6 +333,10 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 	if mr, unknown := adaptiveBackendMinRTT(b); !unknown {
 		minRTT = uint64(mr)
 	}
+	// schedFlags 一次 Load 按位拆分 RankKnown/StickyHeld/排除原因/NearState：
+	// 分多次 Load 会在 run goroutine 并发 RMW 时让面板读到自相矛盾的组合
+	// （如 RankKnown=true 却同时 exclude_reason=envelope_out）。
+	flags := b.schedFlags.Load()
 	snap := schedulerConnJSON{
 		QueuedBytes:        b.queuedBytes.Load(),
 		RateMbps:           float64(rate) * 8 / 1_000_000,
@@ -349,11 +354,10 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		GroupMinRttUS:      b.schedEnvMinRttUS.Load(),
 		GroupMaxRttUS:      b.schedEnvMaxRttUS.Load(),
 		GroupFwdFloorUS:    b.schedEnvFwdFloorUS.Load(),
-		RankKnown:          b.schedFlags.Load()&schedFlagRankKnown != 0,
+		RankKnown:          flags&schedFlagRankKnown != 0,
 		RankKeyUS:          b.rankKeyUS.Load(),
-		StickyHeld:         b.schedFlags.Load()&schedFlagStickyHeld != 0,
+		StickyHeld:         flags&schedFlagStickyHeld != 0,
 	}
-	flags := b.schedFlags.Load()
 	// 排除原因优先于"候选内"呈现：被排除时 Eligible 必为 false，面板据此换徽章。
 	reason := flags & schedFlagExcludeMask
 	switch {
@@ -525,6 +529,12 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		}
 		b.active.Store(true)
 		b.virtualFinishNS.Store(0)
+		// 补一次标志发布：快路径跳过全量管线（每批 0 次候选写入），而拓扑收缩
+		// （如 4 连接掉 3 条）会让幸存 Backend 残留上一批管线写的排除原因/粘滞
+		// 标志——面板将长期显示 active=true 却 eligible=false + envelope_out 的
+		// 自相矛盾组合。清掉排除/粘滞/排名位，与"单路径被选中"的事实自洽；
+		// near 位留给 parity 路径维护。
+		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, schedExcludeNone)
 		p.activePaths.Store(1)
 		p.storePreferredIfCurrent(b)
 		p.recordChoice(backends, b, schedReasonSinglePath, 1)
@@ -532,7 +542,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	}
 	current := p.preferred.Load()
 
-	minRTT, maxRTT, referenceRate, healthy := scanEnvelope(backends)
+	obs, minRTT, maxRTT, referenceRate, healthy := p.scanEnvelope(backends)
 	if healthy == 0 {
 		fb := p.fallbackSinglePath(backends)
 		p.recordChoice(backends, fb, schedReasonNoHealthy, 1)
@@ -544,7 +554,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	if p.schedEnvelopeFwd.Load() {
 		fwdFloor, fwdFloorOK = schedEnvelopeFloor(backends)
 	}
-	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate, fwdFloor, fwdFloorOK)
+	cands := p.buildEligibleCandidates(policy, obs, backends, incomingBytes, minRTT, maxRTT, referenceRate, fwdFloor, fwdFloorOK)
 	p.schedulerScratch = cands
 	if len(cands) == 0 {
 		// 全部后端被并发排除（唯一健康者在扫描间隙被 markStalled）：pickBackend
@@ -563,9 +573,14 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	}
 	rankCandidates(cands)
 
-	active := adaptiveActivePathTarget(pressure, p.inputRateBytesPerSec.Load(), len(cands))
 	bestBase := cands[0].baseUS
-	if !policy.wfq || active == 1 {
+	// strict/latency_sticky（!wfq）不参与字节公平：活跃目标计算（原子读+阈值）
+	// 只在 wfq 分支需要，提前搬进来避免 strict 每批白付一次。
+	if !policy.wfq {
+		return p.commitSinglePath(backends, cands, current, bestBase, policy)
+	}
+	active := adaptiveActivePathTarget(pressure, p.inputRateBytesPerSec.Load(), len(cands))
+	if active == 1 {
 		return p.commitSinglePath(backends, cands, current, bestBase, policy)
 	}
 	return p.dispatchWFQ(backends, cands, active, incomingBytes)
@@ -641,18 +656,23 @@ func (p *AsyncPort) publishEnvelopeFloor(b *Backend, fwdFloor int64, ok bool) {
 // 探针未收敛的路径在 fwd 门下宽松放行（与 near 窗口的 parityNearState 同契约）：
 // 未收敛时 adaptiveBackendOneWayUS 回退到绝对内核尺度（min_rtt/2 或 50ms 哨兵
 // 折半），与已收敛探针的有符号相对量跨尺度比较会把 bootstrap 期全部误判包络外。
-func (p *AsyncPort) envelopeIn(b *Backend, fwdFloor int64, fwdFloorOK bool, maxRTT uint64) bool {
+//
+// minRTTUS / oneWayUS / oneWayOK 由调用方传入本轮的首读结果（调用方在资格判定
+// 之前就要读同一批原子做 fairStart 判定与排名键回退），此处不再重读：热路径每
+// 候选的 minRTT/oneWay 加载从 2-3 次降到 1 次。调用方保证仅在 !fairStart 时进入
+// （此时探针原始值缺失即宽松放行，语义与历史实现一致）。
+func (p *AsyncPort) envelopeIn(fwdFloor int64, fwdFloorOK bool, maxRTT uint64, minRTTUS uint32, oneWayUS int64, oneWayOK bool) bool {
 	if !p.schedEnvelopeFwd.Load() || !fwdFloorOK {
 		// rtt 门，或 fwd 门因组内无已收敛读数整体回退。
-		if rtt, _ := adaptiveBackendMinRTT(b); uint64(rtt) > maxRTT {
+		if uint64(minRTTUS) > maxRTT {
 			return false
 		}
 		return true
 	}
-	if _, ok := b.backendOneWayUS(); !ok {
+	if !oneWayOK {
 		return true
 	}
-	return adaptiveBackendOneWayUS(b) <= fwdFloor+int64(p.schedEnvelopeUS.Load())
+	return oneWayUS <= fwdFloor+int64(p.schedEnvelopeUS.Load())
 }
 
 // scanEnvelope 单遍合并原 scanWarmedMinRTT + buildEnvelope：健康计数、热身
@@ -661,17 +681,53 @@ func (p *AsyncPort) envelopeIn(b *Backend, fwdFloor int64, fwdFloorOK bool, maxR
 // 字段保留：healthy 只计未阻塞路径；minWarmed 只计有 RTT 且完成热身的健康
 // 路径（否则测量顺序可能永久压缩候选集）；referenceRate 只计包络内（或
 // fairStart）路径；包络排除明显偏离的路径以限界接收端乱序。
-func scanEnvelope(backends []*Backend) (minRTT uint32, maxRTT uint64, referenceRate uint64, healthy int) {
+//
+// 两遍结构必须保留：minRTT 聚合要在包络比较之前完成，合并为单遍会把先访问
+// 的路径与"半成品"地板比较。但第二遍不再重读原子，而是复用第一遍的观测
+// （queueCap/queueLen/isStalled/minRTT/rate 各只读一次）——这既省一半加载，
+// 也让"与第一遍对齐"的字段语义变成字面意义上的同一次观察；探针/速率在两遍
+// 之间落地属极端路径，下一批自然纠正。
+// envelopeObs 是单条后端在资格扫描阶段的一次性观测：第一遍聚合（健康闸、
+// min_rtt/速率首读）与第二遍包络比较复用同一次观察，候选构建阶段再消费同一
+// 份切片——minRTT/rate/queue 队列状态跨阶段各只读一次。切片挂在 AsyncPort 上
+// 由 run goroutine 独占并按批复用（与 schedulerScratch/parityScratch 同纪律），
+// 消除每批一次的固定堆分配。
+type envelopeObs struct {
+	alive      bool   // 通过健康闸（第一遍观察，后续阶段沿用）
+	rtt        uint32 // adaptiveBackendMinRTT 首读
+	unknownRTT bool
+	cold       bool   // rateBytesPerSec==0（第一遍观察）
+	rate       uint64 // 首读的速率值，第二遍直接参与 referenceRate
+	cap        int    // queueCap 首读（候选阶段的排除子原因区分用）
+	qLen       int    // queueLen 首读
+	stalled    bool   // isStalled 首读
+}
+
+func (p *AsyncPort) scanEnvelope(backends []*Backend) (obs []envelopeObs, minRTT uint32, maxRTT uint64, referenceRate uint64, healthy int) {
+	if cap(p.envelopeScratch) < len(backends) {
+		p.envelopeScratch = make([]envelopeObs, len(backends))
+	}
+	obs = p.envelopeScratch[:len(backends)]
+	clear(obs)
 	minWarmed := ^uint32(0)
-	for _, b := range backends {
-		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
+	for i, b := range backends {
+		o := &obs[i]
+		if b == nil {
 			continue
 		}
+		o.cap = b.queueCap()
+		o.qLen = b.queueLen()
+		o.stalled = b.isStalled()
+		if o.cap == 0 || o.qLen >= o.cap-2 || o.stalled {
+			continue
+		}
+		o.alive = true
 		healthy++
-		rtt, unknownRTT := adaptiveBackendMinRTT(b)
-		cold := b.rateBytesPerSec.Load() == 0
-		if !unknownRTT && !cold && rtt < minWarmed {
-			minWarmed = rtt
+		o.rtt, o.unknownRTT = adaptiveBackendMinRTT(b)
+		o.rate = b.rateBytesPerSec.Load()
+		o.cold = o.rate == 0
+		if !o.unknownRTT && !o.cold && o.rtt < minWarmed {
+			minWarmed = o.rtt
 		}
 	}
 	minRTT = minWarmed
@@ -681,27 +737,22 @@ func scanEnvelope(backends []*Backend) (minRTT uint32, maxRTT uint64, referenceR
 	rttSlack := max(uint32(backendRTTHysteresisMin), minRTT/4)
 	maxRTT = uint64(minRTT) + uint64(rttSlack)
 	referenceRate = uint64(adaptiveFallbackRateBytesPerSec)
-	for _, b := range backends {
-		// 与第一遍对齐：stalled/队满路径的 rate 不参与参考速率（仅冷路径 ETA
-		// 回退用），死路径不应抬高它。
-		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
+	for i := range backends {
+		o := &obs[i]
+		// 与第一遍同一次观察：stalled/队满路径的 rate 不参与参考速率（仅冷路径
+		// ETA 回退用），死路径不应抬高它。
+		if !o.alive {
 			continue
 		}
-		rtt, unknownRTT := adaptiveBackendMinRTT(b)
-		cold := b.rateBytesPerSec.Load() == 0
-		fairStart := unknownRTT || cold
-		if fairStart {
-			// Candidate ordering uses the best warmed RTT only during bootstrap.
-			rtt = minRTT
-		}
-		if !fairStart && uint64(rtt) > maxRTT {
+		fairStart := o.unknownRTT || o.cold
+		if !fairStart && uint64(o.rtt) > maxRTT {
 			continue
 		}
-		if rate := b.rateBytesPerSec.Load(); rate > referenceRate {
-			referenceRate = rate
+		if o.rate > referenceRate {
+			referenceRate = o.rate
 		}
 	}
-	return minRTT, maxRTT, referenceRate, healthy
+	return obs, minRTT, maxRTT, referenceRate, healthy
 }
 
 // fallbackSinglePath 无健康路径时退化为首条后端，重置活跃/债务状态。
@@ -730,42 +781,51 @@ func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
 }
 
 // buildEligibleCandidates 构建候选集：资格包络 + stall/队满排除，按策略算主排名键。
-func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64, fwdFloor int64, fwdFloorOK bool) []backendCandidate {
+// 队列状态与 min_rtt/速率复用 scanEnvelope 的同一次观测（obs 与 backends 同序），
+// 排除子原因按首读区分发布；只有 SRTT 尚未扫过，仍在此处单次读取。
+func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelopeObs, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64, fwdFloor int64, fwdFloorOK bool) []backendCandidate {
 	cands := p.schedulerScratch[:0]
-	for _, b := range backends {
+	for i, b := range backends {
 		if b == nil {
 			continue
 		}
+		o := &obs[i]
 		// 四类排除子原因分列发布：面板要回答的是"为什么没选它"，笼统的
 		// eligible=false 无法区分 stalled、队满、cap 未就绪与真正落在包络外。
 		switch {
-		case b.queueCap() == 0:
+		case o.cap == 0:
 			p.publishExcluded(b, schedExcludeCapZero, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
-		case b.queueLen() >= b.queueCap()-2:
+		case o.qLen >= o.cap-2:
 			p.publishExcluded(b, schedExcludeQueueFull, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
-		case b.isStalled():
+		case o.stalled:
 			p.publishExcluded(b, schedExcludeStalled, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
 		}
-		// SRTT 用于 ETA 遥测（含当前拥塞，预测更准）；min_rtt 用于资格包络与
-		// 候选排序（无拥塞地板，成员稳定）。
-		srt, _ := adaptiveBackendRTT(b)
-		rtt, unknownRTT := adaptiveBackendMinRTT(b)
-		cold := b.rateBytesPerSec.Load() == 0
+		// SRTT 用于 ETA 遥测（含当前拥塞，预测更准）；min_rtt 已在扫描阶段
+		// 首读（obs）。本轮候选评估内每条原子的首读结果全部复用：资格门、ETA
+		// 与排名键的判定点彼此只差几条指令，探针在这几条指令之间落地不值得
+		// 多付一倍加载，下一批自然纠正。
+		srt, srttUnknown := adaptiveBackendRTT(b)
+		mr, unknownRTT := o.rtt, o.unknownRTT
+		rate := o.rate
+		cold := o.cold
 		fairStart := unknownRTT || cold
+		rtt := mr
 		if fairStart {
+			// 公平启动路径按组内热身地板参与排序（仅 bootstrap 期）。
 			rtt = minRTT
 		}
-		if !fairStart && !p.envelopeIn(b, fwdFloor, fwdFloorOK, maxRTT) {
+		oneWay, oneWayOK := b.backendOneWayUS()
+		if !fairStart && !p.envelopeIn(fwdFloor, fwdFloorOK, maxRTT, mr, oneWay, oneWayOK) {
 			// 冷路径完成热身却真正落在资格门外（按当前 sched_envelope 维度判定）：
 			// 清掉过期成员。
 			p.publishExcluded(b, schedExcludeEnvelopeOut, minRTT, maxRTT, fwdFloor, fwdFloorOK)
 			continue
 		}
 		// Writer-drain EWMA 只作观测 ETA，不代表端到端 TCP 投递能力。
-		etaRate := b.rateBytesPerSec.Load()
+		etaRate := rate
 		if etaRate == 0 {
 			etaRate = referenceRate
 		}
@@ -779,12 +839,18 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Ba
 		// 主排名键按当前算法计算（candidateRankUS）；完全未测路径折到 minRTT/2。
 		// oneWay 为有符号原始相对量（探针已收敛时，负值=快于 ref 基准），显示层
 		// 的 δ 抬升不参与选路——回退候选不带 δ，混排时不抵消会扭曲排名。
-		oneWay := adaptiveBackendOneWayUS(b)
-		if _, ok := b.backendOneWayUS(); !ok {
-			if _, mrUnknown := adaptiveBackendMinRTT(b); mrUnknown {
-				if _, srttUnknown := adaptiveBackendRTT(b); srttUnknown {
-					oneWay = int64(minRTT) / 2
-				}
+		// 回退链与 adaptiveBackendOneWayUS 同型，但复用本轮首读（oneWayOK/
+		// unknownRTT/srttUnknown），每候选少 2-3 次原子加载：
+		//   min_rtt 已知 → min_rtt/2；SRTT 已知 → SRTT/2；
+		//   两者皆未知（全未测）→ 组内 minRTT/2（哨兵折半，与历史覆盖逻辑一致）。
+		if !oneWayOK {
+			switch {
+			case !unknownRTT:
+				oneWay = int64(mr) / 2
+			case srttUnknown:
+				oneWay = int64(minRTT) / 2
+			default:
+				oneWay = int64(srt) / 2
 			}
 		}
 		baseUS := candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate)

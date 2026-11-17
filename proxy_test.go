@@ -41,6 +41,9 @@ func TestParseSocks5(t *testing.T) {
 		{name: "http scheme 必须拒绝", in: "http://1.2.3.4:8080", wantErr: true},
 		{name: "socks4 scheme 必须拒绝", in: "socks4://1.2.3.4:1080", wantErr: true},
 		{name: "scheme 缺 host", in: "socks5://", wantErr: true},
+		// URL 分支与裸格式语义一致：缺端口在解析期报错，不拖到拨号才失败
+		{name: "scheme 缺端口", in: "socks5://1.2.3.4", wantErr: true},
+		{name: "socks5h scheme 缺端口", in: "socks5h://1.2.3.4", wantErr: true},
 	}
 
 	for _, c := range cases {

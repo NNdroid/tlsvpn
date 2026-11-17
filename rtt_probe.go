@@ -169,14 +169,17 @@ type rttProbeScheduler struct {
 	pending   map[uint32]pendingProbe
 	decay     map[[2]uint32]uint64    // decayed-min per (src,dst)，ns
 	lastDecay map[[2]uint32]time.Time // 每 key 独立的慢升计时（ns 地板按 key 累积）
-	nonce     uint32
-	rotate    int // 生成集轮转游标
-	refConn   int
-	active    []int
-	replies   chan rttProbeFrame
-	kickCh    chan struct{}
-	timer     *time.Timer
-	timerCh   <-chan time.Time
+	// lastBackend 上轮 resolveConn 的 connIndex→Backend 指针。槽位换新 Backend
+	// （断线重拨/网络切换）时清 decay 键，防止新连接继承旧连接的时延地板。
+	lastBackend map[int]*Backend
+	nonce       uint32
+	rotate      int // 生成集轮转游标
+	refConn     int
+	active      []int
+	replies     chan rttProbeFrame
+	kickCh      chan struct{}
+	timer       *time.Timer
+	timerCh     <-chan time.Time
 }
 
 // newRttProbeScheduler 创建调度器（不启动探测；enabled 由握手协商后置 true）。
@@ -192,6 +195,7 @@ func newRttProbeScheduler(ctx context.Context, resolveConn func(int) *Backend, a
 		pending:      make(map[uint32]pendingProbe, 16),
 		decay:        make(map[[2]uint32]uint64, 32),
 		lastDecay:    make(map[[2]uint32]time.Time, 32),
+		lastBackend:  make(map[int]*Backend, 8),
 		nonce:        0,
 		replies:      make(chan rttProbeFrame, 64),
 		kickCh:       make(chan struct{}, 1),
@@ -272,8 +276,34 @@ func (s *rttProbeScheduler) resetTimer() {
 }
 
 // issueRound 发起当前轮次的探针（生成集轮转）。
+// detectReconnectedConns 检测 connIndex 槽位的 Backend 指针变化并清理 decay
+// 状态。槽位重连（断线重拨、WiFi→蜂窝切换）后，旧连接的 decayed-min 地板
+// 不再代表新连接：快降只接受更小样本，路径劣化只能靠 0.5ms/s 慢升追赶
+// （50ms 劣化需 ~100s），期间 rankOneWay 把劣化路径当快路径。删除该槽位
+// 参与的全部 decay 键（含作为 ref 的锚），新连接从无偏估计重新收敛。
+// 调度 goroutine 独占（与 pending/decay 同纪律）。
+func (s *rttProbeScheduler) detectReconnectedConns(active []int) {
+	for _, idx := range active {
+		b := s.resolveConn(idx)
+		if b == nil {
+			continue
+		}
+		if prev, seen := s.lastBackend[idx]; seen && prev == b {
+			continue
+		}
+		s.lastBackend[idx] = b
+		for key := range s.decay {
+			if key[0] == uint32(idx) || key[1] == uint32(idx) {
+				delete(s.decay, key)
+				delete(s.lastDecay, key)
+			}
+		}
+	}
+}
+
 func (s *rttProbeScheduler) issueRound() {
 	active := s.activeConns()
+	s.detectReconnectedConns(active)
 	if len(active) < 2 {
 		// 少于 2 条连接时无跨路径可言，仅需 ref 基线（若存在）以维持锚定。
 		if len(active) == 1 {

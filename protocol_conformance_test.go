@@ -468,7 +468,7 @@ func TestFrameGCMRoundTrip(t *testing.T) {
 		if len(got) != len(want)+aeadTagSize {
 			t.Fatalf("第 %d 帧线路负载应含标签: got %d want %d", i, len(got), len(want)+aeadTagSize)
 		}
-		plain, err := rx.openInPlace(got, seq, uint32(len(got)))
+		plain, err := rx.openInPlaceWithScratch(got, seq, uint32(len(got)), uint16(scanner.lastPadLen), &nonceAADScratch{})
 		if err != nil {
 			t.Fatalf("第 %d 帧 GCM 解密失败: %v", i, err)
 		}

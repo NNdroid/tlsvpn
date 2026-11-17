@@ -232,6 +232,14 @@ func main() {
 		}
 	}
 
+	// fwmark 依赖 SO_MARK（需要 CAP_NET_ADMIN 或 root）：只在每次 dial 报 EPERM
+	// 的话故障暴露太晚，启动时用一次性探测 socket 提前告警（只 warn，不阻断）。
+	if cfg.Client.Fwmark > 0 {
+		if err := probeSocketMark(cfg.Client.Fwmark); err != nil {
+			log.Warnf("⚠️  fwmark %d requires CAP_NET_ADMIN (or root): %v — all outbound connections will fail", cfg.Client.Fwmark, err)
+		}
+	}
+
 	// 面板安全提示：非回环 + 无认证 + 无 TLS 时给出明确告警
 	if cfg.Web.Addr != "" {
 		host, _, err := net.SplitHostPort(cfg.Web.Addr)

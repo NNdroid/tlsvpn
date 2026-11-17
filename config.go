@@ -7,7 +7,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap/zapcore"
 )
@@ -144,8 +146,12 @@ type WebConfig struct {
 	//              面板只有进入隧道才能访问；
 	//   "all"    — 绑定全部接口（旧行为）。
 	// 端口取自 Addr 的端口部分。
-	Bind string    `json:"bind,omitempty"` // 默认 all
-	MCP  MCPConfig `json:"mcp,omitempty"`  // 同端口 MCP Server 的独立认证策略
+	Bind string `json:"bind,omitempty"` // 默认 all
+	// BehindProxy 显式声明面板位于 TLS 终止反向代理之后：代理转发 https 请求
+	// 到明文本进程，session cookie 因此一律标记 Secure，不再依赖客户端可控的
+	// X-Forwarded-Proto 头。默认 false（直连或本进程自带 TLS listener）。
+	BehindProxy bool      `json:"behind_proxy,omitempty"`
+	MCP         MCPConfig `json:"mcp,omitempty"` // 同端口 MCP Server 的独立认证策略
 }
 
 // ServerConfig 服务端专属
@@ -300,6 +306,19 @@ func loadConfigFile(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %v", err)
 	}
+	// 配置文件含 PSK 等敏感信息：group/other 可读时提示收紧到 600（仅告警，
+	// 不拒绝加载）。权限位语义仅对类 Unix 平台成立——Windows 的 FileMode.Perm
+	// 由只读属性映射而来，检查会误报。main() 在 initLogger 之前调用本函数，
+	// 此时包级 log 尚未就绪，降级输出到 stderr。
+	if fi, statErr := os.Stat(path); statErr == nil && runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+		msg := fmt.Sprintf("config file %s is readable by group/other (perm %04o); consider: chmod 600 %s",
+			path, fi.Mode().Perm(), path)
+		if log != nil {
+			log.Warnf("%s", msg)
+		} else {
+			fmt.Fprintln(os.Stderr, "tlsvpn: warning: "+msg)
+		}
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	cfg := &Config{}
@@ -451,7 +470,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("priority_data must be in [0, %d]", maxFramePriority)
 	}
 	// 物理锚定下界非负：负值无物理意义；nil 只在绕过 applyDefaults 直接 Validate
-	// 时出现，拒绝。上限 3_600_000µs(1 小时)防误配成天文数字把选路全废。
+	// 时出现，拒绝。上限 3_600_000µs（=3.6s，低于 oneWayRankZeroUS=4s 的编码
+	// 零点，留 0.4s 余量）防误配成天文数字把选路全废。
 	if c.ProbeMinHalfRTTUs == nil || *c.ProbeMinHalfRTTUs < 0 || *c.ProbeMinHalfRTTUs > 3_600_000 {
 		return fmt.Errorf("probe_min_half_rtt_us must be in [0, 3600000]")
 	}
@@ -470,6 +490,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Addr == "" {
 		return fmt.Errorf("addr is required")
+	}
+	// client 模式下 addr 是逗号分隔的目标列表：全空/全分隔符的字符串会在
+	// parseServerAddresses 得到空表，空表会让 dialAndServe 的取模除零 panic。
+	// 在校验层直接拒绝，避免面板/MCP 热更绕过启动路径的 log.Fatalf 防线。
+	if c.Mode == "client" && len(parseServerAddresses(c.Addr)) == 0 {
+		return fmt.Errorf("addr must contain at least one target address (comma-separated)")
 	}
 	psk := strings.TrimSpace(c.PSK)
 	if psk == "" {
@@ -668,6 +694,10 @@ func webAddrIsPublic(addr string) bool {
 	return ip == nil || !ip.IsLoopback()
 }
 
+// saveConfigMu 串行化配置写回。Web 面板与 MCP 是两个并发入口，若各自向同一个
+// 固定临时文件写数据再 rename，交错写出会发布损坏的 JSON。
+var saveConfigMu sync.Mutex
+
 // SaveConfigFile 把配置以缩进 JSON 写回来源文件（面板"保存配置"用）。
 // 写入采用 临时文件 + rename 原子替换，避免半写状态损坏配置。
 // SourcePath 为空（命令行标志启动）时返回错误。
@@ -681,12 +711,31 @@ func SaveConfigFile(cfg *Config) error {
 		return fmt.Errorf("marshal config: %v", err)
 	}
 	data = append(data, '\n')
-	tmp := cfg.SourcePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	// 临时文件名带随机后缀：残余的旧临时文件不会与新写入交错，也不会把
+	// 陈旧权限带进本次发布；CreateTemp 的权限可能不同，写前强制收紧到 0600。
+	tmp, err := os.CreateTemp(filepath.Dir(cfg.SourcePath), filepath.Base(cfg.SourcePath)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %v", err)
+	}
+	tmpPath := tmp.Name()
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp config: %v", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("write temp config: %v", err)
 	}
-	if err := os.Rename(tmp, cfg.SourcePath); err != nil {
-		os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp config: %v", err)
+	}
+	if err := os.Rename(tmpPath, cfg.SourcePath); err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("replace config: %v", err)
 	}
 	return nil

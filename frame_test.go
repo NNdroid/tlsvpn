@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"testing"
 )
@@ -61,4 +63,96 @@ func TestFramePoolIgnoresOffTierBuffer(t *testing.T) {
 	}
 	putFrame(got)
 	putFrame(nil) // nil 必须安全
+}
+
+// TestSetPadModeNormalizesCaseAndWhitespace 大小写/空白规范化：与 crypto.go
+// encAlgoFromConfig 同型。"OFF"/" off " 此前被精确匹配静默回落为 bucket 填充，
+// 必须同样规范化生效，且规范化改变入参时告警一次。
+func TestSetPadModeNormalizesCaseAndWhitespace(t *testing.T) {
+	prev := padModeName()
+	defer setPadMode(prev)
+
+	// 捕获告警：规范化发生时必须 log 一次警告。
+	logs := captureWarnLogs(t)
+
+	if got := setPadMode("OFF"); got != padModeOff {
+		t.Fatalf("setPadMode(%q) = %q, want %q", "OFF", got, padModeOff)
+	}
+	if padModeName() != padModeOff {
+		t.Fatalf("OFF 大写未生效: mode=%q", padModeName())
+	}
+	if got := setPadMode("  off  "); got != padModeOff {
+		t.Fatalf("setPadMode(%q) = %q, want %q", "  off  ", got, padModeOff)
+	}
+	if !bytes.Contains([]byte(logs.String()), []byte("normalized")) {
+		t.Fatalf("规范化未告警: %q", logs.String())
+	}
+
+	// 规范化值即返回值：调用方 ApplyConfig 的 actual != cfg.PadMode 约定不变。
+	logs.Reset()
+	if got := setPadMode(padModeOff); got != padModeOff {
+		t.Fatalf("规范值不应触发告警路径: got=%q", got)
+	}
+	if logs.String() != "" {
+		t.Fatalf("规范值不应告警: %q", logs.String())
+	}
+
+	// 非法值仍回落 bucket（既有契约），且 "BOGUS" 规范化后仍非法。
+	if got := setPadMode("BOGUS"); got != padModeBucket {
+		t.Fatalf("setPadMode(%q) = %q, want %q", "BOGUS", got, padModeBucket)
+	}
+	if padModeName() != padModeBucket {
+		t.Fatalf("非法值应回落 bucket: mode=%q", padModeName())
+	}
+}
+
+// TestFrameScannerBufferShrinksAfterJumbo 认证后收过 jumbo 帧会把扫描缓冲 cap
+// 推到 ~100KB，只增不减就常驻到会话结束。缓冲排空后的整理点必须把 cap 缩回
+// 16KB；缩回后正常收帧不受影响。
+func TestFrameScannerBufferShrinksAfterJumbo(t *testing.T) {
+	var in bytes.Buffer
+	writeScannerFrame := func(seq uint32, data []byte) {
+		var hdr [10]byte
+		binary.BigEndian.PutUint32(hdr[0:4], uint32(len(data)))
+		binary.BigEndian.PutUint16(hdr[4:6], 0)
+		binary.BigEndian.PutUint32(hdr[6:10], seq)
+		in.Write(hdr[:])
+		in.Write(data)
+	}
+
+	payload := make([]byte, 100*1024)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	writeScannerFrame(1, payload)
+
+	fs := NewFrameScanner(&in)
+	frame, seq, err := fs.ReadFrame()
+	if err != nil || seq != 1 || !bytes.Equal(frame, payload) {
+		t.Fatalf("jumbo 帧读取失败: err=%v seq=%d len=%d", err, seq, len(frame))
+	}
+	putFrame(frame)
+	if cap(fs.buf) <= 64*1024 {
+		t.Fatalf("前置条件失败: jumbo 未把缓冲 cap 推高 cap=%d", cap(fs.buf))
+	}
+
+	// 小帧触达"缓冲已排空"的整理点 → 缩容。
+	small := make([]byte, 100)
+	writeScannerFrame(2, small)
+	frame, seq, err = fs.ReadFrame()
+	if err != nil || seq != 2 || !bytes.Equal(frame, small) {
+		t.Fatalf("小帧读取失败: err=%v seq=%d len=%d", err, seq, len(frame))
+	}
+	putFrame(frame)
+	if cap(fs.buf) > 16*1024 {
+		t.Fatalf("缓冲未缩容: cap=%d want<=16KB", cap(fs.buf))
+	}
+
+	// 缩容后继续收帧仍正常。
+	writeScannerFrame(3, small)
+	frame, seq, err = fs.ReadFrame()
+	if err != nil || seq != 3 || !bytes.Equal(frame, small) {
+		t.Fatalf("缩容后读取失败: err=%v seq=%d len=%d", err, seq, len(frame))
+	}
+	putFrame(frame)
 }
