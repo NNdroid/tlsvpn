@@ -162,8 +162,10 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 		"function schedulerTip(r)",
 		"function renderSchedLog(data)",
 		"function schedLogEntries(data)",
+		"function renderDrawerSchedLog(data)",
 		"sched_log",
 		"function schedExclReason(s)",
+		"data-dc-sched-idx",
 	} {
 		if !strings.Contains(app, want) {
 			t.Errorf("webui/app.js 缺少调度可观测片段 %q", want)
@@ -174,6 +176,13 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 	renderLog := app[strings.Index(app, "function renderSchedLog(data)"):]
 	if !strings.Contains(renderLog, "wasOpen") || !strings.Contains(renderLog, "prev.open") {
 		t.Error("renderSchedLog 未保留 details 展开态（轮询重建会吞掉 open）")
+	}
+	// path 必须解析成 conn_id：决策流水里的"路径 0/1/2"是 backends 下标，
+	// 用户无从对应到连接表里的某一行。按 conns[i].index 取 conn_id，
+	// server 模式用会话快照自带的 conn_id。
+	entries := app[strings.Index(app, "function schedLogEntries(data)"):]
+	if !strings.Contains(entries, "byIdx[e.path]") || !strings.Contains(entries, "conn_id") {
+		t.Error("schedLogEntries 未把 path 解析为 conn_id")
 	}
 	css := readWebUIAsset(t, "webui/style.css")
 	if !strings.Contains(css, ".slog-row") {

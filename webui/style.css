@@ -584,6 +584,12 @@ td.rtt-asym{background:var(--warn-soft);color:var(--warn)}
 .dc-conn-k{font-size:.78em;color:var(--sub);white-space:nowrap}
 .dc-conn-sni{margin-top:7px;font-size:.8em;color:var(--sub);overflow-wrap:anywhere}
 .dc-conn-err{margin-top:7px;font-size:.8em;color:var(--err);overflow-wrap:anywhere}
+.dc-conn-sched{margin-top:7px}
+.dc-conn-sched .sched-log summary{cursor:pointer;font-size:.78rem;color:var(--sub)}
+.dc-conn-sched .sched-log[open] summary{color:var(--fg)}
+.dc-conn-sched .slog-row{display:flex;align-items:center;gap:8px;padding:2px 0;border-top:1px solid var(--border)}
+.dc-conn-sched .slog-row:first-of-type{border-top:0}
+.dc-conn-sched .slog-row small{white-space:nowrap}
 .dc-empty{color:var(--sub);font-size:.84em;text-align:center;padding:14px 0}
 
 @media (max-width:720px){

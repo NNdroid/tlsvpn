@@ -989,7 +989,7 @@ function applyStats(data){
     document.getElementById('live-up').innerText=fmtBytes(upSpeed,true);
     document.getElementById('live-down').innerText=fmtBytes(downSpeed,true);
     renderClientsTable(data);
-    if(drawerOn())renderDrawer();
+    if(drawerOn()){renderDrawer();renderDrawerSchedLog(data);}
 
     const f=data.fec||{};
     document.getElementById('fec-kpi').innerHTML=(f.recovered||0)+' <small>/</small> '+(f.lost||0);
@@ -1807,12 +1807,30 @@ function schedulerTip(r){
   return parts.join(' · ');
 }
 // 选路理由流水数据源：客户端模式取顶层 sched_log；服务端模式逐会话，取首个非空。
+// schedLogEntries 返回选路决策流水，并把每条的 path（backends 下标）解析成连接 ID。
+//
+// 不解析就显示成"路径 0/1/2"，用户无从对应到具体哪条连接——面板上连接表有
+// conn_id，这里却没有，等于把可观测性做成了一堵墙。解析依据：
+// - client 模式：顶层 sched_log 是本端 txPort 的流水，conns[i].index 即 backends
+//   下标（connSnapshot 构造时 Index: i），按下标取 conn_id。
+// - server 模式：逐会话 sched_log，conn_id 就在同一会话快照里。
+// 找不到对应连接（连接已断、快照比流水新一拍）时退回下标，不谎报 ID。
 function schedLogEntries(data){
-  const top=data&&data.sched_log;
-  if(top&&top.length)return top;
+  const byIdx={};
+  ((data&&data.conns)||[]).forEach(function(c){
+    if(c!==undefined&&c!==null&&c.conn_id!==undefined)byIdx[c.index]=c.conn_id;
+  });
+  const top=(data&&data.sched_log)||[];
+  if(top.length)return top.map(function(e){
+    const cid=e.path>=0?byIdx[e.path]:undefined;
+    return cid?Object.assign({},e,{cid:cid}):e;
+  });
   const sc=(data&&data.server_conns)||[];
   for(let i=0;i<sc.length;i++){
-    if(sc[i].sched_log&&sc[i].sched_log.length)return sc[i].sched_log;
+    if(sc[i].sched_log&&sc[i].sched_log.length)return sc[i].sched_log.map(function(e){
+      const cid=sc[i].conn_id||undefined;
+      return cid?Object.assign({},e,{cid:cid}):e;
+    });
   }
   return [];
 }
@@ -1834,13 +1852,48 @@ function renderSchedLog(data){
     const key='sched.reason_'+e.reason;
     const lab=t(key);
     const ago=t('dg.updated').replace('{t}',fmtDur(Math.max(0,Math.round((Date.now()-Number(e.at_ms||0))/1000))));
+    // {a} 显示连接 ID（已解析），而非 backends 下标——下标对用户无意义。
+    // 解析不到（连接已断）才退回下标。
+    const who=e.cid!==undefined?e.cid:(e.path<0?'-':String(e.path));
     rows+='<div class="slog-row"><span class="badge b-dup">'+esc(lab!==key?lab:String(e.reason))+'</span><small class="dim">'+
-      esc(t('sched.log_line').replace('{a}',e.path<0?'-':String(e.path)).replace('{b}',String(Number(e.active||0))).replace('{c}',ago))+'</small></div>';
+      esc(t('sched.log_line').replace('{a}',String(who)).replace('{b}',String(Number(e.active||0))).replace('{c}',ago))+'</small></div>';
   }
   const last=es[es.length-1];
   const llab=t('sched.reason_'+last.reason);
   box.innerHTML='<details class="sched-log"'+(wasOpen?' open':'')+'><summary>'+esc(t('sched.log_title')+' · '+
     t('sched.latest')+' '+(llab!=='sched.reason_'+last.reason?llab:String(last.reason)))+'</summary>'+rows+'</details>';
+}
+// renderDrawerSchedLog 把某条连接的选路决策流水填进客户端抽屉里该连接的卡片。
+//
+// 端口级流水在连接表里是"整个端口"的决策，用户看不出"路径 1"是不是自己点开
+// 的这条连接。这里按 conn_id 过滤：只留该连接的决策，标题也带上 conn_id。
+// 单路径端口下所有决策都属于同一条连接，故抽屉里能看到完整历史。
+function renderDrawerSchedLog(data){
+  const slots=document.querySelectorAll('[data-dc-sched]');
+  if(!slots.length)return;
+  const es=schedLogEntries(data);
+  Array.prototype.forEach.call(slots,function(slot){
+    const idx=parseInt(slot.getAttribute('data-dc-sched-idx'),10)||0;
+    const cid=slot.getAttribute('data-dc-sched');
+    const mine=es.filter(function(e){
+      if(e.cid!==undefined)return e.cid===cid;
+      return e.path===idx;
+    });
+    if(!mine.length){slot.innerHTML='';return;}
+    let rows='';
+    for(let i=mine.length-1;i>=0;i--){
+      const e=mine[i];
+      const key='sched.reason_'+e.reason;
+      const lab=t(key);
+      const ago=t('dg.updated').replace('{t}',fmtDur(Math.max(0,Math.round((Date.now()-Number(e.at_ms||0))/1000))));
+      rows+='<div class="slog-row"><span class="badge b-dup">'+esc(lab!==key?lab:String(e.reason))+'</span><small class="dim">'+
+        esc(t('sched.log_line').replace('{a}',String(e.cid!==undefined?e.cid:idx)).replace('{b}',String(Number(e.active||0))).replace('{c}',ago))+'</small></div>';
+    }
+    const last=mine[mine.length-1];
+    const llab=t('sched.reason_'+last.reason);
+    slot.innerHTML='<details class="sched-log" open><summary>'+esc(t('sched.log_title')+' · '+
+      t('sched.latest')+' '+(llab!=='sched.reason_'+last.reason?llab:String(last.reason)))+'</summary>'+rows+'</details>';
+  });
 }
 
 function renderConnsTable(data,fresh){
@@ -2143,6 +2196,7 @@ function renderDrawer(){
         (x.sni?'<div class="dc-conn-sni">'+esc(t('dc.sec_sni'))+': '+esc(x.sni)+'</div>':'')+
         (x.cert_sha256?'<div class="dc-conn-sni" title="'+esc(t('dc.sec_cert'))+'">'+esc(t('dc.sec_cert'))+': <span class="mono">'+esc(x.cert_sha256)+'</span></div>':'')+
         (x.last_error?'<div class="dc-conn-err">'+esc(x.last_error)+'</div>':'')+
+        '<div class="dc-conn-sched" data-dc-sched="'+(x.conn_id!==undefined?esc(x.conn_id):'')+'" data-dc-sched-idx="'+String(x.index||0)+'"></div>'+
       '</div>';
     }).join('');
   } else {
