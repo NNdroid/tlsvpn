@@ -147,21 +147,25 @@
   </section>
 
   <section class="card">
-    <div class="tabs" id="tabs">
-      <i class="tab-ind" id="tab-ind" aria-hidden="true"></i>
-      <button class="on" data-pane="clients" data-i18n="tab.clients">-</button>
-      <button data-pane="conns" data-i18n="tab.conns">-</button>
-      <button data-pane="macs" data-srv="1" data-i18n="tab.macs">-</button>
-      <button data-pane="bans" data-srv="1" data-i18n="tab.bans">-</button>
-      <button data-pane="traffic" data-i18n="tab.traffic">-</button>
-      <button data-pane="status" data-i18n="tab.status">-</button>
-      <button data-pane="diag" data-i18n="tab.diag">-</button>
-      <button data-pane="sec" data-i18n="tab.sc">-</button>
-      <button data-pane="topo" data-i18n="tab.tp">-</button>
-      <button data-pane="events" data-i18n="tab.ev">-</button>
-      <button data-pane="mcp" data-i18n="tab.mcp">-</button>
-      <button data-pane="logs" data-i18n="tab.logs">-</button>
-      <button data-pane="settings" data-i18n="tab.settings">-</button>
+    <div class="tabs-nav">
+      <button class="tab-arrow" id="tab-prev" type="button" data-i18n-title="tab.prev" aria-hidden="true" tabindex="-1">‹</button>
+      <div class="tabs" id="tabs">
+        <i class="tab-ind" id="tab-ind" aria-hidden="true"></i>
+        <button class="on" data-pane="clients" data-i18n="tab.clients">-</button>
+        <button data-pane="conns" data-i18n="tab.conns">-</button>
+        <button data-pane="macs" data-srv="1" data-i18n="tab.macs">-</button>
+        <button data-pane="bans" data-srv="1" data-i18n="tab.bans">-</button>
+        <button data-pane="traffic" data-i18n="tab.traffic">-</button>
+        <button data-pane="status" data-i18n="tab.status">-</button>
+        <button data-pane="diag" data-i18n="tab.diag">-</button>
+        <button data-pane="sec" data-i18n="tab.sc">-</button>
+        <button data-pane="topo" data-i18n="tab.tp">-</button>
+        <button data-pane="events" data-i18n="tab.ev">-</button>
+        <button data-pane="mcp" data-i18n="tab.mcp">-</button>
+        <button data-pane="logs" data-i18n="tab.logs">-</button>
+        <button data-pane="settings" data-i18n="tab.settings">-</button>
+      </div>
+      <button class="tab-arrow" id="tab-next" type="button" data-i18n-title="tab.next" aria-hidden="true" tabindex="-1">›</button>
     </div>
 
     <div class="pane on" id="pane-clients">

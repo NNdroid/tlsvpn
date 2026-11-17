@@ -112,3 +112,33 @@ func TestAdaptiveSwitchDoesNotAdoptColdUnmeasuredPath(t *testing.T) {
 		t.Fatalf("cold unmeasured path stole active slot: got=%p want=%p", got, warm)
 	}
 }
+
+// TestAdaptiveSwitchStickyUnlocksFromSlowerCurrent 单向锁死回归：current 为较慢
+// 路径（其 RTT 大、粘滞带偏大），但快路径领先 d 恰好落在"快路径自己的粘滞带"与
+// "慢路径的粘滞带"之间。修复前粘滞带锚定 current（慢）的 RTT，d≤slack_slow 恒真，
+// 一旦落到慢路径就再也回不去快路径（活跃路径反复横跳）。修复后锚定 rank0（快）的
+// RTT，两个方向共用同一锚：快路径领先超过它自己的粘滞带即切换，慢路径不会被锁死。
+func TestAdaptiveSwitchStickyUnlocksFromSlowerCurrent(t *testing.T) {
+	p := &AsyncPort{}
+	// 快路径：min_rtt=40ms → slack=clamp(40_000/16,0.5,5)=2.5ms；fwd=40ms → base=40ms。
+	// 注意 min_rtt 不得用 50ms（adaptiveUnknownRTTUS 哨兵，会被当成"未测"）。
+	fast := oneWayBackend(40_000, 40_000, 40_000, 30_000_000)
+	// 慢路径：min_rtt=48ms → slack=clamp(48_000/16,0.5,5)=3ms；fwd=42.8ms → base=42.8ms。
+	// 仍在资格包络内（maxRTT=40ms+max(5ms,40ms/4)=50ms）。
+	slow := oneWayBackend(48_000, 42_800, 42_800, 30_000_000)
+	backends := []*Backend{fast, slow}
+
+	// current 锚定在慢路径。d=2.8ms 落在 2.5ms（fast 的 slack）与 3ms（slow 的
+	// slack）之间：修复前 2.8≤3 保留 slow（单向锁死）；修复后 2.8>2.5 切换到 fast。
+	p.preferred.Store(slow)
+	got := p.pickAdaptiveBackend(backends, adaptiveActive2Pressure-1, 8*1024)
+	if got != fast {
+		t.Fatalf("sticky stuck on slower path: got=%p want=%p (fast path not adopted)", got, fast)
+	}
+	if !fast.active.Load() {
+		t.Fatal("fast path not marked active after unlock")
+	}
+	if slow.active.Load() {
+		t.Fatal("slow path still marked active after switch")
+	}
+}

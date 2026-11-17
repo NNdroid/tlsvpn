@@ -119,6 +119,30 @@ function moveTabInd(){
   ind.style.width=btn.offsetWidth+'px';
   tabs.classList.add('ind-on');
 }
+// 标签页横向滚动：窄屏溢出时两侧箭头点击滚动，滚动时更新箭头禁用态。
+// 箭头是鼠标/触摸辅助（容器 overflow-x:auto 本身仍支持触控拖动与滚轮），故
+// aria-hidden + tabindex=-1，不挤占 tab 按钮的键盘 Tab 序。指示条相对内容定位，
+// 滚动时随内容移动，无需在滚动事件里重算。
+function tabScrollUpdate(){
+  const tabs=document.getElementById('tabs');
+  const prev=document.getElementById('tab-prev');
+  const next=document.getElementById('tab-next');
+  if(!tabs||!prev||!next)return;
+  const over=tabs.scrollWidth>tabs.clientWidth+1;
+  prev.disabled=!over||tabs.scrollLeft<=1;
+  next.disabled=!over||tabs.scrollLeft>=tabs.scrollWidth-tabs.clientWidth-1;
+}
+function tabScroll(dir){
+  const tabs=document.getElementById('tabs');
+  if(!tabs)return;
+  const step=(tabs.clientWidth||300)*0.8;
+  tabs.scrollBy({left:dir*step,behavior:'smooth'});
+}
+document.getElementById('tab-prev').addEventListener('click',function(){tabScroll(-1);});
+document.getElementById('tab-next').addEventListener('click',function(){tabScroll(1);});
+document.getElementById('tabs').addEventListener('scroll',tabScrollUpdate);
+window.addEventListener('resize',tabScrollUpdate);
+tabScrollUpdate();
 document.getElementById('tabs').addEventListener('click',function(ev){
   const btn=ev.target.closest('button');if(!btn)return;
   showPane(btn.dataset.pane);
@@ -131,8 +155,10 @@ function applyModeTabs(isServer){
     b.style.display=isServer?'':'none';
   });
   const on=document.querySelector('#tabs button.on');
-  if(on&&on.dataset.srv&&!isServer){showPane('clients');return;}
+  if(on&&on.dataset.srv&&!isServer){showPane('clients');tabScrollUpdate();return;}
   moveTabInd();
+  // 模式切换会隐藏/显示两个页签，溢出状态随之变化：重算箭头禁用态。
+  tabScrollUpdate();
 }
 
 // ---------- 通用折线图渲染：纵轴刻度 + 末端标签防裁剪 + 悬停提示 ----------
@@ -2460,8 +2486,16 @@ async function saveConfig(apply){
   try{
     const res=await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:apply?'save_apply':'save',config:cfg})});
-    const data=await res.json().catch(()=>({}));
-    if(!res.ok){st.textContent=(data.error||('HTTP '+res.status));toast(t('toast.fail')+' '+st.textContent.slice(0,120),'err');return;}
+    // fetch 的 Response body 只能读一次：先取文本，再尝试 JSON.parse。后端失败时
+    // http.Error 返回纯文本（如“configuration was not loaded from a file; specify -c
+    // to enable saving”），res.json() 解析不了且会消费掉 body，导致后续 res.text()
+    // 返回空——用户只看到笼统的 “HTTP 400” 而不知道根因。先读文本再解析，两者兼得。
+    const txtBody=await res.text().catch(function(){return '';});
+    let data={};try{data=JSON.parse(txtBody);}catch(_){/* 纯文本错误体 */}
+    if(!res.ok){
+      const txt=data.error||txtBody||('HTTP '+res.status);
+      st.textContent=txt;toast(t('toast.fail')+' '+txt.slice(0,120),'err');return;
+    }
     if(apply){
       st.textContent=t('set.applied')+(data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.join(', ')):'');
       toast(t('toast.applied'),'ok');

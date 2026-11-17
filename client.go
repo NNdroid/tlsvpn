@@ -795,7 +795,12 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 		}
 		if present {
 			if currentScore, ok := backendScore(current); ok {
-				hysteresis := max(uint32(backendRTTHysteresisMin), atomic.LoadUint32(current.rttCache)/8)
+				// 滞回带锚定最优候选（bestBackend）的 RTT，而非 current：阈值必须与
+				// "谁是 current"无关。若用 current（较慢）的 RTT，其 hysteresis 偏大，
+				// 切换条件被放宽——一旦落到慢路径就再也回不到快路径（单向锁死）。
+				// bestBackend 的 RTT 反映"值得离开的快路径有多快"，进出共用同一锚，
+				// 两个方向对称（与 commitSinglePath 的粘滞带锚定 rank0 同理）。
+				hysteresis := max(uint32(backendRTTHysteresisMin), atomic.LoadUint32(bestBackend.rttCache)/8)
 				if uint64(currentScore) <= uint64(minScore)+uint64(hysteresis) {
 					bestBackend = current
 				}

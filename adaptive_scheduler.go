@@ -835,11 +835,17 @@ func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandida
 	chosen := cands[0].backend
 	reason := schedReasonRank0
 	if policy.sticky && current != nil && current != chosen {
+		// 粘滞带锚定最优候选（rank0）而非 current：滞回阈值必须与"谁是 current"
+		// 无关。若用 current（较慢）的 RTT，其 slack 偏大，切换条件被放宽——一旦
+		// 落到慢路径就再也回不到快路径（单向锁死，活跃路径反复横跳）。rank0 的
+		// RTT 反映"值得离开的快路径有多快"，两个方向共用同一锚，进出对称：快路径
+		// 领先超过它自己的粘滞带才切换。
+		slack := int64(adaptiveStickySlackUS(cands[0].rttUS))
 		for i := range cands {
 			if cands[i].backend != current {
 				continue
 			}
-			if cands[i].baseUS <= bestBase+int64(adaptiveStickySlackUS(cands[i].rttUS)) {
+			if cands[i].baseUS <= bestBase+slack {
 				chosen = current
 				reason = schedReasonStickyHeld
 				// 标记"因粘滞保留"而非"排名第一当选"：面板据此解释为什么明明有

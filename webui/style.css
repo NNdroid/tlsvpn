@@ -142,7 +142,20 @@ body::after{width:680px;height:680px;right:-200px;bottom:-280px;background:var(-
 #chart,#traffic-chart{cursor:crosshair;touch-action:pan-y}
 
 /* ---------- 标签页 ---------- */
-.tabs{position:relative;display:flex;gap:4px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:4px;width:fit-content;max-width:100%;overflow-x:auto;scrollbar-width:none;margin-bottom:14px}
+/* 窄屏 13 个标签溢出时，两侧箭头让用户能明确点击横向滚动（原实现仅靠被隐藏的
+   滚动条，溢出部分无从发现/操作）。.tabs-nav 是布局主体：fit-content 使不溢出时
+   紧凑，max-width:100% 在溢出时压到可用宽度，.tabs 在其中收缩并滚动。 */
+.tabs-nav{display:flex;align-items:center;gap:6px;width:fit-content;max-width:100%;margin-bottom:14px}
+.tabs-nav .tabs{flex:1 1 auto;min-width:0;margin-bottom:0}
+.tab-arrow{
+  flex:none;width:26px;height:34px;display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--border);background:var(--card2);color:var(--muted);
+  border-radius:8px;cursor:pointer;font:inherit;font-size:1.05em;line-height:1;
+  padding:0;transition:color .15s ease,border-color .15s ease,opacity .15s ease;user-select:none;
+}
+.tab-arrow:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
+.tab-arrow:disabled{opacity:.35;cursor:default}
+.tabs{position:relative;display:flex;gap:4px;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:4px;overflow-x:auto;scrollbar-width:none}
 .tabs::-webkit-scrollbar{display:none}
 .tabs button{
   border:none;background:transparent;color:var(--muted);font:inherit;font-size:.86em;

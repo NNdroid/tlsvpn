@@ -88,3 +88,24 @@ func TestRebalanceBrutalShare(t *testing.T) {
 		t.Fatalf("2-conn share index1 = %d, want %d", got, totalMbps*1_000_000/8/2)
 	}
 }
+
+// TestPickBackendStickySymmetryUnlocksFromSlowerCurrent 单向锁死回归：current 为较慢
+// 路径（其 rttCache 大、hysteresis 偏大），但快路径领先 d 恰好落在"快路径自己的
+// 滞回带"与"慢路径的滞回带"之间。修复前 hysteresis 锚定 current（慢）的 RTT，
+// d≤hyst_slow 恒真，一旦落到慢路径就再也回不到快路径。修复后锚定 bestBackend（快）
+// 的 RTT，两个方向共用同一锚：快路径领先超过它自己的滞回带即切换回快路径。
+func TestPickBackendStickySymmetryUnlocksFromSlowerCurrent(t *testing.T) {
+	// fast：rtt=40ms → hysteresis=max(5000, 40000/8=5000)=5000µs。
+	// slow：rtt=45.6ms → hysteresis=max(5000, 45600/8=5700)=5700µs。
+	// 领先 d=45.6-40=5.6ms，落在 (fast_hyst=5ms, slow_hyst=5.7ms] 之间：
+	// 修复前 5.6≤5.7 保留 slow（锁死）；修复后 5.6>5.0 切回 fast。
+	rttFast, rttSlow := uint32(40_000), uint32(45_600)
+	fast := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttFast}
+	slow := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttSlow}
+	p := &AsyncPort{backends: []*Backend{fast, slow}}
+	p.storePreferredIfCurrent(slow) // current 锚定在慢路径
+
+	if got := p.pickBackend([]*Backend{fast, slow}); got != fast {
+		t.Fatalf("sticky stuck on slower path: got=%p want=%p (fast path not re-adopted)", got, fast)
+	}
+}
