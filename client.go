@@ -2346,6 +2346,7 @@ func (c *Client) snapshotConns() []connSnapshot {
 			Target:         ci.target,
 			ServerSeenAddr: serverSeen,
 			RttMs:          rtt,
+			Scheduler:      schedulerSnapshot(ci.backend.Load()),
 			TxBytes:        ci.txBytes.Load(),
 			RxBytes:        ci.rxBytes.Load(),
 			Retries:        ci.retries.Load(),

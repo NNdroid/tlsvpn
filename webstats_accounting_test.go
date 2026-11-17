@@ -346,6 +346,14 @@ func TestWebStatsReconnectOwnsCounters(t *testing.T) {
 	old.txBytes.Add(5000)
 	old.rxBytes.Add(2000)
 	old.retries.Store(3)
+	// 回归护栏：Scheduler 必须是整体快照。此前 peer_active 补丁曾把
+	// Scheduler: schedulerSnapshot(...) 行意外删掉、只留 PeerActive 赋值，
+	// assigned/ETA/active 全零——CI real-tap-perf 的调度器利用率闸直接失败，
+	// 而 TxBytes 断言抓不到它。
+	be := &Backend{}
+	be.assignedBytes.Add(1234)
+	be.active.Store(true)
+	old.backend.Store(be)
 	c := &Client{connsCount: 1, conns: map[int]*clientConnInfo{0: old}}
 	next := c.beginConnAttempt(0, "new.example:443")
 	old.txBytes.Add(1000)
@@ -353,5 +361,14 @@ func TestWebStatsReconnectOwnsCounters(t *testing.T) {
 	got := c.snapshotConns()[0]
 	if got.Target != "new.example:443" || got.TxBytes != 10 || got.RxBytes != 0 || got.Retries != 3 || got.State != "connecting" {
 		t.Fatalf("reused connection attempt metadata: %+v", got)
+	}
+	// old（up 侧语义无状态校验，直接读表）与 next 各自的 Scheduler 独立：
+	// old 挂了 backend，快照必须携带它的 assigned 计数与 active 标志。
+	oldSnap := (&Client{connsCount: 1, conns: map[int]*clientConnInfo{0: old}}).snapshotConns()[0]
+	if oldSnap.Scheduler.AssignedBytes != 1234 || !oldSnap.Scheduler.Active {
+		t.Fatalf("Scheduler snapshot lost: assigned=%d active=%v", oldSnap.Scheduler.AssignedBytes, oldSnap.Scheduler.Active)
+	}
+	if oldSnap.Scheduler.PeerActive {
+		t.Fatal("PeerActive must default to false before any 0x07 frame arrives")
 	}
 }
