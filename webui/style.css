@@ -815,3 +815,8 @@ td.rtt-asym{background:var(--warn-soft);color:var(--warn)}
 .diagnostic-section .chart-head>label{display:flex;align-items:center;gap:8px;min-width:0;color:var(--sub)}
 .diagnostic-section .dl{max-width:260px}
 .dl-menu.on{transform:none}
+
+/* 调度器当前选中的活跃路径：行级高亮 + 首列强调条。td 背景覆盖 tr 的
+   hover 底色（选择器同特异性、文件序在后），保证 hover 下高亮不丢。 */
+tbody tr.row-active td{background:var(--up-soft)}
+tbody tr.row-active td:first-child{box-shadow:inset 3px 0 0 var(--up)}

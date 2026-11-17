@@ -1776,6 +1776,12 @@ function fmtMsUsUS(v){return fmtMsUs(v||0)+' ms';}
 // 被资格门排除的路径其排除原因 token（stalled/queue_full/cap_zero/envelope_out）。
 // 无排除（候选内）返回空串。
 function schedExclReason(s){return (s&&s.exclude_reason)||'';}
+// activePathMark 调度器当前选中路径的统一标识徽章：连接表 remote 列与抽屉
+// 连接块共用。stalled 行让位给 b-off 徽章（调度器已停止向其分配数据）。
+function activePathMark(s,stalled){
+  if(!s||!s.active||stalled)return '';
+  return ' <span class="badge b-on" title="'+esc(t('sched.active'))+'">▶ '+esc(t('sched.active'))+'</span>';
+}
 function schedulerCell(s,stalled){
   if(!s)return '<span class="dim">-</span>';
   // 连接被判定为不健康（stalled）：调度器已停止向其分配数据，独立于 active/standby。
@@ -2045,7 +2051,8 @@ function renderConnsTable(data,fresh){
     // 唯独这里是个看得见的洞。
     const cerr=r.err||r.brutErr;
     const errCell=cerr?'<span style="color:var(--err)" title="'+esc(cerr)+'">'+esc(String(cerr).slice(0,40))+'</span>':'<span style="color:var(--sub)">-</span>';
-    return '<tr data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
+    const rowActive=r.sched&&r.sched.active&&!r.stalled;
+    return '<tr'+(rowActive?' class="row-active"':'')+' data-conn-id="'+esc(r.connid||'')+'"><td class="num dim">'+hi(esc(r.owner),f)+'</td><td class="num dim" title="'+esc(r.connid||'')+'">'+(r.connid?hi(esc(shortId(r.connid,12)),f):'-')+'</td><td class="num hide-srv">'+hi(esc(r.target||'-'),f)+'</td><td class="num hide-srv" title="'+esc(t('th.serverSeen')+' = '+(r.serverSeen||'-'))+'">'+hi(esc(r.serverSeen||'-'),f)+'</td><td class="num">'+hi(esc(r.remote||'-'),f)+activePathMark(r.sched,r.stalled)+'</td><td title="'+esc(brutTip)+'">'+st+'</td>'+
       '<td class="num'+rttCls+'" title="'+esc(rttTip)+'">'+rtt+'</td><td title="'+esc(schedulerTip(r))+'">'+schedulerCell(r.sched,r.stalled)+'</td><td class="num">'+fmtBytes(r.tx)+'</td><td class="num">'+fmtBytes(r.rx)+'</td>'+
       '<td class="num speed">'+fmtBytes(r.sx,true)+'</td><td class="num speed dn">'+fmtBytes(r.sr,true)+'</td>'+
 	      '<td class="hide-sm dim" title="'+esc(sniMeta)+'">'+(r.sni?hi(esc(r.sni),f):'<span style="color:var(--sub)">-</span>')+'</td>'+
@@ -2207,7 +2214,7 @@ function renderDrawer(){
         :'';
       return '<div class="dc-conn">'+
         '<div class="dc-conn-top">'+
-          '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+
+          '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+activePathMark(x.scheduler,!!x.stalled)+
           '<span class="dc-conn-rtt">'+(rtt>0&&rtt<100000?(rtt+' ms'):'-')+'</span>'+
           '<span class="dc-conn-rate"><span class="arr-up">↑</span> '+fmtBytes((srvDirection?x.rx_bytes:x.tx_bytes)||0)+
             '<span class="arr-down">↓</span> '+fmtBytes((srvDirection?x.tx_bytes:x.rx_bytes)||0)+'</span>'+
