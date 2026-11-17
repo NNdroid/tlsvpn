@@ -431,37 +431,23 @@ type ClientSession struct {
 	conns   map[*connInfo]struct{}
 }
 
-// dispatchRxControlFrame 会话级控制平面分流器（语义与 Client.dispatchRxControlFrame
-// 相同）：按 payload kind 把 seq=0 帧分发给各自的处理器。返回 true 表示帧已被
-// 认领并消费完毕；false 表示无匹配处理器——typed control 未被认领时由调用方
-// 交 FEC 门控按协议违规处理（fail-closed，未知 kind 断链）。
+// dispatchRxControlFrame 会话级控制平面分流：共享核心见 dispatchControlFrame
+// （rx_control.go）。ClientSession 实现 peerBitmapSink。
 func (session *ClientSession) dispatchRxControlFrame(frame []byte, connIndex int) bool {
-	// 0x07 active-paths：客户端上行调度当前选中槽位位图。按 connIndex 刷新
-	// 各自的对端活跃时刻，快照按窗口判过期。
-	if isActivePathsFrame(frame) {
-		if bm, ok := parseActivePathsFrame(frame); ok && bm != 0 {
-			now := time.Now().UnixNano()
-			session.sessionMu.RLock()
-			for conn := range session.conns {
-				if conn.connIndex >= 0 && conn.connIndex < 16 && bm&(1<<uint(conn.connIndex)) != 0 {
-					conn.peerActiveAt.Store(now)
-				}
-			}
-			session.sessionMu.RUnlock()
+	return dispatchControlFrame(frame, connIndex, session.rttProbe, session.clockOffset, session)
+}
+
+// applyPeerActiveBitmap 实现 peerBitmapSink：按 connIndex 刷新各自的对端活跃
+// 时刻（0x07 位图 bit i = 客户端上行调度选中槽位 i）。
+func (session *ClientSession) applyPeerActiveBitmap(bitmap uint16) {
+	now := time.Now().UnixNano()
+	session.sessionMu.RLock()
+	for conn := range session.conns {
+		if conn.connIndex >= 0 && conn.connIndex < 16 && bitmap&(1<<uint(conn.connIndex)) != 0 {
+			conn.peerActiveAt.Store(now)
 		}
-		return true
 	}
-	// 跨路径 RTT 探针/回包：仅在客户端握手声明 RTTProbe 后 session.rttProbe 才启用。
-	if session.rttProbe != nil && isRttProbeFrame(frame) {
-		session.rttProbe.onFrame(frame, connIndex)
-		return true
-	}
-	// 双向时钟偏移探针/回包：同纪律。
-	if session.clockOffset != nil && isClockOffsetFrame(frame) {
-		session.clockOffset.onFrame(frame, connIndex)
-		return true
-	}
-	return false
+	session.sessionMu.RUnlock()
 }
 
 // connInfo 单条物理连接的运行明细（面板展示 + kick 关闭句柄）
