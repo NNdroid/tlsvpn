@@ -2482,7 +2482,8 @@ async function saveConfig(apply){
   const st=document.getElementById('cfg-status');
   let cfg;
   try{cfg=JSON.parse(document.getElementById('cfg-editor').value);}
-  catch(e){st.textContent='JSON: '+e.message;toast(t('toast.fail')+' JSON','err');return;}
+  // 语法错误时 toast 带 e.message 前 80 字符（截断加 …）；cfg-status 保留完整信息。
+  catch(e){st.textContent='JSON: '+e.message;toast(t('toast.fail')+' JSON: '+String(e.message).slice(0,80)+(e.message.length>80?'…':''),'err');return;}
   try{
     const res=await api('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({action:apply?'save_apply':'save',config:cfg})});

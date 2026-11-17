@@ -44,13 +44,14 @@ const elements = {
     addEventListener() {},
   },
   'sched-envelope-window': makeInput(),
+  'probe-min-half-rtt': makeInput(),
 };
 const editor = { value: '', parentNode: { insertBefore() {} } };
 elements['cfg-editor'] = editor;
 
 let changeHandler = null;
 // translate() 会把文案写进 [data-rts-t] 元素；预定义这些捕获元素以验证 zh-TW 生效。
-const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint'];
+const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint','labelProbe','probeHint'];
 const i18nEls = i18nKeys.map(k => ({ dataset: { rtsT: k }, textContent: '' }));
 const rootStub = {
   className: '', innerHTML: '', style: {},
@@ -74,7 +75,10 @@ global.document = {
   },
   getElementById(id) { return id === 'cfg-editor' ? editor : (elements[id] || null); },
 };
-global.window = {};
+// 脚本会包装 window.loadConfig / window.saveConfig（保存前 toEditor(false) 补空、
+// 加载后 fromEditor 回填）。预置这两个入口的 stub，包装器才会安装上，
+// 下面的异步用例才能通过它们触发 fromEditor / toEditor(false)。
+global.window = { loadConfig() {}, saveConfig() {} };
 
 // ---- 加载脚本**前**注入顶层 JSON：首次 fromEditor 必须读顶层 ----
 editor.value = JSON.stringify({
@@ -101,11 +105,14 @@ const fec = elements['fec-strategy'];
 const windowEl = elements['fec-near-window'];
 const gateEl = elements['sched-envelope'];
 const gateWindowEl = elements['sched-envelope-window'];
+const probeEl = elements['probe-min-half-rtt'];
 assert(algo.value === 'latency_strict', 'fromEditor reads top-level routing_algo, got "' + algo.value + '"');
 assert(fec.value === 'near', 'fromEditor reads top-level fec_strategy, got "' + fec.value + '"');
 assert(windowEl.value === '25', 'fromEditor reads top-level fec_near_window_ms, got "' + windowEl.value + '"');
 assert(gateEl.value === 'fwd', 'fromEditor reads top-level sched_envelope, got "' + gateEl.value + '"');
 assert(gateWindowEl.value === '35', 'fromEditor reads top-level sched_envelope_ms, got "' + gateWindowEl.value + '"');
+// 初始 JSON 没有 probe_min_half_rtt_us：显示后端默认 1000（而非空）。
+assert(probeEl.value === '1000', 'fromEditor shows backend default 1000 when probe_min_half_rtt_us is absent, got "' + probeEl.value + '"');
 
 // ---- 用例 2：toEditor(true) 写顶层字段（而非 cfg.client） ----
 algo.value = 'min_rtt_adaptive';
@@ -156,9 +163,90 @@ assert(txt('title') === '排程設定', 'zh-TW title translated, got "' + txt('t
 assert(txt('labelAlgo') === '選路演算法', 'zh-TW labelAlgo translated, got "' + txt('labelAlgo') + '"');
 assert(txt('labelFec') === 'FEC 同位元分發策略', 'zh-TW labelFec translated, got "' + txt('labelFec') + '"');
 assert(txt('labelWindow') === 'near 視窗 (ms)', 'zh-TW labelWindow translated, got "' + txt('labelWindow') + '"');
+assert(txt('labelProbe') === 'probe_min 錨定下界 (µs)', 'zh-TW labelProbe translated, got "' + txt('labelProbe') + '"');
+assert(txt('probeHint').indexOf('預設 1000') !== -1, 'zh-TW probeHint translated, got "' + txt('probeHint') + '"');
 // 下拉选项的 textContent 也须为繁中（而非英文/原值）。
 const autoOpt = algo.options.find(o => o.value === 'auto');
 assert(autoOpt && autoOpt.textContent.indexOf('預設') !== -1, 'zh-TW auto option label uses traditional Chinese, got "' + (autoOpt && autoOpt.textContent) + '"');
 
-console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');
-process.exit(failures === 0 ? 0 : 1);
+// ---- 用例 5-8（异步）：经包装的 window.loadConfig / window.saveConfig 触发 ----
+// fromEditor（加载后回填）与 toEditor(false)（保存前补空）在真实面板里分别挂在
+// loadConfig / saveConfig 包装器上，这里走同样的入口。
+async function runAsyncCases() {
+  // ---- 用例 5：fromEditor 越界值显示原值，不再静默置空 ----
+  // 越界值显示进输入框（number input 接受任意值）：保存时后端 400 显示真实错误。
+  editor.value = JSON.stringify({ fec_near_window_ms: 500, sched_envelope_ms: 0, probe_min_half_rtt_us: -1 });
+  await window.loadConfig();
+  assert(windowEl.value === '500', 'fromEditor shows out-of-range fec_near_window_ms as-is, got "' + windowEl.value + '"');
+  assert(gateWindowEl.value === '0', 'fromEditor shows out-of-range sched_envelope_ms as-is, got "' + gateWindowEl.value + '"');
+  assert(probeEl.value === '-1', 'fromEditor shows out-of-range probe_min_half_rtt_us as-is, got "' + probeEl.value + '"');
+  // 键缺失才落显示默认：probe 显示后端默认 1000，near/envelope 输入框留空。
+  editor.value = JSON.stringify({ routing_algo: 'auto' });
+  await window.loadConfig();
+  assert(probeEl.value === '1000', 'missing probe_min_half_rtt_us displays default 1000 after reload, got "' + probeEl.value + '"');
+  assert(windowEl.value === '', 'missing fec_near_window_ms leaves the input empty, got "' + windowEl.value + '"');
+  assert(gateWindowEl.value === '', 'missing sched_envelope_ms leaves the input empty, got "' + gateWindowEl.value + '"');
+
+  // ---- 用例 6：toEditor(true) 对 probe_min_half_rtt_us —— 0 合法可写，非法删键 ----
+  probeEl.value = '0';
+  changeHandler({ target: probeEl });
+  out = JSON.parse(editor.value);
+  assert(out.probe_min_half_rtt_us === 0, 'toEditor keeps explicit 0 (anchoring disabled), got "' + out.probe_min_half_rtt_us + '"');
+  probeEl.value = '2500';
+  changeHandler({ target: probeEl });
+  out = JSON.parse(editor.value);
+  assert(out.probe_min_half_rtt_us === 2500, 'toEditor writes in-range probe_min_half_rtt_us, got "' + out.probe_min_half_rtt_us + '"');
+  probeEl.value = '-5';
+  changeHandler({ target: probeEl });
+  out = JSON.parse(editor.value);
+  assert(!('probe_min_half_rtt_us' in out), 'negative probe_min_half_rtt_us deletes the key, got ' + JSON.stringify(out.probe_min_half_rtt_us));
+  probeEl.value = '3600001';
+  changeHandler({ target: probeEl });
+  out = JSON.parse(editor.value);
+  assert(!('probe_min_half_rtt_us' in out), 'above-range probe_min_half_rtt_us deletes the key, got ' + JSON.stringify(out.probe_min_half_rtt_us));
+  probeEl.value = '';
+  changeHandler({ target: probeEl });
+  out = JSON.parse(editor.value);
+  assert(!('probe_min_half_rtt_us' in out), 'empty probe input deletes the key (backend default 1000), got ' + JSON.stringify(out.probe_min_half_rtt_us));
+
+  // ---- 用例 7：toEditor(false) 补空 —— DOM 合法值优先（与枚举字段语义一致） ----
+  editor.value = JSON.stringify({ routing_algo: 'auto' });
+  windowEl.value = '30';
+  gateWindowEl.value = '300';
+  probeEl.value = '2500';
+  await window.saveConfig(false);
+  out = JSON.parse(editor.value);
+  assert(out.fec_near_window_ms === 30, 'toEditor(false) fills missing fec_near_window_ms from DOM, got "' + out.fec_near_window_ms + '"');
+  assert(out.sched_envelope_ms === 300, 'toEditor(false) fills missing sched_envelope_ms from DOM, got "' + out.sched_envelope_ms + '"');
+  assert(out.probe_min_half_rtt_us === 2500, 'toEditor(false) fills missing probe_min_half_rtt_us from DOM, got "' + out.probe_min_half_rtt_us + '"');
+
+  // ---- 用例 7b：DOM 无合法值 → near/envelope 落硬编码缺省 10/20，probe 不写键 ----
+  editor.value = JSON.stringify({ routing_algo: 'auto' });
+  windowEl.value = 'abc';
+  gateWindowEl.value = '';
+  probeEl.value = '';
+  await window.saveConfig(false);
+  out = JSON.parse(editor.value);
+  assert(out.fec_near_window_ms === 10, 'toEditor(false) falls back to 10 when DOM value is illegal, got "' + out.fec_near_window_ms + '"');
+  assert(out.sched_envelope_ms === 20, 'toEditor(false) falls back to 20 when DOM value is illegal, got "' + out.sched_envelope_ms + '"');
+  assert(!('probe_min_half_rtt_us' in out), 'toEditor(false) omits probe_min_half_rtt_us when DOM has no legal value, got ' + JSON.stringify(out.probe_min_half_rtt_us));
+
+  // ---- 用例 7c：编辑器已有的非法值原样保留（送后端校验），DOM 值不覆盖 ----
+  editor.value = JSON.stringify({ routing_algo: 'auto', fec_near_window_ms: 'oops', sched_envelope_ms: 9999, probe_min_half_rtt_us: -3 });
+  windowEl.value = '40';
+  gateWindowEl.value = '40';
+  probeEl.value = '40';
+  await window.saveConfig(false);
+  out = JSON.parse(editor.value);
+  assert(out.fec_near_window_ms === 'oops', 'toEditor(false) keeps existing illegal fec_near_window_ms for backend validation, got "' + out.fec_near_window_ms + '"');
+  assert(out.sched_envelope_ms === 9999, 'toEditor(false) keeps existing out-of-range sched_envelope_ms, got "' + out.sched_envelope_ms + '"');
+  assert(out.probe_min_half_rtt_us === -3, 'toEditor(false) keeps existing illegal probe_min_half_rtt_us, got "' + out.probe_min_half_rtt_us + '"');
+}
+
+runAsyncCases().then(() => {
+  console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURES');
+  process.exit(failures === 0 ? 0 : 1);
+}).catch(e => {
+  console.error('FAIL: async test crashed: ' + ((e && e.stack) || e));
+  process.exit(1);
+});
