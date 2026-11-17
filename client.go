@@ -92,6 +92,11 @@ type Backend struct {
 	// RTT 采样失败）。调度器跳过 stalled 后端，使其不再接收新的数据，避免把
 	// 数据送进死路径。连接恢复/重建时由新一轮握手清除。
 	stalled atomic.Bool
+	// orphaned 标记该后端已从端口注销（连接关闭）：writer 已退出、channel 残留
+	// 无人排空。与 stalled 的区别——stalled 后端的 writer 仍活着并继续 drain
+	// （RTT 采样失败等软信号，恢复握手会清除），仍可承载流量；orphaned 后端的
+	// 任何入队都是静默丢数据（已分配线路 seq → 序号洞），派发必须跳过。
+	orphaned atomic.Bool
 	// rttFailures 连续 RTT 采样失败计数；超过阈值即视为连接异常并置 stalled。
 	rttFailures atomic.Uint32
 }
@@ -218,6 +223,8 @@ func (p *AsyncPort) SetFecStrategy(strategy string) {
 
 // SetFecNearWindowMs 设定 near 策略的去程时延窗口（毫秒）。可随时热更。
 func (p *AsyncPort) SetFecNearWindowMs(ms int) {
+	// 0 = 显式重置到最小窗口（TestSetFecNearWindowMsClamp 钉住的契约）；常规
+	// 热更路径的 0 会在 applyDefaults 归一为默认 10ms 后才到这里。
 	if ms < fecNearWindowMinMs {
 		ms = fecNearWindowMinMs
 	}
@@ -232,6 +239,11 @@ func (p *AsyncPort) SetFecNearWindowMs(ms int) {
 func (p *AsyncPort) SetProbeMinHalfRTTUs(us int) {
 	if us < 0 {
 		us = 0
+	}
+	// 运行期与配置校验层（config 上限 3_600_000µs）双保险：锚定下界超过
+	// oneWayRankZeroUS 的安全余量会让 raw+偏移的编码撞上 0=未收敛哨兵。
+	if us > 3_600_000 {
+		us = 3_600_000
 	}
 	p.probeMinHalfRTTUS.Store(uint64(us))
 }
@@ -304,6 +316,7 @@ func (p *AsyncPort) UnregisterBackend(ch chan []VPNFrame) {
 	defer p.backendsMu.Unlock()
 	for i, b := range p.backends {
 		if b.ch == ch {
+			b.orphaned.Store(true)
 			p.preferred.CompareAndSwap(b, nil)
 			p.backends = append(p.backends[:i], p.backends[i+1:]...)
 			break
@@ -328,11 +341,34 @@ func (p *AsyncPort) UnregisterOwnedBackend(ch chan *VPNFrameBatch) {
 	defer p.backendsMu.Unlock()
 	for i, b := range p.backends {
 		if b.ownedCh == ch {
+			b.orphaned.Store(true)
 			p.preferred.CompareAndSwap(b, nil)
 			p.backends = append(p.backends[:i], p.backends[i+1:]...)
 			break
 		}
 	}
+}
+
+// storePreferredIfCurrent 把 b 写回 preferred，但仅当它仍在当前后端表中。
+//
+// 派发路径已改为"快照 + 锁外运行"：快照里的后端可能在 pick 过程中被
+// UnregisterOwnedBackend（连接死亡的 goroutine）摘除并 CAS 清掉 preferred。
+// 若这里无条件 Store，死后端会"复活"进 preferred——waitForBackendSlot 的
+// 拥塞分支对非 nil 的 preferred 永不重扫，writer 已退的通道排空后队列恒满、
+// 生产者 50µs 自旋、run 阻塞在空 p.ch 上，整个端口永久断流。持读锁校验
+// 成员资格期间完成 Store，Unregister 的写锁无法插入，竞态窗口关闭。
+func (p *AsyncPort) storePreferredIfCurrent(b *Backend) {
+	if b == nil {
+		return
+	}
+	p.backendsMu.RLock()
+	for _, x := range p.backends {
+		if x == b {
+			p.preferred.Store(b)
+			break
+		}
+	}
+	p.backendsMu.RUnlock()
 }
 
 func (b *Backend) queueLen() int {
@@ -584,20 +620,30 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 			// 开销。目标仍由 pickParityBackend 轮转选择（每次 dispatch 旋转
 			// 一步，跨批均匀分布）。
 			target := p.pickParityBackend(backends, best)
-			p.paritySent.Add(uint64(len(parities)))
-			pbatch := getOwnedVPNFrameBatch()
-			for _, par := range parities {
-				appendOwnedVPNFrame(pbatch, VPNFrame{Seq: 0, Data: par})
-			}
-			n := pbatch.Bytes
-			target.addQueuedBytes(n)
-			if tryQueueOwnedBatch(target, pbatch) {
-				target.fecAssignedBytes.Add(n)
-				target.fecAssignedBatches.Add(1)
+			if target == nil {
+				// near 模式下连数据路径都不健康：抑制本次 parity（near 的意图
+				// 就是宁可不发也不发到慢链路/死链路）。与单路径防御分支一致，
+				// 不计 paritySent。
+				for _, par := range parities {
+					putFrame(par)
+				}
 			} else {
-				target.completeQueuedBytes(n)
-				p.dropN(len(pbatch.Frames))
-				freeOwnedVPNFrameBatch(pbatch)
+				p.paritySent.Add(uint64(len(parities)))
+				pbatch := getOwnedVPNFrameBatch()
+				for _, par := range parities {
+					appendOwnedVPNFrame(pbatch, VPNFrame{Seq: 0, Data: par})
+				}
+				n := pbatch.Bytes
+				target.addQueuedBytes(n)
+				if !tryQueueOwnedBatch(target, pbatch) {
+					// 二分调试：逐份回退禁用，改回直接丢弃（昨日合批语义）
+					target.completeQueuedBytes(n)
+					p.dropN(len(pbatch.Frames))
+					freeOwnedVPNFrameBatch(pbatch)
+				} else {
+					target.fecAssignedBytes.Add(n)
+					target.fecAssignedBatches.Add(1)
+				}
 			}
 		}
 		clear(parities)
@@ -626,7 +672,7 @@ const backendRTTHysteresisMin = 5_000 // 微秒
 func backendScore(b *Backend) (uint32, bool) {
 	qLen := b.queueLen()
 	qCap := b.queueCap()
-	if qCap == 0 || qLen >= qCap-2 || b.isStalled() {
+	if qCap == 0 || qLen >= qCap-2 || b.isStalled() || b.orphaned.Load() {
 		return math.MaxUint32, false
 	}
 	rtt := atomic.LoadUint32(b.rttCache)
@@ -667,7 +713,7 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 				break
 			}
 		}
-		p.preferred.Store(bestBackend)
+		p.storePreferredIfCurrent(bestBackend)
 		return bestBackend
 	}
 	current := p.preferred.Load()
@@ -688,7 +734,7 @@ func (p *AsyncPort) pickBackend(backends []*Backend) *Backend {
 			}
 		}
 	}
-	p.preferred.Store(bestBackend)
+	p.storePreferredIfCurrent(bestBackend)
 	return bestBackend
 }
 
@@ -773,20 +819,29 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 			return b
 		}
 	}
-	return backends[start]
+	// 全部后端都不合格（stalled/队满，或 near 下全部窗口外）：返回 nil，由
+	// 调用方抑制本次 parity——原实现无视 near 过滤与健康度直接取
+	// backends[start]，是 near 语义的违例出口，且大概率入队失败丢帧。
+	return nil
 }
 
 // parityNearEligible 报告候选后端是否落在 near 窗口内：其去程单程时延 ≤ 数据路径
-// fwd + 窗口。用 adaptiveBackendOneWayUS（与选路同一估计，原始有符号相对量、不带
-// 显示层 δ）；数据路径或候选未收敛时宽松返回 true，避免启动期或探针未收敛时误伤
-// parity（此时两者近等，本就无慢链之分）。
+// fwd + 窗口。用与选路同一估计的原始有符号相对量——同一轮 recompute 共享锚点，
+// 差值中公共项抵消，两侧符号无关。任一侧探针未收敛时宽松返回 true：未收敛的
+// 回退值是绝对内核尺度（min_rtt/2，双未知时是 50ms 哨兵折半），而已收敛的 ref
+// 常为负，跨尺度比较会把未收敛候选系统性排除在窗口外（bootstrap 期 parity 全部
+// 退化到数据路径），与"此时两者近等，本就无慢链之分"的文档承诺直接矛盾。
 func (p *AsyncPort) parityNearEligible(b, dataBest *Backend) bool {
-	if b == nil {
+	if b == nil || dataBest == nil {
 		return false
 	}
-	ref := adaptiveBackendOneWayUS(dataBest)
-	fwd := adaptiveBackendOneWayUS(b)
-	return fwd <= ref+int64(p.fecNearWindowUS.Load())
+	if _, okRef := dataBest.backendOneWayUS(); !okRef {
+		return true
+	}
+	if _, okFwd := b.backendOneWayUS(); !okFwd {
+		return true
+	}
+	return adaptiveBackendOneWayUS(b) <= adaptiveBackendOneWayUS(dataBest)+int64(p.fecNearWindowUS.Load())
 }
 
 // tryQueueOwnedBatch transfers batch ownership on success and leaves ownership
@@ -834,6 +889,13 @@ func sendOwnedBatchToAnyFenced(p *AsyncPort, backends []*Backend, preferred *Bac
 
 	trySend := func(b *Backend) bool {
 		if b == nil {
+			return false
+		}
+		// orphaned（已注销、writer 已退）的后端绝不尝试：残留未满的死通道会
+		// 静默吞掉整批（已分配线路 seq → 序号洞）。注意不能用 isStalled 判——
+		// stalled 后端的 writer 仍活着并继续 drain，仍可承载流量（本机 Windows
+		// 下 RTT 采样不可用会把健康后端打成 stalled，误跳过曾致 87% 丢包）。
+		if b.orphaned.Load() {
 			return false
 		}
 

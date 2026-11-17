@@ -46,8 +46,7 @@ const (
 
 type backendCandidate struct {
 	backend   *Backend
-	baseUS    int64  // unloaded path quality: oneWay probe + this batch service time; signed (probe raw may be negative)
-	etaUS     uint64 // observational queued completion estimate for WebUI
+	baseUS    int64 // unloaded path quality: oneWay probe + this batch service time; signed (probe raw may be negative)
 	rttUS     uint32
 	schedRate uint64 // fair-start rate used only by this scheduling decision
 	wasActive bool
@@ -332,7 +331,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		b.active.Store(true)
 		b.virtualFinishNS.Store(0)
 		p.activePaths.Store(1)
-		p.preferred.Store(b)
+		p.storePreferredIfCurrent(b)
 		return b
 	}
 	current := p.preferred.Load()
@@ -344,7 +343,18 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	cands := p.buildEligibleCandidates(policy, backends, incomingBytes, minRTT, maxRTT, referenceRate)
 	p.schedulerScratch = cands
 	if len(cands) == 0 {
-		return p.pickBackend(backends)
+		// 全部后端被并发排除（唯一健康者在扫描间隙被 markStalled）：pickBackend
+		// 只维护 preferred，这里补齐成员维护——否则 active 集残留旧值、
+		// activePaths 计数失真（面板/测试可见）。
+		chosen := p.pickBackend(backends)
+		for _, b := range backends {
+			if b != nil {
+				b.active.Store(b == chosen)
+				b.virtualFinishNS.Store(0)
+			}
+		}
+		p.activePaths.Store(1)
+		return chosen
 	}
 	rankCandidates(cands)
 
@@ -402,7 +412,9 @@ func scanEnvelope(backends []*Backend) (minRTT uint32, maxRTT uint64, referenceR
 	maxRTT = uint64(minRTT) + uint64(rttSlack)
 	referenceRate = uint64(adaptiveFallbackRateBytesPerSec)
 	for _, b := range backends {
-		if b == nil {
+		// 与第一遍对齐：stalled/队满路径的 rate 不参与参考速率（仅冷路径 ETA
+		// 回退用），死路径不应抬高它。
+		if b == nil || b.queueCap() == 0 || b.queueLen() >= b.queueCap()-2 || b.isStalled() {
 			continue
 		}
 		rtt, unknownRTT := adaptiveBackendMinRTT(b)
@@ -424,7 +436,16 @@ func scanEnvelope(backends []*Backend) (minRTT uint32, maxRTT uint64, referenceR
 
 // fallbackSinglePath 无健康路径时退化为首条后端，重置活跃/债务状态。
 func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
+	// 与 pickBackend 的兜底一致：优先未 stalled 的后端——4 连接断 3 条时若盲取
+	// backends[0]（恰是死路径），数据会先进死通道黑洞（writer 已退、残留未满），
+	// 拥塞下可持续多个 RTT；全部 stalled 时才取第一条兜底。
 	b := backends[0]
+	for _, x := range backends {
+		if x != nil && !x.isStalled() {
+			b = x
+			break
+		}
+	}
 	if b != nil {
 		for _, x := range backends {
 			if x != nil {
@@ -433,7 +454,7 @@ func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
 			}
 		}
 		p.activePaths.Store(1)
-		p.preferred.Store(b)
+		p.storePreferredIfCurrent(b)
 	}
 	return b
 }
@@ -490,7 +511,6 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, backends []*Ba
 		cands = append(cands, backendCandidate{
 			backend:   b,
 			baseUS:    candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate),
-			etaUS:     eta,
 			rttUS:     rtt,
 			schedRate: schedRate,
 			wasActive: b.active.Load(),
@@ -505,7 +525,12 @@ func rankCandidates(cands []backendCandidate) {
 	for i := 1; i < len(cands); i++ {
 		x := cands[i]
 		j := i
-		for j > 0 && (x.baseUS < cands[j-1].baseUS || (x.baseUS == cands[j-1].baseUS && x.rttUS < cands[j-1].rttUS)) {
+		// 平局裁决：baseUS 相同（rankMinRTTHalf 下 fairStart 冷路径与最优热路径
+		// 恒并列）时先比 rttUS，再比 wasActive——热路径优先，消除"冷路径靠注册
+		// 顺序抢槽"的顺序巧合。
+		for j > 0 && (x.baseUS < cands[j-1].baseUS ||
+			(x.baseUS == cands[j-1].baseUS && x.rttUS < cands[j-1].rttUS) ||
+			(x.baseUS == cands[j-1].baseUS && x.rttUS == cands[j-1].rttUS && x.wasActive && !cands[j-1].wasActive)) {
 			cands[j] = cands[j-1]
 			j--
 		}
@@ -536,7 +561,7 @@ func (p *AsyncPort) commitSinglePath(backends []*Backend, cands []backendCandida
 		}
 	}
 	p.activePaths.Store(1)
-	p.preferred.Store(chosen)
+	p.storePreferredIfCurrent(chosen)
 	return chosen
 }
 
@@ -596,6 +621,6 @@ func (p *AsyncPort) dispatchWFQ(backends []*Backend, cands []backendCandidate, a
 	}
 	chosen.backend.addVirtualServiceAtRate(incomingBytes, chosen.schedRate)
 	p.activePaths.Store(int32(active))
-	p.preferred.Store(chosen.backend)
+	p.storePreferredIfCurrent(chosen.backend)
 	return chosen.backend
 }

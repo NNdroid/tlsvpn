@@ -48,6 +48,7 @@ func TestPickBackendKeepsStickyPathUntilMateriallyBetterOrBackpressured(t *testi
 	a := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttA}
 	b := &Backend{ch: make(chan []VPNFrame, 32), rttCache: &rttB}
 	p := &AsyncPort{}
+	p.backends = []*Backend{a, b} // storePreferredIfCurrent 要求 preferred ∈ p.backends
 
 	if got := p.pickBackend([]*Backend{a, b}); got != b {
 		t.Fatal("initial selection did not choose the lower-RTT backend")

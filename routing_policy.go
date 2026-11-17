@@ -124,6 +124,10 @@ func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32,
 	case rankSRTTHalf:
 		return int64(srttUS) / 2
 	default: // rankOneWayPlusService
+		// 注意：incomingBytes 与 schedRate 对同批所有候选相同，此项是批内常数、
+		// 对排序是空操作——auto 模式当前实际等价于 rankOneWay。若未来
+		// schedRate 改为 per-path 容量（按容量加权 WFQ），该项才有真实区分度，
+		// 届时需同步审视其"服务时间"与"容量权重"的双重语义。
 		return oneWay + int64(serviceTimeUS(incomingBytes, schedRate))
 	}
 }

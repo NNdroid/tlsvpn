@@ -80,6 +80,7 @@ func TestAdaptivePreferredAlwaysActive(t *testing.T) {
 	a := oneWayBackend(160_000, 80_000, 80_000, 30_000_000)
 	b := oneWayBackend(170_000, 85_000, 85_000, 30_000_000)
 	backends := []*Backend{a, b}
+	p.backends = backends // storePreferredIfCurrent 的成员校验要求 preferred ∈ p.backends
 
 	// 高负载：进入多路径模式（active=2）
 	p.pickAdaptiveBackend(backends, adaptiveActive2Pressure, 16*1024)
