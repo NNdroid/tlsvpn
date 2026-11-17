@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -397,9 +398,25 @@ func certExpiryInfo(cert *tls.Certificate, selfSigned bool) *certExpiry {
 	return &certExpiry{notAfter: leaf.NotAfter, selfSigned: selfSigned}
 }
 
+// selfSignedMu 串行化自签证书的首次生成/加载。
+//
+// 生产路径 getServerTLSConfig 只在进程启动时调用一次，但 e2e 测试夹具会在同
+// 一进程内并发触发：server 监听 goroutine（getServerTLSConfig 构造 tls.Config）
+// 与客户端指纹辅助函数（e2eServerCertFingerprint → getServerTLSConfig）同时首启。
+// 若无保护，两处都会通过 os.Stat 的"不存在"分支各自 rsa.GenerateKey，生成两把
+// 不同私钥/两份不同证书，且非原子落盘还可能把 key 与 cert 交叉写成混合对——
+// 后到者 pin 到的是全局指纹（最后写入者），服务端持的却是自己生成的那份证书，
+// 握手因证书哈希不匹配而持续失败（CI group G 首测 "tunnel did not come up"
+// 即此竞态：仅首测触发，文件生成后所有后续 harness 从磁盘加载同一份，全部通过）。
+// 持锁完成"检查→生成→落盘"，后到者重查 os.Stat 走加载分支，拿到同一份证书。
+var selfSignedMu sync.Mutex
+
 // loadOrGenerateSelfSigned 加载/生成自签名证书并持久化到磁盘：
 // 每次重启复用同一证书，客户端的 -cert-sha256 指纹锁定不会因重启失效。
 func loadOrGenerateSelfSigned() tls.Certificate {
+	selfSignedMu.Lock()
+	defer selfSignedMu.Unlock()
+
 	if _, err1 := os.Stat(selfSignedCertFile); err1 == nil {
 		if _, err2 := os.Stat(selfSignedKeyFile); err2 == nil {
 			cert, err := tls.LoadX509KeyPair(selfSignedCertFile, selfSignedKeyFile)
