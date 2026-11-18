@@ -47,9 +47,13 @@ const elements = {
   'probe-min-half-rtt': makeInput(),
 };
 const editor = { value: '', parentNode: { insertBefore() {} } };
+editor.addEventListener = (ev, fn) => { if (ev === 'input') editorInputHandler = fn; };
 elements['cfg-editor'] = editor;
 
 let changeHandler = null;
+// 脚本会给 cfg-editor 加 input 监听：JSON 编辑器（唯一事实来源）手动编辑时
+// 下拉/输入框实时跟随。捕获该处理器以验证「改 JSON → fromEditor 回填 DOM」。
+let editorInputHandler = null;
 // translate() 会把文案写进 [data-rts-t] 元素；预定义这些捕获元素以验证 zh-TW 生效。
 const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint','labelProbe','probeHint'];
 const i18nEls = i18nKeys.map(k => ({ dataset: { rtsT: k }, textContent: '' }));
@@ -241,6 +245,26 @@ async function runAsyncCases() {
   assert(out.fec_near_window_ms === 'oops', 'toEditor(false) keeps existing illegal fec_near_window_ms for backend validation, got "' + out.fec_near_window_ms + '"');
   assert(out.sched_envelope_ms === 9999, 'toEditor(false) keeps existing out-of-range sched_envelope_ms, got "' + out.sched_envelope_ms + '"');
   assert(out.probe_min_half_rtt_us === -3, 'toEditor(false) keeps existing illegal probe_min_half_rtt_us, got "' + out.probe_min_half_rtt_us + '"');
+
+  // ---- 用例 8：JSON 编辑器手动编辑（input 事件）→ 下拉/输入框实时跟随 ----
+  // 回归：此前只在 loadConfig/saveConfig 包装里回填，用户直接在 cfg-editor 里
+  // 键入/粘贴改字段时下拉框停在旧值，造成「渲染旧值、JSON 新值」分裂。
+  algo.value = 'auto'; fec.value = 'auto'; gateEl.value = 'rtt';
+  windowEl.value = ''; gateWindowEl.value = ''; probeEl.value = '';
+  editor.value = JSON.stringify({ routing_algo: 'min_rtt_adaptive', fec_strategy: 'near',
+    fec_near_window_ms: 33, sched_envelope: 'fwd', sched_envelope_ms: 44, probe_min_half_rtt_us: 2500 });
+  assert(typeof editorInputHandler === 'function', 'cfg-editor input listener is installed');
+  editorInputHandler && editorInputHandler();
+  assert(algo.value === 'min_rtt_adaptive', 'editor input syncs routing_algo dropdown, got "' + algo.value + '"');
+  assert(fec.value === 'near', 'editor input syncs fec_strategy dropdown, got "' + fec.value + '"');
+  assert(gateEl.value === 'fwd', 'editor input syncs sched_envelope dropdown, got "' + gateEl.value + '"');
+  assert(windowEl.value === '33', 'editor input syncs fec_near_window_ms input, got "' + windowEl.value + '"');
+  assert(gateWindowEl.value === '44', 'editor input syncs sched_envelope_ms input, got "' + gateWindowEl.value + '"');
+  assert(probeEl.value === '2500', 'editor input syncs probe_min_half_rtt_us input, got "' + probeEl.value + '"');
+  // 编辑器里的合法枚举值不因 input 回填被改写（唯一事实来源仍为编辑器）
+  out = JSON.parse(editor.value);
+  assert(out.routing_algo === 'min_rtt_adaptive' && out.fec_strategy === 'near' && out.sched_envelope === 'fwd',
+    'editor input does not rewrite valid JSON enum values');
 }
 
 runAsyncCases().then(() => {

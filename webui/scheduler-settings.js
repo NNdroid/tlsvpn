@@ -220,8 +220,28 @@
   });
   translate();fromEditor();
 
+  // JSON 编辑器是唯一事实来源：用户在编辑器里手动改字段时，下拉/输入框必须
+  // 实时跟随，否则「渲染旧值、JSON 新值」分裂。programmatic 的 editor.value=
+  // 赋值（loadConfig / 保存回写）不触发 input，由下方 loadConfig/saveConfig
+  // 包装负责；这里只覆盖用户手动键入/粘贴。
+  // fromEditor 改 DOM 值不触发 change/input（programmatic set 不发事件），
+  // 因此不会与下方 change→toEditor 形成写回循环。
+  editor.addEventListener('input',fromEditor);
+
   const originalLoad=window.loadConfig;
   if(typeof originalLoad==='function')window.loadConfig=async function(){const r=await originalLoad.apply(this,arguments);fromEditor();return r;};
   const originalSave=window.saveConfig;
-  if(typeof originalSave==='function')window.saveConfig=async function(){toEditor(false);const r=await originalSave.apply(this,arguments);if(arguments[0])setTimeout(fromEditor,0);return r;};
+  // 保存（无论是否热应用）后都回填 fromEditor：仅保存时编辑器保留用户输入值，
+  // 下拉/输入框须与之对齐，否则设置页内部（渲染 vs JSON）就分裂。此前只在
+  // apply=true 时回填，仅保存后下拉框停在旧值。
+  if(typeof originalSave==='function')window.saveConfig=async function(){toEditor(false);const r=await originalSave.apply(this,arguments);setTimeout(fromEditor,0);return r;};
+
+  // 兜底：loadConfig / 保存回写对 editor.value 是 programmatic 赋值（不触发
+  // input），且 window.loadConfig 被多个后续脚本（mcp-settings/mcp-examples）
+  // 再次包装——若其中任一包装在链上抛异常或未保存 previousLoad，上方包装的
+  // fromEditor 就不会执行，下拉/输入框停在旧值。这里以轮询检测 editor 内容
+  // 变化，任何来源的写入（加载、保存回写、手动）都保证 fromEditor 回填，
+  // 使渲染永远跟随 JSON 编辑器这一唯一事实来源。仅比较字符串，开销可忽略。
+  let lastEditorValue=editor.value;
+  setInterval(function(){if(editor.value!==lastEditorValue){lastEditorValue=editor.value;fromEditor();}},400);
 })();
