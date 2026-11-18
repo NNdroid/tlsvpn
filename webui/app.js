@@ -1852,6 +1852,10 @@ function schedulerTip(r){
     parts.push((lab!=='sched.excl_'+excl?lab:excl)+((cmpFwd||cmp)?' ('+(cmpFwd||cmp)+')':''));
   }
   if(s.rank_known)parts.push(t('sched.rank_key')+' '+(Number(s.rank_key_us)>=0?'+':'-')+fmtMsUsUS(Math.abs(Number(s.rank_key_us))));
+  // 容量权重与 TCP 重传：与 schedulerCell（metric-corrections 覆盖版）同口径，
+  // 悬停就能看到权重来源与丢包信号，不用进抽屉。
+  if(Number(s.deliver_rate_mbps)>0)parts.push(t('sched.weight')+' '+Number(s.deliver_rate_mbps).toFixed(Number(s.deliver_rate_mbps)<10?1:0)+' Mbps');
+  if(Number(s.retrans_delta)>0)parts.push(t('sched.retrans')+' ×'+Number(s.retrans_delta));
   if(Number(s.group_fwd_floor_us)>0){
     parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us));
   }else if(Number(s.group_min_rtt_us)>0&&Number(s.group_max_rtt_us)>0)parts.push(t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+'~'+fmtMsUsUS(s.group_max_rtt_us));

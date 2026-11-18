@@ -172,7 +172,7 @@
       <div class="toolbar">
         <div class="search" id="search-clients" data-i18n-title="filter_tip">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input class="search-input" id="client-filter" data-i18n-ph="filter_ph">
+          <input class="search-input" data-i18n-ph="filter_ph">
           <button class="search-clear" onclick="clearFilter('clients')" aria-label="clear">×</button>
           <span class="search-count mono" id="client-count"></span>
         </div>
@@ -190,7 +190,7 @@
       <div class="toolbar">
         <div class="search" id="search-conns" data-i18n-title="filter_tip">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input class="search-input" id="conn-filter" data-i18n-ph="filter_ph">
+          <input class="search-input" data-i18n-ph="filter_ph">
           <button class="search-clear" onclick="clearFilter('conns')" aria-label="clear">×</button>
           <span class="search-count mono" id="conn-count"></span>
         </div>
@@ -211,7 +211,7 @@
       <div class="toolbar">
         <div class="search" id="search-macs" data-i18n-title="filter_tip">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input class="search-input" id="mac-filter" data-i18n-ph="filter_ph">
+          <input class="search-input" data-i18n-ph="filter_ph">
           <button class="search-clear" onclick="clearFilter('macs')" aria-label="clear">×</button>
           <span class="search-count mono" id="mac-count"></span>
         </div>
@@ -416,7 +416,6 @@
           <span class="search-count mono" id="mcp-count"></span>
         </div>
         <span class="spacer"></span>
-        <span class="dim" id="mcp-summary"></span>
         <button class="btn ghost sm" onclick="clearMcpLog()" data-i18n="logs.clear">-</button>
         <button class="btn ghost sm" onclick="downloadMcpLog()" data-i18n="logs.download">-</button>
       </div>

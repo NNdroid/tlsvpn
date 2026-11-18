@@ -240,14 +240,27 @@
     }
     const meta = t('sched.queue') + ' ' + fmtBytes(num(s.queued_bytes)) + ' · ' +
       t('sched.assign') + ' ' + alloc + ' (' + share + ') · ' +
-      t('sched.capacity') + ' ' + (capacity ? capacity.toFixed(capacity < 10 ? 1 : 0) + ' Mbps' : '-') + ' · ' +
+      t('sched.capacity') + ' ' + (capacity ? capacity.toFixed(capacity < 10 ? 1 : 0) + ' Mbps' : '-') +
+      // 容量权重（deliver_rate_mbps）：饱和门控测得的路径容量，WFQ 容量加权
+      // 的实际权重来源。仅在测得饱和窗后显示（0=未测得，权重走公平启动费率，
+      // 此时显示 "-" 会让人误以为权重为零）。与上面"负载写入 EWMA"并置才能
+      // 看出非饱和路径"被喂速率 ≠ 容量"的差别。
+      (num(s.deliver_rate_mbps) > 0 ? ' · ' + t('sched.weight') + ' ' + num(s.deliver_rate_mbps).toFixed(num(s.deliver_rate_mbps) < 10 ? 1 : 0) + ' Mbps' : '') + ' · ' +
       t('sched.qeta') + ' ' + eta + ' · ' + t('sched.batches') + ' ' + batchRate +
       (s.carry_pending ? ' · ' + t('sched.carry') : '') + clock;
+    // TCP 重传（最近 200ms 采样窗的差分）：时延地板对丢包不敏感，重传是
+    // "正在丢段"的独立信号。>0 才显示，避免稳态路径的常驻噪音。meta 整体
+    // 走 esc()，着色片段必须在转义之外单独拼接（否则显示成字面 <span>）。
+    let retransHtml = '';
+    if (num(s.retrans_delta) > 0) {
+      retransHtml = ' · <span style="color:var(--err)">' + esc(t('sched.retrans')) + ' ×' + num(s.retrans_delta) + '</span>';
+    }
     const totalBytes = num(s.assigned_bytes) + num(s.fec_assigned_bytes);
     const totalBatches = num(s.assigned_batches) + num(s.fec_assigned_batches);
     const tip = t('sched.cumulative') + ': ' + fmtBytes(totalBytes) + ' / ' + totalBatches + ' ' + t('sched.batch_unit') +
       ' | DATA ' + fmtBytes(num(s.assigned_bytes)) + ' / ' + num(s.assigned_batches) +
-      ' | FEC ' + fmtBytes(num(s.fec_assigned_bytes)) + ' / ' + num(s.fec_assigned_batches) + clock;
-    return '<div class="sched-cell" title="' + esc(tip) + '"><span class="badge ' + cls + '">' + esc(state) + '</span><small class="dim">' + esc(meta) + '</small></div>';
+      ' | FEC ' + fmtBytes(num(s.fec_assigned_bytes)) + ' / ' + num(s.fec_assigned_batches) +
+      (num(s.retrans_delta) > 0 ? ' | ' + t('sched.retrans') + ' ×' + num(s.retrans_delta) + ' (' + t('sched.retrans_tip') + ')' : '') + clock;
+    return '<div class="sched-cell" title="' + esc(tip) + '"><span class="badge ' + cls + '">' + esc(state) + '</span><small class="dim">' + esc(meta) + retransHtml + '</small></div>';
   };
 })();

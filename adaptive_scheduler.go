@@ -187,6 +187,11 @@ type backendCandidate struct {
 type schedulerConnJSON struct {
 	QueuedBytes        uint64  `json:"queued_bytes"`
 	RateMbps           float64 `json:"rate_mbps"`
+	// DeliverRateMbps 饱和门控容量估计（noteCapacitySample 的 EWMA，即 WFQ
+	// 容量权重的来源，Mbps）。0=尚未测得饱和窗（权重回退公平启动费率）。与
+	// rate_mbps（writer-drain"被喂速率"）并置：非饱和路径两者差异巨大——这正是
+	// 容量加权与字节公平的差别所在。仅观测，不在 TLSVPN 线上。
+	DeliverRateMbps    float64 `json:"deliver_rate_mbps,omitempty"`
 	ETAUs              uint64  `json:"eta_us"`
 	Active             bool    `json:"active"`
 	CarryPending       bool    `json:"carry_pending"`
@@ -338,6 +343,8 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		return schedulerConnJSON{}
 	}
 	rate := b.rateBytesPerSec.Load()
+	// 只在上报明确测得时填充（omitempty），未饱和测得的路径不显示伪 0。
+	deliverRate := b.deliverRateBytesPerSec.Load()
 	// min_rtt 未知时 adaptiveBackendMinRTT 返回 50000 哨兵，不可当作真实值
 	// 暴露；只在上报明确已知时填充，否则省略（omitempty）。
 	var minRTT uint64
@@ -351,6 +358,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 	snap := schedulerConnJSON{
 		QueuedBytes:        b.queuedBytes.Load(),
 		RateMbps:           float64(rate) * 8 / 1_000_000,
+		DeliverRateMbps:    float64(deliverRate) * 8 / 1_000_000,
 		ETAUs:              b.etaUsec.Load(),
 		Active:             b.active.Load(),
 		CarryPending:       b.carryPending.Load(),
