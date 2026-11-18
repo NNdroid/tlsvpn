@@ -1335,6 +1335,17 @@ function dgRun(data){
   }else add('tunnel','rtt','skip',miss);
   const cerr=cr.filter(function(x){return !!x.last_error;}).length;
   add('tunnel','connerr',dgLevel('nonzero',cerr),cerr?t('dg.err_n').replace('{n}',N(cerr)):N(0));
+  // TCP 重传：聚合各路径最近采样窗的差分（Backend.noteRetrans）。时延地板
+  // （min_rtt / 探针 decayed-min）对丢包不敏感——一条"低时延但正在丢段"的
+  // 路径在 rtt/connerr 检查里都看不出来，重传是独立信号。nonzero → warn
+  //（单段重传可能是瞬态，不值得红牌）；路径数与总段数一起给出。
+  const retx=cr.filter(function(x){return (x.scheduler&&x.scheduler.retrans_delta)>0;});
+  if(cr.length){
+    const retxTot=retx.reduce(function(n,x){return n+Number(x.scheduler.retrans_delta||0);},0);
+    add('tunnel','retrans',dgLevel('nonzero',retx.length),
+        retx.length?t('dg.retrans_n').replace('{n}',N(retx.length)).replace('{t}',N(retxTot)):N(0),
+        t('sched.retrans_tip'));
+  }else add('tunnel','retrans','skip',miss);
 
   // ---- 路由 ----
   const prl=np.policy_routing;
@@ -2241,6 +2252,13 @@ function renderDrawer(){
       const pkts=(x.tx_packets!==undefined||x.rx_packets!==undefined)
         ?'<span class="dc-conn-k">'+esc(t('dc.pkt_up'))+' '+fmtNum(x.tx_packets||0)+' · '+esc(t('dc.pkt_dn'))+' '+fmtNum(x.rx_packets||0)+'</span>'
         :'';
+      // 逐连接调度观测：容量权重（饱和门控测量）与 TCP 重传，与连接表
+      // 调度单元格同口径。缺位不占位：未测得容量/无重传时不渲染。
+      const sk=x.scheduler||{};
+      const dW=Number(sk.deliver_rate_mbps)||0;
+      const rtx=Number(sk.retrans_delta)||0;
+      const schedMeta=(dW>0?'<span class="dc-conn-k">'+esc(t('sched.weight'))+' '+dW.toFixed(dW<10?1:0)+' Mbps</span>':'')+
+        (rtx>0?'<span class="dc-conn-k" style="color:var(--err)">'+esc(t('sched.retrans'))+' ×'+rtx+'</span>':'');
       return '<div class="dc-conn">'+
         '<div class="dc-conn-top">'+
           '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+activePathMark(x.scheduler,!!x.stalled)+peerActiveMark(x.scheduler)+
@@ -2253,7 +2271,7 @@ function renderDrawer(){
           '<span class="dc-conn-k">'+esc(t('th.epoch'))+' '+(x.session_epoch!==undefined?x.session_epoch:(data.session_epoch||0))+'</span>'+
           encBadge(xEnc)+
           '<span title="'+esc(fecCellTip(x.fec||fec,x.fec_strategy||c.fec_strategy,x.fec_near_window_ms||c.fec_near_window_ms,fecParityPct((x.scheduler&&x.scheduler.fec_assigned_bytes)||0,(x.scheduler&&x.scheduler.assigned_bytes)||0),data.fec))+'">'+badge(x.fec||fec)+fecStratBadge(x.fec_strategy||c.fec_strategy)+'</span>'+
-          brut+pkts+
+          brut+pkts+schedMeta+
         '</div>'+
         (x.sni?'<div class="dc-conn-sni">'+esc(t('dc.sec_sni'))+': '+esc(x.sni)+'</div>':'')+
         (x.cert_sha256?'<div class="dc-conn-sni" title="'+esc(t('dc.sec_cert'))+'">'+esc(t('dc.sec_cert'))+': <span class="mono">'+esc(x.cert_sha256)+'</span></div>':'')+
