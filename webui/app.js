@@ -566,9 +566,26 @@ function tpl(s,o){
 // 原生 <select> 的弹层是操作系统画的，CSS 染不上去（暗色面板配一个白底黑字菜单）。
 // 做法：select 留在 DOM 里继续当唯一取值来源（.dl-native 只把它缩成 1px 藏起来），
 // 外面套自绘的触发按钮和菜单；选中项只写 select.value 再派发一次原生 change 事件，
-// 所以各处 onchange（setLogLevel / renderTrafficView / setPageSize）和程序化写值
-// （服务端每轮轮询回写 log_level）一行都不用改。
+// 所以各处 onchange（setLogLevel / renderTrafficView / setPageSize）不用改。
 const DL=new WeakMap();
+// 自定义下拉只是原生 select 的「视图」，但视图同步只挂在原生 change 事件上——
+// programmatic 的 select.value= 赋值不派发 change：loadConfig 后 scheduler-settings /
+// mcp-settings 的 fromEditor 回填下拉这类写值，按钮文案会停在构建时的旧值，出现
+// 「原生新值、按钮旧值」分裂（设置页下拉显示默认值而 near/fwd 条件字段可见，即此因；
+// 此前 loglevel 轮询、tr-client 过滤靠各调用点手动补一次 syncSelect 兜住）。这里在
+// 原型上劫持 value setter：任何来源的赋值落原生值后自动同步已注册（DL 命中）的
+// 自定义 UI，未注册的 select 零开销；selectedIndex 直写不走此 setter（本仓库无此
+// 用法）。dlPick 写值后本就派发 change，会再同步一次——幂等，无副作用。
+(function(){
+  if(typeof HTMLSelectElement==='undefined')return;
+  const d=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');
+  if(!d||!d.set)return;
+  Object.defineProperty(HTMLSelectElement.prototype,'value',{
+    configurable:true,enumerable:true,
+    get:function(){return d.get.call(this);},
+    set:function(v){d.set.call(this,v);if(DL.has(this))syncSelect(this);}
+  });
+})();
 let dlCur=null;
 let dlSerial=0;
 const DL_ARROW='<svg width="10" height="6" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -974,10 +991,9 @@ function applyStats(data){
     if(chip)chip.classList.toggle('client',data.mode!=='server');
     document.getElementById('ver').innerText=data.version||'-';
     document.getElementById('uptime').innerText=fmtDur(data.uptime_sec||0);
-    // 级别来自服务端：直接写 value 不会触发 change，要顺手刷新自绘下拉框的文案
-    const lvSel=document.getElementById('loglevel');
-    lvSel.value=data.log_level||'info';
-    syncSelect(lvSel);
+    // 级别来自服务端：programmatic 写 value 不派发 change，自绘下拉按钮文案由
+    // 原型级 value setter 劫持自动同步（见自定义下拉框处的注释）。
+    document.getElementById('loglevel').value=data.log_level||'info';
     document.getElementById('tls-flag').innerText=location.protocol==='https:'?'HTTPS':t('tls_http');
 
     // 速率/总量统计覆盖全部客户端；过滤只作用于表格行
@@ -2343,8 +2359,7 @@ function drawerToTraffic(){
   showPane('traffic');
   const sel=document.getElementById('tr-client');
   if(sel&&Array.prototype.some.call(sel.options,function(o){return o.value===id;})){
-    sel.value=id;
-    syncSelect(sel);
+    sel.value=id; // 自绘下拉文案由原型级 value setter 劫持同步（见自定义下拉框处的注释）
   }
   renderTrafficView();
 }
@@ -2420,8 +2435,9 @@ function syncTrafficClients(){
     (lastClientTraffic||[]).forEach(function(ct){opts+='<option value="'+esc(ct.id)+'">'+esc(shortId(ct.id,14))+'</option>';});
     sel.innerHTML=opts;
   }
+  // 选项列表可能刚被 innerHTML 重建：写回原值即经 value setter 劫持同步自绘 UI
+  // （见自定义下拉框处的注释），无需再手动 syncSelect。
   sel.value=want;
-  syncSelect(sel);
 }
 function renderTrafficView(){
   if(!lastTraffic)return;

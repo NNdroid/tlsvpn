@@ -186,10 +186,27 @@
     toEditor();
   };
 
+  // JSON 编辑器是唯一事实来源：用户在编辑器里手动改 web.mcp.* 字段时，MCP
+  // 面板输入框必须实时跟随，否则「渲染旧值、JSON 新值」分裂。programmatic 的
+  // editor.value= 赋值（loadConfig / 保存回写）不触发 input，由下方包装负责；
+  // 这里只覆盖用户手动键入/粘贴。fromEditor 改 DOM 值不触发 change/input
+  // （programmatic set 不发事件），不会与 root 的 change→toEditor 写回循环。
+  editor.addEventListener('input',fromEditor);
+
   const originalLoad=window.loadConfig;
   if(typeof originalLoad==='function')window.loadConfig=async function(){const r=await originalLoad.apply(this,arguments);fromEditor();return r;};
   const originalSave=window.saveConfig;
-  if(typeof originalSave==='function')window.saveConfig=async function(){toEditor();const r=await originalSave.apply(this,arguments);if(arguments[0])setTimeout(fromEditor,0);return r;};
+  // 保存（无论是否热应用）后都回填 fromEditor：仅保存时编辑器保留用户输入值，
+  // MCP 面板输入框须与之对齐，否则「渲染旧值、JSON 新值」分裂。此前只在
+  // apply=true 时回填，仅保存后 MCP 面板停在旧值。
+  if(typeof originalSave==='function')window.saveConfig=async function(){toEditor();const r=await originalSave.apply(this,arguments);setTimeout(fromEditor,0);return r;};
+
+  // 兜底：loadConfig / 保存回写对 editor.value 是 programmatic 赋值（不触发
+  // input），且 window.loadConfig 被后续脚本（mcp-examples）再次包装——若链上
+  // 任一包装未保存 previousLoad，fromEditor 就不会执行，MCP 面板停在旧值。
+  // 轮询检测 editor 内容变化，任何来源的写入都保证 fromEditor 回填。
+  let lastEditorValue=editor.value;
+  setInterval(function(){if(editor.value!==lastEditorValue){lastEditorValue=editor.value;fromEditor();}},400);
 
   new MutationObserver(translate).observe(document.documentElement,{attributes:true,attributeFilter:['lang']});
   translate();updateVisibility();fromEditor();
