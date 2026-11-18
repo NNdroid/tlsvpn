@@ -273,3 +273,127 @@ func TestSaveTwiceDoesNotRollback(t *testing.T) {
 		t.Errorf("第二次保存的 brutal_down=600 未落盘:\n%s", saved)
 	}
 }
+
+// TestSaveEndToEndUserFlow 完整模拟用户在设置页的真实操作序列，逐环节断言：
+//  1. GET /api/config 作为编辑 base（用户从设置页读到现有配置）
+//  2. 改 brutal_up 后 save，GET /api/config 立即回显新值（设置页不旧值）
+//  3. 同时 GET /api/stats 的 cfg 也回显新值（状态卡与设置页一致，不分裂）
+//  4. 重新 GET /api/config 作为 base（模拟用户刷新后继续编辑），改另一个字段
+//     再 save，第一次的改动必须仍在（不静默回滚），且设置页/状态卡都回显新值
+func TestSaveEndToEndUserFlow(t *testing.T) {
+	dir := t.TempDir()
+	bootPath := filepath.Join(dir, "boot.json")
+	bootJSON := `{
+	  "mode": "server",
+	  "psk": "test-only-high-entropy-secret-abcdefgh",
+	  "addr": "127.0.0.1:4000",
+	  "encrypt": true,
+	  "enc_algo": "gcm256",
+	  "brutal_up": 100,
+	  "web": {"addr": "127.0.0.1:8080", "bind": "all", "auth": "admin:realpassword123"},
+	  "server": {"v4_cidr": "10.0.0.0/24", "v6_cidr": "fd00::/64", "max_sessions": 1024}
+	}`
+	if err := os.WriteFile(bootPath, []byte(bootJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootCfg, err := loadConfigFile(bootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootCfg.applyDefaults()
+	srv := statsAuditServer()
+	srv.bootCfg = bootCfg
+	base, _, client := startSaveHTTPHarnessSrv(t, srv)
+
+	// 1) 用户从设置页读到现有配置（作为编辑 base）
+	code, body := getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/config #1: %d %s", code, body)
+	}
+	editor := map[string]any{}
+	if err := json.Unmarshal([]byte(body), &editor); err != nil {
+		t.Fatalf("设置页 GET 不是合法 JSON: %v: %s", err, body)
+	}
+
+	// 2) 改 brutal_up 100→200，仅保存
+	editor["brutal_up"] = 200
+	first, _ := json.Marshal(editor)
+	code, body = postControl(t, base, client, "save", string(first))
+	if code != http.StatusOK {
+		t.Fatalf("save #1: %d %s", code, body)
+	}
+
+	// 设置页回显：GET /api/config 立即返回 200（不旧值 100）
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/config #2: %d", code)
+	}
+	if !strings.Contains(body, `"brutal_up": 200`) {
+		t.Errorf("保存后设置页未回显 brutal_up=200（仍是旧值）:\n%s", body)
+	}
+
+	// 3) 状态卡回显：GET /api/stats 的 cfg.brutal_up 也必须是 200（与设置页一致）
+	resp, err := client.Get("http://" + base + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/stats: %d %s", resp.StatusCode, string(statsBody))
+	}
+	var stats struct {
+		Cfg struct {
+			BrutalUp uint64 `json:"brutal_up"`
+		} `json:"cfg"`
+	}
+	if err := json.Unmarshal(statsBody, &stats); err != nil {
+		t.Fatalf("decode /api/stats: %v", err)
+	}
+	if stats.Cfg.BrutalUp != 200 {
+		t.Errorf("保存后状态卡 cfg.brutal_up = %d, want 200（状态卡与设置页分裂）", stats.Cfg.BrutalUp)
+	}
+
+	// 4) 用户刷新设置页（重新 GET 作为 base），改另一个字段 brutal_down，再保存；
+	//    第一次的 brutal_up=200 必须仍在（不静默回滚）
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/config #3: %d", code)
+	}
+	editor2 := map[string]any{}
+	if err := json.Unmarshal([]byte(body), &editor2); err != nil {
+		t.Fatalf("设置页刷新 GET 不是合法 JSON: %v", err)
+	}
+	editor2["brutal_down"] = 600
+	second, _ := json.Marshal(editor2)
+	code, body = postControl(t, base, client, "save", string(second))
+	if code != http.StatusOK {
+		t.Fatalf("save #2: %d %s", code, body)
+	}
+
+	// 最终设置页回显：brutal_up 仍 200，brutal_down 已 600
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/config #4: %d", code)
+	}
+	if !strings.Contains(body, `"brutal_up": 200`) {
+		t.Errorf("第二次保存后 brutal_up=200 被回滚（配置丢失）:\n%s", body)
+	}
+	if !strings.Contains(body, `"brutal_down": 600`) {
+		t.Errorf("第二次保存后 brutal_down=600 未回显:\n%s", body)
+	}
+
+	// 最终状态卡：brutal_up 仍 200（与设置页一致）
+	resp, err = client.Get("http://" + base + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statsBody, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err := json.Unmarshal(statsBody, &stats); err != nil {
+		t.Fatalf("decode /api/stats #2: %v", err)
+	}
+	if stats.Cfg.BrutalUp != 200 {
+		t.Errorf("第二次保存后状态卡 cfg.brutal_up = %d, want 200", stats.Cfg.BrutalUp)
+	}
+}
