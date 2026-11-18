@@ -169,6 +169,65 @@ func TestSaveReflectsInPanelWithBootCfg(t *testing.T) {
 	}
 }
 
+// TestSaveStatsReflectsNewValue 回归「仅保存后状态卡回显旧值」：
+// 带 bootCfg 的真实服务端仅保存 brutal_up 100→200 后，/api/stats 的 cfg.brutal_up
+// 必须显示 200（与设置页 /api/config 一致），绝不能仍显示数据面生效值 100。
+// 此前 stats.Cfg 读 s.cfg（仅保存不更新），导致设置页新值、状态卡旧值不一致。
+func TestSaveStatsReflectsNewValue(t *testing.T) {
+	dir := t.TempDir()
+	bootPath := filepath.Join(dir, "boot.json")
+	bootJSON := `{
+	  "mode": "server",
+	  "psk": "test-only-high-entropy-secret-abcdefgh",
+	  "addr": "127.0.0.1:4000",
+	  "encrypt": true,
+	  "enc_algo": "gcm256",
+	  "web": {"addr": "127.0.0.1:8080", "bind": "all", "auth": "admin:realpassword123"},
+	  "server": {"v4_cidr": "10.0.0.0/24", "v6_cidr": "fd00::/64", "max_sessions": 1024}
+	}`
+	if err := os.WriteFile(bootPath, []byte(bootJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootCfg, err := loadConfigFile(bootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootCfg.applyDefaults()
+	srv := statsAuditServer()
+	srv.bootCfg = bootCfg
+
+	base, _, client := startSaveHTTPHarnessSrv(t, srv)
+
+	// 仅保存 brutal_up 100→200
+	code, body := postControl(t, base, client, "save",
+		`{"mode":"server","psk":"test-only-high-entropy-secret-abcdefgh","addr":"127.0.0.1:4000","encrypt":true,"enc_algo":"gcm256","brutal_up":200,"web":{"addr":"127.0.0.1:8080","bind":"all"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("save returned %d: %s", code, body)
+	}
+
+	// GET /api/stats：状态卡 cfg.brutal_up 必须反映新值 200
+	resp, err := client.Get("http://" + base + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/stats returned %d: %s", resp.StatusCode, string(data))
+	}
+	var stats struct {
+		Cfg struct {
+			BrutalUp uint64 `json:"brutal_up"`
+		} `json:"cfg"`
+	}
+	if err := json.Unmarshal(data, &stats); err != nil {
+		t.Fatalf("decode /api/stats: %v: %s", err, string(data))
+	}
+	if stats.Cfg.BrutalUp != 200 {
+		t.Errorf("仅保存后状态卡 cfg.brutal_up = %d, want 200（回显旧值，与设置页不一致）", stats.Cfg.BrutalUp)
+	}
+}
+
 // TestSaveTwiceDoesNotRollback 回归配置丢失：
 // 第一次保存 A 字段，第二次（面板从运行态读到的内容）改 B 字段，
 // A 字段必须仍在磁盘上，不能被回滚成启动值。

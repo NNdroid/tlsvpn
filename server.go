@@ -491,7 +491,12 @@ type Server struct {
 	brutal     bool
 	brutalUp   uint64
 	brutalDown uint64
-	cfg        atomic.Pointer[Config] // 当前生效配置（面板热更数据源）
+	cfg        atomic.Pointer[Config] // 数据面实际生效配置（新会话/协商快照数据源）
+	// desiredCfg 用户已保存、期望达到的配置（设置页/状态卡回显与 PendingRestart
+	// 数据源）。与 cfg 分离：仅保存（不热应用）时 desiredCfg 更新为磁盘目标态，
+	// 而 cfg 保持数据面真实生效值，避免状态卡显示一个"未生效"的配置却让新会话
+	// 或协商快照读到它。ApplyConfig（save_apply）时两者同步。
+	desiredCfg atomic.Pointer[Config]
 	// tapPort 本机 TAP 侧的 AsyncPort（startServer 创建后赋值）。热更调度/FEC
 	// 策略字段时一并设置，保证服务端所有发送方向（含 tap→server）策略一致。
 	tapPort *AsyncPort
@@ -1144,6 +1149,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		s.tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
 	}
 	s.cfg.Store(cfg)
+	s.desiredCfg.Store(cfg) // save_apply：数据面与目标态同步
 	return needsRestart
 }
 
@@ -1212,6 +1218,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 		hooks: hooks,
 	}
 	srv.cfg.Store(cfg)
+	srv.desiredCfg.Store(cfg) // 启动时目标态=生效态=启动配置
 	srv.bootCfg = cfg
 	// 交换机安全策略：会话端口只能声明本会话注册的 MAC（防跨客户端 MAC
 	// 冒充劫持下行流量）；本机 TAP 端口可信，豁免校验与广播限速。

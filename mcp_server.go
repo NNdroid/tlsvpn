@@ -324,6 +324,15 @@ func registerMCPWriteTools(s *mcp.Server, w *WebManager) {
 			// base，把第一次的改动静默回滚。数据面热应用仍仅限 apply=true。
 			w.SetConfig(newCfg)
 			dailyTraffic.OnConfig(newCfg)
+			// 保存目标态同步：与 /api/control 的 save 分支同理，无论是否热应用
+			// 都更新数据面"期望配置"，使状态卡与 PendingRestart 反映"已保存
+			// 但未生效"的字段。
+			if w.srv != nil {
+				w.srv.setSavedCfg(newCfg)
+			}
+			if w.cli != nil {
+				w.cli.setSavedCfg(newCfg)
+			}
 			if in.Apply {
 				if err := setRuntimeLogLevel(newCfg.LogLevel); err != nil {
 					return nil, nil, err

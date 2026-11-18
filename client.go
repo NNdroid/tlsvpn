@@ -1419,7 +1419,11 @@ type Client struct {
 	sessionEpoch     uint64                 // 服务端确认的密钥代际
 	peerInfo         PeerInfo               // 服务端自报诊断元数据；sessionMu 保护
 	negInfo          *sessionNeg            // 上次成功握手的协商快照（面板展示用）
-	cfgSnap          atomic.Pointer[Config] // 当前生效完整配置（面板"状态"页数据源）
+	cfgSnap          atomic.Pointer[Config] // 数据面实际生效完整配置（hook/up 启动数据源）
+	// desiredCfg 用户已保存、期望达到的配置（设置页/状态卡回显与 PendingRestart
+	// 数据源）。与 cfgSnap 分离：仅保存（不热应用）时 desiredCfg 更新为磁盘目标态，
+	// cfgSnap 保持数据面真实生效值。ApplyConfig（save_apply）时两者同步。
+	desiredCfg       atomic.Pointer[Config]
 	bootCfg          atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
 	connsMu          sync.Mutex
 	conns            map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
@@ -1666,6 +1670,7 @@ func (c *Client) ApplyConfig(cfg *Config) {
 	oldLive := c.live.Load()
 	c.live.Store(lv)
 	c.cfgSnap.Store(cfg)
+	c.desiredCfg.Store(cfg) // save_apply：数据面与目标态同步
 	// 内层加密器不在此处重建：GCM 实例由每次握手的会话盐派生，直接取自
 	// 刚更新的 lv.psk，无需额外的共享回退加密器。
 
@@ -1918,6 +1923,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	lv := liveFromCfg(cfg)
 	c.bootCfg.Store(cfg)
 	c.cfgSnap.Store(cfg)
+	c.desiredCfg.Store(cfg) // 启动时目标态=生效态=启动配置
 	c.wake = make(chan struct{}, 1)
 	c.instanceID.Store(uuid.New().String())
 	c.live.Store(lv)

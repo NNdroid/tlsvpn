@@ -642,6 +642,15 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 			// 因此随保存一起生效，保证运行态与磁盘一致。
 			mgr.SetConfig(newCfg)
 			dailyTraffic.OnConfig(newCfg)
+			// 保存目标态同步：无论是否热应用，数据面"期望配置"都更新为刚保存的
+			// 值，使状态卡（/api/stats 的 cfg）与 PendingRestart 立即反映"已保存
+			// 但未生效"的字段。ApplyConfig 内部也会 Store，这里覆盖仅保存路径。
+			if srv != nil {
+				srv.setSavedCfg(newCfg)
+			}
+			if cli != nil {
+				cli.setSavedCfg(newCfg)
+			}
 			if apply {
 				setRuntimeLogLevel(newCfg.LogLevel)
 				if srv != nil {
@@ -1026,7 +1035,9 @@ func buildWebStatsStruct(srv *Server, cli *Client) (*WebStats, error) {
 		}
 
 		cfg := srv.curCfg()
-		stats.Cfg = snapshotCfg(cfg, "server")
+		// 状态卡配置回显用「保存目标态」：仅保存后立即显示已保存的值，与设置页
+		// 一致；数据面真实生效值见 curCfg（会话水位/路由/TAP 链路仍用生效值）。
+		stats.Cfg = snapshotCfg(srv.savedCfg(), "server")
 		if cfg != nil {
 			// 会话水位：active 对 max_sessions（0 = 不限，面板按"无上限"渲染）
 			stats.Sessions = &sessionsJSON{Active: stats.RetainedSessions, Max: cfg.Server.MaxSessions}
@@ -1136,7 +1147,9 @@ func buildWebStatsStruct(srv *Server, cli *Client) (*WebStats, error) {
 		}
 
 		cfg := cli.curCfg()
-		stats.Cfg = snapshotCfg(cfg, "client")
+		// 状态卡配置回显用「保存目标态」：仅保存后立即显示已保存的值，与设置页
+		// 一致；数据面真实生效值见 curCfg（会话水位/路由/TAP 链路仍用生效值）。
+		stats.Cfg = snapshotCfg(cli.savedCfg(), "client")
 		stats.Negotiate = cli.negSnapshot()
 		if cfg != nil {
 			// 客户端"会话水位"是本机并发连接数对 conns 上限
@@ -1579,17 +1592,38 @@ func (c *Client) curCfg() *Config {
 	return c.cfgSnap.Load()
 }
 
+// savedCfg 用户已保存、期望达到的配置（保存目标态）。与 curCfg 分离：
+// 仅保存（不热应用）后 savedCfg 是磁盘目标态，curCfg 仍是数据面真实生效值。
+// desiredCfg 未初始化（测试替身/早期状态）时回退到数据面生效值，避免空快照。
+func (s *Server) savedCfg() *Config {
+	if c := s.desiredCfg.Load(); c != nil {
+		return c
+	}
+	return s.cfg.Load()
+}
+func (s *Server) setSavedCfg(c *Config) { s.desiredCfg.Store(c) }
+func (c *Client) savedCfg() *Config {
+	if cfg := c.desiredCfg.Load(); cfg != nil {
+		return cfg
+	}
+	return c.cfgSnap.Load()
+}
+func (c *Client) setSavedCfg(cfg *Config) { c.desiredCfg.Store(cfg) }
+
 // PendingRestart 与启动时配置相比、无法热更因而需要重启的字段。
+// 以「保存目标态」为基准：仅保存后即可提示"这些字段需重启才生效"，
+// 无需等 save_apply。数据面真实生效值见 curCfg。
 func (s *Server) PendingRestart() []string {
-	if cfg := s.curCfg(); cfg != nil {
+	if cfg := s.savedCfg(); cfg != nil {
 		return s.NeedsRestart(cfg)
 	}
 	return nil
 }
 
 // PendingRestart 与启动时配置相比、无法热更因而需要重启的字段。
+// 以「保存目标态」为基准（同 Server）。
 func (c *Client) PendingRestart() []string {
-	if cfg := c.curCfg(); cfg != nil {
+	if cfg := c.savedCfg(); cfg != nil {
 		return c.NeedsRestart(cfg)
 	}
 	return nil
