@@ -319,12 +319,15 @@ func registerMCPWriteTools(s *mcp.Server, w *WebManager) {
 			if err := SaveConfigFile(newCfg); err != nil {
 				return nil, nil, err
 			}
+			// 与 /api/control 的 save 分支同理：运行态配置对象随保存更新，
+			// 否则连续两次 tlsvpn_config_save 会以第一次保存前的旧配置为
+			// base，把第一次的改动静默回滚。数据面热应用仍仅限 apply=true。
+			w.SetConfig(newCfg)
+			dailyTraffic.OnConfig(newCfg)
 			if in.Apply {
 				if err := setRuntimeLogLevel(newCfg.LogLevel); err != nil {
 					return nil, nil, err
 				}
-				w.SetConfig(newCfg)
-				dailyTraffic.OnConfig(newCfg)
 				if w.srv != nil {
 					w.srv.ApplyConfig(newCfg)
 				}

@@ -631,12 +631,19 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 				http.Error(w, err.Error(), 400)
 				return
 			}
-			// 2) save 只持久化；save_apply 才改变当前进程。两种按钮语义
-			// 必须不同，避免用户选择“仅保存”时意外断开现有连接。
+			// 2) 运行态配置对象与磁盘保持一致：save 即更新 mgr 持有的配置（GET /api/config
+			// 立即反映刚保存的值），否则用户连续两次保存时，第二次提交的内容
+			// 来自第一次保存前的旧运行态，第一次改的字段会被静默回滚——
+			// 表现就是"保存了但没生效"。
+			//
+			// 数据面（日志级别 / Server / Client ApplyConfig）仍只在
+			// save_apply 时热应用：仅保存不得重启隧道或断开现有连接。
+			// dailyTraffic 只影响流量统计的保留天数与文件路径，不碰隧道，
+			// 因此随保存一起生效，保证运行态与磁盘一致。
+			mgr.SetConfig(newCfg)
+			dailyTraffic.OnConfig(newCfg)
 			if apply {
 				setRuntimeLogLevel(newCfg.LogLevel)
-				mgr.SetConfig(newCfg)
-				dailyTraffic.OnConfig(newCfg) // traffic_days/traffic_file 热更生效
 				if srv != nil {
 					srv.ApplyConfig(newCfg)
 				}
