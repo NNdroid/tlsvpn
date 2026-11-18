@@ -483,6 +483,9 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 	// 当前生效配置（面板"设置"页）
 	mux.HandleFunc("/api/config", auth(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// 回显接口禁缓存：保存（save/save_apply）后面板立即重新 GET 回显归一化
+		// 结果，中间层/浏览器若返回缓存旧值，编辑器会对齐到保存前的状态。
+		w.Header().Set("Cache-Control", "no-store")
 		redacted := *mgr.Config()
 		redacted.PSK = ""
 		redacted.Web.Auth = ""

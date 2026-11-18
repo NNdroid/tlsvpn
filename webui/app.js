@@ -2505,14 +2505,37 @@ async function setLogLevel(v){
 }
 
 // ---------- 设置页：配置查看/保存/热应用 ----------
+// needs_restart 字段名 → 面板本地化标签。token 由两端 NeedsRestart 硬编码
+// （稳定契约），组合 token（v4/v6 网段、brutal 上/下行）在 restartLabel 内
+// 拼 cfgk 两段；缺映射回落原始 token——后端新增字段时面板不至于静默撒谎。
+const RESTART_LABELS={
+  tap:'cfgk.tap',mac:'cfgk.mac',socks5:'cfgk.socks5',
+  encrypt:'cfgk.encrypt',enc_algo:'cfgk.enc_algo',
+  psk:'set.restart_psk',
+  'server.cert/key':'set.restart_cert',
+  'client.conns':'cfgk.conns',
+  'client.fwmark':'cfgk.fwmark',
+  'client.interface_manager':'cfgk.interface_manager',
+};
+function restartLabel(tok){
+  const key=RESTART_LABELS[tok];
+  if(key){const v=t(key);if(v!==key)return v;}
+  if(tok==='server.v4_cidr/v6_cidr')return t('cfgk.v4_cidr')+'/'+t('cfgk.v6_cidr');
+  if(tok==='up/down')return t('cfgk.brutal_up')+'/'+t('cfgk.brutal_down');
+  return tok;
+}
+// loadConfig 拉取 /api/config（后端归一化+凭据脱敏后的真实落盘配置）回填
+// 编辑器；返回 true=编辑器已更新、false=拉取失败（cfg-status 显示原因）。
+// 返回值供 saveConfig 的保存后回显区分成败——失败时不能用保存消息覆盖错误。
 async function loadConfig(){
   const st=document.getElementById('cfg-status');
   try{
     const res=await fetch(url('/api/config'),AUTH_HDR);
-    if(!res.ok){st.textContent=t('set.loaded_err')+' HTTP '+res.status;return;}
+    if(!res.ok){st.textContent=t('set.loaded_err')+' HTTP '+res.status;return false;}
     document.getElementById('cfg-editor').value=await res.text();
     st.textContent='';
-  }catch(e){st.textContent=t('set.loaded_err')+' '+e;}
+    return true;
+  }catch(e){st.textContent=t('set.loaded_err')+' '+e;return false;}
 }
 async function saveConfig(apply){
   const st=document.getElementById('cfg-status');
@@ -2533,16 +2556,28 @@ async function saveConfig(apply){
       const txt=data.error||txtBody||('HTTP '+res.status);
       st.textContent=txt;toast(t('toast.fail')+' '+txt.slice(0,120),'err');return;
     }
+    // needs_restart 显示本地化标签（restartLabel 映射 cfgk / 专用键，缺映射
+    // 回落原始 token），替代用户看不懂的 "client.interface_manager" 这类字段名。
+    const nr=data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.map(restartLabel).join(', ')):'';
     if(apply){
-      st.textContent=t('set.applied')+(data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.join(', ')):'');
+      st.textContent=t('set.applied')+nr;
       toast(t('toast.applied'),'ok');
       setTimeout(function(){if(window.tlsvpnStreamRestart)window.tlsvpnStreamRestart();},500);
     }else{
       // 仅保存：写回磁盘但未热应用。仍须提示"需重启生效"字段，否则用户以为
       // 改动已生效而数据面实际跑旧配置（settings 页与 /api/stats 会不一致）。
-      st.textContent=t('set.saved')+(data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.join(', ')):'');
+      st.textContent=t('set.saved')+nr;
       toast(t('toast.saved'),'ok');
     }
+    // 保存后回显归一化结果：保存响应只带 needs_restart；磁盘/运行态持有的是
+    // 后端归一化（applyDefaults+Validate+凭据保留+mode/SourcePath 固定）后的
+    // 配置，编辑器若停留在用户草稿，下一次保存提交的还是草稿形态——显示上
+    // 永远与真实落盘值差一拍。重新 GET /api/config 让编辑器对齐真实落盘值
+    // （调度/MCP 面板经包装链级联回填，400ms 轮询兜底）。loadConfig 成功会清
+    // cfg-status，保存消息（含本地化需重启字段）在回显后恢复；GET 失败则保留
+    // 其错误提示——此时编辑器维持草稿，静默吞掉错误会让人以为已对齐。
+    const savedMsg=st.textContent;
+    if(await loadConfig())st.textContent=savedMsg;
   }catch(e){st.textContent=String(e);toast(String(e),'err');}
 }
 
