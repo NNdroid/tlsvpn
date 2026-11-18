@@ -392,7 +392,7 @@ func TestSchedEnvelopeConfigValidate(t *testing.T) {
 	psk := strings.Repeat("a1", 32)
 	valid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + psk +
 		`","sched_envelope":"fwd","sched_envelope_ms":35}`
-	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), false, nil, nil)
+	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), nil, nil)
 	if err != nil {
 		t.Fatalf("合法 sched_envelope 应通过: %v", err)
 	}
@@ -401,13 +401,13 @@ func TestSchedEnvelopeConfigValidate(t *testing.T) {
 	}
 
 	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(
-		`{"mode":"client","addr":"1.2.3.4:4000","psk":"`+psk+`","sched_envelope":"bogus"}`), false, nil, nil); err == nil {
+		`{"mode":"client","addr":"1.2.3.4:4000","psk":"`+psk+`","sched_envelope":"bogus"}`), nil, nil); err == nil {
 		t.Fatal("非法 sched_envelope 必须被拒绝")
 	}
 	// 0 = 未配置，applyDefaults 归一为默认 20ms 后才校验，故不属于越界；下界同理
 	// （minMs-1 = 0 会被归一），只断言真越界的上界。
 	bad := fmt.Sprintf(`{"mode":"client","addr":"1.2.3.4:4000","psk":"%s","sched_envelope_ms":%d}`, psk, schedEnvelopeMaxMs+1)
-	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(bad), false, nil, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(bad), nil, nil); err == nil {
 		t.Errorf("越界 sched_envelope_ms=%d 必须被拒绝", schedEnvelopeMaxMs+1)
 	}
 }
@@ -417,7 +417,7 @@ func TestSchedEnvelopeConfigValidate(t *testing.T) {
 func TestSchedEnvelopeDefaultIsRTT(t *testing.T) {
 	old := &Config{}
 	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(
-		`{"mode":"client","addr":"1.2.3.4:4000","psk":"`+strings.Repeat("a1", 32)+`"}`), false, nil, nil)
+		`{"mode":"client","addr":"1.2.3.4:4000","psk":"`+strings.Repeat("a1", 32)+`"}`), nil, nil)
 	if err != nil {
 		t.Fatalf("最小配置应通过: %v", err)
 	}

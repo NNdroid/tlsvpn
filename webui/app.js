@@ -2518,7 +2518,9 @@ async function saveConfig(apply){
       toast(t('toast.applied'),'ok');
       setTimeout(function(){if(window.tlsvpnStreamRestart)window.tlsvpnStreamRestart();},500);
     }else{
-      st.textContent=t('set.saved');
+      // 仅保存：写回磁盘但未热应用。仍须提示"需重启生效"字段，否则用户以为
+      // 改动已生效而数据面实际跑旧配置（settings 页与 /api/stats 会不一致）。
+      st.textContent=t('set.saved')+(data.needs_restart&&data.needs_restart.length?(' · '+t('set.restart_nr')+' '+data.needs_restart.join(', ')):'');
       toast(t('toast.saved'),'ok');
     }
   }catch(e){st.textContent=String(e);toast(String(e),'err');}

@@ -191,7 +191,7 @@ func registerMCPReadTools(s *mcp.Server, w *WebManager) {
 			if err != nil {
 				return nil, nil, err
 			}
-			cfg, needsRestart, err := mergeAndValidateConfig(w.Config(), raw, false, w.srv, w.cli)
+			cfg, needsRestart, err := mergeAndValidateConfig(w.Config(), raw, w.srv, w.cli)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -312,7 +312,7 @@ func registerMCPWriteTools(s *mcp.Server, w *WebManager) {
 			if err != nil {
 				return nil, nil, err
 			}
-			newCfg, needsRestart, err := mergeAndValidateConfig(w.Config(), raw, in.Apply, w.srv, w.cli)
+			newCfg, needsRestart, err := mergeAndValidateConfig(w.Config(), raw, w.srv, w.cli)
 			if err != nil {
 				return nil, nil, err
 			}

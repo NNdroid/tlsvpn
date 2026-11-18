@@ -29,7 +29,7 @@ func TestSchedSaveFullGetRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal posted config: %v", err)
 	}
-	cfg, _, err := mergeAndValidateConfig(old, raw, true, &Server{}, nil)
+	cfg, _, err := mergeAndValidateConfig(old, raw, &Server{}, nil)
 	if err != nil {
 		t.Fatalf("完整 GET 回传保存失败: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestMergeConfigPinsMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal posted config: %v", err)
 	}
-	cfg, _, err := mergeAndValidateConfig(old, raw, false, &Server{}, nil)
+	cfg, _, err := mergeAndValidateConfig(old, raw, &Server{}, nil)
 	if err != nil {
 		t.Fatalf("merge failed: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestMergeConfigMCPredentialRoundtrip(t *testing.T) {
 			"mcp": map[string]any{"auth_mode": "bearer", "credential": ""}},
 	}
 	raw, _ := json.Marshal(sameMode)
-	cfg, _, err := mergeAndValidateConfig(old, raw, false, &Server{}, nil)
+	cfg, _, err := mergeAndValidateConfig(old, raw, &Server{}, nil)
 	if err != nil {
 		t.Fatalf("same-mode save with redacted credential failed: %v", err)
 	}
@@ -114,7 +114,47 @@ func TestMergeConfigMCPredentialRoundtrip(t *testing.T) {
 			"mcp": map[string]any{"auth_mode": "api_key", "api_key_header": "X-API-Key", "credential": ""}},
 	}
 	raw2, _ := json.Marshal(switchMode)
-	if _, _, err := mergeAndValidateConfig(old, raw2, false, &Server{}, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, raw2, &Server{}, nil); err == nil {
 		t.Fatal("mode switch with empty credential must fail validation")
+	}
+}
+
+// TestMergeConfigReportsRestartOnSaveOnly 回归：needs_restart 只比较「启动配置 vs
+// 提交值」，与 apply 无关。此前 apply=false 时跳过 NeedsRestart，导致"仅保存"（不
+// 热应用）响应恒返回空 needs_restart——用户看到"已保存"却无任何"需重启生效"提示，
+// 数据面实际仍在跑旧配置，改动可能永不生效。仅保存也必须返回完整差异。
+func TestMergeConfigReportsRestartOnSaveOnly(t *testing.T) {
+	old := &Config{Mode: "server", SourcePath: "cfg.json",
+		PSK:  "0123456789abcdef0123456789abcdef",
+		Addr: ":4000", Tap: "tap0",
+		Web: WebConfig{Addr: "127.0.0.1:8080", Bind: "all", Auth: "admin:realpassword",
+			MCP: MCPConfig{OAuth: MCPOAuthJWTConfig{}}}}
+	old.applyDefaults()
+
+	// 启动配置（bootCfg）与 old 一致；提交值把 tap 改成 tap1（NeedsRestart 必报）
+	srv := &Server{bootCfg: old}
+	posted := map[string]any{
+		"mode": "server", "psk": "", "addr": ":4000", "tap": "tap1",
+		"web":    map[string]any{"addr": "127.0.0.1:8080", "bind": "all", "auth": ""},
+		"server": map[string]any{"v4_cidr": "10.0.0.0/24", "v6_cidr": "fd00::/64"},
+	}
+	raw, err := json.Marshal(posted)
+	if err != nil {
+		t.Fatalf("marshal posted config: %v", err)
+	}
+
+	// apply=false（仅保存）也必须报告需重启字段
+	_, needsRestart, err := mergeAndValidateConfig(old, raw, srv, nil)
+	if err != nil {
+		t.Fatalf("save-only merge failed: %v", err)
+	}
+	found := false
+	for _, f := range needsRestart {
+		if f == "tap" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("save-only needs_restart must include %q (got %v)", "tap", needsRestart)
 	}
 }

@@ -255,7 +255,7 @@ func TestServerFecGroupPolicyHotReload(t *testing.T) {
 	newCfg, needsRestart, err := mergeAndValidateConfig(srv.cfg.Load(),
 		[]byte(`{"mode":"server","psk":"test-only-high-entropy-secret","tap":"mem","addr":"127.0.0.1:0",
 			"server":{"v4_cidr":"10.0.0.0/24","v6_cidr":"fd00::/64",
-				"fec_group_min":2,"fec_group_max":64}}`), true, srv, nil)
+				"fec_group_min":2,"fec_group_max":64}}`), srv, nil)
 	if err != nil {
 		t.Fatalf("hot cfg merge/validate: %v", err)
 	}

@@ -19,7 +19,7 @@ func TestMergeConfigRejectsTrailingJSON(t *testing.T) {
 	old := &Config{Mode: "client", PSK: "test-only-high-entropy-secret", Addr: "127.0.0.1:4000"}
 	old.applyDefaults()
 	posted := json.RawMessage(`{"mode":"client","psk":"test-only-high-entropy-secret","addr":"127.0.0.1:4000"} {}`)
-	if _, _, err := mergeAndValidateConfig(old, posted, false, nil, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, posted, nil, nil); err == nil {
 		t.Fatal("config endpoint must reject a second trailing JSON value")
 	}
 }
@@ -608,7 +608,7 @@ func TestMCPConfigSetCertSHA256(t *testing.T) {
 	old := &Config{}
 	// client 模式必填 addr/psk；用合法值填充以便仅验证 cert_sha256 的校验路径。
 	valid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) + `","client":{"cert_sha256":"` + strings.Repeat("ab", 32) + `"}}`
-	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), false, nil, nil)
+	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), nil, nil)
 	if err != nil {
 		t.Fatalf("合法 cert_sha256 应通过: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestMCPConfigSetCertSHA256(t *testing.T) {
 		t.Fatalf("cert_sha256 未被设置: %q", cfg.Client.CertSHA256)
 	}
 	invalid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) + `","client":{"cert_sha256":"short"}}`
-	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), false, nil, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), nil, nil); err == nil {
 		t.Fatal("非法 cert_sha256（非 64 hex）必须被拒绝")
 	}
 }
@@ -637,7 +637,7 @@ func TestMCPConfigSchedulerFields(t *testing.T) {
 	old := &Config{}
 	valid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
 		`","routing_algo":"min_rtt_strict","fec_strategy":"near","fec_near_window_ms":15}`
-	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), false, nil, nil)
+	cfg, _, err := mergeAndValidateConfig(old, json.RawMessage(valid), nil, nil)
 	if err != nil {
 		t.Fatalf("合法调度字段应通过: %v", err)
 	}
@@ -648,12 +648,12 @@ func TestMCPConfigSchedulerFields(t *testing.T) {
 	// 非法值必须被拒
 	invalid := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
 		`","routing_algo":"bogus"}`
-	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), false, nil, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(invalid), nil, nil); err == nil {
 		t.Fatal("非法 routing_algo 必须被拒绝")
 	}
 	badWin := `{"mode":"client","addr":"1.2.3.4:4000","psk":"` + strings.Repeat("a1", 32) +
 		`","fec_near_window_ms":200}`
-	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(badWin), false, nil, nil); err == nil {
+	if _, _, err := mergeAndValidateConfig(old, json.RawMessage(badWin), nil, nil); err == nil {
 		t.Fatal("越界 fec_near_window_ms 必须被拒绝")
 	}
 }

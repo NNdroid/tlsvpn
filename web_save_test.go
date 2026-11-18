@@ -16,6 +16,13 @@ import (
 // startSaveHTTPHarness 起一个从 -c 文件加载配置的 Web 面板，完成登录，
 // 返回带 cookie 的 client。用于回归 /api/control 的 save 语义。
 func startSaveHTTPHarness(t *testing.T) (base, path string, client *http.Client) {
+	return startSaveHTTPHarnessSrv(t, statsAuditServer())
+}
+
+// startSaveHTTPHarnessSrv 是 startSaveHTTPHarness 的变体：允许调用方注入一个
+// 带 bootCfg 的真实 Server（模拟生产服务端），用于验证「服务端保存后刷新
+// 返回新值」这一用户可感知的链路，而非仅用 bootCfg=nil 的测试替身。
+func startSaveHTTPHarnessSrv(t *testing.T, srv *Server) (base, path string, client *http.Client) {
 	t.Helper()
 	dir := t.TempDir()
 	path = filepath.Join(dir, "config.json")
@@ -41,7 +48,7 @@ func startSaveHTTPHarness(t *testing.T) (base, path string, client *http.Client)
 	cfg.SourcePath = path
 	port := freePort(t)
 	cfg.Web.Addr = fmt.Sprintf("127.0.0.1:%d", port)
-	startWebServer(cfg.Web.Addr, statsAuditServer(), nil, "", "", "", cfg)
+	startWebServer(cfg.Web.Addr, srv, nil, "", "", "", cfg)
 	waitListener(t, cfg.Web.Addr, 3*time.Second)
 	base = cfg.Web.Addr
 
@@ -105,6 +112,60 @@ func TestSaveReflectsInPanel(t *testing.T) {
 	}
 	if !strings.Contains(body, `"brutal_up": 200`) {
 		t.Errorf("save 后 GET /api/config 未反映新值（用户会以为保存失败）:\n%s", body)
+	}
+}
+
+// TestSaveReflectsInPanelWithBootCfg 直接覆盖用户可感知的「服务端修改后保存、
+// 刷新仍是旧值」场景：用带 bootCfg 的真实 Server（非 bootCfg=nil 的测试替身）
+// 启动面板，保存 brutal_up 100→200，GET /api/config 必须返回 200，绝不能回滚成
+// 启动值 100。此前 TestSaveReflectsInPanel 只用 statsAuditServer()（bootCfg=nil），
+// 无法暴露 bootCfg 非空时 NeedsRestart 参与计算对保存链路的任何影响。
+func TestSaveReflectsInPanelWithBootCfg(t *testing.T) {
+	// 启动时配置（bootCfg）：applyDefaults 会把未写的 brutal_up 归一到 100
+	dir := t.TempDir()
+	bootPath := filepath.Join(dir, "boot.json")
+	bootJSON := `{
+	  "mode": "server",
+	  "psk": "test-only-high-entropy-secret-abcdefgh",
+	  "addr": "127.0.0.1:4000",
+	  "encrypt": true,
+	  "enc_algo": "gcm256",
+	  "web": {"addr": "127.0.0.1:8080", "bind": "all", "auth": "admin:realpassword123"},
+	  "server": {"v4_cidr": "10.0.0.0/24", "v6_cidr": "fd00::/64", "max_sessions": 1024}
+	}`
+	if err := os.WriteFile(bootPath, []byte(bootJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootCfg, err := loadConfigFile(bootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootCfg.applyDefaults()
+	if bootCfg.BrutalUp != 100 {
+		t.Fatalf("bootCfg.brutal_up = %d, want 100 (applyDefaults 归一)", bootCfg.BrutalUp)
+	}
+	srv := statsAuditServer()
+	srv.bootCfg = bootCfg
+
+	base, _, client := startSaveHTTPHarnessSrv(t, srv)
+
+	// 保存 brutal_up 100→200（仅保存，不热应用）
+	code, body := postControl(t, base, client, "save",
+		`{"mode":"server","psk":"test-only-high-entropy-secret-abcdefgh","addr":"127.0.0.1:4000","encrypt":true,"enc_algo":"gcm256","brutal_up":200,"web":{"addr":"127.0.0.1:8080","bind":"all"}}`)
+	if code != http.StatusOK {
+		t.Fatalf("save returned %d: %s", code, body)
+	}
+
+	// 刷新 GET /api/config：必须看到 200，绝不能回滚成启动值 100
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET /api/config returned %d: %s", code, body)
+	}
+	if !strings.Contains(body, `"brutal_up": 200`) {
+		t.Errorf("带 bootCfg 的服务端 save 后 GET 未返回新值（刷新仍是旧值）:\n%s", body)
+	}
+	if strings.Contains(body, `"brutal_up": 100`) {
+		t.Errorf("带 bootCfg 的服务端 save 后 GET 回滚成启动值 100（刷新显示旧值）:\n%s", body)
 	}
 }
 

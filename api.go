@@ -621,7 +621,7 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 
 		case req.Action == "save" || req.Action == "save_apply":
 			apply := req.Action == "save_apply"
-			newCfg, needsRestart, err := mergeAndValidateConfig(mgr.Config(), req.Config, apply, srv, cli)
+			newCfg, needsRestart, err := mergeAndValidateConfig(mgr.Config(), req.Config, srv, cli)
 			if err != nil {
 				http.Error(w, err.Error(), 400)
 				return
@@ -666,8 +666,10 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 }
 
 // mergeAndValidateConfig 解析面板提交的新配置，校验并计算需重启字段。
-// apply=false 时仅校验不落盘不生效。
-func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv *Server, cli *Client) (*Config, []string, error) {
+// 需重启字段只比较「启动时配置」与提交值，与是否热应用无关：即使仅保存
+// （不热应用），调用方也必须知道哪些字段要重启才能生效。热应用与否由调用方
+// 在返回后按自己的 apply 标记决定，本函数不据此改变行为。
+func mergeAndValidateConfig(old *Config, posted json.RawMessage, srv *Server, cli *Client) (*Config, []string, error) {
 	dec := json.NewDecoder(strings.NewReader(string(posted)))
 	dec.DisallowUnknownFields()
 	newCfg := &Config{}
@@ -707,14 +709,16 @@ func mergeAndValidateConfig(old *Config, posted json.RawMessage, apply bool, srv
 	if err := newCfg.Validate(); err != nil {
 		return nil, nil, err
 	}
+	// needs_restart 只比较「启动时配置」与提交的目标配置，与 apply 无关：
+	// 即使仅保存（不热应用），用户也必须知道哪些字段要重启才能生效，
+	// 否则面板提示"已保存"却无任何"需重启生效"提示，改动可能永不生效
+	// （数据面仍跑旧配置）。save 与 save_apply 都返回完整差异。
 	var needsRestart []string
-	if apply {
-		if srv != nil {
-			needsRestart = append(needsRestart, srv.NeedsRestart(newCfg)...)
-		}
-		if cli != nil {
-			needsRestart = append(needsRestart, cli.NeedsRestart(newCfg)...)
-		}
+	if srv != nil {
+		needsRestart = append(needsRestart, srv.NeedsRestart(newCfg)...)
+	}
+	if cli != nil {
+		needsRestart = append(needsRestart, cli.NeedsRestart(newCfg)...)
 	}
 	return newCfg, needsRestart, nil
 }
