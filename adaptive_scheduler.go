@@ -176,7 +176,7 @@ type backendCandidate struct {
 	backend   *Backend
 	baseUS    int64 // unloaded path quality: oneWay probe + this batch service time; signed (probe raw may be negative)
 	rttUS     uint32
-	schedRate uint64 // fair-start rate used only by this scheduling decision
+	schedRate uint64 // per-path charge/rank rate: writer-drain EWMA，未测路径回退保守 25MB/s（公平启动）
 	wasActive bool
 	virtualNS int64 // logical WFQ service debt; deliberately independent of wall clock
 }
@@ -236,9 +236,12 @@ type schedulerConnJSON struct {
 	// 的路径解释成包络外。0=尚未建立。与 GroupMinRttUS 是两条独立的门，不同时
 	// 都生效——前端应按端口级 envelope_mode 选择展示哪一组。
 	GroupFwdFloorUS int64 `json:"group_fwd_floor_us,omitempty"`
-	// FwdRankKnown / FwdRankUS 本路径已收敛的去程读数（µs，有符号相对量），与
-	// GroupFwdFloorUS 同一尺度，供 fwd 门的排除比较式使用。刻意区别于显示层的
-	// fwd_oneway_us（后者带 δ 抬升非负）。未收敛时两者都缺省，前端不显示比较式。
+	// FwdRankKnown / FwdRankUS 本路径已收敛的有效去程读数（µs，有符号相对量），
+	// 与 GroupFwdFloorUS 同一尺度，供 fwd 门的排除比较式使用。有效值 =
+	// max(decayed-min 地板, recent-typical − 抖动容差)：地板对同连接内持续劣化
+	// （拥塞/路由漂移）迟钝，typical ~5s 跟随把这类路径及时压下去。刻意区别于
+	// 显示层的 fwd_oneway_us（后者是纯地板 + δ 抬升非负，"面板读数"与"调度依据"
+	// 两条数并置展示才能看出差别）。未收敛时两者都缺省，前端不显示比较式。
 	FwdRankKnown bool  `json:"fwd_rank_known,omitempty"`
 	FwdRankUS    int64 `json:"fwd_rank_us,omitempty"`
 	// NearState parity near 窗口成员资格："in"=窗口内、"lenient"=探针未收敛的
@@ -247,6 +250,10 @@ type schedulerConnJSON struct {
 	NearState string `json:"near_state,omitempty"`
 	// StickyHeld 本批是否因粘滞滞回保留了当前路径（而非取 rank[0]）。
 	StickyHeld bool `json:"sticky_held,omitempty"`
+	// RetransDelta 最近一个采样窗（200ms）的 TCP 重传段数（Backend.noteRetrans
+	// 对 tcpi_total_retrans 差分）。重传=路径正在丢段的信号，时延地板对此不敏感；
+	// 面板据此把"丢包路径"与"高时延路径"区分开。仅观测，不在 TLSVPN 线上。
+	RetransDelta uint32 `json:"retrans_delta,omitempty"`
 	// PeerActive 对端调度器当前选中本槽位（0x07 active-paths 位图，2s 窗口内
 	// 收到过声明）。与 Active（本端选中）并列：面板据此把"两端各自选了谁"
 	// 同时呈现。由连接快照组装层填充（数据在 connInfo 而非 Backend）。
@@ -361,6 +368,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		RankKnown:          flags&schedFlagRankKnown != 0,
 		RankKeyUS:          b.rankKeyUS.Load(),
 		StickyHeld:         flags&schedFlagStickyHeld != 0,
+		RetransDelta:       b.retransDelta.Load(),
 	}
 	// 排除原因优先于"候选内"呈现：被排除时 Eligible 必为 false，面板据此换徽章。
 	reason := flags & schedFlagExcludeMask
@@ -611,11 +619,11 @@ func (p *AsyncPort) publishBaselineETA(backends []*Backend, incomingBytes uint64
 
 // schedEnvelopeFloor 健康后端的去程读数最小值：fwd 门的地板。
 //
-// 只计 backendOneWayUS 已收敛的路径（真实探针值），且要求与 min_rtt 同源
-// 的公平启动条件（有 RTT 且完成热身）——冷/未测路径的 min_rtt/2 回退是绝对
-// 内核尺度，与已收敛探针的有符号相对量混排会让参考地板被一条冷路径钉到负
-// 侧，把其余路径全部判成"包络外"。因此地板取不到时返回 ok=false，调用方整体
-// 回退 rtt 门（见 schedEnvelope 的文档）。
+// 只计 backendOneWayUS 已收敛的路径（有效探针值：max(地板, recent-typical −
+// 抖动容差)，见 recomputeAll），且要求与 min_rtt 同源的公平启动条件（有 RTT
+// 且完成热身）——冷/未测路径的 min_rtt/2 回退是绝对内核尺度，与已收敛探针的
+// 有符号相对量混排会让参考地板被一条冷路径钉到负侧，把其余路径全部判成
+// "包络外"。因此地板取不到时返回 ok=false，调用方整体回退 rtt 门。
 func schedEnvelopeFloor(backends []*Backend) (floor int64, ok bool) {
 	var minFwd int64
 	for _, b := range backends {
@@ -697,14 +705,15 @@ func (p *AsyncPort) envelopeIn(fwdFloor int64, fwdFloorOK bool, maxRTT uint64, m
 // 由 run goroutine 独占并按批复用（与 schedulerScratch/parityScratch 同纪律），
 // 消除每批一次的固定堆分配。
 type envelopeObs struct {
-	alive      bool   // 通过健康闸（第一遍观察，后续阶段沿用）
-	rtt        uint32 // adaptiveBackendMinRTT 首读
-	unknownRTT bool
-	cold       bool   // rateBytesPerSec==0（第一遍观察）
-	rate       uint64 // 首读的速率值，第二遍直接参与 referenceRate
-	cap        int    // queueCap 首读（候选阶段的排除子原因区分用）
-	qLen       int    // queueLen 首读
-	stalled    bool   // isStalled 首读
+	alive       bool   // 通过健康闸（第一遍观察，后续阶段沿用）
+	rtt         uint32 // adaptiveBackendMinRTT 首读
+	unknownRTT  bool
+	cold        bool   // rateBytesPerSec==0（第一遍观察）
+	rate        uint64 // 首读的速率值，第二遍直接参与 referenceRate
+	deliverRate uint64 // 容量权重首读（饱和门控测量，见 noteCapacitySample；0=未测得）
+	cap         int    // queueCap 首读（候选阶段的排除子原因区分用）
+	qLen        int    // queueLen 首读
+	stalled     bool   // isStalled 首读
 }
 
 func (p *AsyncPort) scanEnvelope(backends []*Backend) (obs []envelopeObs, minRTT uint32, maxRTT uint64, referenceRate uint64, healthy int) {
@@ -729,6 +738,7 @@ func (p *AsyncPort) scanEnvelope(backends []*Backend) (obs []envelopeObs, minRTT
 		healthy++
 		o.rtt, o.unknownRTT = adaptiveBackendMinRTT(b)
 		o.rate = b.rateBytesPerSec.Load()
+		o.deliverRate = b.deliverRateBytesPerSec.Load()
 		o.cold = o.rate == 0
 		if !o.unknownRTT && !o.cold && o.rtt < minWarmed {
 			minWarmed = o.rtt
@@ -838,8 +848,28 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelope
 			eta -= adaptiveCarryBonusUS
 		}
 		b.etaUsec.Store(eta)
-		// 调度债务刻意字节公平：统一固定速率把虚拟服务时间变成字节计数器。
-		schedRate := uint64(adaptiveFallbackRateBytesPerSec)
+		// 调度债务按路径容量计费（容量加权 WFQ）：权重来自饱和门控的容量采样
+		// （noteCapacitySample——conn.Write 阻塞 ≥ 半窗才结算，writer 未饱和时
+		// 的 drain 速率是"被喂速率"，直接做权重会正反馈饿死欠估路径，见
+		// TestAdaptiveSchedulerWriterRateCannotMonopolizePath 的钉死注释）。
+		// 未测得容量的路径拿「组内最大容量 / 4」的防饿地板：欠估路径仍能拿到
+		// 足以打满自身、修正测量的流量份额，权重随饱和窗自然收敛；全组都未测得
+		// 时统一回退保守 25MB/s（等效字节公平，与 ETA 回退同源）。该速率同时
+		// 参与 auto 算法的服务时间排名项（candidateRankUS），使 auto 与
+		// latency_sticky（纯地板）真正区分。
+		maxDeliver := uint64(0)
+		for j := range obs {
+			if obs[j].deliverRate > maxDeliver {
+				maxDeliver = obs[j].deliverRate
+			}
+		}
+		schedRate := o.deliverRate
+		if floor := maxDeliver / 4; schedRate < floor {
+			schedRate = floor
+		}
+		if schedRate == 0 {
+			schedRate = uint64(adaptiveFallbackRateBytesPerSec)
+		}
 		// 主排名键按当前算法计算（candidateRankUS）；完全未测路径折到 minRTT/2。
 		// oneWay 为有符号原始相对量（探针已收敛时，负值=快于 ref 基准），显示层
 		// 的 δ 抬升不参与选路——回退候选不带 δ，混排时不抵消会扭曲排名。

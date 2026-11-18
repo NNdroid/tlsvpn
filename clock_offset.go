@@ -162,11 +162,17 @@ func patchClockOffsetSendTS(sendBuffer []byte, now time.Time) {
 	binary.BigEndian.PutUint64(sendBuffer[off:off+8], uint64(now.UnixNano()))
 }
 
-// offsetSample 一次完整往返的四个时间戳 + 目标连接。
+// offsetSample 一次完整往返的四个时间戳 + 目标连接 + 本地采集时刻。
 type offsetSample struct {
 	t1, t2, t3, t4 uint64 // A 发送 / B 接收 / B 发送 / A 接收（ns）
 	conn           int
+	at             time.Time // 本端收到回包（采集）时刻，solve 按它做样本老化
 }
+
+// clockOffsetSampleMaxAge 样本最大年龄。256 样本 ≈2 分钟，网络切换后旧 regime
+// 会拖住 θ 中位数；超龄样本直接从估计集剔除，θ 在 ~1 分钟内完成向新状态的收敛
+// （其余寿命由 ref 切换时的整体重置兜底）。
+const clockOffsetSampleMaxAge = 120 * time.Second
 
 // clockOffsetEstimator 维护样本缓冲，线性最小化估计 θ（ns，A 相对 B）+ 不确定度 U（µs）。
 //
@@ -197,6 +203,9 @@ func newClockOffsetEstimator() *clockOffsetEstimator {
 
 // add 追加一次往返样本，按环形缓冲保留最近 clockOffsetSampleCap 个。
 func (e *clockOffsetEstimator) add(s offsetSample) {
+	if s.at.IsZero() {
+		s.at = time.Now()
+	}
 	if len(e.samples) < clockOffsetSampleCap {
 		e.samples = append(e.samples, s)
 		e.head = 0
@@ -248,6 +257,11 @@ func (e *clockOffsetEstimator) solve() {
 	// 用 uint64 差值转 int64（ns 量级远小于 int64 上限，无溢出）。
 	est := make([]int64, 0, n)
 	for _, s := range e.samples {
+		// 样本老化：超龄样本属于旧网络状态（路由切换、路径迁移），留在集合里
+		// 会让 θ 中位数在新旧 regime 之间拖 ~2 分钟。
+		if !s.at.IsZero() && time.Since(s.at) > clockOffsetSampleMaxAge {
+			continue
+		}
 		// 只过滤缺时间戳的哨兵样本；t2<t1 / t4<t3 是跨钟（A↔B）比较，B 慢于
 		// A 属合法状态（θ<0），据此丢弃会让估计器对负偏移系统性失明。
 		if s.t1 == 0 || s.t2 == 0 || s.t3 == 0 || s.t4 == 0 {
@@ -471,7 +485,14 @@ func (s *clockOffsetScheduler) issueRound() {
 	}
 	// 偏移估计针对 ref 连接（index 最小者），与 rttProbe 的 ref 选法一致。
 	ref := active[0]
-	s.target = ref
+	if ref != s.target {
+		// ref 变化 = 被测链路换了：θ 是"该条链路的去/回程不对称度"，旧 ref 的
+		// 样本对新 ref 毫无意义——整体重置估计器，θ 从不可信态重新收敛（面板
+		// 显示同步丢失，~8 个样本 ≈4s 恢复），而不是让新旧链路的 θ 混合出
+		// 无人持有的伪值。
+		s.est = newClockOffsetEstimator()
+		s.target = ref
+	}
 	s.emitProbe(ref)
 }
 
@@ -521,12 +542,13 @@ func (s *clockOffsetScheduler) respond(fr clockOffsetFrame) {
 	if b == nil || b.probeCh == nil {
 		return
 	}
-	now := time.Now()
-	recvTS := uint64(now.UnixNano())
-	// off_ts 存 UnixMilli 低 32 位。当前毫秒时间戳约 1.76e12，已超出 uint32
-	//（32 位承载纳秒才够 ~136 年）；接收端以 recv_ts 的毫秒为基准、按 uint32
-	// 环回差值重建完整 t3，见 absorb。
-	txTS := uint32(now.UnixMilli())
+	// t2 必须取读循环的到达时刻（fr.recvAt，与 absorb 的 t4 同一打点位置），
+	// 而非本 goroutine 的 time.Now()：后者混入 replies 通道（cap 64）+ goroutine
+	// 唤醒延迟 d——负载下 d 系统性偏大且方差小，会让 θ 估计带 +d/2 的固定偏置
+	// 却"低不确定度收敛"到错值。t3 依旧取注入时刻（writer 队列延迟属于回程
+	// 链路，本来就该计入 B−θ 分量，off_ts 显式回填的意义所在）。
+	recvTS := uint64(fr.recvAt.UnixNano())
+	txTS := uint32(time.Now().UnixMilli())
 	payload := appendClockOffsetReplyFrame(nil, fr.nonce, fr.sendTS, recvTS, txTS)
 	select {
 	case b.probeCh <- payload:
@@ -566,6 +588,7 @@ func (s *clockOffsetScheduler) absorb(fr clockOffsetFrame) {
 		t3:   t3NS,      // B 发送（由 off_ts 环回重建）
 		t4:   recvNS,    // A 接收
 		conn: p.targetConn,
+		at:   fr.recvAt, // 本端采集时刻（solve 按它做样本老化）
 	})
 	s.est.refresh()
 }

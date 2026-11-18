@@ -576,3 +576,186 @@ func TestDecomposeOneWayRankingImmuneToAsymmetry(t *testing.T) {
 		t.Fatalf("return ranking wrong: ret=%v, want strictly decreasing", ret)
 	}
 }
+
+// TestRttProbeRecentTypicalDetectsDegradation A1 回归：decayed-min 地板对
+// "同连接内持续劣化"（拥塞/路由漂移，不触发重连）只能靠 0.5ms/s 慢升追赶
+// （45ms 劣化 ≈90s）；recent-typical EWMA ~2 个采样窗（~5s）把**选路用的**
+// 有效去程值（fwdRankUS）抬到当前典型时延，显示层 fwdOneWayUS 保持地板值
+// （"面板读数 vs 调度依据"两条数刻意分开）。
+func TestRttProbeRecentTypicalDetectsDegradation(t *testing.T) {
+	us := func(v uint64) uint64 { return v * 1000 } // µs→ns
+	// 稳态（µs）：ref 自回包 5000；conn1 的 RTT(1,ref)=6000、RTT(ref,1)=4000
+	// → 地板分解 fwd_1=3500、ret_1=1500（halfRef=2500）。
+	dec := map[[2]uint32]uint64{
+		{0, 0}: us(5000),
+		{1, 0}: us(6000),
+		{0, 1}: us(4000),
+	}
+	b0 := &Backend{}
+	b1 := &Backend{}
+	s := &rttProbeScheduler{
+		decay: dec, lastDecay: map[[2]uint32]time.Time{},
+		recent: map[[2]uint32]uint64{}, recentDev: map[[2]uint32]uint64{}, recentN: map[[2]uint32]int{},
+		refConn: 0, active: []int{0, 1},
+	}
+	s.resolveConn = func(i int) *Backend {
+		if i == 0 {
+			return b0
+		}
+		return b1
+	}
+
+	// 阶段 1：稳态——recent≈地板，有效值==地板（typ−容差 不超过地板）。
+	s.recent[[2]uint32{1, 0}] = us(6000)
+	s.recentDev[[2]uint32{1, 0}] = us(100)
+	s.recentN[[2]uint32{1, 0}] = 4
+	s.recomputeAll()
+	if got := oneWayRankDecode(b1.fwdRankUS.Load()); got != 3500 {
+		t.Fatalf("stable path effective fwd = %d, want floor 3500", got)
+	}
+
+	// 阶段 2：持续劣化——RTT(1,ref) 样本 6ms→26ms 连续两个采样窗，EWMA 抬到
+	// 21ms（(6+26)/2=16 → (16+26)/2=21），MAD≈10ms → 容差钳到上限 5000µs。
+	// 有效值 = 21000−2500−5000 = 13500µs ≫ 地板 3500µs：劣化 ~5s 内反映到
+	// 排名，而不是等 0.5ms/s 慢升追 20ms（~40s）。
+	s.recent[[2]uint32{1, 0}] = us(21000)
+	s.recentDev[[2]uint32{1, 0}] = us(10000)
+	s.recentN[[2]uint32{1, 0}] = 6
+	s.recomputeAll()
+	if got := oneWayRankDecode(b1.fwdRankUS.Load()); got != 13500 {
+		t.Fatalf("degraded path effective fwd = %d, want 13500 (typical 18500 − clamp(2·MAD)=5000)", got)
+	}
+	// 显示层保持地板（δ=0：最小 raw=1500 ≥ 1）。
+	if got := b1.fwdOneWayUS.Load(); got != 3500 {
+		t.Fatalf("display fwd must stay at decayed-min floor, got %d want 3500", got)
+	}
+
+	// 阶段 3：MAD 钳制——无线链路 MAD=50ms 时容差封顶 5000µs，不会把有效值
+	// 抬成等效"禁用该路径"。
+	s.recentDev[[2]uint32{1, 0}] = us(50000)
+	s.recomputeAll()
+	if got := oneWayRankDecode(b1.fwdRankUS.Load()); got != 13500 {
+		t.Fatalf("jitter allowance must clamp to %dµs, got effective %d", rttProbeJitterAllowMaxUS, got)
+	}
+
+	// 阶段 4：ref 自身同样参与有效值——recent[(0,0)] 收敛后 ref 的 typical
+	// 半值相对地板锚抬升。
+	s.recent[[2]uint32{0, 0}] = us(30000)
+	s.recentDev[[2]uint32{0, 0}] = us(100)
+	s.recentN[[2]uint32{0, 0}] = 4
+	s.recomputeAll()
+	// ref typical = 30000/2 − 2500 = 12500；容差 2×100µs=200µs → 12500−200=12300。
+	if got := oneWayRankDecode(b0.fwdRankUS.Load()); got != 12300 {
+		t.Fatalf("ref effective fwd = %d, want 12300", got)
+	}
+}
+
+// TestRttProbeRecentTypicalNeedsTwoSamples 单样本不产出 typical（防离群值钉死
+// 典型值）：recentN<rttProbeRecentMinSamples 时有效值退纯地板，与历史行为一致。
+func TestRttProbeRecentTypicalNeedsTwoSamples(t *testing.T) {
+	us := func(v uint64) uint64 { return v * 1000 }
+	dec := map[[2]uint32]uint64{{0, 0}: us(5000), {1, 0}: us(6000), {0, 1}: us(4000)}
+	b1 := &Backend{}
+	s := &rttProbeScheduler{
+		decay:     dec,
+		recent:    map[[2]uint32]uint64{{1, 0}: us(600000)}, // 离群高样本
+		recentDev: map[[2]uint32]uint64{},
+		recentN:   map[[2]uint32]int{{1, 0}: 1},
+		refConn:   0, active: []int{0, 1},
+	}
+	s.resolveConn = func(i int) *Backend {
+		if i == 0 {
+			return &Backend{}
+		}
+		return b1
+	}
+	s.recomputeAll()
+	if got := oneWayRankDecode(b1.fwdRankUS.Load()); got != 3500 {
+		t.Fatalf("single recent sample must not move the rank key, got %d want 3500", got)
+	}
+}
+
+// TestRttProbeUpdateRecentEwma updateRecent 的 EWMA/MAD 数值契约：α=1/2，
+// 首样本只建基线。
+func TestRttProbeUpdateRecentEwma(t *testing.T) {
+	s := newRttProbeScheduler(context.Background(), func(int) *Backend { return nil }, func() []int { return nil }, nil)
+	key := [2]uint32{1, 0}
+	s.updateRecent(1, 0, 6_000_000) // 6ms，首样本
+	if s.recentN[key] != 1 || s.recent[key] != 6_000_000 || s.recentDev[key] != 0 {
+		t.Fatalf("first sample must seed baseline: n=%d ewma=%d dev=%d", s.recentN[key], s.recent[key], s.recentDev[key])
+	}
+	s.updateRecent(1, 0, 26_000_000) // 26ms
+	if got := s.recent[key]; got != 16_000_000 {
+		t.Fatalf("ewma after 2nd sample = %d, want 16ms", got)
+	}
+	if got := s.recentDev[key]; got != 10_000_000 {
+		t.Fatalf("mad after 2nd sample = %d, want 10ms", got)
+	}
+	s.updateRecent(1, 0, 26_000_000)
+	if got := s.recent[key]; got != 21_000_000 {
+		t.Fatalf("ewma after 3rd sample = %d, want 21ms", got)
+	}
+}
+
+// TestRttProbeBurstOnKick A3 回归：kick/重拨后进入收敛爆发期，每轮发全生成集
+// （n 条连接 2(n−1)+1 个探针），rttProbeBurstRounds 轮后回到低开销轮转。
+// probeCh 容量 33 = 生成集上限（2×16+1），爆发期不丢探针。
+func TestRttProbeBurstOnKick(t *testing.T) {
+	backends := make([]*Backend, 3)
+	for i := range backends {
+		backends[i] = &Backend{probeCh: make(chan []byte, 64)}
+	}
+	s := newRttProbeScheduler(context.Background(),
+		func(i int) *Backend {
+			if i >= 0 && i < len(backends) {
+				return backends[i]
+			}
+			return nil
+		},
+		func() []int { return []int{0, 1, 2} }, nil)
+	s.enable()
+
+	// kick 置满爆发（模拟 run 循环的 kick 分支）。
+	s.burst = rttProbeBurstRounds
+	s.issueRound() // 爆发轮 1：3 连接 → 全生成集 = 2+2+1 = 5 个探针
+	if len(s.pending) != 5 {
+		t.Fatalf("burst round must emit the full generation set: pending=%d want 5", len(s.pending))
+	}
+	if s.burst != rttProbeBurstRounds-1 {
+		t.Fatalf("burst budget must decrement: %d", s.burst)
+	}
+	// 爆发轮 2..6：继续全生成集；第 7 轮回到轮转（2 个探针 + k==0 的 ref 基线）。
+	for r := 2; r <= rttProbeBurstRounds; r++ {
+		for nonce := range s.pending {
+			_ = nonce
+		}
+		s.issueRound()
+	}
+	if s.burst != 0 {
+		t.Fatalf("burst budget exhausted after %d rounds, got %d", rttProbeBurstRounds, s.burst)
+	}
+	fullSet := len(s.pending)
+	s.issueRound() // 轮转轮
+	if len(s.pending)-fullSet != 3 {
+		t.Fatalf("rotation round after burst: +%d probes, want 3 (row+col+ref baseline at k=0)", len(s.pending)-fullSet)
+	}
+	// 探针确实投递到了各连接的 probeCh（写侧可见，不丢）。
+	queued := 0
+	for _, b := range backends {
+		for {
+			select {
+			case p := <-b.probeCh:
+				if _, _, _, _, err := parseRttProbeFrame(p); err != nil {
+					t.Fatalf("queued probe malformed: %v", err)
+				}
+				queued++
+				continue
+			default:
+			}
+			break
+		}
+	}
+	if queued < 5+5*4+3 {
+		t.Fatalf("probes lost below generation-set lower bound: queued=%d", queued)
+	}
+}

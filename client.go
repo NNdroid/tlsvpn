@@ -76,9 +76,12 @@ type Backend struct {
 	// 地板，δ 抬升非负）——仅供面板/快照显示。0=未收敛。由 rttProbeScheduler 发布。
 	fwdOneWayUS atomic.Uint64
 	retOneWayUS atomic.Uint64
-	// fwdRankUS / retRankUS 选路专用：原始有符号相对量按 raw+oneWayRankZeroUS
-	// 编码（恒 >0，故 0=未收敛）。刻意不带显示层的 δ——δ 进选路会在与 min_rtt/2
-	// 回退候选混排时不抵消，扭曲排名。与显示字段同轮发布（见 recomputeAll）。
+	// fwdRankUS / retRankUS 选路专用：有效去程/回程值（max(decayed-min 地板,
+	// recent-typical − 抖动容差)，见 recomputeAll）按 raw+oneWayRankZeroUS
+	// 编码（恒 >0，故 0=未收敛）。有效值让"同连接内持续劣化"的路径 ~5s 内从
+	// 排名/fwd 门/near 窗口上及时压下去（纯地板要靠 0.5ms/s 慢升，最长 ~90s）。
+	// 刻意不带显示层的 δ——δ 进选路会在与 min_rtt/2 回退候选混排时不抵消，
+	// 扭曲排名。与显示字段同轮发布。
 	fwdRankUS atomic.Uint64
 	retRankUS atomic.Uint64
 	// probeUpdatedAt 最近一次发布 fwd/ret 的 unix 毫秒（0=尚未收敛）。面板用它
@@ -125,6 +128,20 @@ type Backend struct {
 	orphaned atomic.Bool
 	// rttFailures 连续 RTT 采样失败计数；超过阈值即视为连接异常并置 stalled。
 	rttFailures atomic.Uint32
+	// retransBase / retransBaseSet writer 采样 goroutine 独占：TCP_INFO
+	// tcpi_total_retrans 的上次采样值（连接生命周期累计、单调递增）。
+	// retransDelta 最近一个采样窗（200ms）的重传段数，原子发布供 backendScore
+	// 重传惩罚（backend_health.go retransPenaltyUS）与连接快照读取。
+	retransBase    uint32
+	retransBaseSet bool
+	retransDelta   atomic.Uint32
+	// 容量采样（容量加权 WFQ 的权重源，见 Backend.noteCapacitySample）：
+	// writer 独占 writeBusyNS/writeWindowBytes（drainWrite 逐窗累积 conn.Write
+	// 阻塞时长与成功载荷），sampleRTT 每 200ms 结算一次。deliverRateBytesPerSec
+	// 原子发布；0=从未测得饱和窗（权重回退保守 25MB/s，等效字节公平）。
+	writeBusyNS            int64
+	writeWindowBytes       uint64
+	deliverRateBytesPerSec atomic.Uint64
 }
 
 // AsyncPort 单向时延模式：决定调度器用 fwd 还是 ret 作为本端 egress 的单向
@@ -137,24 +154,27 @@ const (
 )
 
 type AsyncPort struct {
-	id              string
-	ch              chan []byte
-	ctx             context.Context
-	cancel          context.CancelFunc
-	backendsMu      sync.RWMutex
-	backends        []*Backend
-	preferred       atomic.Pointer[Backend]
-	encoder         *fecEncoder
-	txSeq           uint32
-	resetEpoch      chan portEpochReset
-	exhausted       atomic.Bool
-	onExhaust       func()
-	dropped         atomic.Uint64 // 各环节丢弃帧计数（面板/metrics）；atomic 类型保证 32 位平台 8 字节对齐
-	fecTXArmed      atomic.Bool
-	written         txFrameCounters
-	paritySent      atomic.Uint64
-	parityScratch   [][]byte      // run goroutine 独占，复用 FEC parity 描述符切片
-	parityNext      uint32        // run goroutine 独占：单份 parity 在健康后端间轮转
+	id            string
+	ch            chan []byte
+	ctx           context.Context
+	cancel        context.CancelFunc
+	backendsMu    sync.RWMutex
+	backends      []*Backend
+	preferred     atomic.Pointer[Backend]
+	encoder       *fecEncoder
+	txSeq         uint32
+	resetEpoch    chan portEpochReset
+	exhausted     atomic.Bool
+	onExhaust     func()
+	dropped       atomic.Uint64 // 各环节丢弃帧计数（面板/metrics）；atomic 类型保证 32 位平台 8 字节对齐
+	fecTXArmed    atomic.Bool
+	written       txFrameCounters
+	paritySent    atomic.Uint64
+	parityScratch [][]byte // run goroutine 独占，复用 FEC parity 描述符切片
+	parityNext    uint32   // run goroutine 独占：单份 parity 在健康后端间轮转
+	// parityTargets run goroutine 独占：按帧轮转后按目标聚合的 parity 批次
+	// （见 distributeParities）。复用避免每批堆分配。
+	parityTargets   []parityTargetEntry
 	dataNext        uint32        // legacy/compatibility picker cursor
 	spinCount       int           // run goroutine 独占：waitForBackendSlot 对 preferred 的连续自旋计数（超限触发全后端扫描）
 	envelopeScratch []envelopeObs // run goroutine 独占：资格扫描观测切片，按批复用避免每批堆分配
@@ -818,36 +838,12 @@ func (p *AsyncPort) dispatchOwnedBatch(batch *VPNFrameBatch) {
 				putFrame(par)
 			}
 		} else if len(parities) > 0 {
-			// 同一次 flush 的 parity 合并为单个 owned batch：此前每份 parity
-			// 各自走"取批次对象→入队→记账"，K=4 时每 4 个数据帧多一整套批次
-			// 开销。目标仍由 pickParityBackend 轮转选择（每次 dispatch 旋转
-			// 一步，跨批均匀分布）。
-			target := p.pickParityBackend(backends, best)
-			if target == nil {
-				// near 模式下连数据路径都不健康：抑制本次 parity（near 的意图
-				// 就是宁可不发也不发到慢链路/死链路）。与单路径防御分支一致，
-				// 不计 paritySent。
-				for _, par := range parities {
-					putFrame(par)
-				}
-			} else {
-				p.paritySent.Add(uint64(len(parities)))
-				pbatch := getOwnedVPNFrameBatch()
-				for _, par := range parities {
-					appendOwnedVPNFrame(pbatch, VPNFrame{Seq: 0, Data: par})
-				}
-				n := pbatch.Bytes
-				target.addQueuedBytes(n)
-				if !tryQueueOwnedBatch(target, pbatch) {
-					// 二分调试：逐份回退禁用，改回直接丢弃（昨日合批语义）
-					target.completeQueuedBytes(n)
-					p.dropN(len(pbatch.Frames))
-					freeOwnedVPNFrameBatch(pbatch)
-				} else {
-					target.fecAssignedBytes.Add(n)
-					target.fecAssignedBatches.Add(1)
-				}
-			}
+			// 按帧轮转 + 按目标聚合：每份 parity 独立选目标（parityNext 每帧
+			// 前进），同批 parity 均匀散开——大 batch 凑出多组 parity 时不再整批
+			// 压上同一条流，慢流上的一批 parity 一起错过重排窗口的塌方模式消除。
+			// 聚合保持"每目标一次入队/记账"的开销（原每份 parity 各取一个批次
+			// 对象的额外开销不再回来）。
+			p.distributeParities(backends, best, parities)
 		}
 		clear(parities)
 		p.parityScratch = parities[:0]
@@ -883,6 +879,9 @@ func backendScore(b *Backend) (uint32, bool) {
 	if qLen > 10 {
 		penalty = uint64(qLen-10) * 1000
 	}
+	// TCP 重传惩罚（见 backend_health.go retransPenaltyUS）：丢包路径的时延
+	// 地板对丢包不敏感，兜底选择与 parity 轮转要能避开正在丢段的路径。
+	penalty += uint64(b.retransDelta.Load()) * retransPenaltyUS
 	score := uint64(rtt) + penalty
 	if score > math.MaxUint32 {
 		score = math.MaxUint32
@@ -1040,6 +1039,60 @@ func (p *AsyncPort) pickParityBackend(backends []*Backend, dataBest *Backend) *B
 	// 调用方抑制本次 parity——原实现无视 near 过滤与健康度直接取
 	// backends[start]，是 near 语义的违例出口，且大概率入队失败丢帧。
 	return nil
+}
+
+// parityTargetEntry 按目标聚合的 parity 批次（distributeParities 的 scratch 项）。
+type parityTargetEntry struct {
+	b     *Backend
+	batch *VPNFrameBatch
+}
+
+// distributeParities 把一次 flush 的全部 parity 帧分发到目标后端。
+//
+// 按帧轮转而非按批：一次 dispatch 可凑出多组 parity（32 帧大 batch、K=2 时最多
+// 16 份），原实现把整批 parity 合并后发给单一轮转目标——若该流恰好慢，整批
+// parity 一起延迟、一起错过重排窗口（reorderSkipDelay），恢复率塌方。每帧独立
+// 调 pickParityBackend（parityNext 每帧前进），同批 parity 均匀散开；仍按目标
+// 聚合成 owned batch（scratch 复用），保持每目标一次入队/记账的开销。
+// run goroutine 独占（parityTargets/parityNext/parityScratch 同纪律）。
+func (p *AsyncPort) distributeParities(backends []*Backend, best *Backend, parities [][]byte) {
+	p.parityTargets = p.parityTargets[:0]
+	for _, par := range parities {
+		tgt := p.pickParityBackend(backends, best)
+		if tgt == nil {
+			// near 模式下连数据路径都不健康：抑制该份 parity（near 的意图就是
+			// 宁可不发也不发到慢链路/死链路），不计 paritySent、不计 drop。
+			putFrame(par)
+			continue
+		}
+		ent := -1
+		for i := range p.parityTargets {
+			if p.parityTargets[i].b == tgt {
+				ent = i
+				break
+			}
+		}
+		if ent < 0 {
+			p.parityTargets = append(p.parityTargets, parityTargetEntry{b: tgt, batch: getOwnedVPNFrameBatch()})
+			ent = len(p.parityTargets) - 1
+		}
+		appendOwnedVPNFrame(p.parityTargets[ent].batch, VPNFrame{Seq: 0, Data: par})
+	}
+	for i := range p.parityTargets {
+		pt := &p.parityTargets[i]
+		n := pt.batch.Bytes
+		pt.b.addQueuedBytes(n)
+		p.paritySent.Add(uint64(len(pt.batch.Frames)))
+		if !tryQueueOwnedBatch(pt.b, pt.batch) {
+			pt.b.completeQueuedBytes(n)
+			p.dropN(len(pt.batch.Frames))
+			freeOwnedVPNFrameBatch(pt.batch)
+		} else {
+			pt.b.fecAssignedBytes.Add(n)
+			pt.b.fecAssignedBatches.Add(1)
+		}
+	}
+	p.parityTargets = p.parityTargets[:0]
 }
 
 // parityNearEligible 报告候选后端是否落在 near 窗口内：其去程单程时延 ≤ 数据路径
@@ -1423,16 +1476,16 @@ type Client struct {
 	// desiredCfg 用户已保存、期望达到的配置（设置页/状态卡回显与 PendingRestart
 	// 数据源）。与 cfgSnap 分离：仅保存（不热应用）时 desiredCfg 更新为磁盘目标态，
 	// cfgSnap 保持数据面真实生效值。ApplyConfig（save_apply）时两者同步。
-	desiredCfg       atomic.Pointer[Config]
-	bootCfg          atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
-	connsMu          sync.Mutex
-	conns            map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
-	startedAt        time.Time
-	hooks            *LifecycleHooks
-	runCancel        context.CancelFunc
-	fatalOnce        sync.Once
-	fatalErr         chan error
-	networkSetup     sync.Mutex
+	desiredCfg   atomic.Pointer[Config]
+	bootCfg      atomic.Pointer[Config] // 启动时配置（NeedsRestart 差异基准）
+	connsMu      sync.Mutex
+	conns        map[int]*clientConnInfo // 每物理连接明细（connIndex → 状态）
+	startedAt    time.Time
+	hooks        *LifecycleHooks
+	runCancel    context.CancelFunc
+	fatalOnce    sync.Once
+	fatalErr     chan error
+	networkSetup sync.Mutex
 }
 
 // sessionNeg 最近一次握手成功的端到端协商结果快照。面板"状态"页展示的是
@@ -2862,7 +2915,9 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 	connTxChan := make(chan *VPNFrameBatch, 32)
 	backend := c.txPort.RegisterOwnedBackend(connTxChan, rttCache, connIndex)
 	backend.minRttCache = minRttCache
-	backend.probeCh = make(chan []byte, 8)
+	// 容量 = 探针生成集上限（2×16 槽 + 1，见 rttProbeBurstRounds）：收敛爆发/
+	// fast 模式一轮要发全生成集，cap 8 会让第 9 个及以后的探针被静默丢弃。
+	backend.probeCh = make(chan []byte, 33)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
@@ -2927,7 +2982,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			}
 		}
 		if tcpConn != nil {
-			rttTicker = time.NewTicker(200 * time.Millisecond)
+			rttTicker = time.NewTicker(rttSampleInterval)
 			rttC = rttTicker.C
 			defer rttTicker.Stop()
 		}
@@ -2940,13 +2995,19 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 记账代码。返回 false 表示写失败（已置 stalled 并上报 errChan），
 		// 调用方应立即退出写 goroutine。
 		sampleRTT := func() {
-			if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
-				atomic.StoreUint32(rttCache, rtt)
-				if minRtt > 0 {
-					atomic.StoreUint32(minRttCache, minRtt)
+			backend.noteCapacitySample(int64(rttSampleInterval))
+			if rtt, minRtt, totalRetrans, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
+				// 重传差分独立于 rtt>0 的引导门：rtt==0 期间也要建立基线，
+				// 否则首个有效窗会把握手期累积的重传全记进 delta。
+				backend.noteRetrans(totalRetrans)
+				if rtt > 0 {
+					atomic.StoreUint32(rttCache, rtt)
+					if minRtt > 0 {
+						atomic.StoreUint32(minRttCache, minRtt)
+					}
+					ci.rttMeasured.Store(true)
+					backend.noteRTTSuccess()
 				}
-				ci.rttMeasured.Store(true)
-				backend.noteRTTSuccess()
 			} else if err != nil {
 				// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
 				// 该后端标记为 stalled，调度器不再向其分配数据。
@@ -3034,7 +3095,11 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			padTotal := uint64(tailPad)
 			refreshWriteDeadline()
 			batchCork.BeforeWrite(len(sendBuffer))
+			// 容量采样：tlsConn.Write 阻塞时长 = socket 发送缓冲打满的时长
+			//（路径饱和信号，见 Backend.noteCapacitySample）。
+			wStart := time.Now()
 			nw, err := tlsConn.Write(sendBuffer)
+			backend.writeBusyNS += int64(time.Since(wStart))
 			if err == nil && nw != len(sendBuffer) {
 				err = io.ErrShortWrite
 			}
@@ -3047,6 +3112,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 			c.txPort.written.record(written)
 			backend.completeQueuedBytes(queuedPayload)
 			backend.observeDelivered(queuedPayload)
+			backend.writeWindowBytes += queuedPayload
 			// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
 			recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
 			// deadline 不需要清零：下一次写之前会刷新；保留旧 deadline

@@ -113,13 +113,15 @@ func adaptiveBackendMinRTT(b *Backend) (uint32, bool) {
 	return rtt, false
 }
 
-// backendOneWayUS 返回本端 egress 方向的原始单向时延相对量（µs，有符号，可负）
+// backendOneWayUS 返回本端 egress 方向的有效单向时延相对量（µs，有符号，可负）
 // + 是否已收敛。按所属 AsyncPort 的 oneWayMode 选择 fwd/ret。
 //
-// 值来自 fwdRankUS/retRankUS（raw+oneWayRankZeroUS 编码，恒 >0，故字段 0=未
-// 收敛），解码回有符号 µs：负值 = 该方向快于 ref 对称基准，是真实信息，选路
-// argmin 依赖完整序。显示层走另一对字段（fwdOneWayUS，δ 抬升非负），两条路径
-// 互不污染——δ 若进选路，与 min_rtt/2 回退候选混排时不抵消，会扭曲排名。
+// 值来自 fwdRankUS/retRankUS（有效值按 raw+oneWayRankZeroUS 编码，恒 >0，故
+// 字段 0=未收敛），解码回有符号 µs：负值 = 该方向快于 ref 对称基准，是真实
+// 信息，选路 argmin 依赖完整序。有效值 = max(decayed-min 地板, recent-typical −
+// 抖动容差)，持续劣化的路径 ~5s 内被抬升（见 recomputeAll）。显示层走另一对
+// 字段（fwdOneWayUS，纯地板 + δ 抬升非负），两条路径互不污染——δ 若进选路，
+// 与 min_rtt/2 回退候选混排时不抵消，会扭曲排名。
 func (b *Backend) backendOneWayUS() (int64, bool) {
 	if b == nil {
 		return 0, false

@@ -235,3 +235,112 @@ func TestClockOffsetAbsorbUsesTxTS(t *testing.T) {
 		t.Fatalf("txTS==0 sample not dropped, count=%d", n)
 	}
 }
+
+// TestClockOffsetRespondUsesRecvAtAsT2 回归：respond 的 t2 必须取读循环的到达
+// 时刻（fr.recvAt，与 absorb 的 t4 同一打点位置），而非调度 goroutine 的
+// time.Now()——后者混入 replies 通道+唤醒延迟，会让 θ 带 +d/2 的系统性偏置却
+// "低不确定度收敛"到错值。
+func TestClockOffsetRespondUsesRecvAtAsT2(t *testing.T) {
+	backend := &Backend{probeCh: make(chan []byte, 8)}
+	resolve := func(i int) *Backend { return backend }
+	s := newClockOffsetScheduler(context.Background(), resolve, func() []int { return []int{0} })
+
+	recvAt := time.Unix(1_800_000_000, 123_456_789) // 固定到达时刻（ns 粒度可辨）
+	s.respond(clockOffsetFrame{
+		kind: controlKindClockProbe, nonce: 7, conn: 0,
+		sendTS: 111, srcConn: 0, recvAt: recvAt,
+	})
+	select {
+	case payload := <-backend.probeCh:
+		_, nonce, _, sendTS, recvTS, _, err := parseClockOffsetFrame(payload)
+		if err != nil {
+			t.Fatalf("reply malformed: %v", err)
+		}
+		if recvTS != uint64(recvAt.UnixNano()) {
+			t.Fatalf("t2 = %d, want fr.recvAt ns %d (read-loop arrival, not respond-time)", recvTS, recvAt.UnixNano())
+		}
+		if nonce != 7 || sendTS != 111 {
+			t.Fatalf("echo broken: nonce=%d sendTS=%d", nonce, sendTS)
+		}
+	default:
+		t.Fatal("reply not queued on target conn")
+	}
+}
+
+// TestClockOffsetEstimatorResetOnRefChange 回归：ref 变化（被测链路换了）时
+// 估计器必须整体重置——θ 是"该条链路的不对称度"，旧 ref 的样本对新 ref 毫无
+// 意义，混合会产出无人持有的伪 θ。
+func TestClockOffsetEstimatorResetOnRefChange(t *testing.T) {
+	b0 := &Backend{probeCh: make(chan []byte, 8)}
+	b1 := &Backend{probeCh: make(chan []byte, 8)}
+	conns := map[int]*Backend{0: b0, 1: b1}
+	s := newClockOffsetScheduler(context.Background(),
+		func(i int) *Backend { return conns[i] },
+		func() []int { return []int{0, 1} })
+
+	// 旧 ref（conn 0）收敛到某个 θ。
+	now := time.Now()
+	for i := 0; i < clockOffsetMinSamples+2; i++ {
+		t1 := uint64(now.Add(time.Duration(i) * time.Second).UnixNano())
+		s.est.add(offsetSample{
+			t1: t1,
+			t2: t1 + 10_000_000, // 去程 10ms
+			t3: t1 + 11_000_000, // 1ms 后回包
+			t4: t1 + 12_000_000, // 回程 1ms → θ_i=(10-1)/2=4.5ms
+			at: now.Add(time.Duration(i) * time.Second),
+		})
+	}
+	s.est.refresh()
+	if _, _, ok := s.thetaNS(); !ok {
+		t.Fatal("precondition: estimator should converge on old ref samples")
+	}
+
+	// ref 切换到 conn 1（conn 0 掉线）：issueRound 必须重置估计器。
+	s.issueRound() // activeConns 返回 [0,1]，ref 仍 0 —— 不重置
+	if _, _, ok := s.thetaNS(); !ok {
+		t.Fatal("same ref must keep converged estimate")
+	}
+	s.activeConns = func() []int { return []int{1} }
+	s.issueRound() // ref 变为 1
+	if s.target != 1 {
+		t.Fatalf("target not updated: %d", s.target)
+	}
+	if _, _, ok := s.thetaNS(); ok {
+		t.Fatal("estimator must reset (θ not converged) when ref changes")
+	}
+	// 重置后 pending 探针已发往新 ref（连接 1）。
+	if len(b1.probeCh) != 1 {
+		t.Fatalf("clock probe not queued on new ref: %d", len(b1.probeCh))
+	}
+}
+
+// TestClockOffsetSampleAging 回归：solve 剔除超龄样本（clockOffsetSampleMaxAge），
+// 路由切换后 θ 在受限窗口内完成向新 regime 收敛，而不是被 ~2 分钟的旧样本拖住。
+func TestClockOffsetSampleAging(t *testing.T) {
+	e := newClockOffsetEstimator()
+	now := time.Now()
+	mk := func(age time.Duration, off int64) offsetSample {
+		t1 := uint64(int64(now.Add(-age).UnixNano()))
+		f := off*2 + 2_000_000 // 去程分量：base 2ms + 2·off
+		t2 := uint64(int64(t1) + f)
+		t3 := uint64(int64(t1) + 2_000_000)
+		t4 := t3 + 2_000_000 // 回程分量恒 2ms
+		return offsetSample{t1: t1, t2: t2, t3: t3, t4: t4, at: now.Add(-age)}
+	}
+	// (t2-t1)-(t4-t3) = (off*2+2ms) - 2ms = off*2 → θ_i = off。8 个新鲜样本
+	// 收敛到 off=+5ms；再混 8 个超龄样本（off=-5ms）应被剔除。
+	for i := 0; i < 8; i++ {
+		e.add(mk(10*time.Second, 5_000_000))
+	}
+	for i := 0; i < 8; i++ {
+		e.add(mk(clockOffsetSampleMaxAge+time.Minute, -5_000_000))
+	}
+	e.refresh()
+	th, ok := e.thetaNS()
+	if !ok {
+		t.Fatal("fresh samples must keep θ converged")
+	}
+	if th != 5_000_000 {
+		t.Fatalf("θ = %d ns, want 5ms (stale samples excluded)", th)
+	}
+}

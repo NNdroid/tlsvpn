@@ -8,8 +8,8 @@ package main
 type RoutingAlgo string
 
 const (
-	// RoutingAlgoAuto 默认算法：去程稳定地板（decayed-min fwd）+ 本批服务时间，
-	// 带粘滞滞回与 WFQ 字节公平。与引入本选项前的历史行为完全一致。
+	// RoutingAlgoAuto 默认算法：去程稳定地板（decayed-min fwd，叠加 recent-typical
+	// 劣化抬升）+ 按路径容量的服务时间，带粘滞滞回与容量加权 WFQ。
 	RoutingAlgoAuto RoutingAlgo = "auto"
 	// RoutingAlgoLatencyStrict 严格最低去程稳定地板：每批选 rank[0]，无粘滞、无 WFQ。
 	// 路径劣化时立即切到下一条最优，符合「按去程选」的直观预期。
@@ -125,10 +125,11 @@ func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32,
 	case rankSRTTHalf:
 		return int64(srttUS) / 2
 	default: // rankOneWayPlusService
-		// 注意：incomingBytes 与 schedRate 对同批所有候选相同，此项是批内常数、
-		// 对排序是空操作——auto 模式当前实际等价于 rankOneWay。若未来
-		// schedRate 改为 per-path 容量（按容量加权 WFQ），该项才有真实区分度，
-		// 届时需同步审视其"服务时间"与"容量权重"的双重语义。
+		// schedRate 已是 per-path 容量估计（Writer-drain EWMA，未测路径回退保守
+		// 25MB/s，见 buildEligibleCandidates）：服务时间项对本批各候选不再相同，
+		// auto 由此与 latency_sticky（纯地板）真正区分——快路径服务本批更早完成。
+		// 该速率同时是 WFQ 的容量权重（dispatchWFQ 计费），"服务时间"与"容量
+		// 权重"共用一个量是有意的：两者都回答"这条路径多快"。
 		return oneWay + int64(serviceTimeUS(incomingBytes, schedRate))
 	}
 }

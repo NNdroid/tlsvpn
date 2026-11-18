@@ -2099,7 +2099,9 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 	connTxChan := make(chan *VPNFrameBatch, 32)
 	backend := port.RegisterOwnedBackend(connTxChan, rttCache, req.BrutalConnIndex)
 	backend.minRttCache = minRttCache
-	backend.probeCh = make(chan []byte, 8)
+	// 容量 = 探针生成集上限（2×16 槽 + 1，见 rttProbeBurstRounds）：收敛爆发/
+	// fast 模式一轮要发全生成集，cap 8 会让第 9 个及以后的探针被静默丢弃。
+	backend.probeCh = make(chan []byte, 33)
 	ci.backend.Store(backend)
 	defer func() {
 		ci.backend.CompareAndSwap(backend, nil)
@@ -2134,7 +2136,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			}
 		}
 		if tcpConn != nil {
-			rttTicker = time.NewTicker(200 * time.Millisecond)
+			rttTicker = time.NewTicker(rttSampleInterval)
 			rttC = rttTicker.C
 			defer rttTicker.Stop()
 		}
@@ -2147,13 +2149,19 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 记账代码。返回 false 表示写失败（已置 stalled 并关连接），调用方应
 		// 立即退出写 goroutine。
 		sampleRTT := func() {
-			if rtt, minRtt, err := getTCPRTTAndMinRTT(tcpConn); err == nil && rtt > 0 {
-				atomic.StoreUint32(rttCache, rtt)
-				if minRtt > 0 {
-					atomic.StoreUint32(minRttCache, minRtt)
+			backend.noteCapacitySample(int64(rttSampleInterval))
+			if rtt, minRtt, totalRetrans, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
+				// 重传差分独立于 rtt>0 的引导门：rtt==0 期间也要建立基线，
+				// 否则首个有效窗会把握手期累积的重传全记进 delta。
+				backend.noteRetrans(totalRetrans)
+				if rtt > 0 {
+					atomic.StoreUint32(rttCache, rtt)
+					if minRtt > 0 {
+						atomic.StoreUint32(minRttCache, minRtt)
+					}
+					ci.rttMeasured.Store(true)
+					backend.noteRTTSuccess()
 				}
-				ci.rttMeasured.Store(true)
-				backend.noteRTTSuccess()
 			} else if err != nil {
 				// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
 				// 该后端标记为 stalled，调度器不再向其分配数据。
@@ -2233,7 +2241,11 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			padTotal := uint64(tailPad)
 			refreshWriteDeadline()
 			batchCork.BeforeWrite(len(sendBuffer))
+			// 容量采样：conn.Write 阻塞时长 = socket 发送缓冲打满的时长（路径
+			// 饱和信号，见 Backend.noteCapacitySample）。sampleRTT 每 200ms 结算。
+			wStart := time.Now()
 			nw, werr := conn.Write(sendBuffer)
+			backend.writeBusyNS += int64(time.Since(wStart))
 			if werr == nil && nw != len(sendBuffer) {
 				werr = io.ErrShortWrite
 			}
@@ -2250,6 +2262,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			s.txPacketsTotal.Add(uint64(txPackets))
 			backend.completeQueuedBytes(queuedPayload)
 			backend.observeDelivered(queuedPayload)
+			backend.writeWindowBytes += queuedPayload
 			// 填充记账与 TxBytes 同源：都只在 Write 成功之后累加
 			recordPadBytesAt(uint64(len(sendBuffer)), padTotal, padEpoch)
 			session.TxBytes.Add(uint64(len(sendBuffer)))

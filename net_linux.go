@@ -149,36 +149,39 @@ func applyTCPBrutal(conn *net.TCPConn, totalRate, legacyRate, groupID uint64) br
 }
 
 func getTCPRTT(conn *net.TCPConn) (uint32, error) {
-	rtt, _, err := getTCPRTTAndMinRTT(conn)
+	rtt, _, _, err := getTCPRTTAndMinRTT(conn)
 	return rtt, err
 }
 
 // getTCPRTTAndMinRTT 返回内核 TCP 的 SRTT 与 min_rtt（均微秒）。
 // min_rtt 是连接观测到的无拥塞地板往返时延（tcpi_min_rtt），用于路径质量
 // 排名与单向分解锚定；代理/非 Linux 返回 0。
-func getTCPRTTAndMinRTT(conn *net.TCPConn) (uint32, uint32, error) {
+func getTCPRTTAndMinRTT(conn *net.TCPConn) (uint32, uint32, uint32, error) {
 	if conn == nil {
-		return 0, 0, fmt.Errorf("no raw TCP connection available (proxied?)")
+		return 0, 0, 0, fmt.Errorf("no raw TCP connection available (proxied?)")
 	}
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	var rtt, minRtt uint32
+	var rtt, minRtt, totalRetrans uint32
 	var sysErr error
 	err = raw.Control(func(fd uintptr) {
 		info, err := unix.GetsockoptTCPInfo(int(fd), unix.IPPROTO_TCP, unix.TCP_INFO)
 		if err == nil {
 			rtt = info.Rtt
 			minRtt = info.Min_rtt // x/sys 沿用内核字段名 tcpi_min_rtt
+			// tcpi_total_retrans 连接生命周期累计重传段数（单调递增），调用方
+			// 按 200ms 采样窗做差得到最近重传速率（路径丢包信号，见 Backend.noteRetrans）。
+			totalRetrans = info.Total_retrans
 		} else {
 			sysErr = err
 		}
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	return rtt, minRtt, sysErr
+	return rtt, minRtt, totalRetrans, sysErr
 }
 
 func getTCPMSS(conn *net.TCPConn) (int, error) {

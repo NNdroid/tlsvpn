@@ -62,8 +62,24 @@ const (
 	rttProbePendingMax = 256
 
 	// rttProbeFastModeAll 每周期发全生成集（更快收敛、更多填充帧）；
-	// false=每周期 2 个探针轮转（低开销、时序平滑）。
+	// false=每周期 2 个探针轮转（低开销、时序平滑）。稳态轮转不受影响——
+	// 拓扑变化后的收敛爆发（rttProbeBurstRounds）与其独立叠加。
 	rttProbeFastModeAll = false
+
+	// rttProbeBurstRounds 拓扑变化（kick / 连接重拨）后的收敛爆发轮数。轮转
+	// 模式每轮只测一对 (row[k],ref)+(ref,col[k])，n 条连接要 n 轮（~2.5s）才
+	// 覆盖全生成集，期间 fwd 门宽松放行、near 窗口 lenient、排名走 min_rtt/2
+	// 回退。爆发期每轮发全生成集，bootstrap 从 ~2.5s 缩到 ~500ms；爆发结束
+	// 回到轮转稳态。每轮 2n+1 ≤ 33 个探针（16 槽上限），probeCh 容量按此上限。
+	rttProbeBurstRounds = 6
+
+	// recent-typical 伴随指标的参数。decayed-min 是地板（慢升 0.5ms/s），
+	// "同连接内持续劣化"（拥塞、路由漂移，不触发重连）最长 ~90s 才被排名
+	// 反映；recent 是样本 EWMA（α=1/2，约 2 个采样窗 ≈5s 跟随 75%），用于
+	// 把排名键抬到"当前典型时延"。
+	rttProbeRecentMinSamples = 2 // typical 参与排名前的最少样本数（防首样本离群）
+	rttProbeJitterAllowMinUS = 200
+	rttProbeJitterAllowMaxUS = 5000
 )
 
 var errRttProbeMalformed = errors.New("malformed rtt probe frame")
@@ -169,11 +185,19 @@ type rttProbeScheduler struct {
 	pending   map[uint32]pendingProbe
 	decay     map[[2]uint32]uint64    // decayed-min per (src,dst)，ns
 	lastDecay map[[2]uint32]time.Time // 每 key 独立的慢升计时（ns 地板按 key 累积）
+	// recent / recentDev / recentN per (src,dst) 的 recent-typical 伴随指标：
+	// 样本 EWMA（α=1/2）、|样本−EWMA| 的 EWMA（≈MAD）、样本计数。recent 参与
+	// 排名前须 ≥ rttProbeRecentMinSamples 个样本（防首样本离群钉死典型值）。
+	// 与 decay 同 key 同生命周期（重连一并清除）。单位 ns，0=未建立。
+	recent    map[[2]uint32]uint64
+	recentDev map[[2]uint32]uint64
+	recentN   map[[2]uint32]int
 	// lastBackend 上轮 resolveConn 的 connIndex→Backend 指针。槽位换新 Backend
 	// （断线重拨/网络切换）时清 decay 键，防止新连接继承旧连接的时延地板。
 	lastBackend map[int]*Backend
 	nonce       uint32
 	rotate      int // 生成集轮转游标
+	burst       int // 剩余收敛爆发轮数（kick/重拨时置满，每轮递减）
 	refConn     int
 	active      []int
 	replies     chan rttProbeFrame
@@ -195,6 +219,9 @@ func newRttProbeScheduler(ctx context.Context, resolveConn func(int) *Backend, a
 		pending:      make(map[uint32]pendingProbe, 16),
 		decay:        make(map[[2]uint32]uint64, 32),
 		lastDecay:    make(map[[2]uint32]time.Time, 32),
+		recent:       make(map[[2]uint32]uint64, 32),
+		recentDev:    make(map[[2]uint32]uint64, 32),
+		recentN:      make(map[[2]uint32]int, 32),
 		lastBackend:  make(map[int]*Backend, 8),
 		nonce:        0,
 		replies:      make(chan rttProbeFrame, 64),
@@ -247,6 +274,9 @@ func (s *rttProbeScheduler) run() {
 			return
 		case <-s.kickCh:
 			if s.enabled.Load() {
+				// kick 语义=拓扑可能变了（后端注册/stall 恢复）：置满收敛爆发，
+				// 让新路径的全生成集在数百毫秒内覆盖，而不是等轮转 ~2.5s。
+				s.burst = rttProbeBurstRounds
 				s.issueRound()
 			}
 			s.resetTimer()
@@ -271,6 +301,13 @@ func (s *rttProbeScheduler) resetTimer() {
 	if d < 50*time.Millisecond {
 		d = 50 * time.Millisecond
 	}
+	// 排空可能已到期的旧值：kick 分支在定时器未触发时到来，若 issueRound 处理
+	// 期间定时器已到期，旧到期值滞留 channel buffer，Reset 不会移除它——下一轮
+	// select 会立刻收到并多打一轮探针（与 clockOffsetScheduler.resetTimer 同纪律）。
+	select {
+	case <-s.timer.C:
+	default:
+	}
 	s.timer.Reset(d)
 	s.timerCh = s.timer.C
 }
@@ -292,10 +329,16 @@ func (s *rttProbeScheduler) detectReconnectedConns(active []int) {
 			continue
 		}
 		s.lastBackend[idx] = b
+		// 重拨即拓扑变化：清该槽位全部探针状态并置满收敛爆发，新连接从无偏
+		// 估计快速重新收敛（full-set 覆盖 ~1 轮而非轮转 n 轮）。
+		s.burst = rttProbeBurstRounds
 		for key := range s.decay {
 			if key[0] == uint32(idx) || key[1] == uint32(idx) {
 				delete(s.decay, key)
 				delete(s.lastDecay, key)
+				delete(s.recent, key)
+				delete(s.recentDev, key)
+				delete(s.recentN, key)
 			}
 		}
 	}
@@ -327,7 +370,12 @@ func (s *rttProbeScheduler) issueRound() {
 		col = append(col, idx)
 	}
 
-	if rttProbeFastModeAll {
+	// 收敛爆发期（或稳态 fast 模式）：每轮发全生成集。爆发轮数随轮递减，
+	// 结束后回到低开销轮转。
+	if s.burst > 0 || rttProbeFastModeAll {
+		if s.burst > 0 {
+			s.burst--
+		}
 		for _, i := range row {
 			s.emitProbe(i, ref)
 		}
@@ -422,7 +470,51 @@ func (s *rttProbeScheduler) absorb(fr rttProbeFrame) {
 		rtt = 1 // 同机回环/同纳秒收发：clamp 到 1ns，防止 decay 存 0 与"未测量"哨兵混淆
 	}
 	s.updateDecay(uint32(p.srcConn), uint32(p.replyOn), rtt)
+	s.updateRecent(uint32(p.srcConn), uint32(p.replyOn), rtt)
 	s.recomputeAll()
+}
+
+// updateRecent recent-typical 伴随指标：样本 EWMA（α=1/2）+ |样本−EWMA| 的
+// EWMA（≈MAD）。decayed-min 是"历史最优地板"，对同连接内持续劣化（拥塞、
+// 路由漂移——不触发重连）只能靠 0.5ms/s 慢升追赶（45ms 劣化 ≈90s）；EWMA 约
+// 2 个采样窗（~5s）即可跟随 75%，供 recomputeAll 把排名键抬到当前典型时延。
+// 与 updateDecay 同 key 生命周期（重连一并清除，见 detectReconnectedConns）。
+func (s *rttProbeScheduler) updateRecent(src, dst uint32, sampleNS uint64) {
+	if sampleNS == 0 {
+		sampleNS = 1
+	}
+	key := [2]uint32{src, dst}
+	n := s.recentN[key] + 1
+	s.recentN[key] = n
+	prev := s.recent[key]
+	if n == 1 || prev == 0 {
+		// 首样本只建立基线不产出 typical：单个样本可能是离群值，等第二个样本
+		// 校准后才让 recent 参与排名（与 clockOffsetMinSamples 同思路）。
+		s.recent[key] = sampleNS
+		s.recentDev[key] = 0
+		return
+	}
+	dev := sampleNS - prev
+	if sampleNS < prev {
+		dev = prev - sampleNS
+	}
+	s.recent[key] = (prev + sampleNS) / 2
+	s.recentDev[key] = (s.recentDev[key] + dev) / 2
+}
+
+// recentJitterAllowUS 由 recentDev（≈MAD，ns）换算排名用的抖动容差（µs）：
+// 排名键抬升量为 typical − 2·MAD，容差内的抖动不惩罚（稳定路径不受 EWMA 噪声
+// 影响），容差外（持续劣化）才抬升。钳制防 MAD 极端值（无线链路 mad 可达数十
+// ms）把排名键抬成等效"禁用该路径"。
+func recentJitterAllowUS(devNS uint64) int64 {
+	allow := int64(oneWayUS(devNS)) * 2
+	if allow < rttProbeJitterAllowMinUS {
+		allow = rttProbeJitterAllowMinUS
+	}
+	if allow > rttProbeJitterAllowMaxUS {
+		allow = rttProbeJitterAllowMaxUS
+	}
+	return allow
 }
 
 // updateDecay 慢升快降的 decayed-min。慢升量按 (src,dst) 独立累积：用全局
@@ -479,25 +571,50 @@ func (s *rttProbeScheduler) recomputeAll() {
 	// 强行代入会产生 259/5 这类物理不可能的伪值。
 	//
 	// 双路发布：原始有符号相对量（可负）供选路，δ 抬升非负副本供面板显示。
-	// δ 只进显示层——选路回退链（min_rtt/2、SRTT/2）不带 δ，混排时不抵消会
+	// δ 只进显示——选路回退链（min_rtt/2、SRTT/2）不带 δ，混排时不抵消会
 	// 扭曲排名（见 decomposeOneWay/displayDeltaUS 注释）。
+	//
+	// 选路值不是纯地板而是"有效去程"：max(decayed-min 地板, recent-typical −
+	// 抖动容差)。地板慢升 0.5ms/s，对同连接内持续劣化（拥塞/路由漂移，不触发
+	// 重连）最长 ~90s 才反映；EWMA typical ~5s 跟随，把这样的路径及时从排名
+	// 上压下去（near 窗口与 fwd 门消费同一有效值，慢路径同样拿不到 parity）。
+	// 显示层保持地板值：面板的 fwd_oneway_us 与 rank_key_us 本就是"面板读数 vs
+	// 调度依据"两条刻意分开的数。
 	fwdRaw, retRaw := decomposeOneWay(s.decay, s.active, ref, halfRef)
 	delta := displayDeltaUS(fwdRaw, retRaw)
+	fwdTyp, retTyp := decomposeRecent(s.recent, s.recentN, s.active, ref, halfRef)
 	for _, i := range s.active {
 		b := s.resolveConn(i)
 		if b == nil {
 			continue
 		}
 		if f, ok := fwdRaw[i]; ok {
-			b.fwdOneWayUS.Store(uint64(f + delta)) // 显示层：≥1µs
-			b.fwdRankUS.Store(oneWayRankEncode(f)) // 选路层：raw 编码
+			typ, hasTyp := fwdTyp[i]
+			eff := s.effectiveOneWay(f, typ, hasTyp, s.recentDev[[2]uint32{uint32(i), uint32(ref)}])
+			b.fwdOneWayUS.Store(uint64(f + delta))   // 显示层：地板，≥1µs
+			b.fwdRankUS.Store(oneWayRankEncode(eff)) // 选路层：有效值编码
 		}
 		if r, ok := retRaw[i]; ok {
-			b.retOneWayUS.Store(uint64(r + delta)) // 显示层：≥1µs
-			b.retRankUS.Store(oneWayRankEncode(r)) // 选路层：raw 编码
+			typ, hasTyp := retTyp[i]
+			eff := s.effectiveOneWay(r, typ, hasTyp, s.recentDev[[2]uint32{uint32(ref), uint32(i)}])
+			b.retOneWayUS.Store(uint64(r + delta))   // 显示层：地板，≥1µs
+			b.retRankUS.Store(oneWayRankEncode(eff)) // 选路层：有效值编码
 		}
 		b.probeUpdatedAt.Store(nowMs)
 	}
+}
+
+// effectiveOneWay 选路用的有效单向值：地板与 recent-typical − 抖动容差取大。
+// typical 缺席（样本 < rttProbeRecentMinSamples）时退纯地板——与历史行为一致，
+// 单样本可能是离群值。map 取值零值 = 无 typical，m[key] 对 nil map 安全。
+func (s *rttProbeScheduler) effectiveOneWay(floor int64, typ int64, hasTyp bool, devNS uint64) int64 {
+	if !hasTyp {
+		return floor
+	}
+	if cand := typ - recentJitterAllowUS(devNS); cand > floor {
+		return cand
+	}
+	return floor
 }
 
 // anchorHalfRef 锚定：只用参考连接的探针自回包基线 (ref,ref)/2。
@@ -637,6 +754,34 @@ func decomposeOneWay(decay map[[2]uint32]uint64, active []int, ref int, halfRef 
 			fwdX[i] = int64(oneWayUS(v)) - int64(halfRef)
 		}
 		if v, ok := decay[[2]uint32{uint32(ref), uint32(i)}]; ok {
+			retX[i] = int64(oneWayUS(v)) - int64(halfRef)
+		}
+	}
+	return fwdX, retX
+}
+
+// decomposeRecent recent-typical 的同锚分解：与 decomposeOneWay 同一 halfRef
+// 锚（地板尺度），把每对 (i,ref)/(ref,i) 的样本 EWMA 换算成有符号相对量。
+// 仅包含样本数 ≥ rttProbeRecentMinSamples 的方向；ref 自身用 (ref,ref) 的
+// typical 半值（当前自回包 RTT 的一半相对地板锚）。EWMA 是"当前典型"而地板是
+// "历史最优"，二者相减保留同一相对序——持续劣化的路径 typical 抬升、稳定路径
+// typical ≈ 地板，argmin/near 窗口差值中的公共项（B_ref 等）同样抵消。
+func decomposeRecent(recent map[[2]uint32]uint64, recentN map[[2]uint32]int, active []int, ref int, halfRef uint64) (fwdX, retX map[int]int64) {
+	fwdX = make(map[int]int64, len(active))
+	retX = make(map[int]int64, len(active))
+	for _, i := range active {
+		if i == ref {
+			if v, ok := recent[[2]uint32{uint32(ref), uint32(ref)}]; ok && recentN[[2]uint32{uint32(ref), uint32(ref)}] >= rttProbeRecentMinSamples {
+				t := int64(oneWayUS(v))/2 - int64(halfRef)
+				fwdX[i] = t
+				retX[i] = t
+			}
+			continue
+		}
+		if v, ok := recent[[2]uint32{uint32(i), uint32(ref)}]; ok && recentN[[2]uint32{uint32(i), uint32(ref)}] >= rttProbeRecentMinSamples {
+			fwdX[i] = int64(oneWayUS(v)) - int64(halfRef)
+		}
+		if v, ok := recent[[2]uint32{uint32(ref), uint32(i)}]; ok && recentN[[2]uint32{uint32(ref), uint32(i)}] >= rttProbeRecentMinSamples {
 			retX[i] = int64(oneWayUS(v)) - int64(halfRef)
 		}
 	}

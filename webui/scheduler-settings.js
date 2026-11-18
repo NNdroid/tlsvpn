@@ -12,7 +12,7 @@
   const COPY={
     'zh-CN':{
       title:'调度设置',sub:'选路算法、资格门与 FEC parity 分发。热更生效，无需重启。',labelAlgo:'选路算法',labelFec:'FEC parity 分发策略',labelWindow:'near 窗口 (ms)',labelGate:'候选资格门维度',labelGateWindow:'fwd 门窗口 (ms)',labelProbe:'probe_min 锚定下界 (µs)',
-      hint:'auto=去程稳定地板+服务时间（粘滞+WFQ）；latency_strict=严格最低去程地板；latency_sticky=最低去程地板+粘滞；min_rtt_strict=严格最低无拥塞地板；min_rtt_adaptive=无拥塞地板+粘滞+WFQ；roundtrip_strict=严格最低当前往返。',
+      hint:'auto=去程稳定地板+按路径容量的服务时间（粘滞+容量加权 WFQ）；latency_strict=严格最低去程地板；latency_sticky=最低去程地板+粘滞；min_rtt_strict=严格最低无拥塞地板；min_rtt_adaptive=无拥塞地板+粘滞+容量加权 WFQ；roundtrip_strict=严格最低当前往返。',
       fecHint:'auto=所有健康后端轮转（默认）；near=只投到去程单程时延与数据路径相差 ≤ 窗口的连接，抑制慢备链路的 parity 泄漏。',
       windowHint:'仅 near 生效：parity 只发给与数据路径去程时延相差 ≤ N ms 的连接。范围 1-100。',
       gateHint:'rtt=按内核 min_rtt 往返地板设门（默认，方向盲）；fwd=按本端去程排名键设门，让"去程最快但往返很慢"的极不对称路径也能准入——它慢的那一侧是对端发送方向，由对端自己的门挡掉。两端各自按发送方向设门。',
@@ -24,7 +24,7 @@
     },
     'zh-TW':{
       title:'排程設定',sub:'選路演算法、資格門與 FEC 同位元分發。熱更新生效，無需重新啟動。',labelAlgo:'選路演算法',labelFec:'FEC 同位元分發策略',labelWindow:'near 視窗 (ms)',labelGate:'候選資格門維度',labelGateWindow:'fwd 門視窗 (ms)',labelProbe:'probe_min 錨定下界 (µs)',
-      hint:'auto=去程穩定地板+服務時間（黏滯+WFQ）；latency_strict=嚴格最低去程地板；latency_sticky=最低去程地板+黏滯；min_rtt_strict=嚴格最低無壅塞地板；min_rtt_adaptive=無壅塞地板+黏滯+WFQ；roundtrip_strict=嚴格最低目前來回。',
+      hint:'auto=去程穩定地板+按路徑容量的服務時間（黏滯+容量加權 WFQ）；latency_strict=嚴格最低去程地板；latency_sticky=最低去程地板+黏滯；min_rtt_strict=嚴格最低無壅塞地板；min_rtt_adaptive=無壅塞地板+黏滯+容量加權 WFQ；roundtrip_strict=嚴格最低目前來回。',
       fecHint:'auto=所有健康後端輪轉（預設）；near=只投到去程單程延遲與資料路徑相差 ≤ 視窗的連線，抑制慢備援鏈路的同位元洩漏。',
       windowHint:'僅 near 生效：同位元只發給與資料路徑去程延遲相差 ≤ N ms 的連線。範圍 1-100。',
       gateHint:'rtt=依內核 min_rtt 來回地板設門（預設，方向盲）；fwd=依本端去程排名鍵設門，讓「去程最快但來回很慢」的極不對稱路徑也能准入——它慢的那一側是對端發送方向，由對端自己的門擋掉。兩端各自依發送方向設門。',
@@ -36,7 +36,7 @@
     },
     'en':{
       title:'Scheduler settings',sub:'Routing algorithm, eligibility gate & FEC parity distribution. Hot-applied, no restart.',labelAlgo:'Routing algorithm',labelFec:'FEC parity strategy',labelWindow:'near window (ms)',labelGate:'Candidate eligibility gate',labelGateWindow:'fwd gate window (ms)',labelProbe:'probe_min anchor floor (µs)',
-      hint:'auto = stable forward floor + service time (sticky+WFQ); latency_strict = strictly lowest forward floor; latency_sticky = lowest forward floor + sticky; min_rtt_strict = strictly lowest congestion-free floor; min_rtt_adaptive = floor + sticky+WFQ; roundtrip_strict = strictly lowest current RTT.',
+      hint:'auto = stable forward floor + per-path capacity service time (sticky+capacity-weighted WFQ); latency_strict = strictly lowest forward floor; latency_sticky = lowest forward floor + sticky; min_rtt_strict = strictly lowest congestion-free floor; min_rtt_adaptive = floor + sticky+capacity-weighted WFQ; roundtrip_strict = strictly lowest current RTT.',
       fecHint:'auto = rotate across all healthy backends (default); near = only to backends within the window of the data path fwd, suppressing parity leakage to slower standby links.',
       windowHint:'Only for near: parity goes only to connections within N ms of the data path forward latency. Range 1-100.',
       gateHint:'rtt = gate on the kernel min_rtt round-trip floor (default, direction-blind); fwd = gate on this side\u2019s forward rank key, so an extremely asymmetric path that is fastest forward but slow round-trip still qualifies \u2014 its slow side is the peer\u2019s send direction, gated by the peer\u2019s own gate. Each side gates its own send direction.',
@@ -48,7 +48,7 @@
     },
     'de':{
       title:'Scheduler-Einstellungen',sub:'Routing-Algorithmus, Qualifikations-Tor & FEC-Parity-Verteilung. Heiß angewendet, kein Neustart.',labelAlgo:'Routing-Algorithmus',labelFec:'FEC-Parity-Strategie',labelWindow:'near-Fenster (ms)',labelGate:'Qualifikations-Tor',labelGateWindow:'fwd-Tor-Fenster (ms)',labelProbe:'probe_min-Anker-Untergrenze (µs)',
-      hint:'auto = stabiler Vorwärts-Boden + Servicezeit (Sticky+WFQ); latency_strict = strikt niedrigster Vorwärts-Boden; latency_sticky = niedrigster Vorwärts-Boden + Sticky; min_rtt_strict = strikt niedrigster staufreier Boden; min_rtt_adaptive = Boden + Sticky+WFQ; roundtrip_strict = strikt niedrigste aktuelle RTT.',
+      hint:'auto = stabiler Vorwärts-Boden + Servicezeit je Pfadkapazität (Sticky+kapazitätsgewichtetes WFQ); latency_strict = strikt niedrigster Vorwärts-Boden; latency_sticky = niedrigster Vorwärts-Boden + Sticky; min_rtt_strict = strikt niedrigster staufreier Boden; min_rtt_adaptive = Boden + Sticky+kapazitätsgewichtetes WFQ; roundtrip_strict = strikt niedrigste aktuelle RTT.',
       fecHint:'auto = Rotation über alle gesunden Backends (Standard); near = nur zu Backends im Fenster der Datenpfad-Fwd, unterdrückt Parity-Leck auf langsamere Standby-Links.',
       windowHint:'Nur für near: Parity nur zu Verbindungen innerhalb N ms der Vorwärts-Latenz des Datenpfads. Bereich 1-100.',
       gateHint:'rtt = Tor an der Kernel-min_rtt-Rundlauf-Untergrenze (Standard, richtungsblind); fwd = Tor am eigenen Forward-Rangschlüssel, sodass ein extrem asymmetrischer Pfad, der forward am schnellsten ist aber langsam rundläuft, trotzdem zugelassen wird \u2013 seine langsame Seite ist die Senderrichtung des Peers, vom Tor des Peers selbst gehalten. Jede Seite torrt ihre eigene Senderrichtung.',
@@ -60,7 +60,7 @@
     },
     'fr':{
       title:'Paramètres de l’ordonnanceur',sub:'Algorithme de routage, porte d’admission & distribution de parité FEC. Appliqué à chaud, sans redémarrage.',labelAlgo:'Algorithme de routage',labelFec:'Stratégie de parité FEC',labelWindow:'fenêtre near (ms)',labelGate:'Porte d’admission',labelGateWindow:'fenêtre fwd (ms)',labelProbe:'plancher d’ancrage probe_min (µs)',
-      hint:'auto = plancher avant stable + temps de service (sticky+WFQ) ; latency_strict = strictement le plancher avant le plus bas ; latency_sticky = plancher avant le plus bas + sticky ; min_rtt_strict = strictement le plancher sans congestion le plus bas ; min_rtt_adaptive = plancher + sticky+WFQ ; roundtrip_strict = strictement la RTT actuelle la plus basse.',
+      hint:'auto = plancher avant stable + temps de service selon la capacité du chemin (sticky+WFQ pondéré par capacité) ; latency_strict = strictement le plancher avant le plus bas ; latency_sticky = plancher avant le plus bas + sticky ; min_rtt_strict = strictement le plancher sans congestion le plus bas ; min_rtt_adaptive = plancher + sticky+WFQ pondéré par capacité ; roundtrip_strict = strictement la RTT actuelle la plus basse.',
       fecHint:'auto = rotation sur tous les backends sains (défaut) ; near = uniquement aux backends dans la fenêtre de la fwd du chemin de données, supprime la fuite de parité vers les liens standby plus lents.',
       windowHint:'Uniquement pour near : parité envoyée aux connexions à N ms de la latence aller du chemin de données. Plage 1-100.',
       gateHint:'rtt = porte sur le plancher de min_rtt aller-retour du noyau (défaut, insensible à la direction) ; fwd = porte sur la clé de rang aller de ce côté, de sorte qu’un chemin très asymétrique, le plus rapide en aller mais lent en aller-retour, soit quand même admis — son côté lent est la direction d’envoi du pair, filtré par la porte du pair. Chaque côté filtre sa propre direction d’envoi.',
@@ -72,7 +72,7 @@
     },
     'ja':{
       title:'スケジューラ設定',sub:'選路アルゴリズム、資格ゲートと FEC パリティ配布。ホット適用、再起動不要。',labelAlgo:'選路アルゴリズム',labelFec:'FEC パリティ戦略',labelWindow:'near ウィンドウ (ms)',labelGate:'候補資格ゲートの次元',labelGateWindow:'fwd ゲート窓 (ms)',labelProbe:'probe_min アンカー下限 (µs)',
-      hint:'auto=安定した往路フロア＋サービス時間（スティッキー+WFQ）；latency_strict=厳密に最低の往路フロア；latency_sticky=最低の往路フロア＋スティッキー；min_rtt_strict=厳密に最低の輻輳なしフロア；min_rtt_adaptive=フロア＋スティッキー+WFQ；roundtrip_strict=厳密に最低の現在 RTT。',
+      hint:'auto=安定した往路フロア＋経路容量に応じたサービス時間（スティッキー+容量重み付きWFQ）；latency_strict=厳密に最低の往路フロア；latency_sticky=最低の往路フロア＋スティッキー；min_rtt_strict=厳密に最低の輻輳なしフロア；min_rtt_adaptive=フロア＋スティッキー+容量重み付きWFQ；roundtrip_strict=厳密に最低の現在RTT。',
       fecHint:'auto=全健全バックエンドでローテーション（デフォルト）；near=データパス fwd のウィンドウ内のみ、遅いスタンバイリンクへのパリティ漏れを抑制。',
       windowHint:'near のみ：データパスの往路遅延から N ms 以内の接続にのみパリティを送信。範囲 1-100。',
       gateHint:'rtt=カーネル min_rtt の往復フロアでゲート（デフォルト、方向盲）；fwd=本側の往路ランキングキーでゲートし、「往路は最速だが往復が遅い」極端に非対称なパスも准入できるようにする——その遅い側は対向側の送信方向であり、対向側自身のゲートが遮断する。両端がそれぞれ自らの送信方向でゲートする。',
