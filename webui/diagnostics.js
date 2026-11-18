@@ -26,14 +26,30 @@
   const fwdColors=['#4da3ff','#2ec4b6','#8b7bff','#39a8d8','#6b9bff','#00b3a4','#a78bfa','#2f7fd4'];
   const retColors=['#ff9f45','#f25c5c','#e0a800','#ff7ab8','#d94f9e','#ff8a5c','#c25e3a','#b8860b'];
   const section=document.createElement('section');section.className='card diagnostic-section';section.id='diagnostic-section';
-  section.innerHTML='<div class="chart-head"><h2 class="card-title" id="diag-title"></h2><span id="diag-at" class="dim mono"></span><div class="seg" id="diag-range"><button data-v="2m" data-diag-range="2m"></button><button data-v="1h" data-diag-range="1h"></button><button data-v="24h" data-diag-range="24h"></button></div><label><span id="diag-client-label"></span> <select id="diag-client"></select></label><label><span id="diag-conn-label"></span> <select id="diag-conn"></select></label></div><p class="dim" id="diag-note"></p><p class="dim" id="diag-scope"></p><p class="dim" id="diag-aggregate"></p><p id="diag-limit" class="dim"></p><div class="diagnostic-grid">'+[4,5,6,7,8,9,29].map((title,i)=>{
-    // 单向时延卡片是 title=29（text(29)='各连接单向时延'）：θ/U 时钟偏移徽标
-    // 说明 fwd/ret 拆分的置信度，属于单向时延卡片。此前写成 title===9 把徽标
-    // 挂到了"连接与异常"卡片头上，单向时延卡片反而没有。
-    const badge=title===29?'<span id="diag-clk" class="dim" style="font-weight:400;font-size:11px;margin-left:8px"></span>':'';
-    return '<article class="diagnostic-card"><h3 data-diag-title="'+title+'">'+badge+'</h3><div id="diag-body-'+i+'"></div></article>';
-  }).join('')+'</div>';
+  section.innerHTML='<div class="chart-head"><h2 class="card-title" id="diag-title"></h2><span id="diag-at" class="dim mono"></span><div class="seg" id="diag-range"><button data-v="2m" data-diag-range="2m"></button><button data-v="1h" data-diag-range="1h"></button><button data-v="24h" data-diag-range="24h"></button></div><label><span id="diag-client-label"></span> <select id="diag-client"></select></label><label><span id="diag-conn-label"></span> <select id="diag-conn"></select></label></div><p class="dim" id="diag-note"></p><p class="dim" id="diag-scope"></p><p class="dim" id="diag-aggregate"></p><p id="diag-limit" class="dim"></p><div class="diagnostic-grid"><div class="diagnostic-col" id="diag-col-0"></div><div class="diagnostic-col" id="diag-col-1"></div></div>';
   document.querySelector('.chart-card').after(section);
+  // 卡片两列分布：按估计高度最短列优先贪心。此前是 2 列 grid，同一行的两张卡
+  // 高度被行轨道拉齐——FEC 效果有 3 个子图而调度负载只有 2 个，矮卡下方留出
+  // 成片空白（用户报告的"为什么不是瀑布流"）。改为两列各自堆叠（瀑布流）：
+  // 子图数量是宽度的无关量（canvas 高度固定 150px），估计高度 = 子图数×常数
+  // + 卡片基础高度，贪心后两列高度差只剩零头。
+  const CARD_TITLES=[4,5,6,7,8,9,29];
+  const CARD_PANELS=[1,1,2,3,2,2,1]; // 吞吐/RTT/调度负载/FEC/Padding/连接与异常/单向时延 各自的子图数
+  const cards=CARD_TITLES.map((title,i)=>({title,i,h:CARD_PANELS[i]*178+54}));
+  const diagCols=[[],[]],colH=[0,0];
+  cards.forEach(card=>{const c=colH[0]<=colH[1]?0:1;diagCols[c].push(card);colH[c]+=card.h;});
+  diagCols.forEach(function(list,c){
+    const col=document.getElementById('diag-col-'+c);
+    list.forEach(function(card){
+      // 单向时延卡片是 title=29（text(29)='各连接单向时延'）：θ/U 时钟偏移徽标
+      // 说明 fwd/ret 拆分的置信度，属于单向时延卡片。此前写成 title===9 把徽标
+      // 挂到了"连接与异常"卡片头上，单向时延卡片反而没有。
+      const badge=card.title===29?'<span id="diag-clk" class="dim" style="font-weight:400;font-size:11px;margin-left:8px"></span>':'';
+      const art=document.createElement('article');art.className='diagnostic-card';
+      art.innerHTML='<h3 data-diag-title="'+card.title+'">'+badge+'</h3><div id="diag-body-'+card.i+'"></div>';
+      col.append(art);
+    });
+  });
   const client=document.getElementById('diag-client'),conn=document.getElementById('diag-conn');
   function options(select,entries){const old=select.value;select.replaceChildren();[["",text(3)],...entries].forEach(([id,label])=>{const option=document.createElement('option');option.value=id;option.textContent=label;select.append(option);});if(entries.some(e=>e[0]===old))select.value=old;buildSelect(select);syncSelect(select);}
   function identities(){const ids=new Map();(history?.points||[]).forEach(p=>(p.conns||[]).forEach(c=>{ids.delete(c.id);ids.set(c.id,c);}));return [...ids.values()].reverse();}
