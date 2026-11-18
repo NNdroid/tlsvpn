@@ -294,10 +294,8 @@ func main() {
 	if err != nil {
 		fatalf("export TLS keying material: %v", err)
 	}
-	pskHash := sha256.Sum256([]byte(*psk))
-	_ = pskHash
 	req := handshakeReq{
-		ProtocolVersion: 4,
+		ProtocolVersion: 5,
 		ClientInstance:  hex.EncodeToString(instance[:]),
 		ClientID:        clientID(*mac, *psk),
 		PSK:             pskProofHex(*psk, exporter),
@@ -331,8 +329,8 @@ func main() {
 	if !resp.Success {
 		fatalf("handshake rejected: %s", resp.Message)
 	}
-	if resp.ProtocolVersion != 4 || resp.SessionEpoch == 0 {
-		fatalf("server lacks protocol-v4 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
+	if resp.ProtocolVersion != 5 || resp.SessionEpoch == 0 {
+		fatalf("server lacks protocol-v5 key epochs: version=%d epoch=%d", resp.ProtocolVersion, resp.SessionEpoch)
 	}
 	if resp.TLS == nil {
 		fatalf("server did not return server-observed TLS summary")
