@@ -11,7 +11,7 @@
       title:'MCP 认证',sub:'与 WebUI 共用端口；认证策略可独立热更新。',mode:'认证方式',
       modes:{inherit_web:'继承 WebUI 认证',basic:'独立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'无认证'},
       deploy:'部署方式',deploys:{internal:'仅内网',public:'仅公网',both:'内网+公网'},deployLocked:'客户端模式固定为仅内网（无公网 MCP 面）',path:'端点路径',pathHint:'内外网共用；留空则加载时生成随机。路径是端点密钥的一部分，泄露应立即更换。',regen:'重新随机',
-      username:'用户名',credential:'新密码 / Token / API Key',credentialHint:'留空表示保留当前凭据；保存后只显示 SHA-256 校验值。',configured:'已配置静态凭据',notConfigured:'尚未配置静态凭据',
+      username:'用户名',credential:'新密码 / Token / API Key',credentialHint:'留空表示保留当前凭据；保存成功后状态会显示已配置（凭据本身不可回显）。',configured:'已配置静态凭据',notConfigured:'尚未配置静态凭据',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'每行一个 URL',scopesHint:'空格或逗号分隔',sync:'从 JSON 刷新',generate:'生成随机凭据',generated:'已生成 32 字节随机凭据',
       oauthHint:'JWT access token 将校验签名、exp、issuer、audience 和所需 scope；JWKS 仅允许 HTTPS（本机回环 HTTP 除外）。',noneWarn:'警告：none 会让 /mcp 无需认证，仅适合隔离可信网络。'
@@ -20,7 +20,7 @@
       title:'MCP 驗證',sub:'與 WebUI 共用連接埠；驗證策略可獨立熱更新。',mode:'驗證方式',
       modes:{inherit_web:'沿用 WebUI 驗證',basic:'獨立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'無驗證'},
       deploy:'部署方式',deploys:{internal:'僅內網',public:'僅公網',both:'內網+公網'},deployLocked:'用戶端模式固定為僅內網（無公網 MCP 面）',path:'端點路徑',pathHint:'內外網共用；留空則載入時產生隨機。路徑是端點金鑰的一部分，洩漏應立即更換。',regen:'重新隨機',
-      username:'使用者名稱',credential:'新密碼 / Token / API Key',credentialHint:'留空表示保留目前憑據；儲存後只顯示 SHA-256 驗證值。',configured:'已設定靜態憑據',notConfigured:'尚未設定靜態憑據',
+      username:'使用者名稱',credential:'新密碼 / Token / API Key',credentialHint:'留空表示保留目前憑據；儲存成功後狀態會顯示已設定（憑據本身不可回顯）。',configured:'已設定靜態憑據',notConfigured:'尚未設定靜態憑據',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'每行一個 URL',scopesHint:'以空格或逗號分隔',sync:'從 JSON 重新整理',generate:'產生隨機憑據',generated:'已產生 32 位元組隨機憑據',
       oauthHint:'JWT access token 會驗證簽章、exp、issuer、audience 與必要 scope；JWKS 僅允許 HTTPS（本機回環 HTTP 除外）。',noneWarn:'警告：none 會讓 /mcp 不需驗證，只適合隔離可信網路。'
@@ -29,7 +29,7 @@
       title:'MCP Authentication',sub:'Shares the WebUI port; the MCP authentication policy hot-reloads independently.',mode:'Authentication mode',
       modes:{inherit_web:'Inherit WebUI auth',basic:'Independent Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'No authentication'},
       deploy:'Deploy scope',deploys:{internal:'Internal only',public:'Public only',both:'Internal + public'},deployLocked:'Client mode is fixed to internal-only (no public MCP face)',path:'Endpoint path',pathHint:'Shared by the internal and public faces. Leave empty to generate a random one on load. The path is part of the endpoint secret; rotate it immediately if leaked.',regen:'Randomize',
-      username:'Username',credential:'New password / token / API key',credentialHint:'Leave empty to keep the current credential. Saved static credentials are shown only as SHA-256 verifiers.',configured:'Static credential configured',notConfigured:'No static credential configured',
+      username:'Username',credential:'New password / token / API key',credentialHint:'Leave empty to keep the current credential. Once saved, the status shows that a credential is configured (the secret itself is never echoed back).',configured:'Static credential configured',notConfigured:'No static credential configured',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'One URL per line',scopesHint:'Space or comma separated',sync:'Reload from JSON',generate:'Generate random credential',generated:'Generated a 32-byte random credential',
       oauthHint:'JWT access tokens are checked for signature, exp, issuer, audience and required scopes. JWKS must use HTTPS except for loopback tests.',noneWarn:'Warning: none leaves /mcp unauthenticated and is only suitable for isolated trusted networks.'
@@ -38,7 +38,7 @@
       title:'MCP-Authentifizierung',sub:'Nutzt den WebUI-Port; die MCP-Authentifizierung wird unabhängig per Hot-Reload aktualisiert.',mode:'Authentifizierungsmodus',
       modes:{inherit_web:'WebUI-Authentifizierung übernehmen',basic:'Eigenes Basic',bearer:'Bearer-Token',api_key:'API-Key-Header',oauth_jwt:'OAuth / OIDC JWT',none:'Keine Authentifizierung'},
       deploy:'Bereitstellung',deploys:{internal:'Nur intern',public:'Nur öffentlich',both:'Intern + öffentlich'},deployLocked:'Im Client-Modus ist nur intern festgelegt (keine öffentliche MCP-Seite)',path:'Endpunktpfad',pathHint:'Von interner und öffentlicher Seite gemeinsam genutzt. Leer lassen, um beim Laden einen zufälligen Pfad zu erzeugen. Der Pfad ist Teil des Endpunkt-Geheimnisses; bei Leck sofort rotieren.',regen:'Neu zufällig',
-      username:'Benutzername',credential:'Neues Passwort / Token / API-Key',credentialHint:'Leer lassen, um den aktuellen Wert zu behalten. Gespeicherte statische Zugangsdaten werden nur als SHA-256-Prüfwert angezeigt.',configured:'Statische Zugangsdaten konfiguriert',notConfigured:'Keine statischen Zugangsdaten konfiguriert',
+      username:'Benutzername',credential:'Neues Passwort / Token / API-Key',credentialHint:'Leer lassen, um den aktuellen Wert zu behalten. Nach dem Speichern zeigt der Status eine konfigurierte Zugangsmeldung an (das Geheimnis selbst wird nie zurückgespiegelt).',configured:'Statische Zugangsdaten konfiguriert',notConfigured:'Keine statischen Zugangsdaten konfiguriert',
       apiHeader:'API-Key-Header',jwks:'JWKS-URL',issuer:'Issuer',audience:'Audience',resource:'Resource-URL',servers:'Authorization Servers',scopes:'Erforderliche Scopes',
       serversHint:'Eine URL pro Zeile',scopesHint:'Durch Leerzeichen oder Komma getrennt',sync:'Aus JSON neu laden',generate:'Zufälligen Schlüssel erzeugen',generated:'32-Byte-Zufallswert erzeugt',
       oauthHint:'JWT-Access-Tokens werden auf Signatur, exp, issuer, audience und Scopes geprüft. JWKS muss HTTPS nutzen, außer bei Loopback-Tests.',noneWarn:'Warnung: none lässt /mcp ohne Authentifizierung und ist nur für isolierte vertrauenswürdige Netze geeignet.'
@@ -47,7 +47,7 @@
       title:'Authentification MCP',sub:'Partage le port WebUI ; la stratégie MCP est mise à jour à chaud indépendamment.',mode:"Mode d’authentification",
       modes:{inherit_web:'Hériter de WebUI',basic:'Basic indépendant',bearer:'Jeton Bearer',api_key:'En-tête API Key',oauth_jwt:'OAuth / OIDC JWT',none:'Aucune authentification'},
       deploy:'Portée de déploiement',deploys:{internal:'Interne uniquement',public:'Public uniquement',both:'Interne + public'},deployLocked:'Le mode client est fixé à interne uniquement (pas de face MCP publique)',path:'Chemin d’endpoint',pathHint:'Partagé par les faces interne et publique. Laisser vide pour générer un chemin aléatoire au chargement. Le chemin fait partie du secret d’endpoint ; à faire tourner immédiatement en cas de fuite.',regen:'Réaléatoriser',
-      username:"Nom d’utilisateur",credential:'Nouveau mot de passe / token / clé API',credentialHint:'Laisser vide pour conserver la valeur actuelle. Les secrets statiques enregistrés ne sont affichés que sous forme de vérificateur SHA-256.',configured:'Secret statique configuré',notConfigured:'Aucun secret statique configuré',
+      username:"Nom d’utilisateur",credential:'Nouveau mot de passe / token / clé API',credentialHint:'Laisser vide pour conserver la valeur actuelle. Après l’enregistrement, le statut indique qu’un secret est configuré (le secret lui-même n’est jamais renvoyé).',configured:'Secret statique configuré',notConfigured:'Aucun secret statique configuré',
       apiHeader:'En-tête API Key',jwks:'URL JWKS',issuer:'Issuer',audience:'Audience',resource:'URL Resource',servers:'Authorization Servers',scopes:'Scopes requis',
       serversHint:'Une URL par ligne',scopesHint:'Séparés par espace ou virgule',sync:'Recharger depuis JSON',generate:'Générer un secret aléatoire',generated:'Secret aléatoire de 32 octets généré',
       oauthHint:'Les JWT sont vérifiés pour la signature, exp, issuer, audience et les scopes requis. JWKS exige HTTPS sauf en boucle locale.',noneWarn:'Attention : none laisse /mcp sans authentification et ne convient qu’aux réseaux isolés de confiance.'
@@ -56,7 +56,7 @@
       title:'MCP 認証',sub:'WebUI と同じポートを使用し、MCP 認証ポリシーは独立してホット更新できます。',mode:'認証方式',
       modes:{inherit_web:'WebUI 認証を継承',basic:'独立 Basic',bearer:'Bearer Token',api_key:'API Key Header',oauth_jwt:'OAuth / OIDC JWT',none:'認証なし'},
       deploy:'配備範囲',deploys:{internal:'内部のみ',public:'公開のみ',both:'内部＋公開'},deployLocked:'クライアントモードは内部のみに固定（公開 MCP 面なし）',path:'エンドポイントパス',pathHint:'内部・公開面で共有。空欄なら読込時にランダム生成します。パスはエンドポイントの秘密の一部であり、漏洩時は直ちに交換してください。',regen:'再ランダム',
-      username:'ユーザー名',credential:'新しいパスワード / Token / API Key',credentialHint:'空欄なら現在の資格情報を維持します。保存後の静的秘密情報は SHA-256 検証値のみ表示されます。',configured:'静的資格情報を設定済み',notConfigured:'静的資格情報は未設定',
+      username:'ユーザー名',credential:'新しいパスワード / Token / API Key',credentialHint:'空欄なら現在の資格情報を維持します。保存が成功すると、状態に「設定済み」と表示されます（秘密情報自体は返されません）。',configured:'静的資格情報を設定済み',notConfigured:'静的資格情報は未設定',
       apiHeader:'API Key Header',jwks:'JWKS URL',issuer:'Issuer',audience:'Audience',resource:'Resource URL',servers:'Authorization Servers',scopes:'Required Scopes',
       serversHint:'1 行に 1 URL',scopesHint:'空白またはカンマ区切り',sync:'JSON から再読込',generate:'ランダム資格情報を生成',generated:'32 バイトのランダム資格情報を生成しました',
       oauthHint:'JWT access token の署名、exp、issuer、audience、必要な scope を検証します。JWKS はループバックテスト以外 HTTPS 必須です。',noneWarn:'警告: none では /mcp が認証なしになります。隔離された信頼済みネットワーク専用です。'
@@ -108,7 +108,11 @@
   const mode=q('mcp-auth-mode'),deploy=q('mcp-deploy'),path=q('mcp-path');
   const username=q('mcp-username'),credential=q('mcp-credential'),apiHeader=q('mcp-api-header');
   const jwks=q('mcp-jwks'),issuer=q('mcp-issuer'),audience=q('mcp-audience'),resource=q('mcp-resource'),servers=q('mcp-servers'),scopes=q('mcp-scopes');
-  let currentVerifier='';
+  // credConfigured：是否已配置静态凭据（GET 回显 credential_set 派生布尔）。
+  // 此前的 currentVerifier 设计（把校验器存进变量、空输入时回写 credential）
+  // 在凭据语义下是危险的：校验器一旦被回写成 credential，认证直接损坏。
+  // 空输入时不触碰 m.credential——编辑器里是脱敏后的 ""（后端空值=保留现有）。
+  let credConfigured=false;
 
   function lang(){const l=document.documentElement.lang||'en';return COPY[l]||COPY.en;}
   function translate(){
@@ -117,7 +121,7 @@
     Array.from(mode.options).forEach(o=>o.textContent=c.modes[o.value]||o.value);
     Array.from(deploy.options).forEach(o=>o.textContent=c.deploys[o.value]||o.value);
     q('mcp-sync').textContent=c.sync;q('mcp-generate').textContent=c.generate;q('mcp-path-regen').textContent=c.regen;
-    q('mcp-credential-status').textContent=currentVerifier?c.configured:c.notConfigured;
+    q('mcp-credential-status').textContent=credConfigured?c.configured:c.notConfigured;
   }
   function updateVisibility(){
     const v=mode.value;
@@ -144,7 +148,7 @@
     applyDeployLock(cfg.mode==='client');
     path.value=m.path||'';
     username.value=m.username||'';apiHeader.value=m.api_key_header||'X-API-Key';
-    currentVerifier=m.credential||'';credential.value='';
+    credConfigured=!!m.credential_set;credential.value='';
     const o=m.oauth||{};jwks.value=o.jwks_url||'';issuer.value=o.issuer||'';audience.value=o.audience||'';resource.value=o.resource||'';
     servers.value=(o.authorization_servers||[]).join('\n');scopes.value=(o.required_scopes||[]).join(' ');
     translate();updateVisibility();return true;
@@ -153,7 +157,10 @@
     const cfg=parseEditor();if(!cfg)return false;
     cfg.web=cfg.web||{};cfg.web.mcp=cfg.web.mcp||{};
     const m=cfg.web.mcp;m.auth_mode=mode.value||'inherit_web';m.deploy=deploy.disabled?'internal':(deploy.value||'internal');m.path=path.value.trim();m.username=username.value.trim();m.api_key_header=(apiHeader.value||'X-API-Key').trim();
-    const fresh=credential.value;if(fresh)m.credential=fresh;else if(currentVerifier)m.credential=currentVerifier;
+    // 新凭据只在输入框有值时写入；空输入不触碰 m.credential——编辑器里是
+    // 脱敏后的 ""（后端空值=保留现有凭据）。绝不能把任何校验器/派生量回写
+    // 进 credential：那会把校验器变成真实凭据（认证损坏）。
+    const fresh=credential.value;if(fresh)m.credential=fresh;
     m.oauth=m.oauth||{};m.oauth.jwks_url=jwks.value.trim();m.oauth.issuer=issuer.value.trim();m.oauth.audience=audience.value.trim();m.oauth.resource=resource.value.trim();
     m.oauth.authorization_servers=servers.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
     m.oauth.required_scopes=scopes.value.split(/[\s,]+/).map(x=>x.trim()).filter(Boolean);

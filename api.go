@@ -495,7 +495,10 @@ func startWebServer(addr string, srv *Server, cli *Client, webAuth, webCert, web
 		redacted.Web.Auth = ""
 		redacted.Socks5 = ""
 		// MCP credential 是 sha256 验证器（防重放），但拿到验证器即可对弱口令
-		// 离线字典爆破；与其他秘密同等待遇，GET 一律脱敏。
+		// 离线字典爆破；与其他秘密同等待遇，GET 一律脱敏。脱敏前派生
+		// credential_set 布尔量：面板此前拿不到任何"已配置"信号，保存成功后
+		// 状态也一直显示"尚未配置"（用户感知为保存不上）。
+		redacted.Web.MCP.CredentialSet = redacted.Web.MCP.Credential != ""
 		redacted.Web.MCP.Credential = ""
 		data, _ := json.MarshalIndent(&redacted, "", "  ")
 		w.Write(data)
@@ -721,6 +724,9 @@ func mergeAndValidateConfig(old *Config, posted json.RawMessage, srv *Server, cl
 		normalizeMCPAuthMode(newCfg.Web.MCP.AuthMode) == normalizeMCPAuthMode(old.Web.MCP.AuthMode) {
 		newCfg.Web.MCP.Credential = old.Web.MCP.Credential
 	}
+	// credential_set 是 GET 回显的派生量，绝不接受面板回传/落盘——否则保存
+	// 的 JSON 里会固化一个可能与真实凭据脱节的陈旧标志。
+	newCfg.Web.MCP.CredentialSet = false
 	newCfg.applyDefaults()
 	if err := newCfg.Validate(); err != nil {
 		return nil, nil, err
@@ -1228,7 +1234,9 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.WebAuth = cfg.Web.Auth != ""
 	out.WebBind = cfg.Web.Bind
 	out.WebHTTPS = cfg.Web.Cert != "" && cfg.Web.Key != ""
-	out.EncryptPSK = true
+	// EncryptPSK 回显"PSK 已配置"：此前硬编码 true，没配 PSK 的实例也在
+	// 生效配置快照里显示已配置（与 credential_set 同类的"无数据源状态"）。
+	out.EncryptPSK = cfg.PSK != ""
 	out.SessionEnc = cfg.Encrypt
 	out.MaxSess = cfg.Server.MaxSessions
 	out.V4CIDR = cfg.Server.V4CIDR

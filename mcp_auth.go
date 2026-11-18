@@ -62,6 +62,12 @@ type MCPConfig struct {
 	// Credential accepts plaintext when initially configured from the WebUI JSON
 	// editor. applyDefaults converts it to sha256:<hex> before it is persisted.
 	Credential string `json:"credential,omitempty"`
+	// CredentialSet 是"是否已配置静态凭据"的运行时派生量（GET /api/config 回显
+	// 用）：credential 本身被脱敏为空串，面板此前无从得知保存是否生效，一直显示
+	// "尚未配置"。只读回显字段——mergeAndValidateConfig 会清掉面板回传的值，
+	// 绝不落盘。bool 而非校验器前缀：校验器任何前缀都能对弱口令离线爆破
+	//（脱敏注释里的威胁模型），布尔量零验证面。
+	CredentialSet bool `json:"credential_set,omitempty"`
 	// APIKeyHeader is only used by api_key mode and defaults to X-API-Key.
 	APIKeyHeader string `json:"api_key_header,omitempty"`
 	// Deploy selects which listener serves MCP: internal (web listener only,

@@ -397,3 +397,77 @@ func TestSaveEndToEndUserFlow(t *testing.T) {
 		t.Errorf("第二次保存后状态卡 cfg.brutal_up = %d, want 200", stats.Cfg.BrutalUp)
 	}
 }
+
+// TestSaveMCPCredentialSetEcho 回归"MCP 凭据保存不上"（用户感知）：
+// 凭据保存链路本身是通的（toEditor→POST→后端保留），但 GET /api/config 对
+// credential 脱敏且不提供任何"已配置"信号，面板状态永远显示"尚未配置静态
+// 凭据"——保存成功也像失败。修复：GET 派生 credential_set 布尔（校验器任何
+// 前缀都可对弱口令离线爆破，布尔量零验证面），面板据此显示已配置。
+// 本测试钉住整条链路：
+//  1. 提交明文凭据 → GET credential 脱敏为空 + credential_set=true；
+//  2. credential_set 是派生量：不落盘、面板回传被清除；
+//  3. 二次不带凭据保存（保留语义）→ 凭据仍配置（credential_set 仍 true），
+//     文件里的 credential 保持 sha256: 归一形态不被面板回传污染。
+func TestSaveMCPCredentialSetEcho(t *testing.T) {
+	base, path, client := startSaveHTTPHarness(t)
+
+	// 1) 提交明文凭据（Bearer 模式）
+	code, body := postControl(t, base, client, "save",
+		`{"mode":"server","psk":"test-only-high-entropy-secret-abcdefgh","addr":"127.0.0.1:4000","encrypt":true,"enc_algo":"gcm256","web":{"addr":"127.0.0.1:8080","bind":"all","auth":"admin:realpassword123","mcp":{"auth_mode":"bearer","deploy":"public","credential":"my-mcp-bearer-token"}}}`)
+	if code != http.StatusOK {
+		t.Fatalf("save with credential returned %d: %s", code, body)
+	}
+
+	// GET：credential 脱敏为空、credential_set=true
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET after save returned %d: %s", code, body)
+	}
+	var cfg struct {
+		Web struct {
+			MCP struct {
+				Credential    string `json:"credential"`
+				CredentialSet bool   `json:"credential_set"`
+			} `json:"mcp"`
+		} `json:"web"`
+	}
+	if err := json.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf("decode GET /api/config: %v: %s", err, body)
+	}
+	if cfg.Web.MCP.Credential != "" {
+		t.Errorf("credential must stay redacted in GET, got %q", cfg.Web.MCP.Credential)
+	}
+	if !cfg.Web.MCP.CredentialSet {
+		t.Errorf("credential_set must be true after saving a credential (面板据此显示已配置):\n%s", body)
+	}
+
+	// 2) credential_set 是派生量：绝不落盘
+	fileData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(fileData), "credential_set") {
+		t.Errorf("credential_set must never be persisted to the config file:\n%s", fileData)
+	}
+	if !strings.Contains(string(fileData), `"credential": "sha256:`) {
+		t.Errorf("persisted credential must be the normalized sha256 verifier:\n%s", fileData)
+	}
+
+	// 3) 面板回传 credential_set:true（模拟 GET 回显后再保存）+ 空凭据：
+	//    不得 400、派生量被清除、凭据保留语义生效（credential_set 仍 true）。
+	code, body = postControl(t, base, client, "save",
+		`{"mode":"server","psk":"test-only-high-entropy-secret-abcdefgh","addr":"127.0.0.1:4000","encrypt":true,"enc_algo":"gcm256","web":{"addr":"127.0.0.1:8080","bind":"all","auth":"admin:realpassword123","mcp":{"auth_mode":"bearer","deploy":"public","credential_set":true}}}`)
+	if code != http.StatusOK {
+		t.Fatalf("save echoing credential_set returned %d: %s", code, body)
+	}
+	code, body = getConfigFromPanel(t, base, client)
+	if code != http.StatusOK {
+		t.Fatalf("GET after second save returned %d: %s", code, body)
+	}
+	if err := json.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf("decode GET /api/config (2nd): %v: %s", err, body)
+	}
+	if !cfg.Web.MCP.CredentialSet {
+		t.Errorf("credential_set must stay true after a keep-credential save (凭据被清掉=保存不上):\n%s", body)
+	}
+}
