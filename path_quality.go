@@ -160,6 +160,55 @@ func adaptiveBackendOneWayUS(b *Backend) int64 {
 	return int64(rtt) / 2
 }
 
+// rttEffMinSamples 内核 RTT 有效地板发布前的最少采样数。首样本可能是握手期
+// 离群值（TCP 慢启动/拥塞窗口未稳），与探针层 rttProbeRecentMinSamples 同纪律：
+// 样本不足时调度器回退 min_rtt/SRTT 链（历史行为）。
+const rttEffMinSamples = 2
+
+// noteRTTSample 以 200ms 一次的 SRTT 采样维护内核 RTT 的有效地板
+// （decayed-min：慢升 0.5ms/s、快降），writer 采样 goroutine 独占。
+//
+// 语义与探针层 updateDecay 平行（rttProbeDecayPerSecNS 同一常量，RTT 尺度
+// 0.5ms/s）：瞬时拥塞把 SRTT 抬高只持续几个采样窗，地板不动（成员稳定性由
+// TestAdaptiveSchedulerMinRTTElapsedEnvelope 钉死）；持续劣化（拥塞、路由
+// 漂移，不触发重连）让地板以 0.5ms/s 慢升最终跟上；恢复时新样本低于地板，
+// 快降立即自愈。这修复了 tcpi_min_rtt 是 min-ever、对连接存续期的持续劣化
+// 永久钝感的问题——包络地板被一次 lucky window 钉死、健康路径长期
+// envelope_out 只能靠重连解开的根因。
+func (b *Backend) noteRTTSample(rttUS uint32) {
+	if b == nil || rttUS == 0 {
+		return
+	}
+	now := time.Now()
+	elapsedNS := int64(0)
+	if !b.rttEffLast.IsZero() {
+		elapsedNS = now.Sub(b.rttEffLast).Nanoseconds()
+	}
+	b.rttEffLast = now
+	// decayedMinUpdate 自带时钟回拨守卫（elapsed<0 不慢升，防 uint64 wrap）。
+	b.rttEffFloorNS = decayedMinUpdate(b.rttEffFloorNS, elapsedNS, uint64(rttUS)*1000, rttProbeDecayPerSecNS)
+	b.rttEffN++
+	if b.rttEffN < rttEffMinSamples {
+		return
+	}
+	b.effRttUS.Store(uint32(min(b.rttEffFloorNS/1000, uint64(^uint32(0)))))
+}
+
+// adaptiveBackendEffectiveRTT 返回该连接的有效内核 RTT（µs）+ 是否未知。
+// effRttUS 已建立（≥rttEffMinSamples 个 SRTT 采样）时优先——decayed-min 地板
+// 对持续劣化敏感、对瞬时拥塞稳定；未建立时回退 adaptiveBackendMinRTT 的
+// min_rtt/SRTT 链（历史行为）。返回值约定与 adaptiveBackendMinRTT 一致：
+// bool 为 true 表示未知，此时首返回值是 50000 哨兵，不可当作真实 RTT 使用。
+func adaptiveBackendEffectiveRTT(b *Backend) (uint32, bool) {
+	if b == nil {
+		return adaptiveUnknownRTTUS, true
+	}
+	if v := b.effRttUS.Load(); v > 0 {
+		return v, false
+	}
+	return adaptiveBackendMinRTT(b)
+}
+
 func (b *Backend) estimatedETAUS(incomingBytes uint64) uint64 {
 	if b == nil {
 		return ^uint64(0)

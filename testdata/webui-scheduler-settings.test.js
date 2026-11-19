@@ -45,6 +45,7 @@ const elements = {
   },
   'sched-envelope-window': makeInput(),
   'probe-min-half-rtt': makeInput(),
+  'sched-health-penalty': makeInput(),
 };
 const editor = { value: '', parentNode: { insertBefore() {} } };
 editor.addEventListener = (ev, fn) => { if (ev === 'input') editorInputHandler = fn; };
@@ -55,7 +56,7 @@ let changeHandler = null;
 // 下拉/输入框实时跟随。捕获该处理器以验证「改 JSON → fromEditor 回填 DOM」。
 let editorInputHandler = null;
 // translate() 会把文案写进 [data-rts-t] 元素；预定义这些捕获元素以验证 zh-TW 生效。
-const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint','labelProbe','probeHint'];
+const i18nKeys = ['title','sub','labelAlgo','labelFec','labelWindow','hint','fecHint','windowHint','labelProbe','probeHint','labelPenalty','penaltyHint'];
 const i18nEls = i18nKeys.map(k => ({ dataset: { rtsT: k }, textContent: '' }));
 const rootStub = {
   className: '', innerHTML: '', style: {},
@@ -110,6 +111,7 @@ const windowEl = elements['fec-near-window'];
 const gateEl = elements['sched-envelope'];
 const gateWindowEl = elements['sched-envelope-window'];
 const probeEl = elements['probe-min-half-rtt'];
+const penaltyEl = elements['sched-health-penalty'];
 assert(algo.value === 'latency_strict', 'fromEditor reads top-level routing_algo, got "' + algo.value + '"');
 assert(fec.value === 'near', 'fromEditor reads top-level fec_strategy, got "' + fec.value + '"');
 assert(windowEl.value === '25', 'fromEditor reads top-level fec_near_window_ms, got "' + windowEl.value + '"');
@@ -117,6 +119,8 @@ assert(gateEl.value === 'fwd', 'fromEditor reads top-level sched_envelope, got "
 assert(gateWindowEl.value === '35', 'fromEditor reads top-level sched_envelope_ms, got "' + gateWindowEl.value + '"');
 // 初始 JSON 没有 probe_min_half_rtt_us：显示后端默认 1000（而非空）。
 assert(probeEl.value === '1000', 'fromEditor shows backend default 1000 when probe_min_half_rtt_us is absent, got "' + probeEl.value + '"');
+// 初始 JSON 没有 sched_health_penalty_us：显示后端默认 2000（而非空）。
+assert(penaltyEl.value === '2000', 'fromEditor shows backend default 2000 when sched_health_penalty_us is absent, got "' + penaltyEl.value + '"');
 
 // ---- 用例 2：toEditor(true) 写顶层字段（而非 cfg.client） ----
 algo.value = 'min_rtt_adaptive';
@@ -169,6 +173,8 @@ assert(txt('labelFec') === 'FEC 同位元分發策略', 'zh-TW labelFec translat
 assert(txt('labelWindow') === 'near 視窗 (ms)', 'zh-TW labelWindow translated, got "' + txt('labelWindow') + '"');
 assert(txt('labelProbe') === 'probe_min 錨定下界 (µs)', 'zh-TW labelProbe translated, got "' + txt('labelProbe') + '"');
 assert(txt('probeHint').indexOf('預設 1000') !== -1, 'zh-TW probeHint translated, got "' + txt('probeHint') + '"');
+assert(txt('labelPenalty') === '健康罰時單位 (µs)', 'zh-TW labelPenalty translated, got "' + txt('labelPenalty') + '"');
+assert(txt('penaltyHint').indexOf('預設 2000') !== -1, 'zh-TW penaltyHint translated, got "' + txt('penaltyHint') + '"');
 // 下拉选项的 textContent 也须为繁中（而非英文/原值）。
 const autoOpt = algo.options.find(o => o.value === 'auto');
 assert(autoOpt && autoOpt.textContent.indexOf('預設') !== -1, 'zh-TW auto option label uses traditional Chinese, got "' + (autoOpt && autoOpt.textContent) + '"');
@@ -190,6 +196,11 @@ async function runAsyncCases() {
   assert(probeEl.value === '1000', 'missing probe_min_half_rtt_us displays default 1000 after reload, got "' + probeEl.value + '"');
   assert(windowEl.value === '', 'missing fec_near_window_ms leaves the input empty, got "' + windowEl.value + '"');
   assert(gateWindowEl.value === '', 'missing sched_envelope_ms leaves the input empty, got "' + gateWindowEl.value + '"');
+  assert(penaltyEl.value === '2000', 'missing sched_health_penalty_us displays default 2000 after reload, got "' + penaltyEl.value + '"');
+  // 越界值原样显示（保存时后端 400 显示真实错误），与 probe 同口径。
+  editor.value = JSON.stringify({ routing_algo: 'auto', sched_health_penalty_us: -1 });
+  await window.loadConfig();
+  assert(penaltyEl.value === '-1', 'fromEditor shows out-of-range sched_health_penalty_us as-is, got "' + penaltyEl.value + '"');
 
   // ---- 用例 6：toEditor(true) 对 probe_min_half_rtt_us —— 0 合法可写，非法删键 ----
   probeEl.value = '0';
@@ -213,16 +224,40 @@ async function runAsyncCases() {
   out = JSON.parse(editor.value);
   assert(!('probe_min_half_rtt_us' in out), 'empty probe input deletes the key (backend default 1000), got ' + JSON.stringify(out.probe_min_half_rtt_us));
 
+  // ---- 用例 6b：sched_health_penalty_us —— 0 合法可写（禁用罚时），越界删键 ----
+  penaltyEl.value = '0';
+  changeHandler({ target: penaltyEl });
+  out = JSON.parse(editor.value);
+  assert(out.sched_health_penalty_us === 0, 'toEditor keeps explicit 0 (health penalty disabled), got "' + out.sched_health_penalty_us + '"');
+  penaltyEl.value = '500';
+  changeHandler({ target: penaltyEl });
+  out = JSON.parse(editor.value);
+  assert(out.sched_health_penalty_us === 500, 'toEditor writes in-range sched_health_penalty_us, got "' + out.sched_health_penalty_us + '"');
+  penaltyEl.value = '-5';
+  changeHandler({ target: penaltyEl });
+  out = JSON.parse(editor.value);
+  assert(!('sched_health_penalty_us' in out), 'negative sched_health_penalty_us deletes the key, got ' + JSON.stringify(out.sched_health_penalty_us));
+  penaltyEl.value = '60001';
+  changeHandler({ target: penaltyEl });
+  out = JSON.parse(editor.value);
+  assert(!('sched_health_penalty_us' in out), 'above-range sched_health_penalty_us deletes the key, got ' + JSON.stringify(out.sched_health_penalty_us));
+  penaltyEl.value = '';
+  changeHandler({ target: penaltyEl });
+  out = JSON.parse(editor.value);
+  assert(!('sched_health_penalty_us' in out), 'empty penalty input deletes the key (backend default 2000), got ' + JSON.stringify(out.sched_health_penalty_us));
+
   // ---- 用例 7：toEditor(false) 补空 —— DOM 合法值优先（与枚举字段语义一致） ----
   editor.value = JSON.stringify({ routing_algo: 'auto' });
   windowEl.value = '30';
   gateWindowEl.value = '300';
   probeEl.value = '2500';
+  penaltyEl.value = '750';
   await window.saveConfig(false);
   out = JSON.parse(editor.value);
   assert(out.fec_near_window_ms === 30, 'toEditor(false) fills missing fec_near_window_ms from DOM, got "' + out.fec_near_window_ms + '"');
   assert(out.sched_envelope_ms === 300, 'toEditor(false) fills missing sched_envelope_ms from DOM, got "' + out.sched_envelope_ms + '"');
   assert(out.probe_min_half_rtt_us === 2500, 'toEditor(false) fills missing probe_min_half_rtt_us from DOM, got "' + out.probe_min_half_rtt_us + '"');
+  assert(out.sched_health_penalty_us === 750, 'toEditor(false) fills missing sched_health_penalty_us from DOM, got "' + out.sched_health_penalty_us + '"');
 
   // ---- 用例 7b：DOM 无合法值 → near/envelope 落硬编码缺省 10/20，probe 不写键 ----
   editor.value = JSON.stringify({ routing_algo: 'auto' });
@@ -236,23 +271,25 @@ async function runAsyncCases() {
   assert(!('probe_min_half_rtt_us' in out), 'toEditor(false) omits probe_min_half_rtt_us when DOM has no legal value, got ' + JSON.stringify(out.probe_min_half_rtt_us));
 
   // ---- 用例 7c：编辑器已有的非法值原样保留（送后端校验），DOM 值不覆盖 ----
-  editor.value = JSON.stringify({ routing_algo: 'auto', fec_near_window_ms: 'oops', sched_envelope_ms: 9999, probe_min_half_rtt_us: -3 });
+  editor.value = JSON.stringify({ routing_algo: 'auto', fec_near_window_ms: 'oops', sched_envelope_ms: 9999, probe_min_half_rtt_us: -3, sched_health_penalty_us: 'oops' });
   windowEl.value = '40';
   gateWindowEl.value = '40';
   probeEl.value = '40';
+  penaltyEl.value = '40';
   await window.saveConfig(false);
   out = JSON.parse(editor.value);
   assert(out.fec_near_window_ms === 'oops', 'toEditor(false) keeps existing illegal fec_near_window_ms for backend validation, got "' + out.fec_near_window_ms + '"');
   assert(out.sched_envelope_ms === 9999, 'toEditor(false) keeps existing out-of-range sched_envelope_ms, got "' + out.sched_envelope_ms + '"');
   assert(out.probe_min_half_rtt_us === -3, 'toEditor(false) keeps existing illegal probe_min_half_rtt_us, got "' + out.probe_min_half_rtt_us + '"');
+  assert(out.sched_health_penalty_us === 'oops', 'toEditor(false) keeps existing illegal sched_health_penalty_us for backend validation, got "' + out.sched_health_penalty_us + '"');
 
   // ---- 用例 8：JSON 编辑器手动编辑（input 事件）→ 下拉/输入框实时跟随 ----
   // 回归：此前只在 loadConfig/saveConfig 包装里回填，用户直接在 cfg-editor 里
   // 键入/粘贴改字段时下拉框停在旧值，造成「渲染旧值、JSON 新值」分裂。
   algo.value = 'auto'; fec.value = 'auto'; gateEl.value = 'rtt';
-  windowEl.value = ''; gateWindowEl.value = ''; probeEl.value = '';
+  windowEl.value = ''; gateWindowEl.value = ''; probeEl.value = ''; penaltyEl.value = '';
   editor.value = JSON.stringify({ routing_algo: 'min_rtt_adaptive', fec_strategy: 'near',
-    fec_near_window_ms: 33, sched_envelope: 'fwd', sched_envelope_ms: 44, probe_min_half_rtt_us: 2500 });
+    fec_near_window_ms: 33, sched_envelope: 'fwd', sched_envelope_ms: 44, probe_min_half_rtt_us: 2500, sched_health_penalty_us: 1500 });
   assert(typeof editorInputHandler === 'function', 'cfg-editor input listener is installed');
   editorInputHandler && editorInputHandler();
   assert(algo.value === 'min_rtt_adaptive', 'editor input syncs routing_algo dropdown, got "' + algo.value + '"');

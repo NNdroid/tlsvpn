@@ -142,6 +142,29 @@ type Backend struct {
 	writeBusyNS            int64
 	writeWindowBytes       uint64
 	deliverRateBytesPerSec atomic.Uint64
+	// bdpRateBytesPerSec 非饱和窗的 BDP 容量下界估计（cwnd×mss/srtt，见
+	// noteCapacitySample）。饱和门控只覆盖"写阻塞达半窗"的路径，永不饱和的
+	// 快路径（writer 永远追得上输入）借此获得真实量级的容量估计，退出
+	// maxDeliver/4 防饿地板与 25MB/s 保守回退。0=未测得。writer 采样 goroutine
+	// 独占写，调度器原子读。
+	bdpRateBytesPerSec atomic.Uint64
+	// effRttUS 内核 RTT 的有效地板（decayed-min over SRTT 采样：慢升 0.5ms/s、
+	// 快降，见 noteRTTSample）。0=未建立（样本数不足，回退 min_rtt/SRTT 链）。
+	// 修复 tcpi_min_rtt 是 min-ever、对持续劣化永久钝感的问题：资格包络与
+	// min_rtt_* 排名改吃该值。瞬时拥塞不动地板（成员稳定性由
+	// TestAdaptiveSchedulerMinRTTElapsedEnvelope 钉死）——地板只对"持续高于
+	// 地板"的采样慢升。writer 采样 goroutine 独占 rttEff* 累计字段，仅本值原子发布。
+	effRttUS      atomic.Uint32
+	rttEffFloorNS uint64    // decayed-min 地板（ns，decayedMinUpdate 纪律）
+	rttEffN       uint32    // 已累计样本数
+	rttEffLast    time.Time // 上次采样时刻（慢升计时基准）
+	// probeTimeoutStreak 跨路径探针连续超时计数：该槽位发出的探针连续未回包
+	// （rtt_probe.go sweepPending 逐次 +1），任一回包到达即清零（absorb）。
+	// 探针超时=路径疑似黑洞（写进本地发送缓冲成功但对端收不到），此时
+	// decayed-min 地板保持陈旧低值、min_rtt 不变，无罚时则黑洞路径持续赢得
+	// 排名。选路层按 probeTimeoutPenaltyUS 施加递增罚时；与 stalled 判定解耦
+	// （TCP 层失败才 stall）。槽位换新 Backend 时计数随旧对象废弃。
+	probeTimeoutStreak atomic.Uint32
 }
 
 // AsyncPort 单向时延模式：决定调度器用 fwd 还是 ret 作为本端 egress 的单向
@@ -200,6 +223,11 @@ type AsyncPort struct {
 	schedEnvelopeFwd atomic.Bool
 	// schedEnvelopeUS fwd 模式的去程准入窗口（µs）。热更生效。
 	schedEnvelopeUS atomic.Uint64
+	// healthPenaltyUS 健康罚时单位值（µs）：每次探针连续超时/每个重传段在排名
+	// 键上加的微秒数。0=禁用。NewAsyncPort 初始化为默认
+	// schedHealthPenaltyDefaultUS；sched_health_penalty_us 配置热更覆盖。调度器
+	// 每批读取。
+	healthPenaltyUS atomic.Uint32
 
 	// probeMinHalfRTTUS 单向时延分解的物理锚定下界（µs）。跨路径探针的参考
 	// 连接 ref 自回包 decayed-min 可能采到亚毫秒极值，使锚点 halfRef 地板成伪值
@@ -262,6 +290,9 @@ func NewAsyncPort(ctx context.Context, id string) *AsyncPort {
 	p.fecNearWindowUS.Store(uint64(fecNearWindowDefaultMs) * 1000)
 	// fwd 模式准入窗口默认 20ms。未配置时不能让 0 窗口把所有路径挡在门外。
 	p.schedEnvelopeUS.Store(uint64(schedEnvelopeDefaultMs) * 1000)
+	// 健康罚时默认 2ms/事件：sched_health_penalty_us 未配置/热更为 0 之外的
+	// 值前，先给调度器一个可用的默认（0 在配置语义里是"显式禁用"，不是缺省）。
+	p.healthPenaltyUS.Store(schedHealthPenaltyDefaultUS)
 	goSafe(p.run)
 	return p
 }
@@ -327,6 +358,21 @@ func (p *AsyncPort) SchedEnvelope() SchedEnvelope {
 // SchedEnvelopeMs 返回 fwd 模式的去程准入窗口（毫秒）。供快照/面板展示。
 func (p *AsyncPort) SchedEnvelopeMs() int {
 	return int(p.schedEnvelopeUS.Load() / 1000)
+}
+
+// SetSchedHealthPenaltyUs 设定路径健康罚时的单位值（µs）：每次探针连续超时/
+// 每个 200ms 窗重传段在排名键上加的微秒数。0=禁用健康罚时。可热更，调度器每
+// 批读取。负值按 0 处理（配置校验层应先拦）。
+func (p *AsyncPort) SetSchedHealthPenaltyUs(us int) {
+	if us < 0 {
+		us = 0
+	}
+	p.healthPenaltyUS.Store(uint32(us))
+}
+
+// SchedHealthPenaltyUs 返回当前健康罚时单位值（µs），0=禁用。供快照/面板展示。
+func (p *AsyncPort) SchedHealthPenaltyUs() int {
+	return int(p.healthPenaltyUS.Load())
 }
 
 // SetProbeMinHalfRTTUs 设定单向时延分解的物理锚定下界（µs）。可随时热更。
@@ -1736,6 +1782,7 @@ func (c *Client) ApplyConfig(cfg *Config) {
 	// 候选资格门维度与 fwd 窗口热更：buildEligibleCandidates 每批读取。
 	c.txPort.SetSchedEnvelope(cfg.SchedEnvelope)
 	c.txPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
+	c.txPort.SetSchedHealthPenaltyUs(intValue(cfg.SchedHealthPenaltyUs))
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
@@ -1957,6 +2004,7 @@ func NewClient(ctx context.Context, cfg *Config) *Client {
 	// 候选资格门维度与 fwd 窗口：buildEligibleCandidates 每批读取。
 	c.txPort.SetSchedEnvelope(cfg.SchedEnvelope)
 	c.txPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
+	c.txPort.SetSchedHealthPenaltyUs(intValue(cfg.SchedHealthPenaltyUs))
 	// FEC parity 分发策略与 near 窗口热更：pickParityBackend 每批读取。
 	c.txPort.SetFecStrategy(cfg.FecStrategy)
 	c.txPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
@@ -2995,8 +3043,7 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 		// 记账代码。返回 false 表示写失败（已置 stalled 并上报 errChan），
 		// 调用方应立即退出写 goroutine。
 		sampleRTT := func() {
-			backend.noteCapacitySample(int64(rttSampleInterval))
-			if rtt, minRtt, totalRetrans, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
+			if rtt, minRtt, totalRetrans, cwnd, sndMss, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
 				// 重传差分独立于 rtt>0 的引导门：rtt==0 期间也要建立基线，
 				// 否则首个有效窗会把握手期累积的重传全记进 delta。
 				backend.noteRetrans(totalRetrans)
@@ -3007,11 +3054,21 @@ func (c *Client) dialAndServe(parentCtx context.Context, connIndex int) (linked 
 					}
 					ci.rttMeasured.Store(true)
 					backend.noteRTTSuccess()
+					// 内核 RTT 有效化（decayed-min 地板）：资格包络与 min_rtt_*
+					// 排名的输入，修复 min-ever 地板对持续劣化永久钝感的问题，
+					// 见 path_quality.go adaptiveBackendEffectiveRTT。
+					backend.noteRTTSample(rtt)
 				}
+				// 容量结算放 TCP_INFO 之后：非饱和窗可顺带用 cwnd/mss/srtt 做
+				// BDP 容量下界（见 Backend.noteCapacitySample）。TCP_INFO 失败
+				// （连接将死）时 cwnd/mss/rtt 全 0，饱和窗结算不受影响。
+				backend.noteCapacitySample(int64(rttSampleInterval), cwnd, sndMss, rtt)
 			} else if err != nil {
 				// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
 				// 该后端标记为 stalled，调度器不再向其分配数据。
 				// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
+				// TCP_INFO 失败也要结算容量窗：写阻塞时长与 TCP_INFO 无关。
+				backend.noteCapacitySample(int64(rttSampleInterval), 0, 0, 0)
 				backend.noteRTTFailure()
 			}
 		}

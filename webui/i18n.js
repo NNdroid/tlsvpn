@@ -241,7 +241,8 @@ const I18N={
       I18N['zh-CN'].ov.fec_eff = 'FEC 恢复率';
       I18N['zh-CN'].ov.avgpkt = '平均接收帧大小';
       I18N['zh-CN'].ov.drop_pct = '发送丢帧率';
-      setSchedWords(I18N['zh-CN'], {rate:'速率', weight:'容量权重', retrans_tip:'最近 200ms 采样窗的 TCP 重传段数：时延地板对丢包不敏感，重传是路径正在丢段的独立信号。', assign:'分配', capacity:'路径容量', qeta:'队列 ETA', batches:'批次', cumulative:'累计分配', batch_unit:'批', alloc_total:'调度'});
+      I18N['zh-CN'].ov.eff = '有效地板';
+      setSchedWords(I18N['zh-CN'], {rate:'速率', weight:'容量权重', retrans_tip:'最近 200ms 采样窗的 TCP 重传段数：时延地板对丢包不敏感，重传是路径正在丢段的独立信号。', assign:'分配', capacity:'路径容量', qeta:'队列 ETA', batches:'批次', cumulative:'累计分配', batch_unit:'批', alloc_total:'调度', probe_to:'探针超时', probe_to_tip:'跨路径探针连续超时次数（任一回包到达即清零）。>0 表示该路径疑似黑洞：数据写进本地发送缓冲成功但对端收不到，选路已按每次 2ms（上限 10ms）抬升其排名键。'});
     }
     if (I18N['zh-TW']) {
       I18N['zh-TW'].ov.fec_eff = 'FEC 復原率';
@@ -251,7 +252,8 @@ const I18N={
   I18N['zh-TW'].th.meas_na = '不可測';
       I18N['zh-TW'].ov.avgpkt = '平均接收幀大小';
       I18N['zh-TW'].ov.drop_pct = '傳送丟幀率';
-      setSchedWords(I18N['zh-TW'], {rate:'速率', weight:'容量權重', retrans_tip:'最近 200ms 取樣窗的 TCP 重傳段數：時延地板對丟包不敏感，重傳是路徑正在丟段的獨立訊號。', assign:'分配', capacity:'路徑容量', qeta:'佇列 ETA', batches:'批次', cumulative:'累計分配', batch_unit:'批', alloc_total:'排程'});
+      I18N['zh-TW'].ov.eff = '有效地板';
+      setSchedWords(I18N['zh-TW'], {rate:'速率', weight:'容量權重', retrans_tip:'最近 200ms 取樣窗的 TCP 重傳段數：時延地板對丟包不敏感，重傳是路徑正在丟段的獨立訊號。', assign:'分配', capacity:'路徑容量', qeta:'佇列 ETA', batches:'批次', cumulative:'累計分配', batch_unit:'批', alloc_total:'排程', probe_to:'探針超時', probe_to_tip:'跨路徑探針連續逾時次數（任一回包到達即歸零）。>0 表示該路徑疑似黑洞：資料寫進本機發送緩衝成功但對端收不到，排程已按每次 2ms（上限 10ms）抬升其排名鍵。'});
       I18N['zh-TW'].sched.stalled = '失效';
       I18N['zh-TW'].sched.stalled_tip = '該實體連線已被判定為不健康（讀寫失敗或連續 RTT 取樣失敗），排程器已停止向其分配資料。';
       I18N['zh-TW'].sched.stalled_note = '已停止分配資料，等待重連';
@@ -261,25 +263,29 @@ const I18N={
       I18N.en.ov.fec_eff = 'FEC recovery rate';
       I18N.en.ov.avgpkt = 'Avg RX frame size';
       I18N.en.ov.drop_pct = 'TX frame drop rate';
-      setSchedWords(I18N.en, {rate:'rate', weight:'capacity weight', retrans_tip:'TCP retransmitted segments in the latest 200ms window: the latency floor is blind to loss; retransmits are an independent sign of an actively lossy path.', assign:'assigned', capacity:'path capacity', qeta:'queue ETA', batches:'batches', cumulative:'lifetime assigned', batch_unit:'batches', alloc_total:'scheduled'});
+      I18N.en.ov.eff = 'eff floor';
+      setSchedWords(I18N.en, {rate:'rate', weight:'capacity weight', retrans_tip:'TCP retransmitted segments in the latest 200ms window: the latency floor is blind to loss; retransmits are an independent sign of an actively lossy path.', assign:'assigned', capacity:'path capacity', qeta:'queue ETA', batches:'batches', cumulative:'lifetime assigned', batch_unit:'batches', alloc_total:'scheduled', probe_to:'probe timeout', probe_to_tip:'Consecutive cross-path probe timeouts (cleared on any reply). >0 means the path is a black-hole suspect: writes succeed into the local send buffer but the peer never receives them; the scheduler has raised its rank key by 2ms per timeout (10ms cap).'});
     }
     if (I18N.de) {
       I18N.de.ov.fec_eff = 'FEC-Wiederherstellungsrate';
       I18N.de.ov.avgpkt = 'Ø RX-Framegröße';
       I18N.de.ov.drop_pct = 'TX-Frame-Verlustrate';
-      setSchedWords(I18N.de, {rate:'Rate', weight:'Kapazitätsgewicht', retrans_tip:'TCP-Retransmissionssegmente im letzten 200ms-Fenster: Der Latenz-Boden ist gegenüber Verlust blind; Retransmissions sind ein unabhängiges Signal für einen verlustbehafteten Pfad.', assign:'Zuweisung', capacity:'Pfadkapazität', qeta:'Queue-ETA', batches:'Batches', cumulative:'kumuliert', batch_unit:'Batches', alloc_total:'geplant'});
+      I18N.de.ov.eff = 'eff. Boden';
+      setSchedWords(I18N.de, {rate:'Rate', weight:'Kapazitätsgewicht', retrans_tip:'TCP-Retransmissionssegmente im letzten 200ms-Fenster: Der Latenz-Boden ist gegenüber Verlust blind; Retransmissions sind ein unabhängiges Signal für einen verlustbehafteten Pfad.', assign:'Zuweisung', capacity:'Pfadkapazität', qeta:'Queue-ETA', batches:'Batches', cumulative:'kumuliert', batch_unit:'Batches', alloc_total:'geplant', probe_to:'Probe-Timeout', probe_to_tip:'Aufeinanderfolgende Timeout der Pfadsonden (jede Antwort setzt zurück). >0 bedeutet Verdacht auf Schwarzes Loch: Writes landen erfolgreich im lokalen Sendepuffer, das Gegenstück empfängt nichts; der Rank-Key wurde je Timeout um 2ms angehoben (max. 10ms).'});
     }
     if (I18N.fr) {
       I18N.fr.ov.fec_eff = 'Taux de récupération FEC';
       I18N.fr.ov.avgpkt = 'Taille moy. trame RX';
       I18N.fr.ov.drop_pct = 'Taux de perte TX';
-      setSchedWords(I18N.fr, {rate:'débit', weight:'poids de capacité', retrans_tip:'Segments TCP retransmis dans la dernière fenêtre de 200 ms : le plancher de latence est aveugle aux pertes ; les retransmissions signalent un chemin qui perd activement.', assign:'affecté', capacity:'capacité chemin', qeta:'ETA file', batches:'lots', cumulative:'cumul affecté', batch_unit:'lots', alloc_total:'planifié'});
+      I18N.fr.ov.eff = 'plancher eff.';
+      setSchedWords(I18N.fr, {rate:'débit', weight:'poids de capacité', retrans_tip:'Segments TCP retransmis dans la dernière fenêtre de 200 ms : le plancher de latence est aveugle aux pertes ; les retransmissions signalent un chemin qui perd activement.', assign:'affecté', capacity:'capacité chemin', qeta:'ETA file', batches:'lots', cumulative:'cumul affecté', batch_unit:'lots', alloc_total:'planifié', probe_to:'timeout sonde', probe_to_tip:'Timeouts consécutifs des sondes inter-chemins (réinitialisés à toute réponse). >0 = suspicion de trou noir : les écritures réussissent dans le tampon d’envoi local mais le pair ne reçoit rien ; la clé de classement a été relevée de 2ms par timeout (plafond 10ms).'});
     }
     if (I18N.ja) {
       I18N.ja.ov.fec_eff = 'FEC 復元率';
       I18N.ja.ov.avgpkt = '平均 RX フレームサイズ';
       I18N.ja.ov.drop_pct = 'TX フレーム損失率';
-      setSchedWords(I18N.ja, {rate:'レート', weight:'容量重み', retrans_tip:'直近 200ms 窓の TCP 再送セグメント数：レイテンシの下限はロスに鈍感で、再送は経路がロスを起こしている独立のシグナル。', assign:'割当', capacity:'パス容量', qeta:'キュー ETA', batches:'バッチ', cumulative:'累積割当', batch_unit:'バッチ', alloc_total:'スケジュール'});
+      I18N.ja.ov.eff = '実効下限';
+      setSchedWords(I18N.ja, {rate:'レート', weight:'容量重み', retrans_tip:'直近 200ms 窓の TCP 再送セグメント数：レイテンシの下限はロスに鈍感で、再送は経路がロスを起こしている独立のシグナル。', assign:'割当', capacity:'パス容量', qeta:'キュー ETA', batches:'バッチ', cumulative:'累積割当', batch_unit:'バッチ', alloc_total:'スケジュール', probe_to:'プローブタイムアウト', probe_to_tip:'経路横断プローブの連続タイムアウト回数（応答が届けば即リセット）。>0 はブラックホール疑い：ローカル送信バッファへの書き込みは成功するが対端に届いておらず、スケジューラはタイムアウト毎にランクキーを 2ms 引き上げ済み（上限 10ms）。'});
     }
   } catch (_) {}
 })();

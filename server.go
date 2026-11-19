@@ -1123,6 +1123,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		session.Port.SetRoutingAlgo(cfg.RoutingAlgo)
 		session.Port.SetSchedEnvelope(cfg.SchedEnvelope)
 		session.Port.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
+		session.Port.SetSchedHealthPenaltyUs(intValue(cfg.SchedHealthPenaltyUs))
 		session.Port.SetFecStrategy(cfg.FecStrategy)
 		session.Port.SetFecNearWindowMs(cfg.FecNearWindowMs)
 		session.Port.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1144,6 +1145,7 @@ func (s *Server) ApplyConfig(cfg *Config) []string {
 		s.tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
 		s.tapPort.SetSchedEnvelope(cfg.SchedEnvelope)
 		s.tapPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
+		s.tapPort.SetSchedHealthPenaltyUs(intValue(cfg.SchedHealthPenaltyUs))
 		s.tapPort.SetFecStrategy(cfg.FecStrategy)
 		s.tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 		s.tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1281,6 +1283,7 @@ func startServer(ctx context.Context, cfg *Config) (runErr error) {
 	tapPort.SetRoutingAlgo(cfg.RoutingAlgo)
 	tapPort.SetSchedEnvelope(cfg.SchedEnvelope)
 	tapPort.SetSchedEnvelopeMs(cfg.SchedEnvelopeMs)
+	tapPort.SetSchedHealthPenaltyUs(intValue(cfg.SchedHealthPenaltyUs))
 	tapPort.SetFecStrategy(cfg.FecStrategy)
 	tapPort.SetFecNearWindowMs(cfg.FecNearWindowMs)
 	tapPort.SetProbeMinHalfRTTUs(intValue(cfg.ProbeMinHalfRTTUs))
@@ -1874,6 +1877,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 			port.SetRoutingAlgo(srvCfg.RoutingAlgo)
 			port.SetSchedEnvelope(srvCfg.SchedEnvelope)
 			port.SetSchedEnvelopeMs(srvCfg.SchedEnvelopeMs)
+			port.SetSchedHealthPenaltyUs(intValue(srvCfg.SchedHealthPenaltyUs))
 			port.SetFecStrategy(srvCfg.FecStrategy)
 			port.SetFecNearWindowMs(srvCfg.FecNearWindowMs)
 			port.SetProbeMinHalfRTTUs(intValue(srvCfg.ProbeMinHalfRTTUs))
@@ -2149,8 +2153,7 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 		// 记账代码。返回 false 表示写失败（已置 stalled 并关连接），调用方应
 		// 立即退出写 goroutine。
 		sampleRTT := func() {
-			backend.noteCapacitySample(int64(rttSampleInterval))
-			if rtt, minRtt, totalRetrans, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
+			if rtt, minRtt, totalRetrans, cwnd, sndMss, err := getTCPRTTAndMinRTT(tcpConn); err == nil {
 				// 重传差分独立于 rtt>0 的引导门：rtt==0 期间也要建立基线，
 				// 否则首个有效窗会把握手期累积的重传全记进 delta。
 				backend.noteRetrans(totalRetrans)
@@ -2161,11 +2164,21 @@ func (s *Server) handleConnection(parentCtx context.Context, conn net.Conn, tcpC
 					}
 					ci.rttMeasured.Store(true)
 					backend.noteRTTSuccess()
+					// 内核 RTT 有效化（decayed-min 地板）：资格包络与 min_rtt_*
+					// 排名的输入，修复 min-ever 地板对持续劣化永久钝感的问题，
+					// 见 path_quality.go adaptiveBackendEffectiveRTT。
+					backend.noteRTTSample(rtt)
 				}
+				// 容量结算放 TCP_INFO 之后：非饱和窗可顺带用 cwnd/mss/srtt 做
+				// BDP 容量下界（见 Backend.noteCapacitySample）。TCP_INFO 失败
+				// （连接将死）时 cwnd/mss/rtt 全 0，饱和窗结算不受影响。
+				backend.noteCapacitySample(int64(rttSampleInterval), cwnd, sndMss, rtt)
 			} else if err != nil {
 				// 连续多次 RTT 采样失败说明连接正在关闭/已不可用，尽早把
 				// 该后端标记为 stalled，调度器不再向其分配数据。
 				// 注意 rtt==0 是引导期正常状态（尚未取得采样），不算失败。
+				// TCP_INFO 失败也要结算容量窗：写阻塞时长与 TCP_INFO 无关。
+				backend.noteCapacitySample(int64(rttSampleInterval), 0, 0, 0)
 				backend.noteRTTFailure()
 			}
 		}

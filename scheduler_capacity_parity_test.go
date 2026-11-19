@@ -17,21 +17,21 @@ func TestBackendCapacitySampleSaturationGate(t *testing.T) {
 	// 非饱和窗：阻塞 20ms ≪ 100ms 门限——哪怕载荷很大也不结算。
 	b.writeBusyNS = 20_000_000
 	b.writeWindowBytes = 3_000_000
-	b.noteCapacitySample(win)
+	b.noteCapacitySample(win, 0, 0, 0)
 	if got := b.deliverRateBytesPerSec.Load(); got != 0 {
 		t.Fatalf("unsaturated window must not sample capacity, got %d", got)
 	}
 	// 饱和窗：阻塞 150ms / 3MB → 20MB/s。
 	b.writeBusyNS = 150_000_000
 	b.writeWindowBytes = 3_000_000
-	b.noteCapacitySample(win)
+	b.noteCapacitySample(win, 0, 0, 0)
 	if got := b.deliverRateBytesPerSec.Load(); got != 20_000_000 {
 		t.Fatalf("saturated window capacity = %d B/s, want 20MB/s", got)
 	}
 	// 第二个饱和窗 6MB/150ms = 40MB/s → EWMA (20+40)/2 = 30MB/s。
 	b.writeBusyNS = 150_000_000
 	b.writeWindowBytes = 6_000_000
-	b.noteCapacitySample(win)
+	b.noteCapacitySample(win, 0, 0, 0)
 	if got := b.deliverRateBytesPerSec.Load(); got != 30_000_000 {
 		t.Fatalf("capacity EWMA = %d B/s, want 30MB/s", got)
 	}

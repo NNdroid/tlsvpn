@@ -94,23 +94,31 @@ func TestAdaptiveSchedulerMinRTTElapsedEnvelope(t *testing.T) {
 }
 
 // TestAdaptiveSchedulerMinRTTRanksBelowSRTT 候选排序同样吃 min_rtt：min_rtt 更优的
-// 路径在并列负载下应被优先选中，即使它当前的 SRTT 略高（拥塞会恢复，地板不会）。
+// 路径在两条都进候选集的前提下应被优先选中，即使它当前的 SRTT 略高（拥塞会
+// 恢复，地板不会）。
+//
+// 资格包络按需放宽（demand starvation 逐级放宽）落地后，高需求会把远包络路径
+// 拉进活跃集做吞吐聚合，此时字节公平 WFQ 按容量权重分摊、排名只决定成员与
+// 平局裁决——"min_rtt 主导"改在单路径模式（active=1，rank0 即所选）下钉死：
+// 若排名退化成 SRTT，noisy（SRTT 900µs）将反超 floor（SRTT 5000µs）并被选中，
+// 测试同样失败。noisy 的 min_rtt 取 5000µs 使其落在基础包络内（两条同候选），
+// 保证比较式真的发生。
 func TestAdaptiveSchedulerMinRTTRanksBelowSRTT(t *testing.T) {
 	p := &AsyncPort{}
 	// floor 路径：min_rtt 700µs 但当下 SRTT 5000µs。
 	floor := testAdaptiveBackend(5000)
 	floor.minRttCache = new(uint32)
 	*floor.minRttCache = 700
-	// noisy 路径：min_rtt 7000µs 但当下 SRTT 900µs（刚恢复完拥塞）。
+	// noisy 路径：min_rtt 5000µs（基础包络内）但当下 SRTT 900µs（刚恢复完拥塞）。
 	noisy := testAdaptiveBackend(900)
 	noisy.minRttCache = new(uint32)
-	*noisy.minRttCache = 7000
+	*noisy.minRttCache = 5000
 	for _, b := range []*Backend{floor, noisy} {
 		b.rateBytesPerSec.Store(100_000_000)
 	}
 	backends := []*Backend{floor, noisy}
 
-	p.inputRateBytesPerSec.Store(adaptiveActive4RateBytesPerSec)
+	// 低需求：单路径模式，rank0 即所选。排名若吃 SRTT，noisy 会接管。
 	counts := map[*Backend]int{}
 	for i := 0; i < 30; i++ {
 		counts[p.pickAdaptiveBackend(backends, 0, 12*1024)]++

@@ -14,13 +14,15 @@ func TestSchedSaveFullGetRoundtrip(t *testing.T) {
 		PSK: "0123456789abcdef0123456789abcdef",
 		Web: WebConfig{Addr: "127.0.0.1:8080", Bind: "all", Auth: "admin:realpassword",
 			MCP: MCPConfig{OAuth: MCPOAuthJWTConfig{}}}}
-	// 完整 GET 结构（脱敏后 web.auth 为空）+ 用户改调度字段（fwd 门 / near 策略）
+	// 完整 GET 结构（脱敏后 web.auth 为空）+ 用户改调度字段（fwd 门 / near 策略 /
+	// 健康罚时——0 是合法值即禁用）
 	posted := map[string]any{
 		"mode": "server", "psk": "", "addr": ":4000", "log_level": "info",
 		"encrypt": true, "enc_algo": "gcm256", "pad_mode": "bucket",
 		"routing_algo": "latency_sticky", "sched_envelope": "fwd", "sched_envelope_ms": 50,
 		"fec_strategy": "near", "fec_near_window_ms": 5,
-		"tap": "tap0",
+		"sched_health_penalty_us": 0,
+		"tap":                     "tap0",
 		"web": map[string]any{"addr": "127.0.0.1:8080", "bind": "all", "auth": "",
 			"mcp": map[string]any{"oauth": map[string]any{}}},
 		"server": map[string]any{"v4_cidr": "10.0.0.0/24", "v6_cidr": "fd00::/64"},
@@ -49,6 +51,10 @@ func TestSchedSaveFullGetRoundtrip(t *testing.T) {
 	}
 	if cfg.FecStrategy != "near" || cfg.FecNearWindowMs != 5 {
 		t.Errorf("fec_strategy: got %s/%d want near/5", cfg.FecStrategy, cfg.FecNearWindowMs)
+	}
+	// 健康罚时显式 0（禁用）必须原样保存，不得被 applyDefaults 的默认 2000 覆盖
+	if cfg.SchedHealthPenaltyUs == nil || *cfg.SchedHealthPenaltyUs != 0 {
+		t.Errorf("sched_health_penalty_us: got %v want 0 (explicit disable)", cfg.SchedHealthPenaltyUs)
 	}
 }
 

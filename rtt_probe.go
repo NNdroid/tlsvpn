@@ -428,6 +428,14 @@ func (s *rttProbeScheduler) sweepPending() {
 	for nonce, p := range s.pending {
 		if now.Sub(p.issued) > rttProbePendingTimeout {
 			delete(s.pending, nonce)
+			// 探针超时=路径疑似黑洞：对发出槽位累计连续超时（任一回包到达即
+			// 清零，见 absorb），选路层按 probeTimeoutPenaltyUS 施加递增罚时。
+			// 此前超时只被静默丢弃——黑洞路径的 decayed-min 地板保持陈旧低值、
+			// min_rtt 不变，会持续赢得排名。槽位换新 Backend 时计数随旧对象
+			// 废弃，无需显式清除（与 decay 键的 lastBackend 清理独立）。
+			if b := s.resolveConn(p.srcConn); b != nil {
+				b.probeTimeoutStreak.Add(1)
+			}
 		}
 	}
 	if len(s.pending) > rttProbePendingMax {
@@ -461,6 +469,11 @@ func (s *rttProbeScheduler) absorb(fr rttProbeFrame) {
 		return
 	}
 	delete(s.pending, fr.nonce)
+	// 回包到达即清零发出槽位的超时连击：即使时间戳无效（下方 return）也代表
+	// 往返可达——黑洞不带白，时间戳只影响样本质量不影响健康判定。
+	if b := s.resolveConn(p.srcConn); b != nil {
+		b.probeTimeoutStreak.Store(0)
+	}
 	recvNS := uint64(fr.recvAt.UnixNano())
 	if fr.sendTS == 0 || fr.sendTS > recvNS {
 		return // 无有效 send_ts 或时钟异常，丢弃

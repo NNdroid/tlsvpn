@@ -255,12 +255,19 @@
     if (num(s.retrans_delta) > 0) {
       retransHtml = ' · <span style="color:var(--err)">' + esc(t('sched.retrans')) + ' ×' + num(s.retrans_delta) + '</span>';
     }
+    // 探针连续超时（黑洞嫌疑）：与重传并列的健康警告——写进本地发送缓冲成功
+    // 但对端收不到，旧 decayed-min 地板对它钝感，选路已按 streak 抬升其排名键。
+    let probeToHtml = '';
+    if (num(s.probe_timeout_streak) > 0) {
+      probeToHtml = ' · <span style="color:var(--err)">' + esc(t('sched.probe_to')) + ' ×' + num(s.probe_timeout_streak) + '</span>';
+    }
     const totalBytes = num(s.assigned_bytes) + num(s.fec_assigned_bytes);
     const totalBatches = num(s.assigned_batches) + num(s.fec_assigned_batches);
     const tip = t('sched.cumulative') + ': ' + fmtBytes(totalBytes) + ' / ' + totalBatches + ' ' + t('sched.batch_unit') +
       ' | DATA ' + fmtBytes(num(s.assigned_bytes)) + ' / ' + num(s.assigned_batches) +
       ' | FEC ' + fmtBytes(num(s.fec_assigned_bytes)) + ' / ' + num(s.fec_assigned_batches) +
-      (num(s.retrans_delta) > 0 ? ' | ' + t('sched.retrans') + ' ×' + num(s.retrans_delta) + ' (' + t('sched.retrans_tip') + ')' : '') + clock;
-    return '<div class="sched-cell" title="' + esc(tip) + '"><span class="badge ' + cls + '">' + esc(state) + '</span><small class="dim">' + esc(meta) + retransHtml + '</small></div>';
+      (num(s.retrans_delta) > 0 ? ' | ' + t('sched.retrans') + ' ×' + num(s.retrans_delta) + ' (' + t('sched.retrans_tip') + ')' : '') +
+      (num(s.probe_timeout_streak) > 0 ? ' | ' + t('sched.probe_to') + ' ×' + num(s.probe_timeout_streak) + ' (' + t('sched.probe_to_tip') + ')' : '') + clock;
+    return '<div class="sched-cell" title="' + esc(tip) + '"><span class="badge ' + cls + '">' + esc(state) + '</span><small class="dim">' + esc(meta) + retransHtml + probeToHtml + '</small></div>';
   };
 })();

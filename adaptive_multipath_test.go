@@ -15,20 +15,23 @@ func testAdaptiveBackend(rtt uint32) *Backend {
 }
 
 func TestAdaptiveActivePathTarget(t *testing.T) {
+	// adaptiveActivePathTarget 返回未按候选数收口的目标（收口在调用方先放宽
+	// 包络之后）：本表验证压力阈值的映射；旧用例 {adaptiveActive4Pressure,
+	// eligible=2 → 2} 的收口语义已移入 pickAdaptiveBackend，由
+	// TestAdaptiveSchedulerExcludesMateriallySlowerRTT（activePaths=2）覆盖。
 	cases := []struct {
-		pressure       uint64
-		eligible, want int
+		pressure uint64
+		want     int
 	}{
-		{0, 4, 1},
-		{adaptiveActive2Pressure - 1, 4, 1},
-		{adaptiveActive2Pressure, 4, 2},
-		{adaptiveActive3Pressure, 4, 3},
-		{adaptiveActive4Pressure, 4, 4},
-		{adaptiveActive4Pressure, 2, 2},
+		{0, 1},
+		{adaptiveActive2Pressure - 1, 1},
+		{adaptiveActive2Pressure, 2},
+		{adaptiveActive3Pressure, 3},
+		{adaptiveActive4Pressure, 4},
 	}
 	for _, tc := range cases {
-		if got := adaptiveActivePathTarget(tc.pressure, 0, tc.eligible); got != tc.want {
-			t.Fatalf("pressure=%d eligible=%d got=%d want=%d", tc.pressure, tc.eligible, got, tc.want)
+		if got := adaptiveActivePathTarget(tc.pressure, 0, nil); got != tc.want {
+			t.Fatalf("pressure=%d got=%d want=%d", tc.pressure, got, tc.want)
 		}
 	}
 }
@@ -177,9 +180,48 @@ func TestAdaptiveActivePathTargetByDemandRate(t *testing.T) {
 		{adaptiveActive4RateBytesPerSec, 4},
 	}
 	for _, tc := range cases {
-		if got := adaptiveActivePathTarget(0, tc.rate, 4); got != tc.want {
+		if got := adaptiveActivePathTarget(0, tc.rate, nil); got != tc.want {
 			t.Fatalf("rate=%d got=%d want=%d", tc.rate, got, tc.want)
 		}
+	}
+}
+
+// TestAdaptiveActivePathTargetCapacityDriven 容量驱动扩张：需求超过「已实测容量
+// 路径的合计容量」的 80% 时，目标抬到已测路径数 + 1（未测路径凭防饿地板参与
+// 承载并修正测量）；需求回落到容量水位内则回到阈值式结果。修正历史阈值把
+// 单路径容量假设（40/100/180MB/s）写死、与实测容量脱节的问题。
+func TestAdaptiveActivePathTargetCapacityDriven(t *testing.T) {
+	const n = 3
+	backends := make([]*Backend, n)
+	obs := make([]envelopeObs, n)
+	for i := range backends {
+		backends[i] = testAdaptiveBackend(20_000)
+		obs[i] = envelopeObs{alive: true}
+	}
+	// 两条路径实测容量合计 60MB/s，第三条未测得。容量合计直接喂 obs——
+	// adaptiveActivePathTarget 只读观测快照，不重读原子。
+	backends[0].deliverRateBytesPerSec.Store(30_000_000)
+	backends[1].deliverRateBytesPerSec.Store(30_000_000)
+	obs[0].deliverRate = 30_000_000
+	obs[1].deliverRate = 30_000_000
+	// 需求 70MB/s > 0.8×60MB/s=48MB/s：阈值式（<100MB/s → ≤2）不动，容量驱动
+	// 抬到已测数+1 = 3（未测的第三条凭防饿地板参与）。
+	if got := adaptiveActivePathTarget(0, 70_000_000, obs); got != 3 {
+		t.Fatalf("capacity-driven target = %d, want 3", got)
+	}
+	// 需求 30MB/s 在容量水位内且低于需求阈值：want=1。
+	if got := adaptiveActivePathTarget(0, 30_000_000, obs); got != 1 {
+		t.Fatalf("within-capacity target = %d, want 1", got)
+	}
+	// 无实测容量：回退需求阈值（40MB/s → 2）。
+	if got := adaptiveActivePathTarget(0, adaptiveActive2RateBytesPerSec, nil); got != 2 {
+		t.Fatalf("threshold fallback target = %d, want 2", got)
+	}
+	// 未通过健康闸的路径容量不参与合计（防饿地板语义只对可服务路径成立）：
+	// 剩 1 条实测 30MB/s，需求 70MB/s > 0.8×30MB/s=24MB/s → 已测数+1 = 2。
+	obs[1] = envelopeObs{}
+	if got := adaptiveActivePathTarget(0, 70_000_000, obs); got != 2 {
+		t.Fatalf("dead-path capacity must not count: got=%d want 2 (1 measured + 1)", got)
 	}
 }
 

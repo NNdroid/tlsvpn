@@ -159,6 +159,8 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 		"s.group_max_rtt_us",
 		"s.rank_key_us",
 		"s.near_state",
+		"sched.eff_rtt_us",
+		"s.probe_timeout_streak",
 		"function schedulerTip(r)",
 		"function renderSchedLog(data)",
 		"function schedLogEntries(data)",
@@ -170,6 +172,11 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 		if !strings.Contains(app, want) {
 			t.Errorf("webui/app.js 缺少调度可观测片段 %q", want)
 		}
+	}
+	// metric-corrections.js 覆盖版调度单元格也要渲染探针超时警告（与重传同位）。
+	mc := readWebUIAsset(t, "webui/metric-corrections.js")
+	if !strings.Contains(mc, "s.probe_timeout_streak") || !strings.Contains(mc, "probe_to_tip") {
+		t.Error("webui/metric-corrections.js 缺少探针超时警告渲染")
 	}
 	// 展开态保持：renderSchedLog 每轮轮询整段 innerHTML 重建 details，若不把 open
 	// 属性带回，用户点开 2 秒后就被折回收起（表现为"自动隐藏"）。
@@ -206,6 +213,15 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 			t.Errorf("i18n.js %s 出现 %d 次 want=5（五个 locale 各一份）", want, got)
 		}
 	}
+	// setSchedWords 补丁块覆盖全部六个 locale（zh-TW 在 clone 后也显式补丁）：
+	// 探针超时标签/提示与有效地板标签各一份。
+	for _, want := range []string{
+		"probe_to_tip:'", "probe_to:'", "ov.eff = ",
+	} {
+		if got := strings.Count(i18n, want); got != 6 {
+			t.Errorf("i18n.js %s 出现 %d 次 want=6（六个 locale 补丁块各一份）", want, got)
+		}
+	}
 }
 
 // TestSchedConnJSONObservabilityFields 逐字段验证快照 JSON 契约：新增字段名必须
@@ -226,6 +242,10 @@ func TestSchedConnJSONObservabilityFields(t *testing.T) {
 	b4.schedFlags.Store(schedFlagNearLenient)
 	b5 := testAdaptiveBackend(10_000)
 	b5.schedFlags.Store(schedFlagNearIn)
+	b6 := testAdaptiveBackend(10_000)
+	b6.effRttUS.Store(40_000)
+	b7 := testAdaptiveBackend(10_000)
+	b7.probeTimeoutStreak.Store(3)
 
 	cases := []struct {
 		name string
@@ -242,6 +262,8 @@ func TestSchedConnJSONObservabilityFields(t *testing.T) {
 		{"sticky", schedulerSnapshot(b3), `"sticky_held":true`},
 		{"near_lenient", schedulerSnapshot(b4), `"near_state":"lenient"`},
 		{"near_in", schedulerSnapshot(b5), `"near_state":"in"`},
+		{"eff_rtt", schedulerSnapshot(b6), `"eff_rtt_us":40000`},
+		{"probe_timeout_streak", schedulerSnapshot(b7), `"probe_timeout_streak":3`},
 	}
 	for _, tc := range cases {
 		out, err := json.Marshal(tc.snap)

@@ -30,9 +30,28 @@ const (
 	// retransPenaltyUS 重传惩罚：最近采样窗（200ms）内每次 TCP 重传段在
 	// backendScore 上加的微秒数。重传意味着路径正在丢段——时延地板（min_rtt/
 	// 探针 decayed-min）对丢包不敏感，丢包路径的"真实质量"应显著差于其地板。
-	// 只作用于兜底选择器 pickBackend 与 parity 目标轮转（backendScore）；
-	// adaptive 排名仍由探针/min_rtt 主导，避免把丢包与时延两个维度混在一个键里。
+	// 作用于兜底选择器 pickBackend 与 parity 目标轮转（backendScore）；
+	// adaptive 主排名按同一信号用 retransRankPenaltyUS 施加加性罚时（不混入
+	// 排名键本身，作为独立健康罚项叠加，见 buildEligibleCandidates）。
 	retransPenaltyUS = 2_000
+
+	// retransRankPenaltyUS / probeTimeoutPenaltyUS 健康罚时的默认单位值（µs）：
+	// 每个 200ms 窗重传段 / 每次探针连续超时在 adaptive 排名键上加的微秒数。
+	// 两者共用可配的 sched_health_penalty_us（AsyncPort.healthPenaltyUS，
+	// NewAsyncPort 初始化为 schedHealthPenaltyDefaultUS，0=禁用）——同一类
+	// "路径正在变坏"的健康信号，单位罚时没必要分两个字段。
+	retransRankPenaltyUS  = 2_000
+	probeTimeoutPenaltyUS = 2_000
+
+	// schedHealthPenaltyDefaultUS sched_health_penalty_us 的默认值（两个单位
+	// 常量同值，配置缺省与 NewAsyncPort 初始化共用）。
+	schedHealthPenaltyDefaultUS = 2_000
+	// schedHealthPenaltyMaxUS 罚时总量封顶：超时与重传各自封顶到该值，防大量
+	// 事件叠加把排名键抬成等效禁用。
+	schedHealthPenaltyMaxUS = 10_000
+	// schedHealthPenaltyMaxConfigUS sched_health_penalty_us 配置上限：超过它
+	// 单次事件即顶满总量封顶，等于把可调范围退化为开关，无意义。
+	schedHealthPenaltyMaxConfigUS = 60_000
 )
 
 // markStalled 置位 stalled 标记（幂等）。
@@ -86,32 +105,59 @@ func (b *Backend) noteRetrans(total uint32) {
 }
 
 // noteCapacitySample 结算一个采样窗的路径容量估计（writer 采样 goroutine 独占，
-// 与 drainWrite/sampleRTT 同 goroutine，plain 字段无竞态）。
+// 与 drainWrite/sampleRTT 同 goroutine，plain 字段无竞态）。cwnd/sndMss/srttUS
+// 取自同 tick 的 TCP_INFO（失败时全 0，饱和窗结算不受影响）。
 //
 // 容量权重的反馈陷阱：writer-drain 速率是"被喂多少测多少"的量——欠估路径拿
 // 不到流量就永远欠估，按它做权重会正反馈饿死慢起步路径（见
 // TestAdaptiveSchedulerWriterRateCannotMonopolizePath 的钉死注释）。饱和门控
 // 是防反馈的关键：conn.Write 阻塞（socket 发送缓冲打满）时 drain 速率才等于
 // 路径容量。仅当窗口内写阻塞 ≥ 半窗（windowNS/2）才结算样本——饱和状态下
-// 阻塞时长 ≈ 载荷/容量，bytes/busy 即容量；非饱和窗跳过，权重保留上次测量。
-// EWMA α=1/2（两个饱和窗 ≈400ms 跟随）。
-func (b *Backend) noteCapacitySample(windowNS int64) {
+// 阻塞时长 ≈ 载荷/容量，bytes/busy 即容量；EWMA α=1/2（两个饱和窗 ≈400ms 跟随）。
+//
+// 非饱和窗补充 BDP 下界：writer-drain 速率不能当容量（被喂速率），但
+// cwnd×mss/srtt 是拥塞窗口隐含的吞吐上界，与被喂速率无关。饱和门控只覆盖
+// "写阻塞达半窗"的窗口——永不饱和的快路径（writer 永远追得上输入）原先生里
+// 拿不到任何容量样本，权重只能落到 maxDeliver/4 防饿地板或 25MB/s 保守回退；
+// BDP 估计让它进入真实量级。cwnd 仅在收到 ACK 时增长，应用受限期不会凭空
+// 膨胀；srtt 是内核 EWMA。EWMA α=1/2，独立于饱和样本的 deliverRate 字段
+// （面板"饱和门控容量"语义不混）。
+func (b *Backend) noteCapacitySample(windowNS int64, cwnd, sndMss, srttUS uint32) {
 	if b == nil {
 		return
 	}
 	busy, bytes := b.writeBusyNS, b.writeWindowBytes
 	b.writeBusyNS, b.writeWindowBytes = 0, 0
-	if busy <= 0 || busy*2 < windowNS || bytes == 0 {
-		return // 非饱和窗：drain 速率是"被喂速率"，不是容量——保留原权重
+	if bytes == 0 {
+		return // 空窗：无流量即无测量
 	}
-	capBytesPerSec := uint64(float64(bytes) / float64(busy) * 1e9)
-	if capBytesPerSec == 0 {
+	if busy > 0 && busy*2 >= windowNS {
+		// 饱和窗：阻塞时长 ≈ 载荷/容量，bytes/busy 即容量。
+		capBytesPerSec := uint64(float64(bytes) / float64(busy) * 1e9)
+		if capBytesPerSec == 0 {
+			return
+		}
+		old := b.deliverRateBytesPerSec.Load()
+		if old == 0 {
+			b.deliverRateBytesPerSec.Store(capBytesPerSec)
+		} else {
+			b.deliverRateBytesPerSec.Store((old + capBytesPerSec) / 2)
+		}
 		return
 	}
-	old := b.deliverRateBytesPerSec.Load()
+	// 非饱和窗：writer-drain 速率是"被喂速率"，不是容量——deliverRate 保留
+	// 上次饱和测量；改用 BDP 下界补齐永不饱和路径的容量估计。
+	if cwnd == 0 || sndMss == 0 || srttUS == 0 {
+		return
+	}
+	bdp := uint64(cwnd) * uint64(sndMss) * 1_000_000_000 / (uint64(srttUS) * 1000)
+	if bdp == 0 {
+		return
+	}
+	old := b.bdpRateBytesPerSec.Load()
 	if old == 0 {
-		b.deliverRateBytesPerSec.Store(capBytesPerSec)
+		b.bdpRateBytesPerSec.Store(bdp)
 	} else {
-		b.deliverRateBytesPerSec.Store((old + capBytesPerSec) / 2)
+		b.bdpRateBytesPerSec.Store((old + bdp) / 2)
 	}
 }

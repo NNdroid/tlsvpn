@@ -1867,6 +1867,9 @@ function schedulerTip(r){
   // 悬停就能看到权重来源与丢包信号，不用进抽屉。
   if(Number(s.deliver_rate_mbps)>0)parts.push(t('sched.weight')+' '+Number(s.deliver_rate_mbps).toFixed(Number(s.deliver_rate_mbps)<10?1:0)+' Mbps');
   if(Number(s.retrans_delta)>0)parts.push(t('sched.retrans')+' ×'+Number(s.retrans_delta));
+  // 探针连续超时（黑洞嫌疑）：与重传并列的健康信号——旧 decayed-min 地板对
+  // 黑洞钝感，选路已按 streak 抬升其排名键（体现在 rank_key_us 抬升）。
+  if(Number(s.probe_timeout_streak)>0)parts.push(t('sched.probe_to')+' ×'+Number(s.probe_timeout_streak));
   if(Number(s.group_fwd_floor_us)>0){
     parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us));
   }else if(Number(s.group_min_rtt_us)>0&&Number(s.group_max_rtt_us)>0)parts.push(t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+'~'+fmtMsUsUS(s.group_max_rtt_us));
@@ -2062,6 +2065,17 @@ function renderConnsTable(data,fresh){
       rtt+=' <span class="dim">· '+t('ov.mn')+' '+mn+'</span>';
       rttTip+=(rttTip?' · ':'')+t('ov.mn')+' '+mn+' ms';
     }
+    // 有效内核 RTT 地板（decayed-min over SRTT，见 noteRTTSample）：资格包络与
+    // min_rtt_* 排名的实际输入。与 min 并置，两值背离（≥1ms）= 该连接存在
+    // min-ever 地板无法反映的持续劣化——这正是"面板 min 很快、调度却把它当慢
+    // 路径"的解释。未建立（字段缺省）不显示；与 min 一致（常态）也不显示，
+    // 常驻只添噪音。
+    const eff=Number(r.sched&&r.sched.eff_rtt_us)||0;
+    if(eff>0&&(r.minrtt===0||eff-r.minrtt>=1000)){
+      const ev=fmtMsUs(eff);
+      rtt+=' <span class="dim">· '+t('ov.eff')+' '+ev+'</span>';
+      rttTip+=(rttTip?' · ':'')+t('ov.eff')+' '+ev+' ms';
+    }
     // 调度器实际用于排名的键（去程稳定地板，µs 有符号）：与上面带 δ 抬升的显示
     // 读数是两条互不污染的数，并置才能看出"调度依据"与"面板读数"的差别。
     if(r.sched&&r.sched.rank_known){
@@ -2252,13 +2266,15 @@ function renderDrawer(){
       const pkts=(x.tx_packets!==undefined||x.rx_packets!==undefined)
         ?'<span class="dc-conn-k">'+esc(t('dc.pkt_up'))+' '+fmtNum(x.tx_packets||0)+' · '+esc(t('dc.pkt_dn'))+' '+fmtNum(x.rx_packets||0)+'</span>'
         :'';
-      // 逐连接调度观测：容量权重（饱和门控测量）与 TCP 重传，与连接表
-      // 调度单元格同口径。缺位不占位：未测得容量/无重传时不渲染。
+      // 逐连接调度观测：容量权重（饱和门控测量）、TCP 重传与探针超时连击，
+      // 与连接表调度单元格同口径。缺位不占位：未测得容量/无重传/无超时不渲染。
       const sk=x.scheduler||{};
       const dW=Number(sk.deliver_rate_mbps)||0;
       const rtx=Number(sk.retrans_delta)||0;
+      const pto=Number(sk.probe_timeout_streak)||0;
       const schedMeta=(dW>0?'<span class="dc-conn-k">'+esc(t('sched.weight'))+' '+dW.toFixed(dW<10?1:0)+' Mbps</span>':'')+
-        (rtx>0?'<span class="dc-conn-k" style="color:var(--err)">'+esc(t('sched.retrans'))+' ×'+rtx+'</span>':'');
+        (rtx>0?'<span class="dc-conn-k" style="color:var(--err)">'+esc(t('sched.retrans'))+' ×'+rtx+'</span>':'')+
+        (pto>0?'<span class="dc-conn-k" style="color:var(--err)">'+esc(t('sched.probe_to'))+' ×'+pto+'</span>':'');
       return '<div class="dc-conn">'+
         '<div class="dc-conn-top">'+
           '<span class="mono" title="'+esc(x.remote||'')+'">'+esc(x.remote||'-')+'</span>'+activePathMark(x.scheduler,!!x.stalled)+peerActiveMark(x.scheduler)+

@@ -111,6 +111,11 @@ type Config struct {
 	// ≤ 该值即准入。默认 20，范围 [1,500]，可热更。与 fec_near_window_ms 同量纲
 	// 但语义独立（这里管准入，那里管 parity 资格）。
 	SchedEnvelopeMs int `json:"sched_envelope_ms,omitempty"`
+	// SchedHealthPenaltyUs 路径健康罚时的单位值（µs）：每次探针连续超时、每个
+	// 200ms 窗 TCP 重传段在排名键上加的罚时（总量各自封顶 10ms）。默认 2000，
+	// 0=禁用健康罚时（背景丢包恒定的链路上，罚时会永久压制"仍是本组最快"的
+	// 路径，此时可关）。可热更。
+	SchedHealthPenaltyUs *int `json:"sched_health_penalty_us,omitempty"`
 	// FecStrategy parity 分发策略（见 FecStrategy 常量）：auto（所有健康后端轮转，
 	// 默认）/ near（只投到去程单程时延与数据路径相差 ≤ fec_near_window_ms 的连接）。
 	// 可热更、无需重启。作用于本端 egress。
@@ -245,6 +250,7 @@ const exampleConfigJSON = `{
   "socks5": "",
   "routing_algo": "auto",
   "sched_envelope": "rtt",
+  "sched_health_penalty_us": 2000,
   "sched_envelope_ms": 20,
   "fec_strategy": "auto",
   "fec_near_window_ms": 10,
@@ -441,6 +447,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SchedEnvelopeMs == 0 {
 		c.SchedEnvelopeMs = schedEnvelopeDefaultMs
+	}
+	if c.SchedHealthPenaltyUs == nil {
+		v := schedHealthPenaltyDefaultUS
+		c.SchedHealthPenaltyUs = &v
 	}
 	if c.FecStrategy == "" {
 		c.FecStrategy = string(FecStrategyAuto)
@@ -651,6 +661,9 @@ func (c *Config) Validate() error {
 	}
 	if c.SchedEnvelopeMs < schedEnvelopeMinMs || c.SchedEnvelopeMs > schedEnvelopeMaxMs {
 		return fmt.Errorf("sched_envelope_ms must be in [%d, %d]", schedEnvelopeMinMs, schedEnvelopeMaxMs)
+	}
+	if c.SchedHealthPenaltyUs == nil || *c.SchedHealthPenaltyUs < 0 || *c.SchedHealthPenaltyUs > schedHealthPenaltyMaxConfigUS {
+		return fmt.Errorf("sched_health_penalty_us must be in [0, %d]", schedHealthPenaltyMaxConfigUS)
 	}
 	if !ValidFecStrategy(c.FecStrategy) {
 		return fmt.Errorf("invalid fec_strategy %q (want auto or near)", c.FecStrategy)

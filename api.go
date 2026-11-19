@@ -384,14 +384,15 @@ type runtimeCfgJSON struct {
 	SchedEnvelopeMs  int          `json:"sched_envelope_ms,omitempty"`  // fwd 门去程准入窗口（ms）
 	FecStrategy      string       `json:"fec_strategy,omitempty"`       // 本端 egress parity 分发策略（auto/near）
 	FecNearWindowMs  int          `json:"fec_near_window_ms,omitempty"` // near 窗口（ms）
-	// ProbeMinHalfRTTUs 与 Config 同形（*int+omitempty）：0 是合法值（禁用锚定，
-	// 调试），omitempty 让显式 0 显示为 0 而不是整行消失——用户配了 0 就要能在
-	// 生效配置快照里核实它生效了。
-	ProbeMinHalfRTTUs *int       `json:"probe_min_half_rtt_us,omitempty"`
-	TrafficDays      int          `json:"traffic_days,omitempty"`
-	TrafficFile      string       `json:"traffic_file,omitempty"`
-	HooksUp          string       `json:"hooks_up,omitempty"`
-	HooksDown        string       `json:"hooks_down,omitempty"`
+	// ProbeMinHalfRTTUs / SchedHealthPenaltyUs 与 Config 同形（*int+omitempty）：
+	// 0 是合法值（前者禁用锚定、后者禁用健康罚时），omitempty 让显式 0 显示为
+	// 0 而不是整行消失——用户配了 0 就要能在生效配置快照里核实它生效了。
+	ProbeMinHalfRTTUs    *int   `json:"probe_min_half_rtt_us,omitempty"`
+	SchedHealthPenaltyUs *int   `json:"sched_health_penalty_us,omitempty"`
+	TrafficDays          int    `json:"traffic_days,omitempty"`
+	TrafficFile          string `json:"traffic_file,omitempty"`
+	HooksUp              string `json:"hooks_up,omitempty"`
+	HooksDown            string `json:"hooks_down,omitempty"`
 }
 
 // runtimeNegJSON 运行时协商结果快照。客户端模式是端到端会话的实际参数，
@@ -1264,6 +1265,7 @@ func snapshotCfg(cfg *Config, mode string) runtimeCfgJSON {
 	out.SchedEnvelopeMs = cfg.SchedEnvelopeMs
 	out.FecStrategy = cfg.FecStrategy
 	out.ProbeMinHalfRTTUs = cfg.ProbeMinHalfRTTUs
+	out.SchedHealthPenaltyUs = cfg.SchedHealthPenaltyUs
 	out.FecNearWindowMs = cfg.FecNearWindowMs
 	// 流量历史保留策略与 up/down 钩子路径（最近一次执行结果见 WebStats.Hooks）
 	out.TrafficDays = cfg.TrafficDays

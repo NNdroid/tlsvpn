@@ -1,7 +1,7 @@
 /* 调度设置 UI（选路算法 + FEC parity 分发策略）。JSON 编辑器保持唯一事实来源：
    下拉/输入读写顶层 routing_algo / fec_strategy / fec_near_window_ms /
-   sched_envelope / sched_envelope_ms / probe_min_half_rtt_us（全局，
-   client 上行 / server 下行共用）。 */
+   sched_envelope / sched_envelope_ms / probe_min_half_rtt_us /
+   sched_health_penalty_us（全局，client 上行 / server 下行共用）。 */
 (function(){
   'use strict';
 
@@ -12,6 +12,8 @@
   const COPY={
     'zh-CN':{
       title:'调度设置',sub:'选路算法、资格门与 FEC parity 分发。热更生效，无需重启。',labelAlgo:'选路算法',labelFec:'FEC parity 分发策略',labelWindow:'near 窗口 (ms)',labelGate:'候选资格门维度',labelGateWindow:'fwd 门窗口 (ms)',labelProbe:'probe_min 锚定下界 (µs)',
+      labelPenalty:'健康罚时单位 (µs)',
+      penaltyHint:'路径健康罚时的单位值：每次探针连续超时、每个 200ms 窗重传段在选路排名键上加的微秒数（总量各自封顶 10ms）。0=禁用健康罚时（背景丢包恒定的链路上，罚时会永久压制"仍是本组最快"的路径）。范围 0-60000，默认 2000。',
       hint:'auto=去程稳定地板+按路径容量的服务时间（粘滞+容量加权 WFQ）；latency_strict=严格最低去程地板；latency_sticky=最低去程地板+粘滞；min_rtt_strict=严格最低无拥塞地板；min_rtt_adaptive=无拥塞地板+粘滞+容量加权 WFQ；roundtrip_strict=严格最低当前往返。',
       fecHint:'auto=所有健康后端轮转（默认）；near=只投到去程单程时延与数据路径相差 ≤ 窗口的连接，抑制慢备链路的 parity 泄漏。',
       windowHint:'仅 near 生效：parity 只发给与数据路径去程时延相差 ≤ N ms 的连接。范围 1-100。',
@@ -24,6 +26,8 @@
     },
     'zh-TW':{
       title:'排程設定',sub:'選路演算法、資格門與 FEC 同位元分發。熱更新生效，無需重新啟動。',labelAlgo:'選路演算法',labelFec:'FEC 同位元分發策略',labelWindow:'near 視窗 (ms)',labelGate:'候選資格門維度',labelGateWindow:'fwd 門視窗 (ms)',labelProbe:'probe_min 錨定下界 (µs)',
+      labelPenalty:'健康罰時單位 (µs)',
+      penaltyHint:'路徑健康罰時的單位值：每次探針連續逾時、每個 200ms 窗重傳段在選路排名鍵上加的微秒數（總量各自封頂 10ms）。0=停用健康罰時（背景丟包恆定的鏈路上，罰時會永久壓制「仍是本組最快」的路徑）。範圍 0-60000，預設 2000。',
       hint:'auto=去程穩定地板+按路徑容量的服務時間（黏滯+容量加權 WFQ）；latency_strict=嚴格最低去程地板；latency_sticky=最低去程地板+黏滯；min_rtt_strict=嚴格最低無壅塞地板；min_rtt_adaptive=無壅塞地板+黏滯+容量加權 WFQ；roundtrip_strict=嚴格最低目前來回。',
       fecHint:'auto=所有健康後端輪轉（預設）；near=只投到去程單程延遲與資料路徑相差 ≤ 視窗的連線，抑制慢備援鏈路的同位元洩漏。',
       windowHint:'僅 near 生效：同位元只發給與資料路徑去程延遲相差 ≤ N ms 的連線。範圍 1-100。',
@@ -36,6 +40,8 @@
     },
     'en':{
       title:'Scheduler settings',sub:'Routing algorithm, eligibility gate & FEC parity distribution. Hot-applied, no restart.',labelAlgo:'Routing algorithm',labelFec:'FEC parity strategy',labelWindow:'near window (ms)',labelGate:'Candidate eligibility gate',labelGateWindow:'fwd gate window (ms)',labelProbe:'probe_min anchor floor (µs)',
+      labelPenalty:'health penalty unit (µs)',
+      penaltyHint:'Per-event health penalty added to the routing rank key: one raise per consecutive probe timeout and per retransmitted segment in the 200ms window (each capped at 10ms total). 0 = disable health penalties (on links with constant background loss the penalty would permanently bury the still-fastest path). Range 0-60000, default 2000.',
       hint:'auto = stable forward floor + per-path capacity service time (sticky+capacity-weighted WFQ); latency_strict = strictly lowest forward floor; latency_sticky = lowest forward floor + sticky; min_rtt_strict = strictly lowest congestion-free floor; min_rtt_adaptive = floor + sticky+capacity-weighted WFQ; roundtrip_strict = strictly lowest current RTT.',
       fecHint:'auto = rotate across all healthy backends (default); near = only to backends within the window of the data path fwd, suppressing parity leakage to slower standby links.',
       windowHint:'Only for near: parity goes only to connections within N ms of the data path forward latency. Range 1-100.',
@@ -48,6 +54,8 @@
     },
     'de':{
       title:'Scheduler-Einstellungen',sub:'Routing-Algorithmus, Qualifikations-Tor & FEC-Parity-Verteilung. Heiß angewendet, kein Neustart.',labelAlgo:'Routing-Algorithmus',labelFec:'FEC-Parity-Strategie',labelWindow:'near-Fenster (ms)',labelGate:'Qualifikations-Tor',labelGateWindow:'fwd-Tor-Fenster (ms)',labelProbe:'probe_min-Anker-Untergrenze (µs)',
+      labelPenalty:'Gesundheitsstrafe Einheit (µs)',
+      penaltyHint:'Gesundheitsstrafe pro Ereignis auf den Routing-Rangschlüssel: eine Erhöhung pro aufeinanderfolgendem Probe-Timeout und je retransmittiertem Segment im 200ms-Fenster (jeweils gesamt auf 10ms begrenzt). 0 = Gesundheitsstrafen deaktiviert (auf Links mit konstantem Hintergrundverlust würde die Strafe den weiterhin schnellsten Pfad dauerhaft begraben). Bereich 0-60000, Standard 2000.',
       hint:'auto = stabiler Vorwärts-Boden + Servicezeit je Pfadkapazität (Sticky+kapazitätsgewichtetes WFQ); latency_strict = strikt niedrigster Vorwärts-Boden; latency_sticky = niedrigster Vorwärts-Boden + Sticky; min_rtt_strict = strikt niedrigster staufreier Boden; min_rtt_adaptive = Boden + Sticky+kapazitätsgewichtetes WFQ; roundtrip_strict = strikt niedrigste aktuelle RTT.',
       fecHint:'auto = Rotation über alle gesunden Backends (Standard); near = nur zu Backends im Fenster der Datenpfad-Fwd, unterdrückt Parity-Leck auf langsamere Standby-Links.',
       windowHint:'Nur für near: Parity nur zu Verbindungen innerhalb N ms der Vorwärts-Latenz des Datenpfads. Bereich 1-100.',
@@ -60,6 +68,8 @@
     },
     'fr':{
       title:'Paramètres de l’ordonnanceur',sub:'Algorithme de routage, porte d’admission & distribution de parité FEC. Appliqué à chaud, sans redémarrage.',labelAlgo:'Algorithme de routage',labelFec:'Stratégie de parité FEC',labelWindow:'fenêtre near (ms)',labelGate:'Porte d’admission',labelGateWindow:'fenêtre fwd (ms)',labelProbe:'plancher d’ancrage probe_min (µs)',
+      labelPenalty:'unité de pénalité santé (µs)',
+      penaltyHint:'Pénalité santé par événement ajoutée à la clé de rang de routage : une hausse par timeout de sonde consécutif et par segment retransmis dans la fenêtre de 200 ms (chacune plafonnée à 10 ms au total). 0 = pénalités désactivées (sur les liens à perte de fond constante, la pénalité enterrerait durablement le chemin toujours le plus rapide). Plage 0-60000, défaut 2000.',
       hint:'auto = plancher avant stable + temps de service selon la capacité du chemin (sticky+WFQ pondéré par capacité) ; latency_strict = strictement le plancher avant le plus bas ; latency_sticky = plancher avant le plus bas + sticky ; min_rtt_strict = strictement le plancher sans congestion le plus bas ; min_rtt_adaptive = plancher + sticky+WFQ pondéré par capacité ; roundtrip_strict = strictement la RTT actuelle la plus basse.',
       fecHint:'auto = rotation sur tous les backends sains (défaut) ; near = uniquement aux backends dans la fenêtre de la fwd du chemin de données, supprime la fuite de parité vers les liens standby plus lents.',
       windowHint:'Uniquement pour near : parité envoyée aux connexions à N ms de la latence aller du chemin de données. Plage 1-100.',
@@ -72,6 +82,8 @@
     },
     'ja':{
       title:'スケジューラ設定',sub:'選路アルゴリズム、資格ゲートと FEC パリティ配布。ホット適用、再起動不要。',labelAlgo:'選路アルゴリズム',labelFec:'FEC パリティ戦略',labelWindow:'near ウィンドウ (ms)',labelGate:'候補資格ゲートの次元',labelGateWindow:'fwd ゲート窓 (ms)',labelProbe:'probe_min アンカー下限 (µs)',
+      labelPenalty:'ヘルスペナルティ単位 (µs)',
+      penaltyHint:'選路ランキングキーに加算されるイベント毎のヘルスペナルティ：プローブ連続タイムアウト毎、200ms 窓の再送セグメント毎に 1 回引き上げ（それぞれ合計 10ms で封頂）。0=ヘルスペナルティ無効（常時背景ロスのあるリンクでは、ペナルティが依然最速の経路を永久に埋没させる）。範囲 0-60000、デフォルト 2000。',
       hint:'auto=安定した往路フロア＋経路容量に応じたサービス時間（スティッキー+容量重み付きWFQ）；latency_strict=厳密に最低の往路フロア；latency_sticky=最低の往路フロア＋スティッキー；min_rtt_strict=厳密に最低の輻輳なしフロア；min_rtt_adaptive=フロア＋スティッキー+容量重み付きWFQ；roundtrip_strict=厳密に最低の現在RTT。',
       fecHint:'auto=全健全バックエンドでローテーション（デフォルト）；near=データパス fwd のウィンドウ内のみ、遅いスタンバイリンクへのパリティ漏れを抑制。',
       windowHint:'near のみ：データパスの往路遅延から N ms 以内の接続にのみパリティを送信。範囲 1-100。',
@@ -129,13 +141,18 @@
         <input id="probe-min-half-rtt" type="number" min="0" max="3600000" step="1" inputmode="numeric">
         <div class="rts-help" data-rts-t="probeHint"></div>
       </div>
+      <div class="rts-field"><label data-rts-t="labelPenalty"></label>
+        <input id="sched-health-penalty" type="number" min="0" max="60000" step="1" inputmode="numeric">
+        <div class="rts-help" data-rts-t="penaltyHint"></div>
+      </div>
     </div>`;
   editor.parentNode.insertBefore(root,editor);
 
   const q=id=>document.getElementById(id);
   const algo=q('routing-algo'),fec=q('fec-strategy'),windowEl=q('fec-near-window');
   const gate=q('sched-envelope'),gateWindow=q('sched-envelope-window'),probe=q('probe-min-half-rtt');
-  if(!algo||!fec||!windowEl||!gate||!gateWindow||!probe)return;
+  const penalty=q('sched-health-penalty');
+  if(!algo||!fec||!windowEl||!gate||!gateWindow||!probe||!penalty)return;
 
   function lang(){const l=document.documentElement.lang||'en';return COPY[l]||COPY.en;}
   function translate(){
@@ -170,6 +187,7 @@
     if(gv&&optionValue(gate,gv))gate.value=String(gv);
     gateWindow.value=(cfg.sched_envelope_ms!=null)?String(cfg.sched_envelope_ms):'';
     probe.value=(cfg.probe_min_half_rtt_us!=null)?String(cfg.probe_min_half_rtt_us):'1000';
+    penalty.value=(cfg.sched_health_penalty_us!=null)?String(cfg.sched_health_penalty_us):'2000';
     updateNearVisibility();updateGateVisibility();return true;
   }
   // syncDom=true：用户主动改下拉/输入框，DOM 值（合法）写入编辑器。probe 的
@@ -192,6 +210,9 @@
       const pv=parseInt(probe.value,10);
       if(pv>=0&&pv<=3600000)cfg.probe_min_half_rtt_us=pv;
       else delete cfg.probe_min_half_rtt_us;
+      const hp=parseInt(penalty.value,10);
+      if(hp>=0&&hp<=60000)cfg.sched_health_penalty_us=hp;
+      else delete cfg.sched_health_penalty_us;
     }else{
       if(!cfg.routing_algo)cfg.routing_algo=algo.value||'auto';
       if(!cfg.fec_strategy)cfg.fec_strategy=fec.value||'auto';
@@ -208,6 +229,10 @@
         const pv=parseInt(probe.value,10);
         if(pv>=0&&pv<=3600000)cfg.probe_min_half_rtt_us=pv;
       }
+      if(cfg.sched_health_penalty_us==null){
+        const hp=parseInt(penalty.value,10);
+        if(hp>=0&&hp<=60000)cfg.sched_health_penalty_us=hp;
+      }
     }
     editor.value=JSON.stringify(cfg,null,2);
     return true;
@@ -216,7 +241,7 @@
   root.addEventListener('change',ev=>{
     if(ev.target===fec)updateNearVisibility();
     if(ev.target===gate)updateGateVisibility();
-    if(ev.target===algo||ev.target===fec||ev.target===windowEl||ev.target===gate||ev.target===gateWindow||ev.target===probe)toEditor(true);
+    if(ev.target===algo||ev.target===fec||ev.target===windowEl||ev.target===gate||ev.target===gateWindow||ev.target===probe||ev.target===penalty)toEditor(true);
   });
   translate();fromEditor();
 
