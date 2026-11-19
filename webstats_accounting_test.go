@@ -290,8 +290,48 @@ func TestTrafficConcurrentFlushSnapshot(t *testing.T) {
 	}
 	wg.Wait()
 	s := a.Snapshot()
-	if s.Up != 10000 || s.Down != 5000 {
-		t.Fatalf("lost cumulative traffic: %+v", s)
+	// 守恒不变量必须对全部日期桶求和：flush 窗口（base..base+999s ≈ 16 分钟）
+	// 可能跨过本地午夜（CI 在 UTC 午夜前几分钟跑就会踩中），午夜后的增量记入
+	// 分界后那一天的桶，而 Snapshot.Up 只统计"今天"（按日统计是产品设计，
+	// 见 trafficSnapshotJSON 注释）。
+	var totalUp, totalDown uint64
+	for _, d := range s.Daily {
+		totalUp += d.Up
+		totalDown += d.Down
+	}
+	if totalUp != 10000 || totalDown != 5000 {
+		t.Fatalf("lost cumulative traffic: %+v (summed %d/%d)", s, totalUp, totalDown)
+	}
+}
+
+// TestTrafficFlushAcrossDateBoundary 确定性跨午夜回归：flush 窗口以"下一个
+// 本地午夜"为中心（前 500 秒 + 后 499 秒），必定劈出两个日期桶。守恒不变量
+// 对 Daily 求和成立（此前 TestTrafficConcurrentFlushSnapshot 断言 Snapshot.Up
+// 只在窗口不跨午夜时成立，CI 于 UTC 23:54 跑必踩）。
+func TestTrafficFlushAcrossDateBoundary(t *testing.T) {
+	a := NewTrafficAccounting()
+	now := time.Now()
+	mid := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+	base := mid.Add(-500 * time.Second)
+	for i := 0; i < 1000; i++ {
+		a.Add(10, 5)
+		a.flush(base.Add(time.Duration(i) * time.Second))
+	}
+	s := a.Snapshot()
+	var totalUp, totalDown uint64
+	dates := map[string]bool{}
+	for _, d := range s.Daily {
+		totalUp += d.Up
+		totalDown += d.Down
+		if d.Up > 0 || d.Down > 0 {
+			dates[d.Date] = true
+		}
+	}
+	if totalUp != 10000 || totalDown != 5000 {
+		t.Fatalf("lost traffic across date boundary: %+v (summed %d/%d)", s, totalUp, totalDown)
+	}
+	if len(dates) != 2 {
+		t.Fatalf("expected two non-empty date buckets across midnight, got %v", dates)
 	}
 }
 
