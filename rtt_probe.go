@@ -612,6 +612,12 @@ func (s *rttProbeScheduler) recomputeAll() {
 			eff := s.effectiveOneWay(r, typ, hasTyp, s.recentDev[[2]uint32{uint32(ref), uint32(i)}])
 			b.retOneWayUS.Store(uint64(r + delta))   // 显示层：地板，≥1µs
 			b.retRankUS.Store(oneWayRankEncode(eff)) // 选路层：有效值编码
+			// 回程拥塞抬升 = 有效值 − 地板 = 探针回程的排队深度。探针回包从
+			// 对端的 writer 注入本连接（reply_on=i），与对端下行数据共用发送
+			// 队列——该抬升即"本端 ACK 在对端下行数据后面排了多深"，是双向
+			// 吞吐区间回程拥塞门（schedExcludeRetCongested）的直接输入。
+			// typ 缺席时 eff=r ⇒ 抬升 0（无拥塞证据，不制造伪信号）。
+			b.retCongestUS.Store(eff - r)
 		}
 		b.probeUpdatedAt.Store(nowMs)
 	}

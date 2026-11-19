@@ -1839,7 +1839,8 @@ function schedulerCell(s,stalled){
   // 伪值（后端哨兵折半也会误导）。门维度按端口级 sched_envelope 选择展示哪一组：
   // rtt 门是往返 min_rtt 区间，fwd 门是去程地板（单值，窗口由配置给）。
   if(Number(s.group_fwd_floor_us)>0){
-    meta+=' · '+t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us);
+    const retPart=(s.rtt_mode&&Number(s.group_ret_window_us)>0)?(' / '+t('sched.env_ret')+' ≤'+fmtMsUsUS(s.group_ret_window_us)):'';
+    meta+=' · '+t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us)+retPart;
   }else if(Number(s.group_min_rtt_us)>0){
     const umax=Number(s.group_max_rtt_us);
     meta+=' · '+t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+(umax>0?'~'+fmtMsUsUS(umax):'');
@@ -1856,11 +1857,14 @@ function schedulerTip(r){
   const excl=schedExclReason(s);
   if(excl){
     const lab=t('sched.excl_'+excl);
-    // 比较式按门维度分列：rtt 门比 min_rtt 与上限，fwd 门比去程与地板+窗口。
-    // 两种门量纲不同，不能共用一条文案（fwd 门的下限是相对量、可为负）。
+    // 比较式按门维度分列：rtt 门比 min_rtt 与上限，fwd 门比去程与地板+窗口，
+    // 双向吞吐区间的回程拥塞门比排队深度与窗口。量纲不同不共用一条文案
+    // （fwd 门的下限是相对量、可为负）。
     const cmpFwd=(s.fwd_rank_known&&Number(s.group_fwd_floor_us)>0)?(t('sched.excl_cmp_fwd').replace('{a}',fmtMsUsUS(s.fwd_rank_us||0)).replace('{b}',fmtMsUsUS(s.group_fwd_floor_us))):'';
+    const cmpRet=(excl==='ret_congested'&&Number(s.ret_congest_us)>0&&Number(s.group_ret_window_us)>0)?(t('sched.excl_cmp_ret').replace('{a}',fmtMsUsUS(s.ret_congest_us)).replace('{b}',fmtMsUsUS(s.group_ret_window_us))):'';
     const cmp=Number(s.min_rtt_us)>0&&Number(s.group_max_rtt_us)>0?(t('sched.excl_cmp').replace('{a}',fmtMsUsUS(s.min_rtt_us)).replace('{b}',fmtMsUsUS(s.group_max_rtt_us))):'';
-    parts.push((lab!=='sched.excl_'+excl?lab:excl)+((cmpFwd||cmp)?' ('+(cmpFwd||cmp)+')':''));
+    const cmpAll=[cmpFwd,cmpRet,cmp].filter(Boolean).join(' · ');
+    parts.push((lab!=='sched.excl_'+excl?lab:excl)+(cmpAll?' ('+cmpAll+')':''));
   }
   if(s.rank_known)parts.push(t('sched.rank_key')+' '+(Number(s.rank_key_us)>=0?'+':'-')+fmtMsUsUS(Math.abs(Number(s.rank_key_us))));
   // 容量权重与 TCP 重传：与 schedulerCell（metric-corrections 覆盖版）同口径，
@@ -1871,7 +1875,9 @@ function schedulerTip(r){
   // 黑洞钝感，选路已按 streak 抬升其排名键（体现在 rank_key_us 抬升）。
   if(Number(s.probe_timeout_streak)>0)parts.push(t('sched.probe_to')+' ×'+Number(s.probe_timeout_streak));
   if(Number(s.group_fwd_floor_us)>0){
-    parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us));
+    // 双向吞吐区间（rtt_mode）补显回程拥塞窗：去程地板之后的"回程排队上限"。
+    const retPart=(s.rtt_mode&&Number(s.group_ret_window_us)>0)?(' / '+t('sched.env_ret')+' ≤'+fmtMsUsUS(s.group_ret_window_us)):'';
+    parts.push(t('sched.env')+' '+t('sched.env_fwd')+' '+fmtMsUsUS(s.group_fwd_floor_us)+retPart);
   }else if(Number(s.group_min_rtt_us)>0&&Number(s.group_max_rtt_us)>0)parts.push(t('sched.env')+' '+fmtMsUsUS(s.group_min_rtt_us)+'~'+fmtMsUsUS(s.group_max_rtt_us));
   if(s.peer_active)parts.push(t('sched.peer_active_tip')||t('sched.peer_active'));
   if(s.sticky_held)parts.push(t('sched.sticky_held'));

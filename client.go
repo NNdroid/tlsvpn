@@ -84,6 +84,12 @@ type Backend struct {
 	// 扭曲排名。与显示字段同轮发布。
 	fwdRankUS atomic.Uint64
 	retRankUS atomic.Uint64
+	// retCongestUS 回程拥塞抬升（µs，≥0）：回程有效值 − 回程 decayed-min 地板
+	// = 探针回程的排队深度 = 对端发送方向（即本端 ACK 方向）的排队深度。TCP
+	// 的 ACK 自钟控把吞吐钉在 cwnd/(F+B) 上——双向吞吐区间（rttMode）的回程
+	// 拥塞门据此把"ACK 被对端下行数据踩死"的路径排除出候选集（见
+	// schedExcludeRetCongested）。0=未收敛或无拥塞。rttProbeScheduler 发布。
+	retCongestUS atomic.Int64
 	// probeUpdatedAt 最近一次发布 fwd/ret 的 unix 毫秒（0=尚未收敛）。面板用它
 	// 显示"上次计算时间"，判断跨路径 RTT 探针是否仍在刷新。
 	probeUpdatedAt atomic.Uint64
@@ -109,7 +115,11 @@ type Backend struct {
 	// 用 Int64：该值是 raw+oneWayRankZeroUS 解码后的有符号量，可为负（快于 ref
 	// 基准）。0 = 尚未收敛/未建立。
 	schedEnvFwdFloorUS atomic.Int64
-	oneWayModePtr      *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
+	// schedEnvRetWindowUS 双向吞吐区间（rttMode）回程拥塞门的判定窗口（µs），
+	// = sched_envelope_ms 配置值。面板 tooltip 的"回程排队 > 窗口"比较式用。
+	// 仅 rttMode 批发布（0=交互区间/未建立）。
+	schedEnvRetWindowUS atomic.Uint64
+	oneWayModePtr       *atomic.Int32 // 指向所属 AsyncPort 的 oneWayMode
 	// clockOffsetTheta 提供所属会话的双向时钟偏移 θ（ns）+ 不确定度 U（µs）+
 	// 是否收敛。由 Client/ServerSession 在初始化 Backend 时注入，使快照可暴露
 	// θ/U 收敛状态。nil=未注入（快照省略这些字段）。

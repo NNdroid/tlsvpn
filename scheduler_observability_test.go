@@ -161,6 +161,9 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 		"s.near_state",
 		"sched.eff_rtt_us",
 		"s.probe_timeout_streak",
+		"s.ret_congest_us",
+		"s.group_ret_window_us",
+		"s.rtt_mode",
 		"function schedulerTip(r)",
 		"function renderSchedLog(data)",
 		"function schedLogEntries(data)",
@@ -208,6 +211,7 @@ func TestWebUISchedObservabilityContract(t *testing.T) {
 	for _, want := range []string{
 		"excl_envelope_out:'", "excl_cmp:'", "reason_sticky_held:'",
 		"near_lenient:'", "log_line:'", "rank:'", "peer_active:'",
+		"excl_ret_congested:'", "env_ret:'", "excl_cmp_ret:'",
 	} {
 		if got := strings.Count(i18n, want); got != 5 {
 			t.Errorf("i18n.js %s 出现 %d 次 want=5（五个 locale 各一份）", want, got)
@@ -246,6 +250,11 @@ func TestSchedConnJSONObservabilityFields(t *testing.T) {
 	b6.effRttUS.Store(40_000)
 	b7 := testAdaptiveBackend(10_000)
 	b7.probeTimeoutStreak.Store(3)
+	b8 := testAdaptiveBackend(10_000)
+	b8.retRankUS.Store(oneWayRankEncode(30_000))
+	b8.retCongestUS.Store(28_000)
+	b8.schedEnvRetWindowUS.Store(20_000)
+	b8.schedFlags.Store(schedFlagRttMode)
 
 	cases := []struct {
 		name string
@@ -264,6 +273,10 @@ func TestSchedConnJSONObservabilityFields(t *testing.T) {
 		{"near_in", schedulerSnapshot(b5), `"near_state":"in"`},
 		{"eff_rtt", schedulerSnapshot(b6), `"eff_rtt_us":40000`},
 		{"probe_timeout_streak", schedulerSnapshot(b7), `"probe_timeout_streak":3`},
+		{"ret_rank", schedulerSnapshot(b8), `"ret_rank_us":30000`},
+		{"ret_congest", schedulerSnapshot(b8), `"ret_congest_us":28000`},
+		{"ret_window", schedulerSnapshot(b8), `"group_ret_window_us":20000`},
+		{"rtt_mode", schedulerSnapshot(b8), `"rtt_mode":true`},
 	}
 	for _, tc := range cases {
 		out, err := json.Marshal(tc.snap)

@@ -143,6 +143,40 @@ func (b *Backend) backendOneWayUS() (int64, bool) {
 	return 0, false
 }
 
+// backendRetUS 返回本端视角的回程有效值（µs，有符号，可负）+ 是否已收敛。
+// 回程 = 对端发送方向 = 本端 ACK 方向；retRankUS 由 recomputeAll 发布（两端
+// egress 均为 fwd 模式，ret 恒为"另一方向"）。oneWayMode 为 roundtrip 兼容
+// 模式（0）时不消费探针（与 backendOneWayUS 同契约，保持历史行为不变）。
+func (b *Backend) backendRetUS() (int64, bool) {
+	if b == nil {
+		return 0, false
+	}
+	if b.oneWayModePtr != nil && b.oneWayModePtr.Load() == oneWayModeRoundtrip {
+		return 0, false
+	}
+	if v := b.retRankUS.Load(); v > 0 {
+		return oneWayRankDecode(v), true
+	}
+	return 0, false
+}
+
+// backendRoundTripUS 返回本端探针分解的往返相对量（µs）+ 是否已收敛：
+// fwd_i + ret_i = (F_i + c1) + (B_i + c2)，c1/c2 只依赖参考连接、与 i 无关，
+// 故 argmin(fwd+ret) = argmin(F_i+B_i) = 真实往返排序——TCP ACK 自钟控下
+// 吞吐由 cwnd/(F+B) 决定，双向吞吐区间的排名键据此升级为往返。任一方向未
+// 收敛即不可用（往返键必须双侧实测）。
+func (b *Backend) backendRoundTripUS() (int64, bool) {
+	fwd, fwdOK := b.backendOneWayUS()
+	if !fwdOK {
+		return 0, false
+	}
+	ret, retOK := b.backendRetUS()
+	if !retOK {
+		return 0, false
+	}
+	return fwd + ret, true
+}
+
 // adaptiveBackendOneWayUS 返回选路用的单向时延（µs，有符号）：跨路径原始相对
 // 量（已收敛）优先，否则回退 min_rtt/2（无拥塞地板），再退 SRTT/2。回退值与
 // 探针原始值同尺度（绝对单程估计），无需任何公共偏移即可混排比较。估计未收敛

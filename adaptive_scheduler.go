@@ -56,6 +56,7 @@ const (
 	schedFlagNearLenient uint32 = 1 << 1 // 探针未收敛的 bootstrap 宽限（宽松放行）
 	schedFlagStickyHeld  uint32 = 1 << 2 // 本批因粘滞滞回保留了当前路径
 	schedFlagRankKnown   uint32 = 1 << 3 // rankKeyUS 已发布（0 是合法排名值，需门控）
+	schedFlagRttMode     uint32 = 1 << 7 // 本批处于双向吞吐区间（门/排名升级往返维度）
 	schedFlagExcludeMask uint32 = 7 << 4 // 排除原因，见 schedExclude*
 )
 
@@ -67,6 +68,10 @@ const (
 	schedExcludeQueueFull   uint32 = 2 << 4
 	schedExcludeCapZero     uint32 = 3 << 4
 	schedExcludeEnvelopeOut uint32 = 4 << 4
+	// schedExcludeRetCongested 双向吞吐区间的回程拥塞门：探针回程抬升（有效值
+	// − 地板 = 对端发送排队深度 = 本端 ACK 排队深度）超过窗口。TCP ACK 自钟控
+	// 把吞吐钉在 cwnd/(F+B)——该路径对本端 bulk 无交付增益，排除而非降权。
+	schedExcludeRetCongest uint32 = 5 << 4
 )
 
 // schedReason* 是选路管线各返回分支的决策原因。用稳定字符串而非数字码：
@@ -156,6 +161,26 @@ func (b *Backend) schedFlagsSet(mask, v uint32) {
 	b.schedFlags.Store((b.schedFlags.Load() &^ mask) | (v & mask))
 }
 
+// envelopeGate 本批资格门的批级状态：门维度选择（fwd/内核 rtt）、组内去程地板、
+// 双向吞吐区间标记与回程拥塞窗。每批构建一次，buildEligibleCandidates 与放宽
+// 重建循环复用（maxRTT/去程窗随放宽变化，作独立参数传入；地板与模式不随放宽
+// 变化）。值语义：小结构体按值传递，批内多次重建共享同一份事实。
+type envelopeGate struct {
+	// fwdDim sched_envelope=fwd：门维度为去程排名键（false=内核往返地板门，
+	// 默认）。每批读一次 schedEnvelopeFwd，免除 envelopeIn 逐候选原子读。
+	fwdDim   bool
+	fwdFloor int64
+	fwdOK    bool
+	// rttMode 双向吞吐区间（本端需求 ≥ 多路径区间阈值）：TCP ACK 自钟控下吞吐
+	// 由 cwnd/(F+B) 决定——fwd 系排名键升级为往返（fwd+ret 之和），fwd 门叠加
+	// 回程拥塞副门；交互区间保持纯 fwd（慢回程不损交互时延，原设计意图成立）。
+	rttMode bool
+	// retWindowUS 回程拥塞门的判定窗口（µs）＝ sched_envelope_ms 配置值。抬升
+	// 超窗即排除（schedExcludeRetCongested）。不随放宽变化：放宽换的是"乱序
+	// 界"，回程拥塞是容量事实，饥饿不能把 ACK 被踩死的路径换进来。
+	retWindowUS uint64
+}
+
 // publishExcluded 把一条被资格门排除的路径的观测状态写回该 Backend。
 // 与 buildEligibleCandidates 内"进入候选集"的发布点构成同一套不变量：每批每后端
 // 恰好写一次排除原因或一次候选内标志。
@@ -164,7 +189,7 @@ func (b *Backend) schedFlagsSet(mask, v uint32) {
 // wasActive 路径按组内 epoch 重置债务（重入即归位），这里清零反而会在
 // "基础轮排除 → 放宽重建同批拉回"的窗口内把该路径的债务抹掉，使其每批
 // 都像新加入一样抢跑（TestAdaptiveSchedulerMinRTTRanksBelowSRTT 的回归）。
-func (p *AsyncPort) publishExcluded(b *Backend, reason uint32, minRTT uint32, maxRTT uint64, fwdFloor int64, fwdFloorOK bool) {
+func (p *AsyncPort) publishExcluded(b *Backend, reason uint32, minRTT uint32, maxRTT uint64, g envelopeGate) {
 	if b == nil {
 		return
 	}
@@ -173,11 +198,12 @@ func (p *AsyncPort) publishExcluded(b *Backend, reason uint32, minRTT uint32, ma
 		b.schedEnvMinRttUS.Store(uint64(minRTT))
 		b.schedEnvMaxRttUS.Store(maxRTT)
 	}
-	p.publishEnvelopeFloor(b, fwdFloor, fwdFloorOK)
+	p.publishEnvelopeFloor(b, g)
 	// 未进入候选集即无排名键：清 RankKnown 并把键归零，面板显示"-"而非伪 0。
 	b.rankKeyUS.Store(0)
-	// 被排除的路径同样清粘滞位，否则上一批的 sticky_held 会跨批残留。
-	b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, reason)
+	// 被排除的路径同样清粘滞/双向模式位，否则上一批的 sticky_held/rtt_mode 会
+	// 跨批残留。
+	b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld|schedFlagRttMode, reason)
 }
 
 type backendCandidate struct {
@@ -270,6 +296,21 @@ type schedulerConnJSON struct {
 	// 两条数并置展示才能看出差别）。未收敛时两者都缺省，前端不显示比较式。
 	FwdRankKnown bool  `json:"fwd_rank_known,omitempty"`
 	FwdRankUS    int64 `json:"fwd_rank_us,omitempty"`
+	// RetRankKnown / RetRankUS 本路径已收敛的回程读数（µs，有符号相对量，与
+	// FwdRankUS 同尺度）。双向吞吐区间（RttMode）的"回程拥塞"解释用。
+	RetRankKnown bool  `json:"ret_rank_known,omitempty"`
+	RetRankUS    int64 `json:"ret_rank_us,omitempty"`
+	// RetCongestUS 回程拥塞抬升（µs，≥0）：回程有效值 − 回程地板 = 探针回程
+	// 排队深度 = 对端发送排队深度 = 本端 ACK 排队深度。rtt_mode 下超过
+	// sched_envelope_ms 窗口的路径被排除（exclude_reason=ret_congested）。
+	RetCongestUS int64 `json:"ret_congest_us,omitempty"`
+	// GroupRetWindowUS rtt_mode 回程拥塞门的判定窗口（µs）= sched_envelope_ms
+	// 配置值。tooltip 比较式"回程排队 {a} > 窗口 {b}"的 {b}。0=交互区间/未建立。
+	GroupRetWindowUS uint64 `json:"group_ret_window_us,omitempty"`
+	// RttMode 本批处于双向吞吐区间（本端需求 ≥ 多路径区间阈值）：fwd 门叠加
+	// 回程拥塞副门、fwd 系排名键升级往返（fwd+ret）。面板据此解释"去程最快
+	// 却被排除"的回程拥塞情形。
+	RttMode bool `json:"rtt_mode,omitempty"`
 	// NearState parity near 窗口成员资格："in"=窗口内、"lenient"=探针未收敛的
 	// bootstrap 宽限放行；窗口外不发布（字段 omitempty 缺省），不会拿 parity。
 	// 仅 near 策略有意义。
@@ -398,6 +439,7 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		RankKnown:          flags&schedFlagRankKnown != 0,
 		RankKeyUS:          b.rankKeyUS.Load(),
 		StickyHeld:         flags&schedFlagStickyHeld != 0,
+		RttMode:            flags&schedFlagRttMode != 0,
 		RetransDelta:       b.retransDelta.Load(),
 	}
 	// EffRttUS 已建立时才填充（omitempty）：未建立的路径不显示伪 0，面板据
@@ -416,6 +458,8 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		snap.ExcludeReason = "cap_zero"
 	case reason == schedExcludeEnvelopeOut:
 		snap.ExcludeReason = "envelope_out"
+	case reason == schedExcludeRetCongest:
+		snap.ExcludeReason = "ret_congested"
 	}
 	snap.Eligible = reason == schedExcludeNone
 	switch {
@@ -431,6 +475,13 @@ func schedulerSnapshot(b *Backend) schedulerConnJSON {
 		snap.FwdRankKnown = true
 		snap.FwdRankUS = v
 	}
+	// 回程读数与拥塞抬升：双向吞吐区间的"回程拥塞"解释用（同 fwd 口径）。
+	if v := b.retRankUS.Load(); v > 0 {
+		snap.RetRankKnown = true
+		snap.RetRankUS = oneWayRankDecode(v)
+	}
+	snap.RetCongestUS = b.retCongestUS.Load()
+	snap.GroupRetWindowUS = b.schedEnvRetWindowUS.Load()
 	// 时钟偏移 θ/U：仅当注入且已收敛时暴露，面板据此显示"虚拟时钟已同步"。
 	if b.clockOffsetTheta != nil {
 		if th, unc, ok := b.clockOffsetTheta(); ok {
@@ -658,7 +709,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 		// 标志——面板将长期显示 active=true 却 eligible=false + envelope_out 的
 		// 自相矛盾组合。清掉排除/粘滞/排名位，与"单路径被选中"的事实自洽；
 		// near 位留给 parity 路径维护。
-		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, schedExcludeNone)
+		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld|schedFlagRttMode, schedExcludeNone)
 		p.activePaths.Store(1)
 		p.storePreferredIfCurrent(b)
 		p.recordChoice(backends, b, schedReasonSinglePath, 1)
@@ -666,6 +717,11 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	}
 	current := p.preferred.Load()
 
+	demandRate := p.inputRateBytesPerSec.Load()
+	// 双向吞吐区间（rttMode）：需求进入多路径区间后，TCP ACK 自钟控把吞吐钉在
+	// cwnd/(F+B)——门与 fwd 系排名键升级往返维度（见 envelopeGate）。交互区间
+	// 保持纯 fwd：小批量交付时延仍由去程决定，慢回程不损交互时延。
+	rttMode := demandRate >= adaptiveActive2RateBytesPerSec
 	obs, minRTT, maxRTT, referenceRate, healthy := p.scanEnvelope(backends)
 	if healthy == 0 {
 		fb := p.fallbackSinglePath(backends)
@@ -674,12 +730,13 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	}
 	// fwd 门的组内去程地板。取不到（组内无已收敛去程读数）时整体回退 rtt 门：
 	// 回退值混排会让地板变成绝对尺度伪值，把全部路径误判成包络外。
-	fwdFloor, fwdFloorOK := int64(0), false
+	gate := envelopeGate{rttMode: rttMode, retWindowUS: p.schedEnvelopeUS.Load()}
 	if p.schedEnvelopeFwd.Load() {
-		fwdFloor, fwdFloorOK = schedEnvelopeFloor(backends)
+		gate.fwdDim = true
+		gate.fwdFloor, gate.fwdOK = schedEnvelopeFloor(backends)
 	}
 	fwdWindow := p.schedEnvelopeUS.Load()
-	cands := p.buildEligibleCandidates(policy, obs, backends, incomingBytes, minRTT, maxRTT, referenceRate, fwdFloor, fwdFloorOK, fwdWindow)
+	cands := p.buildEligibleCandidates(policy, obs, backends, incomingBytes, minRTT, maxRTT, referenceRate, gate, fwdWindow)
 	p.schedulerScratch = cands
 	if len(cands) == 0 {
 		// 全部后端被并发排除（唯一健康者在扫描间隙被 markStalled）：pickBackend
@@ -704,7 +761,7 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	if !policy.wfq {
 		return p.commitSinglePath(backends, cands, current, bestBase, policy)
 	}
-	active := adaptiveActivePathTarget(pressure, p.inputRateBytesPerSec.Load(), obs)
+	active := adaptiveActivePathTarget(pressure, demandRate, obs)
 	if active == 1 {
 		return p.commitSinglePath(backends, cands, current, bestBase, policy)
 	}
@@ -714,15 +771,15 @@ func (p *AsyncPort) pickAdaptiveBackend(backends []*Backend, pressure, incomingB
 	// 只徒增接收端乱序（TestAdaptiveSchedulerExcludesMateriallySlowerRTT 钉死
 	// 该语义）；持续需求饥饿时饥饿代价才大于乱序代价——重排窗口本就有界。
 	// 路径 RTT 分布未知，一步到位的倍率无法预知，故逐级重建直到候选数够或
-	// 顶格；healthy==len(cands) 说明没有可补的路径。
-	demandRate := p.inputRateBytesPerSec.Load()
+	// 顶格；healthy==len(cands) 说明没有可补的路径。回程拥塞门（rttMode）的
+	// 窗口不随放宽变化——它是容量事实，不是乱序界。
 	demandWant := adaptiveDemandPathTarget(demandRate, obs)
 	starved, _ := capacityStarved(demandRate, obs)
 	if demandWant > len(cands) && healthy > len(cands) {
 		for widenExp := 1; demandWant > len(cands) && healthy > len(cands) && widenExp <= 3; widenExp++ {
 			widenedRTT := widenRTTEnvelope(minRTT, maxRTT, widenExp)
 			widenedWindow := widenFwdWindow(fwdWindow, widenExp)
-			cands = p.buildEligibleCandidates(policy, obs, backends, incomingBytes, minRTT, widenedRTT, referenceRate, fwdFloor, fwdFloorOK, widenedWindow)
+			cands = p.buildEligibleCandidates(policy, obs, backends, incomingBytes, minRTT, widenedRTT, referenceRate, gate, widenedWindow)
 			p.schedulerScratch = cands
 			rankCandidates(cands)
 		}
@@ -798,11 +855,17 @@ func schedEnvelopeFloor(backends []*Backend) (floor int64, ok bool) {
 // publishEnvelopeFloor 发布本批 fwd 门的组内去程地板（µs，有符号相对量）。
 // 与 rtt 门的 schedEnvMinRttUS/MaxRttUS 平行的观测字段：面板据此显示"去程地板"，
 // 并把落在其 +sched_envelope_ms 之外的路径解释成包络外。未收敛时归零（=尚未建立）。
-func (p *AsyncPort) publishEnvelopeFloor(b *Backend, fwdFloor int64, ok bool) {
-	if b == nil || !ok {
+// rttMode 批额外发布回程拥塞窗（面板"回程排队 > 窗口"比较式的 {b}）。
+func (p *AsyncPort) publishEnvelopeFloor(b *Backend, g envelopeGate) {
+	if b == nil {
 		return
 	}
-	b.schedEnvFwdFloorUS.Store(fwdFloor)
+	if g.fwdOK {
+		b.schedEnvFwdFloorUS.Store(g.fwdFloor)
+	}
+	if g.rttMode {
+		b.schedEnvRetWindowUS.Store(g.retWindowUS)
+	}
 }
 
 // envelopeIn 判定一条已完成公平启动的路径是否落在当前资格门内（false=排除）。
@@ -813,28 +876,36 @@ func (p *AsyncPort) publishEnvelopeFloor(b *Backend, fwdFloor int64, ok bool) {
 // fwd 门：本端去程排名键，与排名键同源，使上述路径准入；它慢的那一侧是对端的
 // 发送方向，由对端自己那端的门负责挡掉，两端各自按发送方向设门、无需跨端协调。
 //
+// 双向吞吐区间的修正：TCP ACK 自钟控把吞吐钉在 cwnd/(F+B)——"去程最快但回程
+// 被对端下行数据踩死"的路径对本端 bulk 无交付增益。回程拥塞门按探针回程抬升
+// （retCongestUS = 回程有效值 − 回程地板 = 对端发送排队深度 = 本端 ACK 排队
+// 深度）判定，超窗排除；抬升是拥塞量而非方向距离（远而干净的路径抬升≈0 不受
+// 影响），因此不随放宽变化——放宽换的是乱序界，换不回容量。该门在
+// buildEligibleCandidates 内独立于本函数执行（发布 ret_congested 专属排除原因，
+// 面板可与包络外区分）；交互区间不启用：小批量交付时延仍由去程决定，原设计
+// 意图成立。
+//
 // 探针未收敛的路径在 fwd 门下宽松放行（与 near 窗口的 parityNearState 同契约）：
 // 未收敛时 adaptiveBackendOneWayUS 回退到绝对内核尺度（min_rtt/2 或 50ms 哨兵
 // 折半），与已收敛探针的有符号相对量跨尺度比较会把 bootstrap 期全部误判包络外。
 //
-// minRTTUS / oneWayUS / oneWayOK 由调用方传入本轮的首读结果（调用方在资格判定
-// 之前就要读同一批原子做 fairStart 判定与排名键回退），此处不再重读：热路径每
-// 候选的 minRTT/oneWay 加载从 2-3 次降到 1 次。调用方保证仅在 !fairStart 时进入
-// （此时探针原始值缺失即宽松放行，语义与历史实现一致）。
+// minRTTUS / fwdUS / fwdOK 由调用方传入本轮的首读结果（调用方在资格判定之前
+// 就要读同一批原子做 fairStart 判定与排名键回退），此处不再重读。调用方保证仅
+// 在 !fairStart 时进入。
 // fwdWindowUS 为本批生效的 fwd 准入窗口（µs）——通常即 schedEnvelopeUS 配置值，
 // 活跃目标超过候选数时由调用方传入放宽值（见 widenFwdWindow）。
-func (p *AsyncPort) envelopeIn(fwdFloor int64, fwdFloorOK bool, fwdWindowUS uint64, maxRTT uint64, minRTTUS uint32, oneWayUS int64, oneWayOK bool) bool {
-	if !p.schedEnvelopeFwd.Load() || !fwdFloorOK {
+func (p *AsyncPort) envelopeIn(g envelopeGate, fwdWindowUS uint64, maxRTT uint64, minRTTUS uint32, fwdUS int64, fwdOK bool) bool {
+	if !g.fwdDim || !g.fwdOK {
 		// rtt 门，或 fwd 门因组内无已收敛读数整体回退。
 		if uint64(minRTTUS) > maxRTT {
 			return false
 		}
 		return true
 	}
-	if !oneWayOK {
+	if !fwdOK {
 		return true
 	}
-	return oneWayUS <= fwdFloor+int64(fwdWindowUS)
+	return fwdUS <= g.fwdFloor+int64(fwdWindowUS)
 }
 
 // scanEnvelope 单遍合并原 scanWarmedMinRTT + buildEnvelope：健康计数、热身
@@ -954,12 +1025,14 @@ func (p *AsyncPort) fallbackSinglePath(backends []*Backend) *Backend {
 	return b
 }
 
-// buildEligibleCandidates 构建候选集：资格包络 + stall/队满排除，按策略算主排名键。
-// 队列状态与有效 RTT/速率复用 scanEnvelope 的同一次观测（obs 与 backends 同序），
-// 排除子原因按首读区分发布；只有 SRTT 尚未扫过，仍在此处单次读取。
-// fwdWindowUS 为本批生效的 fwd 准入窗口（µs）——通常即配置值，活跃目标超过
-// 候选数时调用方传入放宽值（见 pickAdaptiveBackend / widenFwdWindow）。
-func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelopeObs, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64, fwdFloor int64, fwdFloorOK bool, fwdWindowUS uint64) []backendCandidate {
+// buildEligibleCandidates 构建候选集：资格包络（含双向吞吐区间的回程拥塞门）+
+// stall/队满排除，按策略算主排名键。队列状态与有效 RTT/速率复用 scanEnvelope
+// 的同一次观测（obs 与 backends 同序），排除子原因按首读区分发布；只有 SRTT
+// 尚未扫过，仍在此处单次读取。
+// g 为本批资格门状态（维度/地板/双向模式/回程拥塞窗）；fwdWindowUS 为本批生效
+// 的 fwd 准入窗口（µs）——通常即配置值，活跃目标超过候选数时调用方传入放宽值
+// （见 pickAdaptiveBackend / widenFwdWindow）。
+func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelopeObs, backends []*Backend, incomingBytes uint64, minRTT uint32, maxRTT uint64, referenceRate uint64, g envelopeGate, fwdWindowUS uint64) []backendCandidate {
 	cands := p.schedulerScratch[:0]
 	// 组内最大实测容量（饱和门控样本）提升到候选循环之外：防饿地板的输入，
 	// 原先每候选重算是 O(n²)。BDP 下界不参与地板——它是"未饱和路径"的估计，
@@ -979,13 +1052,13 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelope
 		// eligible=false 无法区分 stalled、队满、cap 未就绪与真正落在包络外。
 		switch {
 		case o.cap == 0:
-			p.publishExcluded(b, schedExcludeCapZero, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			p.publishExcluded(b, schedExcludeCapZero, minRTT, maxRTT, g)
 			continue
 		case o.qLen >= o.cap-2:
-			p.publishExcluded(b, schedExcludeQueueFull, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			p.publishExcluded(b, schedExcludeQueueFull, minRTT, maxRTT, g)
 			continue
 		case o.stalled:
-			p.publishExcluded(b, schedExcludeStalled, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			p.publishExcluded(b, schedExcludeStalled, minRTT, maxRTT, g)
 			continue
 		}
 		// SRTT 用于 ETA 遥测（含当前拥塞，预测更准）；有效 RTT 已在扫描阶段
@@ -1002,11 +1075,32 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelope
 			// 公平启动路径按组内热身地板参与排序（仅 bootstrap 期）。
 			rtt = minRTT
 		}
-		oneWay, oneWayOK := b.backendOneWayUS()
-		if !fairStart && !p.envelopeIn(fwdFloor, fwdFloorOK, fwdWindowUS, maxRTT, mr, oneWay, oneWayOK) {
+		fwdVal, fwdOK := b.backendOneWayUS()
+		retVal, retOK := b.backendRetUS()
+		oneWay, oneWayOK := fwdVal, fwdOK
+		if g.rttMode {
+			// 双向吞吐区间：排名键升级为往返（fwd+ret 之和，公共常数与 i 无关，
+			// argmin 即真实往返 argmin——TCP ACK 自钟控下吞吐由 cwnd/(F+B) 决定）。
+			// 任一方向未收敛 → 本路径无往返键 → 未测类；回退链在该模式下不折半
+			// （kernel RTT 全值与已收敛探针往返同尺度）。
+			if fwdOK && retOK {
+				oneWay = fwdVal + retVal
+			} else {
+				oneWay, oneWayOK = 0, false
+			}
+		}
+		if !fairStart && !p.envelopeIn(g, fwdWindowUS, maxRTT, mr, fwdVal, fwdOK) {
 			// 冷路径完成热身却真正落在资格门外（按当前 sched_envelope 维度判定）：
 			// 清掉过期成员。
-			p.publishExcluded(b, schedExcludeEnvelopeOut, minRTT, maxRTT, fwdFloor, fwdFloorOK)
+			p.publishExcluded(b, schedExcludeEnvelopeOut, minRTT, maxRTT, g)
+			continue
+		}
+		// 双向吞吐区间的回程拥塞门：探针回程抬升 = 对端发送排队深度 = 本端 ACK
+		// 排队深度，超窗即排除（schedExcludeRetCongested）。独立于门维度——
+		// 内核往返地板门（min_rtt 是无拥塞地板）对回程拥塞同样钝感。交互区间
+		// 不启用：小批量交付时延仍由去程决定。
+		if g.rttMode && int64(b.retCongestUS.Load()) > int64(g.retWindowUS) {
+			p.publishExcluded(b, schedExcludeRetCongest, minRTT, maxRTT, g)
 			continue
 		}
 		// Writer-drain EWMA 只作观测 ETA，不代表端到端 TCP 投递能力。
@@ -1039,24 +1133,30 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelope
 		if schedRate == 0 {
 			schedRate = uint64(adaptiveFallbackRateBytesPerSec)
 		}
-		// 主排名键按当前算法计算（candidateRankUS）；完全未测路径折到 minRTT/2。
-		// oneWay 为有符号原始相对量（探针已收敛时，负值=快于 ref 基准），显示层
-		// 的 δ 抬升不参与选路——回退候选不带 δ，混排时不抵消会扭曲排名。
+		// 主排名键按当前算法计算（candidateRankUS）。oneWay 为有符号原始相对量
+		// （探针已收敛时，负值=快于 ref 基准；双向吞吐区间为 fwd+ret 之和），
+		// 显示层的 δ 抬升不参与选路——回退候选不带 δ，混排时不抵消会扭曲排名。
 		// 回退链与 adaptiveBackendOneWayUS 同型，但复用本轮首读（oneWayOK/
 		// unknownRTT/srttUnknown），每候选少 2-3 次原子加载：
-		//   有效 RTT/min_rtt 已知 → mr/2；SRTT 已知 → SRTT/2；
-		//   两者皆未知（全未测）→ 组内 minRTT/2（哨兵折半，与历史覆盖逻辑一致）。
+		//   交互区间：有效 RTT/min_rtt 已知 → mr/2；SRTT 已知 → SRTT/2；
+		//     两者皆未知（全未测）→ 组内 minRTT/2（哨兵折半，与历史覆盖一致）。
+		//   双向吞吐区间：同一链不折半（mr/minRTT/srt 全值）——键的语义是往返，
+		//     kernel RTT 全值与已收敛探针往返（fwd+ret）同尺度可比。
 		// 回退键只用于"组内无已测路径"时的排序与 fair-start 喂量：跨尺度混排
 		// 由 rankCandidates 的 measured 分类隔离（已测恒先于未测），冷路径不再
 		// 凭乐观地板抢跑。
 		if !oneWayOK {
+			halve := int64(1)
+			if !g.rttMode {
+				halve = 2
+			}
 			switch {
 			case !unknownRTT:
-				oneWay = int64(mr) / 2
+				oneWay = int64(mr) / halve
 			case srttUnknown:
-				oneWay = int64(minRTT) / 2
+				oneWay = int64(minRTT) / halve
 			default:
-				oneWay = int64(srt) / 2
+				oneWay = int64(srt) / halve
 			}
 		}
 		baseUS := candidateRankUS(policy, oneWay, rtt, srt, incomingBytes, schedRate)
@@ -1075,11 +1175,16 @@ func (p *AsyncPort) buildEligibleCandidates(policy routingPolicy, obs []envelope
 			b.schedEnvMinRttUS.Store(uint64(minRTT))
 			b.schedEnvMaxRttUS.Store(maxRTT)
 		}
-		p.publishEnvelopeFloor(b, fwdFloor, fwdFloorOK)
+		p.publishEnvelopeFloor(b, g)
 		b.rankKeyUS.Store(baseUS)
-		// StickyHeld 在此处清空：粘滞判定发生在其后的 commitSinglePath，同一批内
+		// StickyHeld / 双向模式位在此处清空：粘滞判定发生在其后的
+		// commitSinglePath，双向模式位按本批 g.rttMode 重设，同一批内
 		// "先清后设"，故粘滞未生效的路径不会残留上一批的旧标志。
-		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld, schedExcludeNone|schedFlagRankKnown)
+		modeBit := uint32(0)
+		if g.rttMode {
+			modeBit = schedFlagRttMode
+		}
+		b.schedFlagsSet(schedFlagExcludeMask|schedFlagRankKnown|schedFlagStickyHeld|schedFlagRttMode, schedExcludeNone|schedFlagRankKnown|modeBit)
 		cands = append(cands, backendCandidate{
 			backend:   b,
 			baseUS:    baseUS,

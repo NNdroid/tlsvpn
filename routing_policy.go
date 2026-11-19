@@ -141,6 +141,12 @@ func candidateRankUS(p routingPolicy, oneWay int64, rttUS uint32, srttUS uint32,
 // "去程最快但往返很慢"的极不对称路径——而那条路径对本端 egress 的接收端乱序
 // 窗口其实最有利——它慢的那一侧是对端的发送方向，会被对端自己那端的资格门挡掉。
 // 两端各自按自己的发送方向设门，不需要跨端协调。
+//
+// 边界条件（TCP ACK 自钟控）：上述论证只对交互区间完整成立。需求进入多路径
+// 区间（rttMode）后，吞吐被 cwnd/(F+B) 钉死——"去程快但回程被对端下行数据
+// 踩死"的路径对本端 bulk 无交付增益，fwd 门叠加回程拥塞副门（探针回程抬升
+// 超窗排除，见 envelopeGate/schedExcludeRetCongested），fwd 系排名键同步升级
+// 往返（fwd+ret 之和）。
 type SchedEnvelope string
 
 const (
