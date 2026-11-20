@@ -129,9 +129,19 @@ grep -Fq 'mediatek' "${release_workflow}"
 grep -Fq 'ath79' "${release_workflow}"
 grep -Fq 'qualcommax' "${release_workflow}"
 grep -Fq 'airoha' "${release_workflow}"
-grep -Fq 'TLSVPN_PKG_VERSION: ${{' "${release_workflow}"
-grep -Fq "startsWith(github.ref, 'refs/tags/v') && github.ref_name" "${release_workflow}"
+# Version generation is centralized in the compute-version job since 1baf40b:
+# manual workflow_dispatch input > v* tag name > auto rule
+# v1.0.<commit-date yyyymmdd>-<7-char hash>+<v-tag-count+1>. Both native and
+# OpenWrt builds plus the Release job must consume that single output.
+grep -Fq 'workflow_dispatch:' "${release_workflow}"
+grep -Fq 'compute-version:' "${release_workflow}"
+grep -Fq 'version: ${{ steps.compute.outputs.version }}' "${release_workflow}"
+grep -Fq 'needs: compute-version' "${release_workflow}"
+grep -Fq 'INPUT_VERSION: ${{ github.event.inputs.version }}' "${release_workflow}"
+grep -Fq '[[ "$REF" == refs/tags/* ]]' "${release_workflow}"
+grep -Fq 'VERSION="v1.0.${COMMIT_DATE}-${COMMIT_HASH}+$((TAG_COUNT + 1))"' "${release_workflow}"
+grep -Fq 'TLSVPN_PKG_VERSION: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
+grep -Fq 'tag_name: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
 grep -Fq 'VERSION: ${{' "${release_workflow}"
-grep -Fq "format('dev-{0}', github.run_number)" "${release_workflow}"
 
 echo "[PASS] OpenWrt netifd/LuCI/APK release integration static checks passed"
