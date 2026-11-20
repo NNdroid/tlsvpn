@@ -143,5 +143,14 @@ grep -Fq 'VERSION="v1.0.${COMMIT_DATE}-${COMMIT_HASH}+$((TAG_COUNT + 1))"' "${re
 grep -Fq 'TLSVPN_PKG_VERSION: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
 grep -Fq 'tag_name: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
 grep -Fq 'VERSION: ${{' "${release_workflow}"
+# Manual releases must keep the OpenWrt feed in sync: a GITHUB_TOKEN tag push
+# cannot start other workflows, so the release job explicitly dispatches the
+# custom feed workflow on the released tag. Tag pushes trigger the feed
+# themselves; the dispatch is gated on workflow_dispatch + a newly created tag.
+grep -Fq 'actions: write' "${release_workflow}"
+grep -Fq 'gh workflow run openwrt_customfeed.yml' "${release_workflow}"
+grep -Fq -e '--ref "$VERSION"' "${release_workflow}"
+grep -Fq -e '-f publish=true' "${release_workflow}"
+grep -Fq "github.event_name == 'workflow_dispatch' && steps.ensure-tag.outputs.created == 'true'" "${release_workflow}"
 
 echo "[PASS] OpenWrt netifd/LuCI/APK release integration static checks passed"

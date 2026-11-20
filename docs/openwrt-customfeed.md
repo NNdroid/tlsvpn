@@ -21,7 +21,7 @@ v* tag / manual dispatch
     -> OpenWrt /etc/apk/repositories.d/customfeeds.list
 ```
 
-Automatic builds run only for `v*` tag pushes. Pull requests and pushes to `main` do not trigger this workflow. A `v*` tag or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64` and the stable public-key Actions Variable `OPENWRT_FEED_PUBLIC_KEY_B64`.
+Automatic builds run only for `v*` tag pushes. Pull requests and pushes to `main` do not trigger this workflow. A `v*` tag or a manual workflow dispatch with `publish=true` can publish after all target builds succeed. Production publication requires the stable signing secret `OPENWRT_FEED_SIGNING_KEY_B64` and the stable public-key Actions Variable `OPENWRT_FEED_PUBLIC_KEY_B64`. A manual `build_and_release.yml` release additionally dispatches this workflow on the released tag with `publish=true`, because a GITHUB_TOKEN tag push cannot start other workflows on its own.
 
 The generated `openwrt-feed` branch is machine-owned. Do not edit it by hand.
 
@@ -183,4 +183,4 @@ Install and update TLSVPN by package name from the repository rather than by dow
 4. `workflow_dispatch` always supports validation; setting `publish=true` turns it into a production publication and requires the stable configured key pair.
 5. Before production publication the workflow verifies that all target feeds contain the public key from `OPENWRT_FEED_PUBLIC_KEY_B64`.
 6. The publish job is serialized with the `openwrt-feed-publish` concurrency group so concurrent runs cannot race when updating the generated branch.
-7. Existing GitHub Release assets and `build_and_release.yml` remain independent and unchanged.
+7. GitHub Release assets remain owned by `build_and_release.yml`. That workflow dispatches this one on a newly created release tag (`publish=true`) so a manually dispatched release also refreshes the feed; `v*` tag pushes already trigger it directly. The feed never touches the Release assets themselves.

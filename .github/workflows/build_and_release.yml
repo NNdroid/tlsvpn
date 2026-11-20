@@ -218,6 +218,9 @@ jobs:
       - compute-version
     permissions:
       contents: write
+      # Triggering the openwrt_customfeed.yml workflow_dispatch via
+      # GITHUB_TOKEN needs actions:write on this job.
+      actions: write
 
     steps:
       - name: Checkout code
@@ -226,6 +229,7 @@ jobs:
           fetch-depth: 0
 
       - name: Ensure release tag exists
+        id: ensure-tag
         shell: bash
         env:
           VERSION: ${{ needs.compute-version.outputs.version }}
@@ -236,8 +240,10 @@ jobs:
             git tag "$VERSION" "$GITHUB_SHA"
             git push origin "refs/tags/$VERSION"
             echo "Created and pushed tag $VERSION at $GITHUB_SHA"
+            echo "created=true" >> "$GITHUB_OUTPUT"
           else
             echo "Tag $VERSION already exists; reusing it."
+            echo "created=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download all build artifacts
@@ -282,3 +288,18 @@ jobs:
             packages are architecture-independent and are emitted once by the
             x86/64 SDK build; target-specific tlsvpn APKs are suffixed with their
             OpenWrt target/subtarget.
+
+      - name: Trigger OpenWrt custom feed publication
+        if: github.event_name == 'workflow_dispatch' && steps.ensure-tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.compute-version.outputs.version }}
+        run: |
+          # GITHUB_TOKEN 的 git push 不会启动其他工作流，因此手动触发的
+          # release 否则会让 OpenWrt feed 停留在旧版本。workflow_dispatch
+          # 是 GITHUB_TOKEN 允许触发新工作流运行的例外：把 feed 锚定在
+          # 刚发布的标签上，feed 源码与包版本始终与 GitHub Release 一致。
+          # 标签推送事件本身会自动触发 feed，无需在此重复 dispatch。
+          gh workflow run openwrt_customfeed.yml --repo "$GITHUB_REPOSITORY" \
+            --ref "$VERSION" -f publish=true
+          echo "Dispatched openwrt_customfeed for $VERSION (publish=true)"

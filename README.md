@@ -182,7 +182,7 @@ OPENWRT_INCLUDE_ARCH_INDEPENDENT=1 \
 ./scripts/build_openwrt_apk.sh
 ```
 
-The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621, ath79/generic, qualcommax/ipq50xx and airoha/an7581+an7583. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. Manual runs of `build_and_release.yml` build Actions artifacts without creating a Release, while a pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release.
+The release workflow runs the same script as a target matrix for x86/64, generic ARMv8/ARMv7, Rockchip ARMv8, MediaTek Filogic, ramips/mt7621, ath79/generic, qualcommax/ipq50xx and airoha/an7581+an7583. `tlsvpn-proto` and `luci-proto-tlsvpn` are architecture-independent, so the release exports them only once; the main `tlsvpn` APK is emitted per target/subtarget. A pushed `v*` tag builds all artifacts and publishes them to the corresponding GitHub Release. A manual `build_and_release.yml` run computes the version, creates and pushes that tag, publishes the Release and then dispatches `openwrt_customfeed.yml` on the released tag with `publish=true` — a GITHUB_TOKEN tag push cannot start other workflows, so the release job dispatches the feed explicitly and both release paths keep `openwrt-feed` in sync without a second manual step.
 
 ### OpenWrt APK feed signing key
 
