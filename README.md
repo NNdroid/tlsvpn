@@ -2,15 +2,15 @@
 
 This branch is generated automatically from the repository main branch and release tags. Do not edit it by hand.
 
-OpenWrt release: 25.12.5
+OpenWrt releases: stable 25.12.x and rolling SNAPSHOT (Airoha AN758x)
 
 Feed layout:
 
-`releases/25.12.5/<target>/<subtarget>/packages.adb`
+`releases/<openwrt-version>/<target>/<subtarget>/packages.adb`
 
 Example for x86/64:
 
-`https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/25.12.5/x86/64/packages.adb`
+`https://raw.githubusercontent.com/NNdroid/tlsvpn/openwrt-feed/releases/<openwrt-version>/x86/64/packages.adb`
 
 Stable public key:
 

@@ -1,0 +1,9 @@
+{
+  "repository": "NNdroid/tlsvpn",
+  "openwrt_version": "25.12.6",
+  "target": "armsr",
+  "subtarget": "armv7",
+  "source_commit": "8fc2829956f24940d441cae3b99376e8f5901a48",
+  "source_version": "v1.0.20261120-8fc2829+9",
+  "package_count": 8
+}
