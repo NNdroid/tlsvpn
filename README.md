@@ -149,17 +149,26 @@ config interface 'vpn'
         option conns '4'
         option fec '1'
         option fec_group '4'
+        option routing_algo 'auto'
+        option sched_envelope 'rtt'
         option encrypt '1'
         option brutal '1'
         option brutal_up '100'
         option brutal_down '500'
+        option web_enable '1'
+        option web_addr ':8080'
+        option web_bind 'tunnel'
+        option web_auth 'admin:REPLACE-WITH-A-RANDOM-PASSWORD'
+        option traffic_days '30'
         option defaultroute '1'
         option metric '10'
 ```
 
-The protocol handler resolves every transport endpoint before starting TLSVPN, installs netifd host dependencies for exactly those resolved IPs, and passes the same fixed IP:port list to the process. If `socks5` is enabled, the proxy endpoint is resolved, pinned and rewritten to a fixed IP too, because that proxy is the actual local TCP peer. This prevents a VPN default route from recursively capturing its own TLS transport after a later DNS answer. If an underlying OpenWrt network should be forced, set `option tunlink 'wan'` (or another network name).
+Every client-mode configuration knob that is legal under `client.interface_manager=netifd` is exposed through UCI and LuCI (which splits it into general, scheduling, dashboard, MCP and advanced tabs): transport identity (`server`/`psk`/`tap`/`mac`/`sni`/`cert_sha256`/`req_v4`/`req_v6`), inner encryption (`encrypt`/`enc_algo`/`min_enc`), padding, TCP Brutal, SOCKS5, multipath scheduling (`routing_algo`, `sched_envelope`, `sched_envelope_ms`, `sched_health_penalty_us`), FEC parity placement (`fec_strategy`, `fec_near_window_ms`), frame write priorities (`priority_control`, `priority_data`), the observation floor (`probe_min_half_rtt_us`), daily traffic accounting (`traffic_days`, `traffic_file`) and the dashboard with its MCP endpoint (`web_*`, `mcp_*`). Options the daemon rejects in netifd mode — `fwmark`, `fwmark_priority`, `extra_routes`, `source_rules`, `up`/`down` — are intentionally absent because netifd owns L3 routing and interface lifecycle. The proto handler mirrors the daemon's validation (ranges, cipher/encrypt consistency, fingerprint pinning, dashboard auth/TLS requirements) and reports `proto_notify_error` codes at `ifup` instead of letting the process die after start.
 
 The generated JSON is stored in `/var/etc/tlsvpn-<interface>.json` with mode `0600` semantics and always sets `client.interface_manager` to `netifd`. In this mode `fwmark`, `extra_routes` and `source_rules` must remain disabled because netifd is the L3 owner.
+
+Because that generated file lives on tmpfs and is rebuilt at every `ifup`, **UCI is the single source of truth on OpenWrt**: the dashboard's *Save & apply* hot-edits stay in effect only for the current process lifetime and are re-generated from UCI on the next interface restart or reboot — persist changes through LuCI/UCI. `traffic_file` defaults to `/etc/tlsvpn/tlsvpn-<interface>-traffic.json` so daily traffic statistics survive reboots (about one flash write per minute while traffic flows); point it at tmpfs such as `/var/etc/vpn-traffic.json` to keep them in RAM only. The dashboard binds tunnel IPs only by default (`web_bind='tunnel'`); `web_bind='all'` also exposes it on WAN and then requires `web_cert`/`web_key`, mirroring the daemon's own validation. An empty `web.mcp.path` is re-randomized by the daemon at every interface restart, so set `mcp_path` explicitly on routers where MCP clients are expected to reconnect.
 
 For ad-hoc SDK work the package template follows `main`; reproducible release builds do not rely on that moving ref. `scripts/build_openwrt_apk.sh` injects the exact Git commit, source date and package version into the OpenWrt build, downloads the official SDK, verifies its SHA-256 checksum, installs only the Go packaging helper from the `packages` feed (the LuCI protocol package is static JavaScript and does not require the full `luci` feed), builds `tlsvpn`, `tlsvpn-proto` and `luci-proto-tlsvpn`, then collects the resulting APK files under `bin/openwrt/<target>-<subtarget>/`.
 
