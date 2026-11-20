@@ -35,6 +35,21 @@ index_html="$(curl --retry 4 --retry-all-errors --fail -sSL "$SDK_BASE_URL/")"; 
 archive="$DOWNLOAD_DIR/$sdk_name"; sums="$DOWNLOAD_DIR/sha256sums"; [ -s "$archive" ] || curl --retry 4 --retry-all-errors --fail -L "$SDK_BASE_URL/$sdk_name" -o "$archive"; curl --fail -sSL "$SDK_BASE_URL/sha256sums" -o "$sums"; checksum_line="$(awk -v name="$sdk_name" '$2 == name || $2 == "*" name {print;exit}' "$sums")"; (cd "$DOWNLOAD_DIR"; printf '%s\n' "$checksum_line"|sha256sum -c -)
 rm -rf "$SDK_DIR"; mkdir -p "$SDK_DIR"; tar --zstd -xf "$archive" -C "$SDK_DIR" --strip-components=1
 (cd "$SDK_DIR"; ./scripts/feeds update packages luci; ./scripts/feeds install -p packages golang; ./scripts/feeds install -p luci luci-base)
+# The packages feed hard-pins GOTOOLCHAIN=local inside golang-package.mk
+# (GO_PKG_BUILD_VARS), which forbids toolchain switching: when go.mod requires
+# a newer Go than the SDK's staged toolchain provides (e.g. go 1.27.4 vs the
+# 25.12.6 feed's 1.26.9), every package build fails with
+# "go.mod requires go >= X (running go Y; GOTOOLCHAIN=local)". Re-pin the
+# build to exactly the toolchain version go.mod demands — go downloads that
+# one version into the module cache, keeping the build hermetic and in
+# lockstep with go.mod instead of floating on an unpinned 'auto'.
+required_go="$(sed -n 's/^go \([0-9][0-9.]*\)$/\1/p' go.mod | head -n 1)"
+if [ -n "$required_go" ] && [ -f "$SDK_DIR/feeds/packages/lang/golang/golang-package.mk" ] \
+  && grep -Fq 'GOTOOLCHAIN=local' "$SDK_DIR/feeds/packages/lang/golang/golang-package.mk"; then
+  sed -i "s/GOTOOLCHAIN=local/GOTOOLCHAIN=go${required_go}/g" \
+    "$SDK_DIR/feeds/packages/lang/golang/golang-package.mk"
+  echo "SDK golang build pinned to go${required_go} (from go.mod)"
+fi
 rm -rf "$SDK_DIR/package/tlsvpn" "$SDK_DIR/package/luci-proto-tlsvpn"; cp -a openwrt/package/tlsvpn "$SDK_DIR/package/tlsvpn"; cp -a openwrt/luci-proto-tlsvpn "$SDK_DIR/package/luci-proto-tlsvpn"
 
 # LuCI creates translation APKs from real po/* directories. English is the

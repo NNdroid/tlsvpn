@@ -63,6 +63,11 @@ grep -Fq 'package/luci-proto-tlsvpn/compile' "${apk_builder}"
 grep -Fq 'OPENWRT_INCLUDE_ARCH_INDEPENDENT' "${apk_builder}"
 grep -Fq 'normalize_apk_version()' "${apk_builder}"
 grep -Fq '0.0.${source_day}_git${SOURCE_EPOCH}' "${apk_builder}"
+# go.mod may require a newer Go than the SDK's staged toolchain provides (the
+# packages feed pins GOTOOLCHAIN=local); the builder must re-pin the SDK build
+# to the exact toolchain version go.mod demands.
+grep -Fq 'required_go=' "${apk_builder}"
+grep -Fq 'GOTOOLCHAIN=go${required_go}' "${apk_builder}"
 if grep -Ev '^[[:space:]]*#' "${apk_builder}" | grep -Fq '+git.'; then
 	echo "APK package version generation must not use SemVer +git build metadata" >&2
 	exit 1
