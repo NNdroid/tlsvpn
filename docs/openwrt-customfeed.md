@@ -1,6 +1,6 @@
 # OpenWrt 25.12 custom APK feed
 
-TLSVPN publishes an OpenWrt 25.12+ APK repository from release tags or a manually selected repository ref. The generated repository lives on the dedicated `openwrt-feed` branch; it is not stored in `main` and it does not replace the normal GitHub Release APK artifacts.
+TLSVPN publishes an OpenWrt 25.12+ APK repository from release tags or a manually selected repository ref. The generated repository lives on the dedicated `openwrt-feed` branch; it is not stored in `main`, and it is the **only** distribution channel for OpenWrt APK packages — the GitHub Release carries the native binaries only.
 
 ## Publication model
 

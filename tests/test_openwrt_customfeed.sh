@@ -107,6 +107,15 @@ grep -Fq 'rsync -a "$GITHUB_WORKSPACE/feed-dist/releases/" releases/' "$workflow
 grep -Fq 'raw.githubusercontent.com/${GITHUB_REPOSITORY}/openwrt-feed' "$workflow"
 grep -Fq 'group: openwrt-feed-publish' "$workflow"
 
+# The feed owns OpenWrt APK distribution end to end: package version resolution
+# (tag name on v* pushes / dispatched release tags, describe fallback otherwise)
+# feeds the APK builder directly.
+grep -Fq 'TLSVPN_PKG_VERSION: ${{ steps.version.outputs.value }}' "$workflow"
+if grep -Fq 'release-assets' "$workflow"; then
+  echo 'feed workflow must not consume GitHub Release assets' >&2
+  exit 1
+fi
+
 # Keep every supported OpenWrt target in the feed matrix.
 for target in \
   'target: x86' \

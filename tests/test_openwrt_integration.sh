@@ -123,12 +123,17 @@ checksum_match="$(
 }
 grep -Fq '$2 == name || $2 == "*" name' "${apk_builder}"
 
-grep -Fq 'scripts/build_openwrt_apk.sh' "${release_workflow}"
-grep -Fq 'rockchip' "${release_workflow}"
-grep -Fq 'mediatek' "${release_workflow}"
-grep -Fq 'ath79' "${release_workflow}"
-grep -Fq 'qualcommax' "${release_workflow}"
-grep -Fq 'airoha' "${release_workflow}"
+# OpenWrt APK publication lives exclusively in the custom feed workflow
+# (openwrt_customfeed.yml, triggered by v* tags and dispatched by the release
+# job below); the GitHub Release carries native binaries only.
+if grep -Fq 'release-assets/\*.apk' "${release_workflow}"; then
+	echo "GitHub Release must not attach OpenWrt APKs; the custom feed owns their distribution" >&2
+	exit 1
+fi
+if grep -Fq 'build-openwrt-apk' "${release_workflow}"; then
+	echo "build_and_release.yml must not rebuild OpenWrt APKs; the custom feed workflow owns SDK builds" >&2
+	exit 1
+fi
 # Version generation is centralized in the compute-version job since 1baf40b:
 # manual workflow_dispatch input > v* tag name > auto rule
 # v1.0.<commit-date yyyymmdd>-<7-char hash>+<v-tag-count+1>. Both native and
@@ -140,7 +145,6 @@ grep -Fq 'needs: compute-version' "${release_workflow}"
 grep -Fq 'INPUT_VERSION: ${{ github.event.inputs.version }}' "${release_workflow}"
 grep -Fq '[[ "$REF" == refs/tags/* ]]' "${release_workflow}"
 grep -Fq 'VERSION="v1.0.${COMMIT_DATE}-${COMMIT_HASH}+$((TAG_COUNT + 1))"' "${release_workflow}"
-grep -Fq 'TLSVPN_PKG_VERSION: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
 grep -Fq 'tag_name: ${{ needs.compute-version.outputs.version }}' "${release_workflow}"
 grep -Fq 'VERSION: ${{' "${release_workflow}"
 # Manual releases must keep the OpenWrt feed in sync: a GITHUB_TOKEN tag push

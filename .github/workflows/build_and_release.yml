@@ -124,97 +124,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-openwrt-apk:
-    name: OpenWrt APK - ${{ matrix.name }}
-    runs-on: ubuntu-latest
-    needs: compute-version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: x86-64
-            target: x86
-            subtarget: "64"
-            include_arch_independent: "1"
-          - name: armsr-armv8
-            target: armsr
-            subtarget: armv8
-            include_arch_independent: "0"
-          - name: armsr-armv7
-            target: armsr
-            subtarget: armv7
-            include_arch_independent: "0"
-          - name: rockchip-armv8
-            target: rockchip
-            subtarget: armv8
-            include_arch_independent: "0"
-          - name: mediatek-filogic
-            target: mediatek
-            subtarget: filogic
-            include_arch_independent: "0"
-          - name: ramips-mt7621
-            target: ramips
-            subtarget: mt7621
-            include_arch_independent: "0"
-          - name: ath79-generic
-            target: ath79
-            subtarget: generic
-            include_arch_independent: "0"
-          - name: qualcommax-ipq50xx
-            target: qualcommax
-            subtarget: ipq50xx
-            include_arch_independent: "0"
-          - name: airoha-an7581
-            target: airoha
-            subtarget: an7581
-            include_arch_independent: "0"
-          - name: airoha-an7583
-            target: airoha
-            subtarget: an7583
-            include_arch_independent: "0"
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install OpenWrt SDK host dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential bison flex gawk gettext git libncurses-dev \
-            libssl-dev python3 rsync unzip zlib1g-dev file curl zstd
-
-      - name: Build OpenWrt APK packages
-        env:
-          OPENWRT_VERSION: "25.12.6"
-          OPENWRT_TARGET: ${{ matrix.target }}
-          OPENWRT_SUBTARGET: ${{ matrix.subtarget }}
-          OPENWRT_INCLUDE_ARCH_INDEPENDENT: ${{ matrix.include_arch_independent }}
-          TLSVPN_SOURCE_VERSION: ${{ github.sha }}
-          TLSVPN_PKG_VERSION: ${{ needs.compute-version.outputs.version }}
-          JOBS: "2"
-        run: |
-          chmod +x scripts/build_openwrt_apk.sh
-          ./scripts/build_openwrt_apk.sh
-
-      - name: Upload OpenWrt APK artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: openwrt-apk-${{ matrix.name }}
-          path: |
-            bin/openwrt/${{ matrix.target }}-${{ matrix.subtarget }}/*.apk
-            bin/openwrt/${{ matrix.target }}-${{ matrix.subtarget }}/SHA256SUMS-*.txt
-          if-no-files-found: error
-          retention-days: 7
-
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs:
       - build-native
-      - build-openwrt-apk
       - compute-version
     permissions:
       contents: write
@@ -266,7 +180,6 @@ jobs:
           tag_name: ${{ needs.compute-version.outputs.version }}
           files: |
             release-assets/tlsvpn_*
-            release-assets/*.apk
             release-assets/SHA256SUMS-*.txt
           draft: false
           prerelease: false
@@ -284,10 +197,9 @@ jobs:
             `SHA256SUMS-native.txt` covers all native binaries. Higher ISA
             variants require a matching CPU; use the generic artifact when in doubt.
 
-            OpenWrt 25.12.6 APK packages are also attached. OpenWrt protocol/LuCI
-            packages are architecture-independent and are emitted once by the
-            x86/64 SDK build; target-specific tlsvpn APKs are suffixed with their
-            OpenWrt target/subtarget.
+            OpenWrt 25.12+ APK packages (tlsvpn, tlsvpn-proto and the LuCI
+            protocol package) are not attached here; they are built, signed and
+            published exclusively through the openwrt-feed custom feed.
 
       - name: Trigger OpenWrt custom feed publication
         if: github.event_name == 'workflow_dispatch' && steps.ensure-tag.outputs.created == 'true'
